@@ -366,6 +366,11 @@ void CInGameGuiManager::Draw(const CStateManager& mgr) const {
     } else {
       mapAlpha = 0.f;
     }
+#ifdef TARGET_PC
+    // PortVr: the minimap and its depth mask are drawn in the HUD frame
+    // camera's space, so the headset keeps them in front of the head too.
+    AuroraSetStereoDrawRoute(AURORA_STEREO_ROUTE_HEAD_LOCKED);
+#endif
     CGuiCamera* camera = x34_samusHud->GetBaseHudFrame()->GetFrameCamera();
     camera->Draw(CGuiWidgetDrawParms(0.f, CVector3f::Zero()));
     CGraphics::SetDepthRange(0.f, 1.f / 512.f);
@@ -392,13 +397,23 @@ void CInGameGuiManager::Draw(const CStateManager& mgr) const {
                          mapAlpha * (x1f4_visorStaticAlpha * t));
     CGraphics::SetDepthWriteMode(true, kE_LEqual, true);
     x148_model_automapper->SetIsVisible(false);
+#ifdef TARGET_PC
+    AuroraSetStereoDrawRoute(AURORA_STEREO_ROUTE_WORLD);
+#endif
   }
   if (!preDrawBlur) {
     x3c_pauseScreenBlur->Draw(mgr);
   }
   if (x1e0_helmetVisMode != 0u && notInCine && !PortDebug::HideHelmet()) {
     const float cameraOffset = x48_pauseScreen.null() ? 0.f : x48_pauseScreen->GetHelmetCamYOff();
+#ifdef TARGET_PC
+    // PortVr: the helmet frame is drawn in its GUI camera's space: head-locked.
+    AuroraSetStereoDrawRoute(AURORA_STEREO_ROUTE_HEAD_LOCKED);
+#endif
     x34_samusHud->DrawHelmet(mgr, cameraOffset);
+#ifdef TARGET_PC
+    AuroraSetStereoDrawRoute(AURORA_STEREO_ROUTE_WORLD);
+#endif
   }
   if (!x4c_saveUI.null()) {
     x4c_saveUI->Draw();

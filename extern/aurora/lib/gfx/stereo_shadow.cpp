@@ -1,5 +1,7 @@
 #include "stereo_shadow.hpp"
 
+#include "resources.hpp"
+#include "stereo_replay.hpp"
 #include "texture.hpp"
 #include "../webgpu/gpu.hpp"
 
@@ -21,18 +23,30 @@ bool g_active = false;
 uint64_t g_epoch = 1;
 uint32_t g_frames = 0;
 
-bool same_shape(const TextureRef& a, const TextureRef& b) noexcept {
-  return a.size.width == b.size.width && a.size.height == b.size.height && a.format == b.format;
+// An eye texture is `size` across and in `mono`'s format.
+bool fits(const TextureRef& eye, const TextureRef& mono, EyeSize size) noexcept {
+  return eye.size.width == size.width && eye.size.height == size.height && eye.format == mono.format;
 }
 
-// A texture made the way the mono one was: copies of the EFB in the surface
-// format are render textures, converted copies (I4, C8, the RGBA8 palette
-// results) are conversion textures in their own format.
-TextureHandle make_like(const TextureRef& mono) noexcept {
+// A texture made the way the mono one was, `size` across: copies of the EFB in
+// the surface format are render textures, converted copies (I4, C8, the RGBA8
+// palette results) are conversion textures in their own format.
+TextureHandle make_like(const TextureRef& mono, EyeSize size) noexcept {
   const bool render =
       mono.attachmentTextureView && mono.format == webgpu::g_graphicsConfig.surfaceConfiguration.format;
-  return render ? new_render_texture(mono.size.width, mono.size.height, mono.gxFormat, "Stereo eye copy")
-                : new_conv_texture(mono.size.width, mono.size.height, mono.gxFormat, "Stereo eye converted copy");
+  return render ? new_render_texture(size.width, size.height, mono.gxFormat, "Stereo eye copy")
+                : new_conv_texture(size.width, size.height, mono.gxFormat, "Stereo eye converted copy");
+}
+
+// The eye's size for a mono texture `mono` across, made from a source
+// `monoReference` across whose eye version is `eyeReference` across.
+EyeSize eye_size(const TextureRef& mono, EyeSize monoReference, EyeSize eyeReference) noexcept {
+  const uint32_t maxDimension = detail::resources().limits.maxTextureDimension2D;
+  return {
+      .width = stereo_replay::eye_copy_extent(mono.size.width, monoReference.width, eyeReference.width, maxDimension),
+      .height =
+          stereo_replay::eye_copy_extent(mono.size.height, monoReference.height, eyeReference.height, maxDimension),
+  };
 }
 
 Entry* find(const TextureRef* mono) noexcept {
@@ -51,12 +65,16 @@ Entry* find(const TextureRef* mono) noexcept {
   return &it->second;
 }
 
-Entry& ensure(const TextureHandle& mono) noexcept {
+Entry& ensure(const TextureHandle& mono, const std::array<EyeSize, 2>& sizes) noexcept {
   auto& entry = g_entries[mono.get()];
   const auto current = entry.mono.lock();
-  if (current != mono || !entry.eyes[0] || !entry.eyes[1] || !same_shape(*entry.eyes[0], *mono)) {
+  bool reusable = current == mono;
+  for (uint32_t eye = 0; eye < 2 && reusable; ++eye) {
+    reusable = entry.eyes[eye] && fits(*entry.eyes[eye], *mono, sizes[eye]);
+  }
+  if (!reusable) {
     entry.mono = mono;
-    entry.eyes = {make_like(*mono), make_like(*mono)};
+    entry.eyes = {make_like(*mono, sizes[0]), make_like(*mono, sizes[1])};
     entry.valid = false;
   }
   return entry;
@@ -89,11 +107,11 @@ bool active() noexcept { return g_active; }
 
 uint64_t epoch() noexcept { return g_epoch; }
 
-EyeTextures copy_targets(const TextureHandle& mono) noexcept {
+EyeTextures copy_targets(const TextureHandle& mono, EyeSize efb, const std::array<EyeSize, 2>& eyeTargets) noexcept {
   if (!mono) {
     return {};
   }
-  auto& entry = ensure(mono);
+  auto& entry = ensure(mono, {eye_size(*mono, efb, eyeTargets[0]), eye_size(*mono, efb, eyeTargets[1])});
   set_valid(entry, true);
   return entry.eyes;
 }
@@ -113,7 +131,12 @@ bool palette_conv(const tex_palette_conv::ConvRequest& mono,
   }
   // ensure() may rehash the map: take the eye sources first.
   const EyeTextures sourceEyes = source->eyes;
-  auto& destination = ensure(mono.dst);
+  const EyeSize monoSource{mono.src->size.width, mono.src->size.height};
+  std::array<EyeSize, 2> sizes{};
+  for (uint32_t eye = 0; eye < 2; ++eye) {
+    sizes[eye] = eye_size(*mono.dst, monoSource, {sourceEyes[eye]->size.width, sourceEyes[eye]->size.height});
+  }
+  auto& destination = ensure(mono.dst, sizes);
   for (uint32_t eye = 0; eye < 2; ++eye) {
     eyes[eye] = tex_palette_conv::ConvRequest{
         .variant = mono.variant,

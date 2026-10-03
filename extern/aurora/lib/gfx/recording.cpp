@@ -966,7 +966,14 @@ void resolve_pass_into(TextureHandle texture, ClipRect rect, bool clearColor, bo
   stereo_seal_pass(current_frame_packet(), g_recorder.currentRenderPass);
   if (probeFace < 0) {
     if (prevPass.stereo.enabled && !gx::is_depth_format(resolveFormat)) {
-      prevPass.stereo.copyTargets = stereo_shadow::copy_targets(prevPass.resolveTarget);
+      // Each eye's copy at that eye's resolution (stereo_shadow.hpp).
+      const auto& efbSize = prevPass.colorAttachments[SceneColorAttachmentIndex].size;
+      std::array<stereo_shadow::EyeSize, AURORA_STEREO_EYE_COUNT> eyeTargets{};
+      for (uint32_t eye = 0; eye < AURORA_STEREO_EYE_COUNT; ++eye) {
+        eyeTargets[eye] = {prevPass.stereo.eyes[eye].size.width, prevPass.stereo.eyes[eye].size.height};
+      }
+      prevPass.stereo.copyTargets = stereo_shadow::copy_targets(
+          prevPass.resolveTarget, {efbSize.width, efbSize.height}, eyeTargets);
       // A copy made under AURORA_STEREO_ROUTE_HEAD_LOCKED_2D is taken from
       // each eye through the head-locked plane, so it holds what that eye sees
       // behind the copied rectangle: the scan visor's window magnifies what

@@ -12,6 +12,13 @@
 // "layered palette conversion path"); and a draw that samples either binds the
 // eye's version in that eye's pass.
 //
+// An eye's version has the eye's resolution, not the mono texture's: the mono
+// EFB follows the desktop window (or the EFB scale), so a small window would
+// otherwise stretch a few hundred pixels of visor or warp over each eye
+// (stereo_replay::eye_copy_extent). Draws sample with normalized coordinates
+// and measure texel offsets in the mono texture's size (their uniform's), so
+// the larger texture only adds detail.
+//
 // Recording thread only (the GX FIFO thread, where copies and draws are
 // recorded), except begin_frame, which runs between frames.
 
@@ -25,6 +32,11 @@ namespace aurora::gfx::stereo_shadow {
 
 using EyeTextures = std::array<TextureHandle, 2>;
 
+struct EyeSize {
+  uint32_t width = 0;
+  uint32_t height = 0;
+};
+
 // Frame begin: whether this frame replays per eye.
 void begin_frame(bool immersive) noexcept;
 bool active() noexcept;
@@ -32,13 +44,17 @@ bool active() noexcept;
 // so cached per-eye bind groups know to rebuild.
 uint64_t epoch() noexcept;
 
-// An EFB copy into `mono` from a pass that replays per eye: the two eye
-// textures to copy into (created like `mono`, reused while it lives).
-EyeTextures copy_targets(const TextureHandle& mono) noexcept;
+// An EFB copy into `mono` from a pass that replays per eye, whose mono EFB is
+// `efb` and whose eye targets are `eyeTargets`: the two eye textures to copy
+// into, created like `mono` but each as many times larger as its eye target
+// is than the EFB, and reused while `mono` lives and the sizes hold.
+EyeTextures copy_targets(const TextureHandle& mono, EyeSize efb, const std::array<EyeSize, 2>& eyeTargets) noexcept;
 // `mono` was written without eye copies: its stand-ins no longer apply.
 void invalidate(const TextureRef* mono) noexcept;
 // A palette conversion `mono`: when its source has valid stand-ins, fills the
-// two eye conversions (eye source, eye destination, same palette) and returns true.
+// two eye conversions (eye source, eye destination, same palette) and returns
+// true. Each eye destination is scaled from `mono`'s as that eye's source is
+// from the mono source.
 bool palette_conv(const tex_palette_conv::ConvRequest& mono,
                   std::array<tex_palette_conv::ConvRequest, 2>& eyes) noexcept;
 // The eye's stand-in for `mono`, or null when it has none valid.

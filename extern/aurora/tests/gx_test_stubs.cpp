@@ -135,6 +135,10 @@ std::array<gfx::BindGroupRef, 2> build_stereo_bind_groups(const ShaderInfo& info
 namespace aurora::gfx {
 void set_stereo_draw_route(uint8_t route) noexcept {}
 uint8_t stereo_draw_route() noexcept { return 0; }
+void set_stereo_head_locked_plane(float tanHalfWidth, float tanHalfHeight, float distance) noexcept {}
+stereo_replay::HeadLockedPlane stereo_head_locked_plane() noexcept { return {}; }
+void set_stereo_screen_tex_mtx(uint8_t texSlot, uint8_t pnSlot) noexcept {}
+StereoScreenTexMtx stereo_screen_tex_mtx() noexcept { return {}; }
 namespace stereo_shadow {
 bool active() noexcept { return false; }
 uint64_t epoch() noexcept { return 0; }

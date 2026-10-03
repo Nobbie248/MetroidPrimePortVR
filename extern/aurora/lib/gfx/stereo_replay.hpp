@@ -3,6 +3,7 @@
 #include <aurora/math.hpp>
 #include <algorithm>
 #include <cmath>
+#include <cstdint>
 
 namespace aurora::gfx::stereo_replay {
 
@@ -222,6 +223,26 @@ inline Mat3x4<float> screen_tex_mtx(const Mat4x4<float>& projection, const Mat3x
     dst[3] += r[3];
   }
   return out;
+}
+
+// The size, along one axis, of an eye's version of a texture made from the
+// mono EFB: `monoSize` texels in mono, taken from an EFB `monoReference`
+// pixels across, when the eye's image is `eyeReference` pixels across. It
+// keeps the mono texture's share of its source, so an effect built from an
+// eye's view (an EFB copy, its palette conversion) has the eye's resolution
+// rather than the desktop window's, and a copy the game asked for at half
+// size stays half the eye's. Kept within 1..`maxDimension`; the mono size
+// when there is no reference to scale by.
+inline uint32_t eye_copy_extent(uint32_t monoSize, uint32_t monoReference, uint32_t eyeReference,
+                                uint32_t maxDimension) noexcept {
+  if (monoReference == 0 || eyeReference == 0) {
+    return monoSize;
+  }
+  const double scaled =
+      static_cast<double>(monoSize) * static_cast<double>(eyeReference) / static_cast<double>(monoReference);
+  const double rounded = std::floor(scaled + 0.5);
+  const double limit = maxDimension != 0 ? static_cast<double>(maxDimension) : rounded;
+  return static_cast<uint32_t>(std::clamp(rounded, 1.0, std::max(limit, 1.0)));
 }
 
 // A fixed virtual screen for the game's 2D content, sized and placed in the

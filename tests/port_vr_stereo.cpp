@@ -264,6 +264,21 @@ int main() {
   Check(!stereo_replay::head_locked_plane_uv_rect(flatFrustum, rightEye, {}, -0.5f, 0.5f, 0.5f, -0.5f).valid(),
         "no plane, no copy rectangle");
 
+  // An eye's version of an EFB copy has the eye's resolution: a full copy
+  // of an 800 x 450 desktop EFB in a 4808 x 4904 eye, a half-size copy
+  // stays half the eye's, a part of the view keeps its share.
+  Check(stereo_replay::eye_copy_extent(800, 800, 4808, 16384) == 4808 &&
+            stereo_replay::eye_copy_extent(450, 450, 4904, 16384) == 4904,
+        "a full EFB copy takes the eye's size");
+  Check(stereo_replay::eye_copy_extent(400, 800, 4808, 16384) == 2404,
+        "a half-size copy stays half the eye's size");
+  Check(stereo_replay::eye_copy_extent(192, 640, 2688, 16384) == 806, "a part of the view keeps its share");
+  Check(stereo_replay::eye_copy_extent(1000, 100, 5000, 8192) == 8192, "the device's limit caps the size");
+  Check(stereo_replay::eye_copy_extent(1, 4808, 100, 16384) == 1, "a copy never shrinks to nothing");
+  Check(stereo_replay::eye_copy_extent(256, 0, 4808, 16384) == 256 &&
+            stereo_replay::eye_copy_extent(256, 640, 0, 16384) == 256,
+        "without a reference the mono size stays");
+
   std::puts("port_vr_stereo_tests: ok");
   return 0;
 }

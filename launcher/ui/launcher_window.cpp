@@ -1,0 +1,728 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
+//
+// Derived from PrimedGun's DolphinQt/MainWindow.cpp (GPL-2.0-or-later).
+
+#include "launcher_window.h"
+
+#include "cannon_textures.h"
+#include "disc_probe.h"
+#include "port_settings_file.h"
+#include "primedgun_import.h"
+#include "style.h"
+#include "tabs.h"
+
+#include "port_gci.h"
+
+#include <QCloseEvent>
+#include <QDialog>
+#include <QDialogButtonBox>
+#include <QDir>
+#include <QFileDialog>
+#include <QFileInfo>
+#include <QFileSystemWatcher>
+#include <QFrame>
+#include <QHBoxLayout>
+#include <QIcon>
+#include <QLabel>
+#include <QMenu>
+#include <QMessageBox>
+#include <QPixmap>
+#include <QPushButton>
+#include <QScrollArea>
+#include <QStyle>
+#include <QTabWidget>
+#include <QTimer>
+#include <QVBoxLayout>
+
+#include <cstdlib>
+
+namespace PrimedGunLauncher {
+namespace {
+
+constexpr int kForceStopDelayMs = 10000;
+
+QString LauncherVersion() { return QStringLiteral(PRIMEDGUN_LAUNCHER_VERSION); }
+
+void StyleGameButton(QPushButton* button, bool primary = false) {
+  button->setFlat(true);
+  button->setStyleSheet(primary ? Style::kPrimaryGameButton : Style::kGameButton);
+}
+
+QString DiscWarning(const QString& path) {
+  if (path.isEmpty()) {
+    return {};
+  }
+  const DiscInfo info = ProbeDisc(ToPath(path));
+  switch (info.check) {
+  case DiscCheck::WrongGame:
+    return QObject::tr("Wrong game");
+  case DiscCheck::WrongRevision:
+    return QObject::tr("Wrong revision");
+  case DiscCheck::UnsupportedFormat:
+    return QObject::tr("Format not supported");
+  case DiscCheck::Unreadable:
+    return QFileInfo::exists(path) ? QObject::tr("Cannot read file") : QObject::tr("File not found");
+  case DiscCheck::Ok:
+  case DiscCheck::Unverified:
+    break;
+  }
+  return {};
+}
+
+} // namespace
+
+LauncherWindow::LauncherWindow()
+    : m_paths(ResolvePaths()), m_ctx(m_model, m_paths, this),
+      m_ini(m_paths.launcherIni, QSettings::IniFormat) {
+  setWindowTitle(QStringLiteral("PrimedGun v%1").arg(LauncherVersion()));
+  setWindowIcon(QIcon(QStringLiteral(":/PrimedGun.png")));
+  setMinimumSize(700, 720);
+  resize(700, 720);
+
+  auto* page = new QWidget(this);
+  page->setStyleSheet(Style::kPage);
+  auto* layout = new QVBoxLayout(page);
+  layout->setContentsMargins(14, 12, 14, 10);
+  layout->setSpacing(8);
+
+  m_ctx.onEdited = [this] { UpdateFooter(); };
+  m_ctx.saveKeyNow = [this](std::string_view key) { SaveKeyNow(key); };
+
+  m_tabs = new QTabWidget(page);
+  m_tabs->setDocumentMode(true);
+  BuildSetupTab(m_tabs);
+  const auto addSettingsTab = [this](void (*build)(TabContext&, QTabWidget*)) {
+    build(m_ctx, m_tabs);
+    m_settingsPages.push_back(m_tabs->widget(m_tabs->count() - 1));
+  };
+  addSettingsTab(BuildControllerTab);
+  addSettingsTab(BuildCalibrationTab);
+  addSettingsTab(BuildCannonTab);
+  BuildLayoutTab(m_ctx, m_tabs);
+  addSettingsTab(BuildPortConfigTab);
+  BuildAboutTab(m_ctx, m_tabs);
+  layout->addWidget(m_tabs, 1);
+  BuildFooter(layout);
+  setCentralWidget(page);
+
+  restoreGeometry(m_ini.value(QStringLiteral("geometry")).toByteArray());
+
+  m_forceStopTimer = new QTimer(this);
+  m_forceStopTimer->setSingleShot(true);
+  connect(m_forceStopTimer, &QTimer::timeout, this, [this] {
+    if (m_game != nullptr) {
+      m_forceStopOffered = true;
+      m_stopButton->setText(tr("Force Stop"));
+      m_runStatus->setText(tr("The game has not closed yet. Force Stop ends it at once."));
+    }
+  });
+
+  m_watcher = new QFileSystemWatcher(this);
+  connect(m_watcher, &QFileSystemWatcher::fileChanged, this, [this] { OnSettingsFileChanged(); });
+  connect(m_watcher, &QFileSystemWatcher::directoryChanged, this,
+          [this] { OnSettingsFileChanged(); });
+
+  LoadSettings();
+  if (SelectedDisc().isEmpty()) {
+    // First start: the disc the game itself last used, if any.
+    PortSettingsFile file;
+    if (file.Load(ToPath(m_paths.settingsFile))) {
+      if (const auto disc = file.Get("disc_path"); disc && !disc->empty()) {
+        SetSelectedDisc(QString::fromStdString(*disc));
+      }
+    }
+  }
+  WatchSettingsFile();
+  SetRunning(false);
+}
+
+void LauncherWindow::BuildSetupTab(QTabWidget* tabs) {
+  QVBoxLayout* layout = m_ctx.MakeScrollTab(tabs, tr("Setup"));
+  layout->setContentsMargins(12, 10, 12, 0);
+  layout->addWidget(m_ctx.Section(tr("Setup")));
+  auto* notesButton = new QPushButton(tr("Setup Notes"));
+  StyleGameButton(notesButton);
+  layout->addWidget(notesButton);
+  m_ctx.Separator(layout);
+
+  m_selectedGame = new QLabel;
+  layout->addWidget(m_selectedGame);
+  auto* selectRow = new QHBoxLayout;
+  auto* selectNote = new QLabel(tr("Select Metroid Prime NTSC Revision 0 (1.0)."));
+  selectNote->setObjectName(QStringLiteral("PrimedGunMuted"));
+  m_discWarning = new QLabel;
+  m_discWarning->setObjectName(QStringLiteral("PrimedGunBad"));
+  m_discWarning->setVisible(false);
+  selectRow->addWidget(selectNote);
+  selectRow->addStretch();
+  selectRow->addWidget(m_discWarning);
+  layout->addLayout(selectRow);
+
+  m_selectButton = new QPushButton(tr("Select Game..."));
+  m_playButton = new QPushButton(tr("Play"));
+  m_stopButton = new QPushButton(tr("Stop"));
+  m_optionsButton = new QPushButton(tr("Game Options..."));
+  StyleGameButton(m_selectButton);
+  StyleGameButton(m_playButton, true);
+  StyleGameButton(m_stopButton);
+  StyleGameButton(m_optionsButton);
+  layout->addWidget(m_selectButton);
+  layout->addWidget(m_playButton);
+  layout->addWidget(m_stopButton);
+  m_runStatus = new QLabel;
+  m_runStatus->setObjectName(QStringLiteral("PrimedGunMuted"));
+  m_runStatus->setWordWrap(true);
+  layout->addWidget(m_runStatus);
+  layout->addWidget(m_optionsButton);
+
+  layout->addSpacing(10);
+  layout->addWidget(m_ctx.Section(tr("Memory Card")));
+  m_transferButton = new QPushButton(tr("Transfer PrimedGun Memory Card / Settings"));
+  StyleGameButton(m_transferButton);
+  layout->addWidget(m_transferButton);
+  layout->addSpacing(12);
+  layout->addStretch();
+
+  auto* art = new QLabel;
+  art->setAlignment(Qt::AlignLeft | Qt::AlignBottom);
+  art->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Fixed);
+  const QPixmap samus(QStringLiteral(":/samus.png"));
+  if (!samus.isNull()) {
+    const QPixmap scaled = samus.scaled(208, 126, Qt::KeepAspectRatio, Qt::SmoothTransformation);
+    art->setPixmap(scaled);
+    art->setFixedHeight(scaled.height());
+  }
+  layout->addWidget(art, 0, Qt::AlignLeft | Qt::AlignBottom);
+
+  connect(notesButton, &QPushButton::clicked, this, [this] { ShowSetupNotes(); });
+  connect(m_selectButton, &QPushButton::clicked, this, [this] { SelectGame(); });
+  connect(m_playButton, &QPushButton::clicked, this, [this] { Play(); });
+  connect(m_stopButton, &QPushButton::clicked, this, [this] { Stop(); });
+  connect(m_optionsButton, &QPushButton::clicked, this, [this] { ShowGameOptions(); });
+  connect(m_transferButton, &QPushButton::clicked, this, [this] { TransferOldSave(); });
+}
+
+void LauncherWindow::BuildFooter(QVBoxLayout* layout) {
+  auto* line = new QFrame;
+  line->setFrameShape(QFrame::HLine);
+  layout->addWidget(line);
+  auto* footer = new QHBoxLayout;
+  m_resetAllButton = new QPushButton(tr("Reset All"));
+  m_saveButton = new QPushButton(tr("Save Settings"));
+  m_footerStatus = new QLabel;
+  m_footerStatus->setObjectName(QStringLiteral("PrimedGunMuted"));
+  // Never wider than the room the credit leaves it.
+  m_footerStatus->setSizePolicy(QSizePolicy::Ignored, QSizePolicy::Preferred);
+  auto* credit = new QLabel(tr("By Nobbie and iChris4   v%1").arg(LauncherVersion()));
+  credit->setObjectName(QStringLiteral("PrimedGunMuted"));
+  footer->addWidget(m_resetAllButton);
+  footer->addWidget(m_saveButton);
+  footer->addWidget(m_footerStatus, 1);
+  footer->addWidget(credit);
+  layout->addLayout(footer);
+
+  connect(m_resetAllButton, &QPushButton::clicked, this, [this] {
+    if (QMessageBox::question(this, tr("Reset All"),
+                              tr("Reset every PrimedGun setting to its default? Use Save Settings "
+                                 "afterwards to keep the reset.")) != QMessageBox::Yes) {
+      return;
+    }
+    m_model.ResetAll();
+    m_ctx.RefreshAll();
+    UpdateFooter();
+  });
+  connect(m_saveButton, &QPushButton::clicked, this, [this] { SaveSettings(); });
+}
+
+// --- settings file -------------------------------------------------------
+
+void LauncherWindow::LoadSettings() {
+  PortSettingsFile file;
+  if (!file.Load(ToPath(m_paths.settingsFile))) {
+    QMessageBox::warning(this, tr("PrimedGun"),
+                         tr("Could not read the settings file:\n%1")
+                             .arg(QDir::toNativeSeparators(m_paths.settingsFile)));
+  }
+  m_model.Load(file);
+  m_changedOnDisk = false;
+  m_ctx.RefreshAll();
+  UpdateFooter();
+}
+
+bool LauncherWindow::SaveSettings() {
+  if (!m_model.Dirty()) {
+    return true;
+  }
+  // Read again: only the launcher's changed keys are written, over whatever the
+  // game left in the file.
+  PortSettingsFile file;
+  std::string error;
+  if (!file.Load(ToPath(m_paths.settingsFile))) {
+    error = "cannot read the settings file";
+  } else {
+    m_model.ApplyChanges(file);
+    if (file.Save(ToPath(m_paths.settingsFile), error)) {
+      m_lastWritten = file.Text();
+      m_model.MarkSaved();
+      m_changedOnDisk = false;
+      WatchSettingsFile();
+      UpdateFooter();
+      return true;
+    }
+  }
+  QMessageBox::critical(this, tr("Save Settings"),
+                        tr("Could not write %1:\n%2")
+                            .arg(QDir::toNativeSeparators(m_paths.settingsFile),
+                                 QString::fromStdString(error)));
+  return false;
+}
+
+void LauncherWindow::SaveKeyNow(std::string_view key) {
+  PortSettingsFile file;
+  std::string error;
+  if (!file.Load(ToPath(m_paths.settingsFile))) {
+    error = "cannot read the settings file";
+  } else {
+    file.Set(std::string(key), m_model.Value(key));
+    if (file.Save(ToPath(m_paths.settingsFile), error)) {
+      m_lastWritten = file.Text();
+      m_model.MarkSaved(key);
+      WatchSettingsFile();
+      UpdateFooter();
+      return;
+    }
+  }
+  QMessageBox::critical(this, tr("Save Settings"),
+                        tr("Could not write %1:\n%2")
+                            .arg(QDir::toNativeSeparators(m_paths.settingsFile),
+                                 QString::fromStdString(error)));
+}
+
+void LauncherWindow::WatchSettingsFile() {
+  // A save replaces the file (temporary file + rename), which ends a watch on
+  // it, so the watch is renewed after every change; the folder is watched for
+  // a file that does not exist yet.
+  if (!m_watcher->files().isEmpty()) {
+    m_watcher->removePaths(m_watcher->files());
+  }
+  if (QFileInfo::exists(m_paths.settingsFile)) {
+    m_watcher->addPath(m_paths.settingsFile);
+    if (!m_watcher->directories().isEmpty()) {
+      m_watcher->removePaths(m_watcher->directories());
+    }
+  } else if (m_watcher->directories().isEmpty() && QFileInfo::exists(m_paths.userFolder)) {
+    m_watcher->addPath(m_paths.userFolder);
+  }
+}
+
+void LauncherWindow::OnSettingsFileChanged() {
+  WatchSettingsFile();
+  if (m_game != nullptr) {
+    return; // read again when the game exits
+  }
+  PortSettingsFile file;
+  if (!file.Load(ToPath(m_paths.settingsFile)) || file.Text() == m_lastWritten) {
+    return;
+  }
+  if (m_model.Dirty()) {
+    m_changedOnDisk = true;
+    UpdateFooter();
+    return;
+  }
+  LoadSettings();
+}
+
+void LauncherWindow::UpdateFooter() {
+  // While the game runs, the Setup tab says the settings are locked.
+  QString status;
+  QString tooltip;
+  if (m_game == nullptr && m_model.Dirty()) {
+    status = m_changedOnDisk ? tr("Unsaved; changed on disk") : tr("Unsaved changes");
+    if (m_changedOnDisk) {
+      tooltip = tr("port_settings.ini changed on disk since it was read. Save Settings writes only "
+                   "the settings you changed and keeps the rest.");
+    }
+  }
+  m_footerStatus->setText(status);
+  m_footerStatus->setToolTip(tooltip);
+}
+
+// --- Setup tab -------------------------------------------------------------
+
+QString LauncherWindow::SelectedDisc() const {
+  return m_ini.value(QStringLiteral("selected_disc")).toString();
+}
+
+void LauncherWindow::SetSelectedDisc(const QString& path) {
+  if (path.isEmpty()) {
+    m_ini.remove(QStringLiteral("selected_disc"));
+  } else {
+    m_ini.setValue(QStringLiteral("selected_disc"), path);
+  }
+  m_ini.sync();
+  UpdateSelectedGame();
+}
+
+void LauncherWindow::UpdateSelectedGame() {
+  const QString path = SelectedDisc();
+  m_selectedGame->setVisible(!path.isEmpty());
+  m_selectedGame->setText(path.isEmpty() ? QString()
+                                         : tr("Selected: %1").arg(QFileInfo(path).fileName()));
+  m_selectedGame->setToolTip(QDir::toNativeSeparators(path));
+  const QString warning = DiscWarning(path);
+  m_discWarning->setText(warning);
+  m_discWarning->setVisible(!warning.isEmpty());
+  SetRunning(m_game != nullptr);
+}
+
+void LauncherWindow::SelectGame() {
+  const QString start = m_ini.value(QStringLiteral("last_dir"), QFileInfo(SelectedDisc()).absolutePath()).toString();
+  const QString path = QFileDialog::getOpenFileName(
+      this, tr("Select a File"), start,
+      tr("Metroid Prime disc images (*.iso *.gcm *.nkit *.rvz *.ciso *.wbfs);;All Files (*)"));
+  if (path.isEmpty()) {
+    return;
+  }
+  m_ini.setValue(QStringLiteral("last_dir"), QFileInfo(path).absolutePath());
+  SetSelectedDisc(path);
+}
+
+void LauncherWindow::ShowGameOptions() {
+  const QString path = SelectedDisc();
+  QMenu menu(this);
+  menu.addAction(tr("Open Containing Folder"), this,
+                 [path] { OpenFolder(QFileInfo(path).absolutePath()); });
+  menu.addAction(tr("Open User Folder"), this, [this] { OpenFolder(m_paths.userFolder); });
+  menu.addAction(tr("Open Memory Card Folder"), this, [this] { OpenFolder(m_paths.cardFolder); });
+  menu.addSeparator();
+  menu.addAction(tr("Forget Selected Game"), this, [this] { SetSelectedDisc({}); });
+  menu.exec(m_optionsButton->mapToGlobal(QPoint(0, m_optionsButton->height())));
+}
+
+void LauncherWindow::ShowSetupNotes() {
+  QDialog dialog(this);
+  dialog.setWindowTitle(tr("Setup Notes"));
+  dialog.setModal(true);
+  dialog.resize(680, 500);
+  dialog.setMinimumSize(520, 360);
+  dialog.setStyleSheet(Style::kPage);
+
+  auto* layout = new QVBoxLayout(&dialog);
+  layout->setContentsMargins(16, 14, 16, 14);
+  layout->setSpacing(12);
+  auto* title = new QLabel(tr("Setup Notes"), &dialog);
+  title->setObjectName(QStringLiteral("PrimedGunSection"));
+  layout->addWidget(title);
+
+  auto* scroll = new QScrollArea(&dialog);
+  scroll->setWidgetResizable(true);
+  auto* content = new QWidget(scroll);
+  auto* contentLayout = new QVBoxLayout(content);
+  contentLayout->setContentsMargins(14, 12, 14, 12);
+  auto* notes = new QLabel(
+      tr(R"(<ul style="margin: 0; padding-left: 22px;">
+<li>Meta's own OpenXR environment is not recommended; try SteamVR or Virtual Desktop instead.</li>
+<li>Select your Metroid Prime NTSC Revision 0 (1.0) disc image (ISO, NKit ISO, RVZ or CISO), then press Play.</li>
+<li>Check the Layout tab for controller bindings.</li>
+<li>To bring over your PrimedGun saves and settings, use Transfer PrimedGun Memory Card / Settings on this tab.</li>
+<li>Save states do not carry over from PrimedGun on Dolphin. Make sure to save normally before you transfer.</li>
+<li>Once in game, click the right stick to set your height.</li>
+<li>Try to stay in the centre of your play space and face forward, this mod is not roomscaled.</li>
+<li>Settings are locked while the game runs. Change them here before pressing Play, or use F1 in game for live changes.</li>
+<li>Use Save Settings after changing PrimedGun options; Play saves them too.</li>
+</ul>)"),
+      content);
+  notes->setTextFormat(Qt::RichText);
+  notes->setTextInteractionFlags(Qt::TextSelectableByMouse);
+  notes->setWordWrap(true);
+  notes->setAlignment(Qt::AlignLeft | Qt::AlignTop);
+  contentLayout->addWidget(notes);
+  contentLayout->addStretch();
+  scroll->setWidget(content);
+  layout->addWidget(scroll, 1);
+
+  auto* buttons = new QDialogButtonBox(QDialogButtonBox::Close, &dialog);
+  connect(buttons, &QDialogButtonBox::rejected, &dialog, &QDialog::reject);
+  layout->addWidget(buttons);
+  dialog.exec();
+}
+
+void LauncherWindow::TransferOldSave() {
+  const QString title = tr("Transfer Old Memory Card");
+  if (m_game != nullptr) {
+    QMessageBox::warning(this, title, tr("Stop the game before transferring a memory card save."));
+    return;
+  }
+
+  QMessageBox prompt(this);
+  prompt.setWindowTitle(title);
+  prompt.setText(tr("Transfer old save game."));
+  prompt.setInformativeText(
+      tr("PrimedGun will search nearby old PrimedGun folders and transfer your save and PrimedGun "
+         "settings to this install. Choose Folder picks the old PrimedGun folder yourself. Save "
+         "states are not transferred."));
+  QPushButton* transfer = prompt.addButton(tr("Transfer"), QMessageBox::AcceptRole);
+  QPushButton* choose = prompt.addButton(tr("Choose Folder..."), QMessageBox::ActionRole);
+  prompt.addButton(QMessageBox::Cancel);
+  prompt.exec();
+
+  OldCard card;
+  if (prompt.clickedButton() == choose) {
+    const QString folder = QFileDialog::getExistingDirectory(
+        this, tr("Select your old PrimedGun folder"), m_paths.exeFolder);
+    if (folder.isEmpty()) {
+      return;
+    }
+    card = FindOldCardUnder(ToPath(folder));
+    if (!card.Found()) {
+      QMessageBox::critical(this, title, tr("No memory card was found in that folder."));
+      return;
+    }
+  } else if (prompt.clickedButton() == transfer) {
+    card = FindNearbyOldCard(ToPath(m_paths.exeFolder));
+    if (!card.Found()) {
+      const PortGci::DolphinCard dolphin = PortGci::FindDolphinCard();
+      if (dolphin.Found()) {
+        const std::filesystem::path found =
+            !dolphin.rawImage.empty() ? dolphin.rawImage : dolphin.gciFolder;
+        const auto answer = QMessageBox::question(
+            this, title,
+            tr("No old PrimedGun folder was found near this install. Dolphin's own memory card "
+               "was found at:\n%1\n\nTransfer that one?")
+                .arg(QDir::toNativeSeparators(FromPath(found))));
+        if (answer != QMessageBox::Yes) {
+          return;
+        }
+        card.path = found;
+        card.isFolder = dolphin.rawImage.empty();
+      } else {
+        QMessageBox::critical(
+            this, title,
+            tr("Could not find an old memory card near this PrimedGun install.\n\nPlace the new "
+               "version near your old PrimedGun folder, or use Choose Folder to pick it."));
+        return;
+      }
+    }
+  } else {
+    return;
+  }
+
+  const std::filesystem::path destination = ToPath(m_paths.cardFolder);
+  PortGci::Report report;
+  if (card.isFolder) {
+    report = PortGci::ImportFolder(card.path, destination);
+  } else {
+    const QString scratch = QDir::tempPath() + QStringLiteral("/primedgun_card_import");
+    QDir().mkpath(scratch);
+    report = PortGci::ImportFile(card.path, destination, ToPath(scratch));
+  }
+  const QString summary = QString::fromStdString(report.Summary("Transferred"));
+  if (report.copied == 0) {
+    QMessageBox::critical(this, title,
+                          tr("No Metroid Prime save was transferred from:\n%1\n\n%2")
+                              .arg(QDir::toNativeSeparators(FromPath(card.path)), summary));
+    return;
+  }
+
+  const OldSettings old = ReadOldSettings(card.UserFolder());
+  for (const auto& [key, value] : old.values) {
+    if (key != "vr_cannon_texture_slot") {
+      m_model.Set(key, value);
+    }
+  }
+  for (const auto& [key, value] : old.values) {
+    if (key == "vr_cannon_texture_slot") {
+      // The slot is applied as files, so it is recorded at once.
+      const int slot = std::atoi(value.c_str());
+      std::string error;
+      if (Cannon::ApplySlot(m_paths.cannon, slot, error)) {
+        m_model.Set(key, value);
+        SaveKeyNow(key);
+      }
+    }
+  }
+  m_ctx.RefreshAll();
+  UpdateFooter();
+  const QString oldGame = QString::fromStdString(old.gamePath);
+  if (SelectedDisc().isEmpty() && !oldGame.isEmpty() && QFileInfo::exists(oldGame)) {
+    SetSelectedDisc(oldGame);
+  }
+
+  QString message = tr("Old memory card transferred from:\n%1\nto:\n%2\n\n%3")
+                        .arg(QDir::toNativeSeparators(FromPath(card.path)),
+                             QDir::toNativeSeparators(m_paths.cardFolder), summary);
+  if (!old.source.empty()) {
+    message += tr("\n\nPrimedGun settings transferred from:\n%1\nUse Save Settings to keep them.")
+                   .arg(QDir::toNativeSeparators(FromPath(old.source)));
+  } else {
+    message += tr("\n\nNo old PrimedGun settings were found next to that memory card.");
+  }
+  QMessageBox::information(this, title, message);
+}
+
+// --- the game --------------------------------------------------------------
+
+void LauncherWindow::Play() {
+  const QString disc = SelectedDisc();
+  if (m_game != nullptr || disc.isEmpty()) {
+    return;
+  }
+  if (!QFileInfo::exists(m_paths.gameExe)) {
+    QMessageBox::critical(this, tr("Play"),
+                          tr("The game was not found:\n%1")
+                              .arg(QDir::toNativeSeparators(m_paths.gameExe)));
+    return;
+  }
+  if (!SaveSettings()) {
+    return;
+  }
+
+  m_game = new QProcess(this);
+  m_game->setProgram(m_paths.gameExe);
+  // The first argument that is not an option is the disc (platform/main.cpp
+  // ResolveDiscPath); Qt quotes it, and SDL reads the wide command line.
+  m_game->setArguments({QDir::toNativeSeparators(disc)});
+  m_game->setWorkingDirectory(m_paths.exeFolder);
+  // The game logs to stderr all along; a file needs no reader.
+  m_game->setProcessChannelMode(QProcess::MergedChannels);
+  m_game->setStandardOutputFile(m_paths.lastRunLog, QIODevice::Truncate);
+#if defined(Q_OS_WIN)
+  // metroid_prime_port.exe is a console program: without this, a console
+  // window would open beside the game.
+  m_game->setCreateProcessArgumentsModifier([](QProcess::CreateProcessArguments* args) {
+    constexpr unsigned long kCreateNoWindow = 0x08000000;
+    args->flags |= kCreateNoWindow;
+  });
+#endif
+  connect(m_game, &QProcess::finished, this,
+          [this](int exitCode, QProcess::ExitStatus status) { OnGameFinished(exitCode, status); });
+  connect(m_game, &QProcess::errorOccurred, this, [this](QProcess::ProcessError error) {
+    if (error != QProcess::FailedToStart || m_game == nullptr) {
+      return;
+    }
+    const QString reason = m_game->errorString();
+    m_game->deleteLater();
+    m_game = nullptr;
+    SetRunning(false);
+    QMessageBox::critical(this, tr("Play"), tr("The game could not be started:\n%1").arg(reason));
+  });
+  m_stopRequested = false;
+  m_forceStopOffered = false;
+  m_game->start();
+  SetRunning(true);
+}
+
+void LauncherWindow::Stop() {
+  if (m_game == nullptr) {
+    return;
+  }
+  if (m_forceStopOffered) {
+    m_game->kill();
+    return;
+  }
+  // WM_CLOSE to the game's window: the game quits through its normal exit and
+  // saves its settings on the way.
+  m_stopRequested = true;
+  m_game->terminate();
+  m_runStatus->setText(tr("Stopping..."));
+  m_forceStopTimer->start(kForceStopDelayMs);
+}
+
+void LauncherWindow::OnGameFinished(int exitCode, QProcess::ExitStatus status) {
+  m_forceStopTimer->stop();
+  if (m_game != nullptr) {
+    m_game->deleteLater();
+    m_game = nullptr;
+  }
+  const bool stopped = m_stopRequested;
+  m_stopRequested = false;
+  m_forceStopOffered = false;
+  m_stopButton->setText(tr("Stop"));
+  SetRunning(false);
+  // The game rewrote port_settings.ini as it closed, with anything the F1
+  // overlay changed.
+  LoadSettings();
+
+  if (m_closeAfterStop) {
+    close();
+    return;
+  }
+  if (!stopped && (status == QProcess::CrashExit || exitCode != 0)) {
+    QMessageBox box(this);
+    box.setIcon(QMessageBox::Warning);
+    box.setWindowTitle(tr("PrimedGun"));
+    box.setText(status == QProcess::CrashExit ? tr("The game stopped unexpectedly.")
+                                              : tr("The game exited with code %1.").arg(exitCode));
+    box.setInformativeText(tr("The log of this run explains why."));
+    QPushButton* openLog = box.addButton(tr("Open Log"), QMessageBox::ActionRole);
+    box.addButton(QMessageBox::Close);
+    box.exec();
+    if (box.clickedButton() == openLog) {
+      OpenFile(NewestLog(m_paths));
+    }
+  }
+}
+
+void LauncherWindow::SetRunning(bool running) {
+  for (QWidget* page : m_settingsPages) {
+    page->setEnabled(!running);
+  }
+  const bool haveDisc = !SelectedDisc().isEmpty();
+  const bool haveGame = QFileInfo::exists(m_paths.gameExe);
+  m_selectButton->setEnabled(!running);
+  m_playButton->setEnabled(!running && haveDisc && haveGame);
+  m_stopButton->setEnabled(running);
+  m_optionsButton->setEnabled(haveDisc);
+  m_transferButton->setEnabled(!running);
+  m_resetAllButton->setEnabled(!running);
+  m_saveButton->setEnabled(!running);
+  if (running) {
+    if (!m_stopRequested) {
+      m_runStatus->setObjectName(QStringLiteral("PrimedGunGood"));
+      m_runStatus->setText(tr("Running. Settings are locked until the game closes."));
+    }
+  } else if (!haveGame) {
+    m_runStatus->setObjectName(QStringLiteral("PrimedGunBad"));
+    m_runStatus->setText(tr("metroid_prime_port.exe was not found next to the launcher."));
+  } else {
+    m_runStatus->setObjectName(QStringLiteral("PrimedGunMuted"));
+    m_runStatus->setText(QString());
+  }
+  // A new object name only restyles once the widget is polished again.
+  m_runStatus->style()->unpolish(m_runStatus);
+  m_runStatus->style()->polish(m_runStatus);
+  m_runStatus->setVisible(!m_runStatus->text().isEmpty());
+  UpdateFooter();
+}
+
+void LauncherWindow::closeEvent(QCloseEvent* event) {
+  if (m_game != nullptr) {
+    // QProcess would kill the game with the window; stop it properly instead.
+    QMessageBox box(this);
+    box.setWindowTitle(tr("PrimedGun"));
+    box.setText(tr("The game is running. Stop it and close?"));
+    QPushButton* stop = box.addButton(tr("Stop and Close"), QMessageBox::AcceptRole);
+    box.addButton(QMessageBox::Cancel);
+    box.exec();
+    if (box.clickedButton() == stop) {
+      m_closeAfterStop = true;
+      Stop();
+    }
+    event->ignore();
+    return;
+  }
+  if (m_model.Dirty()) {
+    const auto answer = QMessageBox::question(
+        this, tr("PrimedGun"), tr("Save your changed settings before closing?"),
+        QMessageBox::Save | QMessageBox::Discard | QMessageBox::Cancel);
+    if (answer == QMessageBox::Cancel || (answer == QMessageBox::Save && !SaveSettings())) {
+      event->ignore();
+      return;
+    }
+  }
+  m_ini.setValue(QStringLiteral("geometry"), saveGeometry());
+  m_ini.sync();
+  event->accept();
+}
+
+} // namespace PrimedGunLauncher

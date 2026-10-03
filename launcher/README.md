@@ -1,0 +1,65 @@
+# PrimedGun launcher
+
+`PrimedGun.exe` is PrimedGun's launcher window, ported from its Dolphin build
+(`DolphinQt/MainWindow.cpp` there) to the native port. It is a separate Qt 6
+program that sits next to `metroid_prime_port.exe`, edits the game's
+`port_settings.ini`, and starts the game. The tabs are the same as in PrimedGun:
+Setup, Controller, Calibration, Cannon Textures, Layout, Port Config (in place
+of Dolphin Config) and About (from the Quest build).
+
+## Building
+
+The launcher is off by default. To build it, turn it on and point CMake at a
+Qt 6.5+ install, for example the prebuilt Qt that PrimedGun's Dolphin tree
+carries:
+
+```
+cmake -S . -B build/vr -DMP_BUILD_LAUNCHER=ON ^
+  -DCMAKE_PREFIX_PATH=C:/path/to/PrimedGun/Externals/Qt/Qt6.5.1/x64
+cmake --build build/vr
+```
+
+`PrimedGun.exe` is built next to the game. The build then runs `windeployqt`,
+which copies Qt's DLLs and `platforms/`, and copies the cannon texture slots to
+`primedgun/cannon_textures`. `cmake --install` installs the same files.
+
+Qt's prebuilt `Qt6EntryPoint.lib` is compiled with `/GL`, which lld-link cannot
+read. The target therefore sets `qt_no_entrypoint` and links with
+`/ENTRY:mainCRTStartup`.
+
+The Qt-free half, `core/`, is always built with the tests, and
+`port_launcher_tests` checks it. It covers settings-file editing, the key table
+against `PortVrSettings` and the game's clamps, the disc check, the PrimedGun
+import, and the cannon pack.
+
+## How it behaves
+
+- **Settings.** The launcher finds `port_settings.ini` the same way the game
+  does (`platform/include/port_paths.h`). A save re-reads the file and rewrites
+  only the keys the launcher changed. Every other line, including comments and
+  line endings, stays as the game wrote it.
+  - Settings are locked while the game runs, because the game rewrites the file
+    when it exits. The launcher reads the file again afterwards. Use F1 in game
+    for live changes.
+  - Settings the game saves but does not use yet carry a "not active yet" tag
+    (`active` in `core/launcher_keys.cpp`).
+  - The launcher's own state, such as the selected disc and the window position,
+    is kept in `primedgun_launcher.ini` beside it.
+- **Play** saves pending edits, then starts the game with the disc as its first
+  argument. The game's output goes to `primedgun_last_run.log` in the user
+  folder.
+  - **Stop** closes the game's window, so the game exits normally. **Force
+    Stop** is offered after 10 seconds.
+- **Cannon Textures.** PrimedGun's Dolphin-named DDS files are used as they
+  are; Aurora reads the same names and hashes.
+  - Applying a slot copies it into `user_textures/000_primedgun_cannon`. If the
+    pack is split by device, the slot goes into every device folder.
+  - Aurora uses the first file for each texture in path order, so this folder
+    wins over any other pack file for the cannon.
+  - The applied slot is stored as `vr_cannon_texture_slot`.
+- **Transfer PrimedGun Memory Card / Settings** looks for an old PrimedGun
+  install around the launcher, the same way PrimedGun did, or in a folder you
+  pick, or in Dolphin's own folder.
+  - It imports the Metroid Prime saves into the game's card (`USA/Card A`) with
+    `platform/port_gci.cpp`.
+  - It loads the old `PrimedGun.ini` settings as unsaved changes.

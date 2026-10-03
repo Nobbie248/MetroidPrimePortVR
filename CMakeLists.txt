@@ -48,6 +48,9 @@ option(MP_ENABLE_OPENXR "Build OpenXR VR support" ${MP_ENABLE_OPENXR_DEFAULT})
 unset(MP_ENABLE_OPENXR_DEFAULT)
 set(MP_OPENXR_SDK_DIR "" CACHE PATH
     "Optional OpenXR-SDK source tree; when empty, use a package or fetch the pinned SDK")
+# PrimedGun's launcher (launcher/): a Qt 6 window beside the game. Needs Qt on
+# CMAKE_PREFIX_PATH.
+option(MP_BUILD_LAUNCHER "Build the PrimedGun Qt launcher (PrimedGun.exe)" OFF)
 option(MP_ANDROID_NOD_STUB "Use a non-functional nod stub for Android build probes" OFF)
 
 # The decompiled game/engine sources and the port code around them are written
@@ -407,6 +410,14 @@ install(FILES ${CMAKE_CURRENT_SOURCE_DIR}/LICENSE
               ${CMAKE_CURRENT_SOURCE_DIR}/NOTICE
     DESTINATION ${CMAKE_INSTALL_DATADIR}/licenses/metroid-prime-port)
 
+# The launcher's Qt-free core is also what port_launcher_tests checks.
+if(MP_BUILD_TESTS OR MP_BUILD_LAUNCHER)
+    add_subdirectory(launcher/core)
+endif()
+if(MP_BUILD_LAUNCHER)
+    add_subdirectory(launcher)
+endif()
+
 if(MP_BUILD_TESTS)
     enable_testing()
     add_test(NAME port_version COMMAND metroid_prime_port --version)
@@ -543,6 +554,11 @@ if(MP_BUILD_TESTS)
     add_test(NAME port_gci_tests COMMAND port_gci_tests)
     set_tests_properties(port_gci_tests PROPERTIES TIMEOUT 15 LABELS port)
     aurora_copy_runtime_dlls(port_gci_tests)
+    add_executable(port_launcher_tests tests/port_launcher.cpp)
+    target_include_directories(port_launcher_tests PRIVATE platform/include)
+    target_link_libraries(port_launcher_tests PRIVATE primedgun_launcher_core)
+    add_test(NAME port_launcher_tests COMMAND port_launcher_tests "${CMAKE_CURRENT_BINARY_DIR}/launcher-test-data")
+    set_tests_properties(port_launcher_tests PROPERTIES TIMEOUT 15 LABELS port)
     foreach(test IN ITEMS port_buffer_tests port_ai_tests port_randomizer_tests port_apclient_tests port_ap_logic_tests port_musyx_tests port_disc_tests port_mouse_tests port_touch_pad_tests port_json_tests port_ws_tests port_mods_tests port_room_env_tests port_room_geo_tests port_hd_font_tests port_hud_bars_tests port_remastered_hud_tests port_remastered_movie_tests port_remastered_text_tests port_importers_tests port_custom_res_tests port_hold_toggle_tests port_tick_pair_tests port_livesplit_tests port_discord_tests port_savestate_tests port_timing_tests port_audio_math_tests port_vr_stereo_tests)
         add_test(NAME ${test} COMMAND ${test})
         set_tests_properties(${test} PROPERTIES TIMEOUT 15 LABELS port)

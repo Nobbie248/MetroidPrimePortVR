@@ -113,6 +113,12 @@ public:
   virtual float GetFPS() = 0;
   virtual void CacheReflection(void (*)(void*, const CVector3f&), void*, bool) = 0;
   virtual void DrawSpaceWarp(const CVector3f&, float) = 0;
+#ifdef TARGET_PC
+  // Port: the space warp anchored at `point` in the world, facing `viewer`, rather than at the
+  // point's projection on the game camera's screen. PortVr: each eye of the headset then warps
+  // what lies around the point in its own view.
+  virtual void DrawSpaceWarpWorld(const CVector3f& point, const CVector3f& viewer, float strength) = 0;
+#endif
   virtual void DrawThermalModel(const CModel&, const CColor&, const CColor&, const float*,
                                 const float*, const CModelFlags&) = 0;
   virtual void DrawModelDisintegrate(const CModel&, const CTexture&, const CColor&, const float*,

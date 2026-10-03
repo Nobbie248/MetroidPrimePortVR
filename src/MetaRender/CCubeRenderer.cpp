@@ -55,6 +55,7 @@
 
 #ifdef TARGET_PC
 #include "port_room_geo.h"
+#include <dolphin/gx/GXAurora.h>
 #endif
 
 CCubeRenderer* CCubeRenderer::sRenderer = nullptr;
@@ -1263,6 +1264,142 @@ void CCubeRenderer::_DrawSpaceWarp(const CVector3f& point, float strength) {
 
   CGX::SetFog(fogType, fogStartZ, fogEndZ, fogNearZ, fogFarZ, fogColor);
 }
+
+#ifdef TARGET_PC
+// Port: _DrawSpaceWarp anchored in the world (IRenderer::DrawSpaceWarpWorld). PortVr:
+// CStateManager::DrawSpaceWarp sends the warp here while the headset shows the world per eye.
+// Retail projects the point through the game camera, copies the square of the screen around it
+// and draws the copy back warped as an orthographic quad, which the stereo replay lays at the same
+// spot of both eye images. Here the square is a quad around the point in the world, facing the
+// viewer and as large as retail's square looks from the game camera. The whole viewport is
+// copied (the replay takes that copy from each eye), and the quad samples it where each of its
+// pixels lies, through a screen-projecting texture matrix the replay derives again per eye
+// (CGraphics::LoadScreenProjectionTexMtx, AuroraSetStereoScreenTexMtx), so each eye warps what it
+// sees around the point. The warp's offsets are counted in texels of the copy, which keeps the
+// logical size of the viewport, so they move the image as far on the screen as retail's do.
+void CCubeRenderer::DrawSpaceWarpWorld(const CVector3f& point, const CVector3f& viewer,
+                                       float strength) {
+  const CGraphics::CProjectionState& proj = CGraphics::GetProjectionState();
+  if (!proj.IsPerspective()) {
+    return;
+  }
+  int vpLeft, vpTop, vpWidth, vpHeight;
+  CGraphics::GetViewport(vpLeft, vpTop, vpWidth, vpHeight);
+  if (vpWidth <= 0 || vpHeight <= 0) {
+    return;
+  }
+  const CVector3f toPoint = point - viewer;
+  const float distance = toPoint.Magnitude();
+  if (!(distance > 0.001f)) {
+    return;
+  }
+  const CVector3f forward = toPoint * (1.f / distance);
+
+  // Retail's square reaches 0x60 viewport pixels each way from the point: as tangents of the game
+  // camera's view, the same angular size whatever the distance.
+  const float nearZ = proj.GetNear();
+  const float tanX = (static_cast< float >(0x60) / (0.5f * static_cast< float >(vpWidth))) *
+                     ((proj.GetRight() - proj.GetLeft()) / (2.f * nearZ));
+  const float tanY = (static_cast< float >(0x60) / (0.5f * static_cast< float >(vpHeight))) *
+                     ((proj.GetTop() - proj.GetBottom()) / (2.f * nearZ));
+  // Kept beyond the near plane. The warp ignores depth, so pushing it back along the view keeps
+  // its look and hides nothing.
+  const float depth = rstl::max_val(distance, 2.f * nearZ);
+  const CVector3f center = viewer + forward * depth;
+  // Facing the viewer and upright (the camera's up), unless the point is straight above or below.
+  const CTransform4f& cameraXf = CGraphics::GetViewMatrix();
+  CVector3f right = CVector3f::Cross(forward, cameraXf.GetUp());
+  if (right.CanBeNormalized()) {
+    right.Normalize();
+  } else {
+    right = cameraXf.GetRight();
+  }
+  const CVector3f up = CVector3f::Cross(right, forward);
+  const CVector3f halfRight = right * (tanX * depth);
+  const CVector3f halfUp = up * (tanY * depth);
+
+  GXFogType fogType;
+  float fogStartZ;
+  float fogEndZ;
+  float fogNearZ;
+  float fogFarZ;
+  GXColor fogColor;
+  CGX::GetFog(&fogType, &fogStartZ, &fogEndZ, &fogNearZ, &fogFarZ, &fogColor);
+  CGX::SetFog(GX_FOG_NONE, fogStartZ, fogEndZ, fogNearZ, fogFarZ, fogColor);
+
+  GXSetTexCopySrc(static_cast< u16 >(vpLeft), static_cast< u16 >(vpTop), static_cast< u16 >(vpWidth),
+                  static_cast< u16 >(vpHeight));
+  GXSetTexCopyDst(static_cast< u16 >(vpWidth), static_cast< u16 >(vpHeight), GX_TF_RGBA8, false);
+  GXCopyTex(CGraphics::GetDolphinSpareBuffer(), false);
+  GXPixModeSync();
+
+  CGraphics::LoadDolphinSpareTexture(vpWidth, vpHeight, GX_TF_RGBA8, nullptr,
+                                     CGraphics::kSpareBufferTexMapID);
+
+  x150_reflectionTex.Load(GX_TEXMAP1, CTexture::kCM_Clamp);
+  CGX::SetTevColorIn(GX_TEVSTAGE0, GX_CC_ZERO, GX_CC_ZERO, GX_CC_ZERO, GX_CC_TEXC);
+  CGX::SetTevColorOp(GX_TEVSTAGE0, GX_TEV_ADD, GX_TB_ZERO, GX_CS_SCALE_1, true, GX_TEVPREV);
+  // The copy's coordinates from the position (the matrix below); the warp texture's from the
+  // vertex, across the quad.
+  CGX::SetTexCoordGen(GX_TEXCOORD0, GX_TG_MTX3x4, GX_TG_POS, GX_TEXMTX0, false, GX_PTIDENTITY);
+  CGX::SetTexCoordGen(GX_TEXCOORD1, GX_TG_MTX3x4, GX_TG_TEX0, GX_IDENTITY, false, GX_PTIDENTITY);
+  CGX::SetTevOrder(GX_TEVSTAGE0, GX_TEXCOORD0, CGraphics::kSpareBufferTexMapID, GX_COLOR_NULL);
+
+  const float indScale = static_cast< float >(0.5 * strength);
+  float indMtx[2][3] = {
+      {indScale, 0.f, 0.f},
+      {0.f, indScale, 0.f},
+  };
+  GXSetIndTexMtx(GX_ITM_0, indMtx, -1);
+  GXSetIndTexOrder(GX_INDTEXSTAGE0, GX_TEXCOORD1, GX_TEXMAP1);
+  CGX::SetTevIndirect(GX_TEVSTAGE0, GX_INDTEXSTAGE0, GX_ITF_8, GX_ITB_STU, GX_ITM_0, GX_ITW_OFF,
+                      GX_ITW_OFF, false, false, GX_ITBA_OFF);
+  CGX::SetNumIndStages(1);
+  CGX::SetNumTevStages(1);
+  CGX::SetNumTexGens(2);
+  CGX::SetNumChans(0);
+  CGX::SetBlendMode(GX_BM_BLEND, GX_BL_ONE, GX_BL_ZERO, GX_LO_CLEAR);
+
+  static const GXVtxDescList vtxDescrs[3] = {
+      {GX_VA_POS, GX_DIRECT},
+      {GX_VA_TEX0, GX_DIRECT},
+      {GX_VA_NULL, GX_NONE},
+  };
+  CGX::SetVtxDescv(vtxDescrs);
+
+  // World positions through the game camera, as any world draw.
+  CGraphics::SetModelMatrix(CTransform4f::Identity());
+  CGraphics::LoadScreenProjectionTexMtx(GX_TEXMTX0);
+  AuroraSetStereoScreenTexMtx(GX_TEXMTX0, GX_PNMTX0);
+
+  CGX::SetZMode(false, GX_ALWAYS, false);
+  GXSetCullMode(GX_CULL_NONE);
+
+  // The corners in retail's order: top left, bottom left, bottom right, top right.
+  const CVector3f topLeft = center - halfRight + halfUp;
+  const CVector3f bottomLeft = center - halfRight - halfUp;
+  const CVector3f bottomRight = center + halfRight - halfUp;
+  const CVector3f topRight = center + halfRight + halfUp;
+
+  CGX::Begin(GX_TRIANGLEFAN, GX_VTXFMT0, 4);
+  GXPosition3f32(topLeft.GetX(), topLeft.GetY(), topLeft.GetZ());
+  GXTexCoord2f32(0.f, 0.f);
+  GXPosition3f32(bottomLeft.GetX(), bottomLeft.GetY(), bottomLeft.GetZ());
+  GXTexCoord2f32(0.f, 1.f);
+  GXPosition3f32(bottomRight.GetX(), bottomRight.GetY(), bottomRight.GetZ());
+  GXTexCoord2f32(1.f, 1.f);
+  GXPosition3f32(topRight.GetX(), topRight.GetY(), topRight.GetZ());
+  GXTexCoord2f32(1.f, 0.f);
+  CGX::End();
+
+  AuroraSetStereoScreenTexMtx(GX_IDENTITY, GX_PNMTX0);
+  GXSetCullMode(GX_CULL_FRONT);
+  CGX::SetTevDirect(GX_TEVSTAGE0);
+  CGX::SetNumIndStages(0);
+
+  CGX::SetFog(fogType, fogStartZ, fogEndZ, fogNearZ, fogFarZ, fogColor);
+}
+#endif
 
 void CCubeRenderer::SetWireframeFlags(int flags) {
   CCubeModel::SetModelWireframe((flags & 1) == 1);

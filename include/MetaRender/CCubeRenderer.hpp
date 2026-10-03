@@ -137,6 +137,9 @@ public:
   float GetFPS() override;
   void CacheReflection(void (*)(void*, const CVector3f&), void*, bool) override;
   void DrawSpaceWarp(const CVector3f&, float) override;
+#ifdef TARGET_PC
+  void DrawSpaceWarpWorld(const CVector3f& point, const CVector3f& viewer, float strength) override;
+#endif
   void DrawThermalModel(const CModel&, const CColor&, const CColor&, const float*, const float*,
                         const CModelFlags&) override;
   void DrawModelDisintegrate(const CModel&, const CTexture&, const CColor&, const float*,

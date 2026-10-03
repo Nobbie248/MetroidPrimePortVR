@@ -3211,6 +3211,22 @@ void CStateManager::DrawSpaceWarp(const CVector3f& point, float strength) const 
   }
 
   const CGameCamera& curCam = x870_cameraManager->GetCurrentCamera(*this);
+#ifdef TARGET_PC
+  // PortVr: projected through the game (body) camera and drawn flat, the warp lands at the same
+  // spot of both eye images, where the body camera would see the point, not where each eye sees
+  // it (a charged shot's warp trailed off to one side of the bullet). Immersive, it is placed in
+  // the world around the point instead, facing the head.
+  if (PortVr::VrImmersive()) {
+    CVector3f viewer = curCam.GetTranslation();
+    CVector3f headOrigin(CVector3f::Zero());
+    CVector3f headDirection(CVector3f::Zero());
+    if (PortVr::VrHeadGaze(curCam.GetTransform(), headOrigin, headDirection)) {
+      viewer = headOrigin;
+    }
+    gpRender->DrawSpaceWarpWorld(point, viewer, strength);
+    return;
+  }
+#endif
   gpRender->DrawSpaceWarp(curCam.ConvertToScreenSpace(point), strength);
 }
 

@@ -3210,6 +3210,13 @@ void CStateManager::DrawSpaceWarp(const CVector3f& point, float strength) const 
     break;
   }
 
+#ifdef TARGET_PC
+  // PortVr: the VR settings can turn the warp off in the headset (vr_space_warp).
+  if (PortVr::VrHideSpaceWarp()) {
+    return;
+  }
+#endif
+
   const CGameCamera& curCam = x870_cameraManager->GetCurrentCamera(*this);
 #ifdef TARGET_PC
   // PortVr: projected through the game (body) camera and drawn flat, the warp lands at the same
@@ -3223,7 +3230,10 @@ void CStateManager::DrawSpaceWarp(const CVector3f& point, float strength) const 
     if (PortVr::VrHeadGaze(curCam.GetTransform(), headOrigin, headDirection)) {
       viewer = headOrigin;
     }
-    gpRender->DrawSpaceWarpWorld(point, viewer, strength);
+    // At half retail's strength: seen from inside the headset the full warp read as too strong
+    // (user feedback, 2026-10-04).
+    static const float kVrSpaceWarpStrengthScale = 0.5f;
+    gpRender->DrawSpaceWarpWorld(point, viewer, kVrSpaceWarpStrengthScale * strength);
     return;
   }
 #endif

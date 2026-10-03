@@ -84,6 +84,10 @@ struct PortVrSettings {
     // sky dome is drawn with the head's rotation only, so it reads as
     // infinitely far rather than as a ball sixty units away.
     bool sky_at_infinity = true;
+    // The space warp (the distortion around a charged shot, Flickerbats,
+    // Chozo Ghosts and Metroid Prime's second form) in the headset. Off, it is
+    // not drawn while the headset runs; the desktop always draws it.
+    bool space_warp = true;
     float frustum_culling_degrees = 115.0f;
     float metroid_hud_distance = 0.75f;
     float metroid_hud_size = 0.75f;

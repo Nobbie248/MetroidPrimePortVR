@@ -122,6 +122,9 @@ void DrawVrDebugTab() {
   changed |= ImGui::Checkbox("Sky at infinity", &s.sky_at_infinity);
   ImGui::TextWrapped("The sky dome is drawn with the head's rotation only, so the planet and the stars read as "
                      "far away rather than as a ball sixty units out (PrimedGun's Detect Skybox, without the scan).");
+  changed |= ImGui::Checkbox("Space warp", &s.space_warp);
+  ImGui::TextWrapped("The distortion around charged shots (also Flickerbats, Chozo Ghosts and Metroid Prime). "
+                     "Off, it is not drawn in the headset.");
 
   ImGui::SeparatorText("Controls");
   int mode = static_cast< int >(s.controller_mode);

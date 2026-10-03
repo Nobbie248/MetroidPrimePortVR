@@ -54,6 +54,9 @@ bool VrRemoveCinematicBars() noexcept;
 // the camera-centred sky dome with the head's rotation only, without the eye
 // offset that would place it at its modelled sixty units.
 bool VrSkyAtInfinity() noexcept;
+// The headset is running and the settings turn the space warp off
+// (CStateManager::DrawSpaceWarp draws nothing).
+bool VrHideSpaceWarp() noexcept;
 
 // The 6DOF cannon. Once per simulation tick from CPlayer::UpdateGunTransform:
 // when the tracked controller drives the cannon, replaces `gunXf` (world) and

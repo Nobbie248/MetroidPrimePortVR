@@ -163,6 +163,8 @@ bool VrRemoveCinematicBars() noexcept {
 
 bool VrSkyAtInfinity() noexcept { return OpenXRIsRunning() && GetVrSettings().sky_at_infinity; }
 
+bool VrHideSpaceWarp() noexcept { return OpenXRIsRunning() && !GetVrSettings().space_warp; }
+
 bool VrCannonTransform(const CStateManager& mgr, const CPlayer& player, const CTransform4f& cameraXf,
                        CTransform4f& gunXf) noexcept {
     (void)mgr;

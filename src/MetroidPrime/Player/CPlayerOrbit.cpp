@@ -32,6 +32,9 @@
 #include "Kyoto/Graphics/CGraphics.hpp"
 #include "Kyoto/Math/CMath.hpp"
 #include "math.h"
+#ifdef TARGET_PC
+#include "vr/vr_view.h"
+#endif
 
 static const CMaterialList kLineOfSightIncludeList = CMaterialList(kMT_Solid);
 static const CMaterialList kLineOfSightExcludeList =
@@ -275,6 +278,13 @@ void CPlayer::UpdateOrbitOrientation(CStateManager& mgr) {
   if (x2f8_morphBallState != kMS_Unmorphed) {
     return;
   }
+#ifdef TARGET_PC
+  // PortVr: look to scan: the head picked the target, so the body keeps its
+  // facing rather than turning the world toward it (vr_view.h).
+  if (PortVr::VrLookToScanHoldsFacing(mgr)) {
+    return;
+  }
+#endif
   switch (x304_orbitState) {
   case kOS_NoOrbit:
     return;
@@ -351,6 +361,11 @@ void CPlayer::UpdateOrbitInput(const CFinalInput& input, CStateManager& mgr) {
     return;
   }
   UpdateOrbitableObjects(mgr);
+#ifdef TARGET_PC
+  // PortVr: look to scan: measure the scannable objects around the head's gaze
+  // for FindOrbitTargetId and the scan icons (vr_view.h).
+  PortVr::VrLookToScanUpdate(mgr, *this);
+#endif
   if (x304_orbitState == kOS_NoOrbit) {
     SetOrbitNextTargetId(FindOrbitTargetId(mgr));
   }
@@ -820,6 +835,14 @@ void CPlayer::UpdateOrbitableObjects(CStateManager& mgr) {
 }
 
 TUniqueId CPlayer::FindOrbitTargetId(CStateManager& mgr) {
+#ifdef TARGET_PC
+  // PortVr: look to scan (PrimedGun's gun ray / scan target hook): in the scan
+  // visor the head picks the target, not the body's screen box.
+  TUniqueId lookTarget = kInvalidUniqueId;
+  if (PortVr::VrLookToScanTarget(mgr, lookTarget)) {
+    return lookTarget;
+  }
+#endif
   return FindBestOrbitableObject(x354_onScreenOrbitObjects, x330_orbitZoneMode, mgr);
 }
 

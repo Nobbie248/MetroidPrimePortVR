@@ -104,6 +104,38 @@ CTransform4f VrHeadFacingTransform(const CTransform4f& cameraXf) noexcept {
     return facing;
 }
 
+bool VrHeadGaze(const CTransform4f& cameraXf, CVector3f& origin, CVector3f& direction) noexcept {
+    if (!ImmersiveNow()) {
+        return false;
+    }
+    OpenXRFrameRequest request{};
+    if (!OpenXRLatestFrameRequest(request) || !request.head_valid) {
+        return false;
+    }
+    // The eyes see the game camera's space through lean^-1 * head
+    // (openxr_integration.cpp ViewFromBase), lean being a pitch about the
+    // right axis, which Prime and OpenXR share.
+    const float leanBack = GetVrSettings().lean_back_degrees * kDegreesToRadians;
+    const CQuaternion leanInverse = AxisQuaternion(1.f, 0.f, 0.f, -leanBack);
+    const CQuaternion head = (leanInverse * PrimeFromXr(request.head_orientation)).BuildNormalized();
+    direction = cameraXf.Rotate(head.Transform(CVector3f(0.f, 1.f, 0.f)));
+    if (!direction.CanBeNormalized()) {
+        return false;
+    }
+    direction.Normalize();
+    CVector3f offset = CVector3f::Zero();
+    if (request.base_valid) {
+        const std::array<float, 3> fromBase{
+            request.head_position[0] - request.base_position[0],
+            request.head_position[1] - request.base_position[1],
+            request.head_position[2] - request.base_position[2],
+        };
+        offset = leanInverse.Transform(PrimeFromXr(fromBase)) * request.units_per_meter;
+    }
+    origin = cameraXf.GetTranslation() + cameraXf.Rotate(offset);
+    return true;
+}
+
 bool VrCullingFrustum(const CTransform4f& cameraXf, float nearZ, CFrustumPlanes& frustum) noexcept {
     if (!ImmersiveNow()) {
         return false;

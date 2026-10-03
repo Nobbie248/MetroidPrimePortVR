@@ -16,6 +16,7 @@
 
 #include "Kyoto/Math/CTransform4f.hpp"
 #include "Kyoto/Math/CVector3f.hpp"
+#include "MetroidPrime/TGameTypes.hpp"
 
 class CFrustumPlanes;
 class CPlayer;
@@ -30,6 +31,11 @@ bool VrImmersive() noexcept;
 // `cameraXf` with the head's rotation (relative to the recentred base)
 // composed in; `cameraXf` itself when not immersive or the head is unknown.
 CTransform4f VrHeadFacingTransform(const CTransform4f& cameraXf) noexcept;
+
+// The head's gaze in the world, as the eyes see it: from the head's position
+// (the game camera plus the head's offset from the tracking base) along its
+// forward, lean back included. False when not immersive or the head is unknown.
+bool VrHeadGaze(const CTransform4f& cameraXf, CVector3f& origin, CVector3f& direction) noexcept;
 
 // Replaces `frustum` with the head-facing cone of the settings' culling angle
 // when immersive and culling is enabled; false leaves it alone.
@@ -51,6 +57,27 @@ bool VrCannonTransform(const CStateManager& mgr, const CPlayer& player, const CT
                        CTransform4f& gunXf) noexcept;
 // Whether the last VrCannonTransform placed the cannon.
 bool VrCannonTracked() noexcept;
+
+// Look to scan (PrimedGun's gun ray / scan target hook, vr_patch_gun_ray_target):
+// in the scan visor the head picks the scan target and the scan icons, rather
+// than the body's facing (vr/vr_look_scan.h has the maths). Game thread.
+//
+// Once per tick from CPlayer::UpdateOrbitInput, after the orbitable objects
+// are gathered: measures the scannable objects around the head's gaze.
+void VrLookToScanUpdate(CStateManager& mgr, const CPlayer& player) noexcept;
+// True when look to scan owns this tick's choice (immersive, scan visor,
+// unmorphed, setting on); `id` is then the head's pick, possibly none.
+// CPlayer::FindOrbitTargetId returns it instead of its screen-box choice.
+bool VrLookToScanTarget(const CStateManager& mgr, TUniqueId& id) noexcept;
+// The scannable objects near where the head looks, for their scan icons
+// (CPlayerVisor::UpdateScanObjectIndicators); null and 0 when inactive.
+const TUniqueId* VrLookToScanNearby(const CStateManager& mgr, int& count) noexcept;
+// While look to scan is active the body keeps its facing: an orbit lock on
+// the target the head picked does not turn the camera and the player toward
+// it, which would swing the whole world around the headset and take the
+// target out from under the gaze (CFirstPersonCamera::UpdateTransform,
+// CPlayer::UpdateOrbitOrientation).
+bool VrLookToScanHoldsFacing(const CStateManager& mgr) noexcept;
 // The rendered model's offset from the tracked pose (PrimedGun's model offset
 // and its base forward offset), in world units; zero when not tracked.
 CVector3f VrCannonModelOffsetWorld() noexcept;

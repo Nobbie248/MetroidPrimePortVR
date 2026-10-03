@@ -88,6 +88,15 @@ void DrawVrDebugTab() {
     changed = false;
   }
 
+  ImGui::SeparatorText("Scan visor");
+  changed |= ImGui::Checkbox("Look to scan", &s.patch_gun_ray_target);
+  ImGui::TextWrapped("The scan target and the scan icons follow where the head looks, and a scan lock keeps the "
+                     "body's facing (PrimedGun's gun ray / scan target hook).");
+  changed |= ImGui::SliderFloat("Look reach", &s.gun_targeting_distance, 15.f, 100.f, "%.0f units");
+  changed |= ImGui::SliderFloat("Look radius", &s.gun_targeting_radius, 0.5f, 12.f, "%.1f units");
+  ImGui::TextWrapped("The radius widens the cones around the gaze that pick the target and show icons "
+                     "(PrimedGun: 60 and 4).");
+
   ImGui::SeparatorText("Camera");
   changed |= ImGui::Checkbox("No camera bob or idle sway", &s.patch_no_idle_sway);
   changed |= ImGui::Checkbox("No arm cannon idle fidget", &s.patch_disable_arm_cannon_idle_fidget);

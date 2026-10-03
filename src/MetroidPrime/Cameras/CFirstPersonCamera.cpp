@@ -133,7 +133,14 @@ void CFirstPersonCamera::UpdateTransform(CStateManager& mgr, float dt) {
     bob->SetCameraBobTransform(CTransform4f::Identity());
   }
 
-  switch (player->GetOrbitState()) {
+#ifdef TARGET_PC
+  // PortVr: look to scan: the head picked the orbit target, so the camera
+  // keeps the body's facing instead of swinging the world toward it.
+  const bool portVrHoldFacing = PortVr::VrLookToScanHoldsFacing(mgr);
+#else
+  const bool portVrHoldFacing = false;
+#endif
+  switch (portVrHoldFacing ? CPlayer::kOS_NoOrbit : player->GetOrbitState()) {
   case CPlayer::kOS_OrbitObject:
   case CPlayer::kOS_ForcedOrbitObject: {
     const CActor* actor = TCastToConstPtr< CActor >(mgr.GetObjectById(player->GetOrbitTargetId()));

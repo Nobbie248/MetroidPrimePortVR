@@ -26,6 +26,7 @@
 #include <float.h>
 #ifdef TARGET_PC
 #include "aurora/gfx.h"
+#include "vr/vr_view.h"
 #include <dolphin/gx/GXAurora.h>
 #endif
 
@@ -612,6 +613,13 @@ void CPlayerVisor::UpdateScanObjectIndicators(const CStateManager& mgr, float dt
                     0.5f * CGraphics::GetViewportHeight());
       bool inBox = mgr.GetPlayer()->WithinOrbitScreenBox(
           orbitPos, mgr.GetPlayer()->GetOrbitZoneMode(), mgr.GetPlayer()->GetOrbitZoneType());
+#ifdef TARGET_PC
+      // PortVr: look to scan: the frame lights for the object the head picks.
+      TUniqueId lookTarget = kInvalidUniqueId;
+      if (PortVr::VrLookToScanTarget(mgr, lookTarget)) {
+        inBox = target.x0_objId == lookTarget;
+      }
+#endif
       if (inBox != target.xc_inBox) {
         target.xc_inBox = inBox;
         if (inBox)
@@ -647,6 +655,34 @@ void CPlayerVisor::UpdateScanObjectIndicators(const CStateManager& mgr, float dt
       }
     }
   }
+#ifdef TARGET_PC
+  // PortVr: look to scan: the objects near where the head looks show their
+  // icons too, whichever way the body faces (PrimedGun's indicator seeding).
+  // Those the game already listed were counted above.
+  int lookCount = 0;
+  const TUniqueId* const look = PortVr::VrLookToScanNearby(mgr, lookCount);
+  for (int i = 0; i < lookCount; ++i) {
+    const TUniqueId id = look[i];
+    bool listed = false;
+    for (AUTO(listedIt, nearbyObjects.begin()); listedIt != nearbyObjects.end(); ++listedIt) {
+      listed = listed || *listedIt == id;
+    }
+    if (listed)
+      continue;
+    const CActor* actor = TCastToConstPtr< CActor >(mgr.GetObjectById(id));
+    if (actor == nullptr || actor->GetCurrentAreaId() != playerArea)
+      continue;
+    int target = FindCachedInactiveScanTarget(id);
+    if (target != -1) {
+      SScanObjectIndicatorInfo& info = x13c_scanTargets[target];
+      info.x4_timer = rstl::min_val(1.f, info.x4_timer + dt2);
+    } else {
+      target = FindEmptyInactiveScanTarget();
+      if (target != -1)
+        x13c_scanTargets[target] = SScanObjectIndicatorInfo(id, dt, 1.f);
+    }
+  }
+#endif
 }
 
 bool CPlayerVisor::DrawScanObjectIndicators(const CStateManager& mgr) const {

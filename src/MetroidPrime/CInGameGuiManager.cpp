@@ -313,6 +313,18 @@ void CInGameGuiManager::Draw(const CStateManager& mgr) const {
     // so the headset keeps them in front of the head. The reticle above stays in
     // the world (CSamusHud::Draw routes its own reticle draw the same way).
     AuroraSetStereoDrawRoute(AURORA_STEREO_ROUTE_HEAD_LOCKED);
+    // PortVr: the scan visor's window (CPlayerVisor::DrawScanEffect) and its
+    // data dots (CScanDisplay::Draw) are orthographic draws. The headset lays
+    // those on a plane in front of the head that spans the same angles as the
+    // base HUD camera's view, at the depth of the HUD's body (its widgets sit
+    // about twenty units from their camera), so they stay registered with the
+    // HUD; the window's framebuffer copy is taken from each eye through that
+    // plane, so it magnifies what is straight ahead of the head.
+    if (x14c_basehud_camera != nullptr) {
+      static const float kHudBodyDepth = 20.f;
+      AuroraSetStereoHeadLockedPlane(x14c_basehud_camera->GetDrawTanHalfWidth(),
+                                     x14c_basehud_camera->GetDrawTanHalfHeight(), kHudBodyDepth);
+    }
 #endif
     CGraphics::SetDepthRange(1.f / 64.f, 1.f / 32.f);
     const bool scanVisor = mgr.GetPlayerState()->GetActiveVisor(mgr) == CPlayerState::kPV_Scan;

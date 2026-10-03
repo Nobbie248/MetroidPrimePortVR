@@ -1,6 +1,7 @@
 #pragma once
 
 #include "stereo_frame.hpp"
+#include "stereo_replay.hpp"
 #include "types.hpp"
 
 #include <array>
@@ -121,6 +122,11 @@ StereoFrameState recorded_stereo_state() noexcept;
 // uniforms staged from now on. Resets to WORLD at frame begin.
 void set_stereo_draw_route(uint8_t route) noexcept;
 uint8_t stereo_draw_route() noexcept;
+// The plane AURORA_STEREO_ROUTE_HEAD_LOCKED_2D lays orthographic draws on and
+// takes EFB copies through (stereo_replay.hpp HeadLockedPlane), as the GX FIFO
+// last set it; kept until set again.
+void set_stereo_head_locked_plane(float tanHalfWidth, float tanHalfHeight, float distance) noexcept;
+stereo_replay::HeadLockedPlane stereo_head_locked_plane() noexcept;
 // Stages the eye copies of the GX uniform just pushed at `monoRange` (whose
 // CPU-side bytes are `mono`) and returns the offsets the draw binds per eye:
 // the mono offset for a draw that is identical in both eyes, UINT32_MAX for

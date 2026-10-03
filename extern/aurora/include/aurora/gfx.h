@@ -83,6 +83,10 @@ typedef enum AuroraStereoDrawRoute {
   AURORA_STEREO_ROUTE_FULLSCREEN = 3,      // identical in both eyes, game projection untouched
   AURORA_STEREO_ROUTE_PER_EYE_RESOLVE = 4, // reserved: the pass's EFB copy replayed per eye (drawn like WORLD)
   AURORA_STEREO_ROUTE_SKIP = 5,            // not drawn in the eyes
+  // HEAD_LOCKED, with its orthographic draws laid on the head-locked plane (AuroraSetStereoHeadLockedPlane in
+  // dolphin/gx/GXAurora.h) and its EFB copies taken from each eye through that plane: a 2D window onto the view,
+  // such as Metroid Prime's scan visor, keeps pointing where the head does and magnifies each eye's own view.
+  AURORA_STEREO_ROUTE_HEAD_LOCKED_2D = 6,
 } AuroraStereoDrawRoute;
 // AURORA_STEREO_ROUTE_HEAD_LOCKED draws are scaled about the camera origin
 // before the eye offset: sizeScale sets their angular size, distanceScale

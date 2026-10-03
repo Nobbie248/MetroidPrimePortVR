@@ -112,9 +112,14 @@ void CGuiCamera::Draw(const CGuiWidgetDrawParms& parms) const {
     }
     mCenterX = 0.f;
     mCenterZ = 0.f;
+    // PortVr: remembered for the headset's head-locked plane (GetDrawTanHalfWidth).
+    mDrawTanHalfHeight = std::tan(0.5f * fov * (3.14159265f / 180.f));
+    mDrawTanHalfWidth = mDrawTanHalfHeight * aspect;
     CGraphics::SetPerspective(fov, aspect, mCameraParms.perspective.znear,
                               mCameraParms.perspective.zfar);
   } else {
+    mDrawTanHalfWidth = 0.f;
+    mDrawTanHalfHeight = 0.f;
     float left = mCameraParms.orthographic.left;
     float right = mCameraParms.orthographic.right;
     float top = mCameraParms.orthographic.top;

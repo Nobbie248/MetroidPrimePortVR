@@ -88,6 +88,10 @@ struct StereoPassReplay {
   std::array<TextureHandle, AURORA_STEREO_EYE_COUNT> copyTargets{};
   // Palette conversions of eye copies, run with the pass's own conversions.
   std::array<std::vector<tex_palette_conv::ConvRequest>, AURORA_STEREO_EYE_COUNT> paletteConvs{};
+  // The UV transform each eye's copy samples with when the copy was made
+  // under AURORA_STEREO_ROUTE_HEAD_LOCKED_2D (stereo_replay.hpp
+  // HeadLockedPlane); empty, an eye copies the pass's own rectangle.
+  std::array<Range, AURORA_STEREO_EYE_COUNT> copyUniformRanges{};
 };
 
 } // namespace detail

@@ -613,6 +613,17 @@ void handle_aurora(ByteReader& reader) noexcept {
       g_gxState.dirty |= DirtyUniform;
       gfx::set_stereo_draw_route(route);
     }
+  } else if (subCmd == GX_AURORA_STEREO_HEAD_LOCKED_PLANE) {
+    const f32 tanHalfWidth = reader.read<f32>();
+    const f32 tanHalfHeight = reader.read<f32>();
+    const f32 distance = reader.read<f32>();
+    const auto current = gfx::stereo_head_locked_plane();
+    if (current.tanHalfWidth != tanHalfWidth || current.tanHalfHeight != tanHalfHeight ||
+        current.distance != distance) {
+      // The eye copies of a 2D draw on the plane depend on it.
+      g_gxState.dirty |= DirtyUniform;
+      gfx::set_stereo_head_locked_plane(tanHalfWidth, tanHalfHeight, distance);
+    }
   } else if (subCmd >= GX_AURORA_LOAD_ARRAYBASE && subCmd <= (GX_AURORA_LOAD_ARRAYBASE | 0x0f)) {
     const u32 attrIdx = subCmd - GX_AURORA_LOAD_ARRAYBASE + GX_VA_POS;
     const u64 arrayAddr = reader.read<u64>();

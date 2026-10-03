@@ -24,6 +24,10 @@
 #include <dolphin/gx/GXManage.h>
 #include <dolphin/gx/GXTexture.h>
 #include <float.h>
+#ifdef TARGET_PC
+#include "aurora/gfx.h"
+#include <dolphin/gx/GXAurora.h>
+#endif
 
 static const int skPixelsPerTileDimension16Bit = 4;
 
@@ -309,10 +313,25 @@ void CPlayerVisor::DrawXRayEffect(const CStateManager& mgr) const { x90_xrayBlur
 
 void CPlayerVisor::DrawScanEffect(const CStateManager& mgr,
                                   const CTargetingManager* const tgtMgr) const {
+#ifdef TARGET_PC
+  // PortVr: the scan window is 2D content (a copy of the framebuffer's centre
+  // stretched over a pane, and its frame). The headset lays it on the plane in
+  // front of the head that CInGameGuiManager::Draw sets, and takes the copy
+  // from each eye through that plane, so the window points where the head does
+  // and magnifies each eye's own view.
+  AuroraSetStereoDrawRoute(AURORA_STEREO_ROUTE_HEAD_LOCKED_2D);
+#endif
   const bool indicatorsDrawn = DrawScanObjectIndicators(mgr);
   if (tgtMgr != nullptr && indicatorsDrawn) {
     CGraphics::SetDepthRange(0.125f + FLT_EPSILON, 0.125f + FLT_EPSILON);
+#ifdef TARGET_PC
+    // PortVr: the reticle sits on its target in the world (as in CSamusHud::Draw).
+    AuroraSetStereoDrawRoute(AURORA_STEREO_ROUTE_WORLD);
+#endif
     tgtMgr->Draw(mgr, false);
+#ifdef TARGET_PC
+    AuroraSetStereoDrawRoute(AURORA_STEREO_ROUTE_HEAD_LOCKED_2D);
+#endif
     CGraphics::SetDepthRange(0.015625f, 0.03125f);
   }
   int vpLeft, vpTop, vpWidth, vpHeight;
@@ -341,7 +360,14 @@ void CPlayerVisor::DrawScanEffect(const CStateManager& mgr,
   GXSetTexCopyDst(width, height, GX_TF_RGB565, GX_FALSE);
   GXCopyTex(buffer, GX_FALSE);
   GXPixModeSync();
+#ifdef TARGET_PC
+  // PortVr: the dim tints the whole view, not just the plane.
+  AuroraSetStereoDrawRoute(AURORA_STEREO_ROUTE_FULLSCREEN);
+#endif
   x64_scanDim.Draw();
+#ifdef TARGET_PC
+  AuroraSetStereoDrawRoute(AURORA_STEREO_ROUTE_HEAD_LOCKED_2D);
+#endif
   gpRender->SetViewportOrtho(true, -1.f, 1.f);
   const CTransform4f windowScale =
       CTransform4f::Scale(x48_interpWindowDims.GetX(), 1.f, x48_interpWindowDims.GetY());
@@ -429,6 +455,10 @@ void CPlayerVisor::DrawScanEffect(const CStateManager& mgr,
     model->Draw(flags);
   }
   CGraphics::SetCullMode(kCM_Front);
+#ifdef TARGET_PC
+  // PortVr: back to the route CInGameGuiManager::Draw set for the visor.
+  AuroraSetStereoDrawRoute(AURORA_STEREO_ROUTE_HEAD_LOCKED);
+#endif
 }
 
 void CPlayerVisor::LockUnlockAssets() {
@@ -632,6 +662,11 @@ bool CPlayerVisor::DrawScanObjectIndicators(const CStateManager& mgr) const {
   gpRender->SetModelMatrix(CTransform4f::Scale(17.f * x48_interpWindowDims.GetX(), 1.f,
                                                17.f * x48_interpWindowDims.GetY()));
   shield->Draw(CModelFlags::AlphaBlended(CColor(0)));
+#ifdef TARGET_PC
+  // PortVr: the shield above masks the window's part of the view on the plane;
+  // the icons below sit on their objects in the world.
+  AuroraSetStereoDrawRoute(AURORA_STEREO_ROUTE_WORLD);
+#endif
   const CGameCamera& camera = mgr.GetCameraManager()->GetCurrentCamera(mgr);
   CTransform4f cameraXf = mgr.GetCameraManager()->GetCurrentCameraTransform(mgr);
   CGraphics::SetViewPointMatrix(cameraXf);
@@ -688,6 +723,9 @@ bool CPlayerVisor::DrawScanObjectIndicators(const CStateManager& mgr) const {
     }
   }
   CGraphics::SetDepthRange(0.015625f, 0.03125f);
+#ifdef TARGET_PC
+  AuroraSetStereoDrawRoute(AURORA_STEREO_ROUTE_HEAD_LOCKED_2D);
+#endif
   return true;
 }
 

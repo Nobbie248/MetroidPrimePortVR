@@ -1,6 +1,8 @@
 // The stereo replay's uniform composition (extern/aurora/lib/gfx/stereo_uniform.hpp):
-// the GX uniform layout the recorder assumes, and what one eye's copy of a
-// perspective draw's uniform must contain.
+// the GX uniform layout the recorder assumes, what one eye's copy of a
+// perspective draw's uniform must contain, and the head-locked plane that
+// AURORA_STEREO_ROUTE_HEAD_LOCKED_2D lays 2D draws on and takes EFB copies
+// through (stereo_replay.hpp HeadLockedPlane: the scan visor's window).
 
 #include "gfx/stereo_uniform.hpp"
 
@@ -132,6 +134,74 @@ int main() {
   orthoProjection.m3 = Vec4<float>{0.f, 0.f, 0.f, 1.f};
   std::memcpy(ortho.data() + layout.projectionOffset, &orthoProjection, sizeof(orthoProjection));
   Check(!stereo_uniform_is_perspective(ortho.data(), layout), "an orthographic projection is 2D content");
+
+  // The head-locked plane: the HUD camera's half-angle tangents and a depth,
+  // scaled like a head-locked perspective draw (across by size times
+  // distance, along by distance).
+  const stereo_replay::HeadLockedPlane plane{1.2f, 0.6f, 20.f};
+  Check(plane.valid() && !stereo_replay::HeadLockedPlane{}.valid(), "a plane needs its three extents");
+  const auto screen = stereo_replay::head_locked_plane_screen(plane, 0.5625f, 0.75f);
+  Check(Near(screen.halfWidth, 13.5f) && Near(screen.halfHeight, 6.75f) && Near(screen.distance, 15.f),
+        "the plane scales across the view by the size and along it by the distance");
+  Check(!stereo_replay::head_locked_plane_screen({}, 1.f, 1.f).valid(), "no plane, no screen");
+
+  // An orthographic draw on the plane: its NDC lands on the plane, offset by
+  // the eye, and its flat-screen depth survives the perspective divide. A
+  // 90 degree symmetric eye frustum, an eye a tenth of a unit to the right,
+  // a plane two by one half-units across at distance four.
+  Mat4x4<float> flatFrustum{};
+  flatFrustum.m0 = Vec4<float>{1.f, 0.f, 0.f, 0.f};
+  flatFrustum.m1 = Vec4<float>{0.f, 1.f, 0.f, 0.f};
+  flatFrustum.m3 = Vec4<float>{0.f, 0.f, -1.f, 0.f};
+  const auto rightEye = Affine(1, 0, 0, 0.1f, 0, 1, 0, 0, 0, 0, 1, 0);
+  const stereo_replay::HudScreen paneScreen{2.f, 1.f, 4.f};
+  // ndc x = 0.1 x, ndc y = 0.2 y, depth = -0.5 z + 0.25
+  Mat4x4<float> paneOrtho{};
+  paneOrtho.m0 = Vec4<float>{0.1f, 0.f, 0.f, 0.f};
+  paneOrtho.m1 = Vec4<float>{0.f, 0.2f, 0.f, 0.f};
+  paneOrtho.m2 = Vec4<float>{0.f, 0.f, -0.5f, 0.25f};
+  paneOrtho.m3 = Vec4<float>{0.f, 0.f, 0.f, 1.f};
+  const auto onPlane =
+      stereo_replay::compose_head_locked_2d_projection(flatFrustum, rightEye, paneScreen, paneOrtho);
+  // The vertex (5, 0, 1): ndc x 0.5, so plane x 1, plus the eye's 0.1, at distance 4.
+  const float vertex[4] = {5.f, 0.f, 1.f, 1.f};
+  const auto clip = [&](const Vec4<float>& row) {
+    return row[0] * vertex[0] + row[1] * vertex[1] + row[2] * vertex[2] + row[3] * vertex[3];
+  };
+  const float w = clip(onPlane.m3);
+  Check(Near(w, 4.f), "the plane's distance is the clip w");
+  Check(Near(clip(onPlane.m0) / w, 0.275f) && Near(clip(onPlane.m1) / w, 0.f),
+        "the vertex lands on the plane, offset by the eye");
+  Check(Near(clip(onPlane.m2) / w, -0.25f), "the flat-screen depth survives the divide");
+  auto paneUniform = ortho;
+  std::memcpy(paneUniform.data() + layout.projectionOffset, &paneOrtho, sizeof(paneOrtho));
+  compose_stereo_2d_uniform(paneUniform.data(), layout,
+                            StereoEye2DCompose{&flatFrustum, &rightEye, paneScreen, 2.f, 0.5f});
+  Mat4x4<float> staged;
+  std::memcpy(&staged, paneUniform.data() + layout.projectionOffset, sizeof(staged));
+  Check(std::memcmp(&staged, &onPlane, sizeof(staged)) == 0, "the 2D eye uniform carries the plane projection");
+  Check(std::memcmp(paneUniform.data() + layout.positionOffset, ortho.data() + layout.positionOffset,
+                    sizeof(Mat3x4<float>)) == 0,
+        "a 2D draw's position matrices are untouched");
+  std::memcpy(outSizes, paneUniform.data(), sizeof(outSizes));
+  Check(Near(outSizes[0], 3840.f) && Near(outSizes[1], 540.f), "the 2D eye uniform takes the eye's render size");
+
+  // A copy through the plane: the part of the eye's view behind the plane's
+  // rectangle, in the eye's texture coordinates.
+  const auto uv =
+      stereo_replay::head_locked_plane_uv_rect(flatFrustum, rightEye, paneScreen, -0.5f, 0.5f, 0.5f, -0.5f);
+  Check(uv.valid() && Near(uv.u, 0.3875f) && Near(uv.v, 0.4375f) && Near(uv.width, 0.25f) &&
+            Near(uv.height, 0.125f),
+        "the copy follows the plane's rectangle, offset by the eye");
+  // An asymmetric frustum: straight ahead is off the eye image's centre, and so is the copy.
+  Mat4x4<float> cantedFrustum = flatFrustum;
+  cantedFrustum.m0[2] = 0.5f;
+  const auto canted =
+      stereo_replay::head_locked_plane_uv_rect(cantedFrustum, identity, paneScreen, -0.5f, 0.5f, 0.5f, -0.5f);
+  Check(canted.valid() && Near(canted.u + 0.5f * canted.width, 0.25f),
+        "the copy is centred where the head points, not at the image's centre");
+  Check(!stereo_replay::head_locked_plane_uv_rect(flatFrustum, rightEye, {}, -0.5f, 0.5f, 0.5f, -0.5f).valid(),
+        "no plane, no copy rectangle");
 
   std::puts("port_vr_stereo_tests: ok");
   return 0;

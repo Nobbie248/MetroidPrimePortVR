@@ -52,6 +52,12 @@ public:
   void SetHudScaled(bool scaled) { mHudScaled = scaled; }
   // 1.0 when inactive; computed by the last Draw.
   float GetHudScale() const { return mHudScale; }
+  // PortVr: the tangents of the half angles the perspective view the last Draw
+  // set up spans across and up (after the aspect match); zero for an
+  // orthographic camera or before the first Draw. The headset lays the HUD's
+  // 2D draws on a plane spanning the same angles (CInGameGuiManager::Draw).
+  float GetDrawTanHalfWidth() const { return mDrawTanHalfWidth; }
+  float GetDrawTanHalfHeight() const { return mDrawTanHalfHeight; }
   // The HUD scale alone, as a world-space transform; scaleWeight fades it
   // (0 = identity).
   CTransform4f GetHudScaleTransform(float scaleWeight = 1.f) const;
@@ -77,6 +83,9 @@ public:
   mutable CTransform4f mSpreadView = CTransform4f::Identity();
   bool mHudScaled = false;
   mutable float mHudScale = 1.f;
+  // PortVr: see GetDrawTanHalfWidth.
+  mutable float mDrawTanHalfWidth = 0.f;
+  mutable float mDrawTanHalfHeight = 0.f;
   // The view centre drawn by the last Draw (orthographic cameras may be offset).
   mutable float mCenterX = 0.f;
   mutable float mCenterZ = 0.f;

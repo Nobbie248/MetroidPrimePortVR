@@ -64,6 +64,7 @@ struct FrameRecorder {
   ClipRect cachedScissor;
   bool suppressRenderWorker = false;
   uint8_t stereoRoute = AURORA_STEREO_ROUTE_WORLD;
+  stereo_replay::HeadLockedPlane headLockedPlane;
 #ifdef AURORA_GFX_DEBUG_GROUPS
   std::vector<std::string> debugGroupStack;
 #endif
@@ -817,6 +818,12 @@ void set_stereo_draw_route(uint8_t route) noexcept { g_recorder.stereoRoute = ro
 
 uint8_t stereo_draw_route() noexcept { return g_recorder.stereoRoute; }
 
+void set_stereo_head_locked_plane(float tanHalfWidth, float tanHalfHeight, float distance) noexcept {
+  g_recorder.headLockedPlane = {tanHalfWidth, tanHalfHeight, distance};
+}
+
+stereo_replay::HeadLockedPlane stereo_head_locked_plane() noexcept { return g_recorder.headLockedPlane; }
+
 std::array<uint32_t, 2> stage_stereo_uniforms(const uint8_t* mono, Range monoRange,
                                               const StereoUniformLayout& layout) noexcept {
   constexpr std::array<uint32_t, 2> none{UINT32_MAX, UINT32_MAX};
@@ -840,7 +847,12 @@ std::array<uint32_t, 2> stage_stereo_uniforms(const uint8_t* mono, Range monoRan
   if (route == AURORA_STEREO_ROUTE_FULLSCREEN || route == AURORA_STEREO_ROUTE_SCREEN_2D) {
     return same;
   }
-  if (!stereo_uniform_is_perspective(mono, layout)) {
+  // An orthographic draw is 2D content, identical in both eyes, unless its
+  // route lays it on the head-locked plane (stereo_replay.hpp HeadLockedPlane).
+  const bool perspective = stereo_uniform_is_perspective(mono, layout);
+  const bool onPlane =
+      !perspective && route == AURORA_STEREO_ROUTE_HEAD_LOCKED_2D && g_recorder.headLockedPlane.valid();
+  if (!perspective && !onPlane) {
     return same;
   }
   const size_t alignment = resources().limits.minUniformBufferOffsetAlignment;
@@ -856,25 +868,42 @@ std::array<uint32_t, 2> stage_stereo_uniforms(const uint8_t* mono, Range monoRan
   }
   const auto& pass = current_render_passes()[g_recorder.currentRenderPass];
   const auto& monoSize = pass.colorAttachments[SceneColorAttachmentIndex].size;
+  const stereo_replay::HudScreen plane =
+      onPlane ? stereo_replay::head_locked_plane_screen(g_recorder.headLockedPlane, state.headLockedScaleXY,
+                                                        state.headLockedScaleZ)
+              : stereo_replay::HudScreen{};
   thread_local std::vector<uint8_t> scratch;
   std::array<uint32_t, 2> offsets{};
   for (uint32_t eye = 0; eye < AURORA_STEREO_EYE_COUNT; ++eye) {
     scratch.assign(mono, mono + layout.size);
     const auto& params = state.eyes[eye];
-    const bool headLocked = route == AURORA_STEREO_ROUTE_HEAD_LOCKED;
-    compose_stereo_uniform(
-        scratch.data(), layout,
-        StereoEyeCompose{
-            .projection = &params.projection,
-            .viewFromCenter = headLocked ? &params.headLockedViewFromCenter : &params.viewFromCenter,
-            .positionScaleXY = headLocked ? state.headLockedScaleXY : 1.0f,
-            .positionScaleZ = headLocked ? state.headLockedScaleZ : 1.0f,
-            .renderScaleX =
-                monoSize.width != 0 ? static_cast<float>(params.width) / static_cast<float>(monoSize.width) : 1.0f,
-            .renderScaleY = monoSize.height != 0
-                                ? static_cast<float>(params.height) / static_cast<float>(monoSize.height)
-                                : 1.0f,
-        });
+    const float renderScaleX =
+        monoSize.width != 0 ? static_cast<float>(params.width) / static_cast<float>(monoSize.width) : 1.0f;
+    const float renderScaleY =
+        monoSize.height != 0 ? static_cast<float>(params.height) / static_cast<float>(monoSize.height) : 1.0f;
+    if (onPlane) {
+      compose_stereo_2d_uniform(scratch.data(), layout,
+                                StereoEye2DCompose{
+                                    .projection = &params.projection,
+                                    .headLockedViewFromCenter = &params.headLockedViewFromCenter,
+                                    .plane = plane,
+                                    .renderScaleX = renderScaleX,
+                                    .renderScaleY = renderScaleY,
+                                });
+    } else {
+      const bool headLocked =
+          route == AURORA_STEREO_ROUTE_HEAD_LOCKED || route == AURORA_STEREO_ROUTE_HEAD_LOCKED_2D;
+      compose_stereo_uniform(
+          scratch.data(), layout,
+          StereoEyeCompose{
+              .projection = &params.projection,
+              .viewFromCenter = headLocked ? &params.headLockedViewFromCenter : &params.viewFromCenter,
+              .positionScaleXY = headLocked ? state.headLockedScaleXY : 1.0f,
+              .positionScaleZ = headLocked ? state.headLockedScaleZ : 1.0f,
+              .renderScaleX = renderScaleX,
+              .renderScaleY = renderScaleY,
+          });
+    }
     offsets[eye] = push(frame.uniforms, scratch.data(), layout.size, alignment).offset;
   }
   return offsets;
@@ -920,6 +949,27 @@ void resolve_pass_into(TextureHandle texture, ClipRect rect, bool clearColor, bo
   if (probeFace < 0) {
     if (prevPass.stereo.enabled && !gx::is_depth_format(resolveFormat)) {
       prevPass.stereo.copyTargets = stereo_shadow::copy_targets(prevPass.resolveTarget);
+      // A copy made under AURORA_STEREO_ROUTE_HEAD_LOCKED_2D is taken from
+      // each eye through the head-locked plane, so it holds what that eye sees
+      // behind the copied rectangle: the scan visor's window magnifies what
+      // is straight ahead of the head (stereo_replay.hpp HeadLockedPlane).
+      if (g_recorder.stereoRoute == AURORA_STEREO_ROUTE_HEAD_LOCKED_2D && g_recorder.headLockedPlane.valid()) {
+        const auto& stereo = current_frame_packet().stereo;
+        const auto plane = stereo_replay::head_locked_plane_screen(g_recorder.headLockedPlane,
+                                                                   stereo.headLockedScaleXY, stereo.headLockedScaleZ);
+        const float ndcLeft = 2.0f * static_cast<float>(rect.x) / srcW - 1.0f;
+        const float ndcRight = 2.0f * static_cast<float>(rect.x + rect.width) / srcW - 1.0f;
+        const float ndcTop = 1.0f - 2.0f * static_cast<float>(rect.y) / srcH;
+        const float ndcBottom = 1.0f - 2.0f * static_cast<float>(rect.y + rect.height) / srcH;
+        for (uint32_t eye = 0; eye < AURORA_STEREO_EYE_COUNT; ++eye) {
+          const auto& params = stereo.eyes[eye];
+          const auto uv = stereo_replay::head_locked_plane_uv_rect(params.projection, params.headLockedViewFromCenter,
+                                                                   plane, ndcLeft, ndcTop, ndcRight, ndcBottom);
+          if (uv.valid()) {
+            prevPass.stereo.copyUniformRanges[eye] = push_uniform(std::array{uv.u, uv.v, uv.width, uv.height});
+          }
+        }
+      }
     } else {
       stereo_shadow::invalidate(prevPass.resolveTarget.get());
     }

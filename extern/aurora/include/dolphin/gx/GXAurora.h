@@ -201,6 +201,12 @@ extern "C" {
  */
 #define GX_AURORA_STEREO_DRAW_ROUTE 0x0050
 
+/**
+ * The plane in front of the head that AURORA_STEREO_ROUTE_HEAD_LOCKED_2D lays orthographic draws on and takes EFB
+ * copies through (AuroraSetStereoHeadLockedPlane). Must be followed by three f32.
+ */
+#define GX_AURORA_STEREO_HEAD_LOCKED_PLANE 0x0051
+
 
 /*
  * Debug marker stuff
@@ -255,6 +261,14 @@ void GXSetViewportRender(f32 left, f32 top, f32 wd, f32 ht, f32 nearz, f32 farz)
  * draws through the FIFO; resets to AURORA_STEREO_ROUTE_WORLD at every frame begin.
  */
 void AuroraSetStereoDrawRoute(u32 route);
+
+/**
+ * The plane in front of the head that AURORA_STEREO_ROUTE_HEAD_LOCKED_2D lays orthographic draws on and takes EFB
+ * copies through: the tangents of the half angles the mono viewport spans across and up (those of the HUD camera the
+ * 2D draws should stay registered with) and the plane's distance along the view, in the game camera's units, before
+ * the head-locked scales. Ordered with the draws through the FIFO; kept until set again.
+ */
+void AuroraSetStereoHeadLockedPlane(f32 tanHalfWidth, f32 tanHalfHeight, f32 distance);
 
 /**
  * Sets the actual render scissor in native framebuffer coordinates.

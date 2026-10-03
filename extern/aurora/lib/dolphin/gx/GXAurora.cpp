@@ -102,3 +102,10 @@ void AuroraSetStereoDrawRoute(u32 route) {
   GX_WRITE_AURORA(GX_AURORA_STEREO_DRAW_ROUTE);
   GX_WRITE_U8(static_cast<u8>(route));
 }
+
+void AuroraSetStereoHeadLockedPlane(f32 tanHalfWidth, f32 tanHalfHeight, f32 distance) {
+  GX_WRITE_AURORA(GX_AURORA_STEREO_HEAD_LOCKED_PLANE);
+  GX_WRITE_F32(tanHalfWidth);
+  GX_WRITE_F32(tanHalfHeight);
+  GX_WRITE_F32(distance);
+}

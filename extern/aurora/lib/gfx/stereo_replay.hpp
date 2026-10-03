@@ -312,6 +312,124 @@ inline Mat4x4<float> compose_hud_screen_projection(const Mat4x4<float>& eyeFrust
   return out;
 }
 
+// --- the head-locked plane (AURORA_STEREO_ROUTE_HEAD_LOCKED_2D) ------------
+//
+// Metroid Prime's scan visor draws its window as 2D content: it copies the
+// centre of the framebuffer, stretches that copy over an orthographic pane
+// and frames it (CPlayerVisor::DrawScanEffect). Replayed per eye as it is,
+// the pane lands identically in both eyes (at infinity, at each eye image's
+// own centre rather than straight ahead) and each eye's copy is taken from
+// its own image centre, which with asymmetric eye frustums is not where the
+// head points. The route lays such 2D draws on a plane in front of the head
+// instead, and takes each eye's copy from the part of that eye's view behind
+// the same rectangle of the plane, so the window magnifies what is straight
+// ahead of the head, with the eye's own view inside it.
+//
+// The plane maps the mono viewport like the game's HUD camera does: NDC
+// (x, y) is the point (x * tanHalfWidth, y * tanHalfHeight, -1) * distance in
+// the recorded (game camera) space, before the head-locked scales; the same
+// scales as a head-locked perspective draw then apply, so the window and the
+// HUD keep their relative size and depth whatever the settings.
+struct HeadLockedPlane {
+  float tanHalfWidth = 0.0f;  // tan of half the view angle the viewport spans across
+  float tanHalfHeight = 0.0f; // tan of half the view angle it spans up
+  float distance = 0.0f;      // along the view, in the recorded space's units
+
+  [[nodiscard]] bool valid() const noexcept {
+    return tanHalfWidth > 0.0f && tanHalfHeight > 0.0f && distance > 0.0f;
+  }
+};
+
+// The plane as the screen compose_hud_screen_projection lays 2D content on,
+// after the head-locked scales (stereo_frame.hpp: across the view for the
+// angular size, along it for the distance).
+inline HudScreen head_locked_plane_screen(const HeadLockedPlane& plane, float scaleXY, float scaleZ) noexcept {
+  if (!plane.valid() || !(scaleXY > 0.0f) || !(scaleZ > 0.0f)) {
+    return {};
+  }
+  return {
+      .halfWidth = plane.tanHalfWidth * plane.distance * scaleXY,
+      .halfHeight = plane.tanHalfHeight * plane.distance * scaleXY,
+      .distance = plane.distance * scaleZ,
+  };
+}
+
+// One eye's projection for an orthographic draw laid on the head-locked
+// plane: compose_hud_screen_projection's chain through the eye's head-locked
+// pose, then the depth row made fit for the ordinary GX shader. That shader
+// divides every clip coordinate by w; the composed w is the same for every
+// vertex (the plane faces the view and the head-locked pose is a
+// translation), so scaling the exact-depth row by it hands the divide the
+// depth the draw would have had on the flat screen. The draw then keeps its
+// depth relation to the eye's world and to the other 2D draws just as in
+// mono (the scan window's shield masks the scan icons behind it).
+inline Mat4x4<float> compose_head_locked_2d_projection(const Mat4x4<float>& eyeFrustum,
+                                                       const Mat3x4<float>& headLockedViewFromCenter,
+                                                       const HudScreen& plane, const Mat4x4<float>& gameProjection,
+                                                       const HudNdcRemap& ndcRemap = {}) noexcept {
+  Mat4x4<float> out =
+      compose_hud_screen_projection(eyeFrustum, headLockedViewFromCenter, plane, gameProjection, ndcRemap);
+  const float w = out.m3[3];
+  if (w > 0.0f) {
+    for (size_t i = 0; i < 4; ++i) {
+      out.m2[i] *= w;
+    }
+  }
+  return out;
+}
+
+// Where a rectangle of the mono viewport lands in one eye's image when laid
+// on the head-locked plane, as the UV transform tex_copy_conv takes: the
+// eye's texture coordinates of the rectangle's left/top corner and its size.
+// The rectangle is given as the NDC of its left, top, right and bottom edges
+// (y up). An EFB copy made under the route is taken from each eye through
+// this, so the copy holds what that eye sees behind the rectangle rather
+// than the same part of each eye's image. Empty when the plane is invalid or
+// behind the eye.
+struct EyeUvRect {
+  float u = 0.0f;
+  float v = 0.0f;
+  float width = 0.0f;
+  float height = 0.0f;
+
+  [[nodiscard]] bool valid() const noexcept { return width > 0.0f && height > 0.0f; }
+};
+
+inline EyeUvRect head_locked_plane_uv_rect(const Mat4x4<float>& eyeFrustum,
+                                           const Mat3x4<float>& headLockedViewFromCenter, const HudScreen& plane,
+                                           float ndcLeft, float ndcTop, float ndcRight, float ndcBottom) noexcept {
+  if (!plane.valid()) {
+    return {};
+  }
+  // A corner of the rectangle on the plane, into the eye's view space, then
+  // through the frustum's four terms into the eye's texture coordinates.
+  const auto project = [&](float nx, float ny, float& u, float& v) {
+    const float p[3] = {nx * plane.halfWidth, ny * plane.halfHeight, -plane.distance};
+    float e[3];
+    for (size_t row = 0; row < 3; ++row) {
+      const auto& m = *(&headLockedViewFromCenter.m0 + row);
+      e[row] = m[0] * p[0] + m[1] * p[1] + m[2] * p[2] + m[3];
+    }
+    const float w = -e[2];
+    if (!(w > 0.0f)) {
+      return false;
+    }
+    const float cx = eyeFrustum.m0[0] * e[0] + eyeFrustum.m0[2] * e[2];
+    const float cy = eyeFrustum.m1[1] * e[1] + eyeFrustum.m1[2] * e[2];
+    u = 0.5f * (cx / w + 1.0f);
+    v = 0.5f * (1.0f - cy / w);
+    return true;
+  };
+  float u0 = 0.0f;
+  float v0 = 0.0f;
+  float u1 = 0.0f;
+  float v1 = 0.0f;
+  if (!project(ndcLeft, ndcTop, u0, v0) || !project(ndcRight, ndcBottom, u1, v1)) {
+    return {};
+  }
+  return {.u = u0, .v = v0, .width = u1 - u0, .height = v1 - v0};
+}
+
 // The headset settings panel (aurora_imgui_set_stereo_overlay): a rectangle
 // centred on the virtual screen, in the same world units as the screen.
 struct OverlayPanel {

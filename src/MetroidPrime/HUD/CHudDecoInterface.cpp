@@ -15,6 +15,10 @@
 #include "MetroidPrime/Tweaks/CTweakGui.hpp"
 #include "MetroidPrime/Tweaks/CTweakGuiColors.hpp"
 #include "rstl/math.hpp"
+#ifdef TARGET_PC
+#include "aurora/gfx.h"
+#include <dolphin/gx/GXAurora.h>
+#endif
 
 static const char skDecoWidgetName[] = "basewidget_deco";
 static const char skBarDecoWidgetName[] = "basewidget_tickdeco0";
@@ -404,7 +408,15 @@ void CHudDecoInterfaceScan::Update(float dt, const CStateManager& mgr) {
 }
 
 void CHudDecoInterfaceScan::Draw() const {
+#ifdef TARGET_PC
+  // PortVr: the data dots are 2D draws around the scan window: the headset lays
+  // them on the head-locked plane with it (CInGameGuiManager::Draw).
+  AuroraSetStereoDrawRoute(AURORA_STEREO_ROUTE_HEAD_LOCKED_2D);
+#endif
   x18_scanDisplay.Draw();
+#ifdef TARGET_PC
+  AuroraSetStereoDrawRoute(AURORA_STEREO_ROUTE_HEAD_LOCKED);
+#endif
   if (x10_loadedScanHudFlat != nullptr) {
     x10_loadedScanHudFlat->Draw(CGuiWidgetDrawParms::Default());
   }

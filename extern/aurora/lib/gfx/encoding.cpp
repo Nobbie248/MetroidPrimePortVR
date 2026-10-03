@@ -432,7 +432,10 @@ void render(wgpu::CommandEncoder& cmd, FramePacket& frame, RenderPass& passInfo,
   }
 
   // Stereo replay: the same copy from each eye's image, over the same part of
-  // the view (the copy's UV transform is relative), into the eye stand-ins.
+  // the view (the copy's UV transform is relative), into the eye stand-ins. A
+  // copy made under AURORA_STEREO_ROUTE_HEAD_LOCKED_2D has its own rectangle
+  // per eye instead: the part of the eye's view behind the copied rectangle of
+  // the head-locked plane (stereo_replay.hpp HeadLockedPlane).
   if (passInfo.stereo.enabled && passInfo.resolveTarget && passInfo.probeFace < 0 &&
       passInfo.stereo.copyTargets[0] && !gx::is_depth_format(passInfo.resolveFormat)) {
     const webgpu::gpu_prof::Zone zone{cmd, "Stereo eye copies"};
@@ -442,10 +445,11 @@ void render(wgpu::CommandEncoder& cmd, FramePacket& frame, RenderPass& passInfo,
       if (!source || !passInfo.stereo.copyTargets[eye]) {
         continue;
       }
+      const auto& eyeUniform = passInfo.stereo.copyUniformRanges[eye];
       const tex_copy_conv::ConvRequest eyeReq{
           .fmt = passInfo.resolveFormat,
           .srcView = source,
-          .uniformRange = passInfo.resolveUniformRange,
+          .uniformRange = eyeUniform.size != 0 ? eyeUniform : passInfo.resolveUniformRange,
           .dst = passInfo.stereo.copyTargets[eye],
           .sampleFilter = tex_copy_conv::SampleFilter::Linear,
       };

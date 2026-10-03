@@ -151,4 +151,35 @@ inline void compose_stereo_uniform(uint8_t* uniform, const StereoUniformLayout& 
   std::memcpy(uniform, renderSize, sizeof(renderSize));
 }
 
+// AURORA_STEREO_ROUTE_HEAD_LOCKED_2D: an orthographic draw laid on the
+// head-locked plane (stereo_replay.hpp HeadLockedPlane).
+struct StereoEye2DCompose {
+  const Mat4x4<float>* projection = nullptr;               // the eye frustum
+  const Mat3x4<float>* headLockedViewFromCenter = nullptr; // the eye's offset from the head centre
+  stereo_replay::HudScreen plane{};                        // the plane, after the head-locked scales
+  float renderScaleX = 1.0f; // eye target size over the recorded render target size
+  float renderScaleY = 1.0f;
+};
+
+// Rewrites `uniform` (a copy of the mono uniform) in place for one eye of an
+// orthographic draw on the head-locked plane: the projection becomes
+// stereo_replay::compose_head_locked_2d_projection's (the draw's position
+// matrices already give its flat-screen NDC through the mono one, so they
+// stay), and the render size becomes the eye target's as for a perspective
+// draw.
+inline void compose_stereo_2d_uniform(uint8_t* uniform, const StereoUniformLayout& layout,
+                                      const StereoEye2DCompose& eye) noexcept {
+  Mat4x4<float> projection;
+  std::memcpy(&projection, uniform + layout.projectionOffset, sizeof(projection));
+  projection = stereo_replay::compose_head_locked_2d_projection(*eye.projection, *eye.headLockedViewFromCenter,
+                                                                eye.plane, projection);
+  std::memcpy(uniform + layout.projectionOffset, &projection, sizeof(projection));
+
+  float renderSize[2];
+  std::memcpy(renderSize, uniform, sizeof(renderSize));
+  renderSize[0] *= eye.renderScaleX;
+  renderSize[1] *= eye.renderScaleY;
+  std::memcpy(uniform, renderSize, sizeof(renderSize));
+}
+
 } // namespace aurora::gfx

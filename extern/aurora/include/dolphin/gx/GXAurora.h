@@ -207,6 +207,13 @@ extern "C" {
  */
 #define GX_AURORA_STEREO_HEAD_LOCKED_PLANE 0x0051
 
+/**
+ * A texture matrix of the draws that follow projects positions onto the screen (AuroraSetStereoScreenTexMtx), so
+ * the stereo replay derives it again per eye. Must be followed by two u8: the texture matrix slot (0-9, 0xFF for
+ * none) and the position matrix slot (0-9) it projects through.
+ */
+#define GX_AURORA_STEREO_SCREEN_TEX_MTX 0x0052
+
 
 /*
  * Debug marker stuff
@@ -269,6 +276,18 @@ void AuroraSetStereoDrawRoute(u32 route);
  * the head-locked scales. Ordered with the draws through the FIFO; kept until set again.
  */
 void AuroraSetStereoHeadLockedPlane(f32 tanHalfWidth, f32 tanHalfHeight, f32 distance);
+
+/**
+ * Tells the stereo replay that texture matrix `texMtx` (GX_TEXMTX0..GX_TEXMTX9) of the draws that follow projects
+ * positions onto the screen through position matrix `pnMtx` (GX_PNMTX0..GX_PNMTX9): the (s, t, q) rows of a
+ * GX_TG_MTX3x4 texgen from GX_TG_POS, with s = (x + w) / 2, t = (w - y) / 2 and q = w of the vertex's clip position,
+ * so s / q and t / q are its own place in a copy of the viewport. The game loads it from its own projection and
+ * modelview; each eye's copy of the draw's uniform gets it derived again from that eye's projection and position
+ * matrix, so a draw that samples the viewport's EFB copy through it reads what lies behind it in that eye's own copy
+ * rather than where the mono camera put it. GX_IDENTITY ends it. Ordered with the draws through the FIFO; resets at
+ * every frame begin.
+ */
+void AuroraSetStereoScreenTexMtx(u32 texMtx, u32 pnMtx);
 
 /**
  * Sets the actual render scissor in native framebuffer coordinates.

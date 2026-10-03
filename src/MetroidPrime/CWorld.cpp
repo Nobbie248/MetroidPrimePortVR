@@ -32,9 +32,12 @@
 #include "rstl/vector.hpp"
 
 #ifdef TARGET_PC
+#include "aurora/gfx.h"
+#include "vr/vr_view.h"
 #include <chrono>
 #include <cstdio>
 #include <cstdlib>
+#include <dolphin/gx/GXAurora.h>
 #endif
 
 CGameArea::CConstChainIterator CWorld::skGlobalEnd;
@@ -755,8 +758,22 @@ void CWorld::DrawSky(const CTransform4f& xf) const {
     gpRender->SetModelMatrix(xf);
     gpRender->SetAmbientColor(CColor::White());
     CGraphics::SetDepthRange(0.999f, 1.f);
+#ifdef TARGET_PC
+    // PortVr: the sky is a dome of some sixty units centred on the camera, pushed into the far depth range so
+    // it reads as infinitely far. Per eye it would sit at its modelled distance, a dome forty metres off whose
+    // planet looks like a ball; routed SKY, the eyes see it with the head's rotation only (vr/vr_view.h).
+    const bool skyAtInfinity = PortVr::VrSkyAtInfinity();
+    if (skyAtInfinity) {
+      AuroraSetStereoDrawRoute(AURORA_STEREO_ROUTE_SKY);
+    }
+#endif
     (*(xb4_skyboxOverride ? xb4_skyboxOverride : xa4_skyboxWorldLoaded))
         ->Draw(CModelFlags::Normal().DepthCompareUpdate(true, false));
+#ifdef TARGET_PC
+    if (skyAtInfinity) {
+      AuroraSetStereoDrawRoute(AURORA_STEREO_ROUTE_WORLD);
+    }
+#endif
     CGraphics::SetDepthRange(0.125f, 1.f);
   }
 }

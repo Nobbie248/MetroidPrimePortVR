@@ -1434,6 +1434,43 @@ void CGraphics::FlushProjection() {
   }
 }
 
+#ifdef TARGET_PC
+// Port: the (s, t, q) rows of a screen projection for a GX_TG_MTX3x4 texgen from GX_TG_POS:
+// s = (x + w) / 2, t = (w - y) / 2 and q = w of the clip position the current projection and
+// modelview give a vertex, so s / q and t / q are its own place in a copy of the viewport (u to
+// the right and v down, both from 0). Built from the same matrices FlushProjection and
+// SetViewMatrix load. PortVr: told the slots (AuroraSetStereoScreenTexMtx), the stereo replay
+// derives it again per eye from the eye's own projection and modelview
+// (aurora stereo_replay::screen_tex_mtx is the same sum).
+void CGraphics::LoadScreenProjectionTexMtx(GXTexMtx id) {
+  Mtx44 proj;
+  if (mProj.IsPerspective()) {
+    MTXFrustum(proj, mProj.GetTop(), mProj.GetBottom(), mProj.GetLeft(), mProj.GetRight(),
+               mProj.GetNear(), mProj.GetFar());
+  } else {
+    MTXOrtho(proj, mProj.GetTop(), mProj.GetBottom(), mProj.GetLeft(), mProj.GetRight(),
+             mProj.GetNear(), mProj.GetFar());
+  }
+  // s, t and q as functionals of the view-space point (x, y, z, 1).
+  float rows[3][4];
+  for (int i = 0; i < 4; ++i) {
+    rows[0][i] = 0.5f * (proj[0][i] + proj[3][i]);
+    rows[1][i] = 0.5f * (proj[3][i] - proj[1][i]);
+    rows[2][i] = proj[3][i];
+  }
+  // Then of the object-space point, through the modelview (its implicit fourth row (0, 0, 0, 1)).
+  Mtx tex;
+  for (int r = 0; r < 3; ++r) {
+    for (int c = 0; c < 4; ++c) {
+      tex[r][c] = rows[r][0] * mGxModelView[0][c] + rows[r][1] * mGxModelView[1][c] +
+                  rows[r][2] * mGxModelView[2][c];
+    }
+    tex[r][3] += rows[r][3];
+  }
+  GXLoadTexMtxImm(tex, id, GX_MTX3x4);
+}
+#endif
+
 const CGraphics::CProjectionState& CGraphics::GetProjectionState() { return mProj; }
 
 void CGraphics::SetProjectionState(const CProjectionState& proj) {

@@ -49,6 +49,11 @@ bool VrNoArmCannonFidget() noexcept;
 // The headset is running and the settings remove the letterbox: the game's
 // viewport scale stays 1 and the cinema-bars camera filter is not drawn.
 bool VrRemoveCinematicBars() noexcept;
+// The headset is running and the settings put the sky at infinity: the sky
+// draw is routed AURORA_STEREO_ROUTE_SKY (CWorld::DrawSky), so each eye sees
+// the camera-centred sky dome with the head's rotation only, without the eye
+// offset that would place it at its modelled sixty units.
+bool VrSkyAtInfinity() noexcept;
 
 // The 6DOF cannon. Once per simulation tick from CPlayer::UpdateGunTransform:
 // when the tracked controller drives the cannon, replaces `gunXf` (world) and

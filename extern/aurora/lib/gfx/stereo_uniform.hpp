@@ -151,6 +151,25 @@ inline void compose_stereo_uniform(uint8_t* uniform, const StereoUniformLayout& 
   std::memcpy(uniform, renderSize, sizeof(renderSize));
 }
 
+// AuroraSetStereoScreenTexMtx: after compose_stereo_uniform, derives texture
+// matrix `texSlot` again from the eye's composed projection and position
+// matrix `pnSlot` (stereo_replay::screen_tex_mtx), so a draw that samples the
+// viewport's EFB copy through it reads what lies behind it in the eye's own
+// copy. A slot out of range leaves the uniform alone.
+inline void compose_stereo_screen_tex_mtx(uint8_t* uniform, const StereoUniformLayout& layout, uint32_t texSlot,
+                                          uint32_t pnSlot) noexcept {
+  if (texSlot >= kStereoTextureMatrices || pnSlot >= kStereoPositionMatrices) {
+    return;
+  }
+  Mat4x4<float> projection;
+  std::memcpy(&projection, uniform + layout.projectionOffset, sizeof(projection));
+  Mat3x4<float> position;
+  std::memcpy(&position, uniform + layout.positionOffset + pnSlot * sizeof(Mat3x4<float>), sizeof(position));
+  const auto texture = stereo_replay::screen_tex_mtx(projection, position);
+  std::memcpy(uniform + layout.positionOffset + (kStereoPositionMatrices + texSlot) * sizeof(Mat3x4<float>), &texture,
+              sizeof(texture));
+}
+
 // AURORA_STEREO_ROUTE_HEAD_LOCKED_2D: an orthographic draw laid on the
 // head-locked plane (stereo_replay.hpp HeadLockedPlane).
 struct StereoEye2DCompose {

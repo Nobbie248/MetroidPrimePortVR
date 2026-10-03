@@ -119,6 +119,9 @@ void DrawVrDebugTab() {
   changed |= ImGui::Checkbox("Remove cinematic bars", &s.remove_cinematic_bars);
   ImGui::TextWrapped("The morph ball and visor letterbox shrink the 3D view, which distorts it in the headset; "
                      "this keeps the view full and skips the cinema-bar overlay.");
+  changed |= ImGui::Checkbox("Sky at infinity", &s.sky_at_infinity);
+  ImGui::TextWrapped("The sky dome is drawn with the head's rotation only, so the planet and the stars read as "
+                     "far away rather than as a ball sixty units out (PrimedGun's Detect Skybox, without the scan).");
 
   ImGui::SeparatorText("Controls");
   int mode = static_cast< int >(s.controller_mode);

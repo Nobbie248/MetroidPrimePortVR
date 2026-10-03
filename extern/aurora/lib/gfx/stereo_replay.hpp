@@ -179,6 +179,51 @@ inline Mat3x4<float> compose_normal(const Mat3x4<float>& viewFromCenter, const M
   return out;
 }
 
+// The pose's rotation alone, the eye at the centre (AURORA_STEREO_ROUTE_SKY):
+// what an eye sees of something infinitely far is set by where it looks, not
+// by where it stands.
+inline Mat3x4<float> without_translation(const Mat3x4<float>& viewFromCenter) noexcept {
+  Mat3x4<float> out = viewFromCenter;
+  out.m0[3] = 0.0f;
+  out.m1[3] = 0.0f;
+  out.m2[3] = 0.0f;
+  return out;
+}
+
+// A texture matrix that projects a vertex onto the screen: the (s, t, q) rows
+// a GX_TG_MTX3x4 texgen from GX_TG_POS applies to the object-space position,
+// with s / q and t / q the vertex's own texture coordinates in a copy of the
+// viewport (u to the right and v down, both from 0): s = (x + w) / 2,
+// t = (w - y) / 2 and q = w of the clip position `projection` gives the
+// view-space point `objectToView` makes of it. Only the projection's x, y and
+// w rows take part, so the same sum serves the game's own projection and
+// modelview (the mono draw builds it on the CPU) and an eye's composed ones
+// (AuroraSetStereoScreenTexMtx): a draw that samples the viewport's EFB copy
+// through it then reads what lies behind it in that eye's own copy, where
+// coordinates worked out for the mono camera would point at the wrong place
+// (Metroid Prime's refracting particles).
+inline Mat3x4<float> screen_tex_mtx(const Mat4x4<float>& projection, const Mat3x4<float>& objectToView) noexcept {
+  // s, t and q as functionals of the view-space point (x, y, z, 1).
+  float rows[3][4];
+  for (size_t i = 0; i < 4; ++i) {
+    rows[0][i] = 0.5f * (projection.m0[i] + projection.m3[i]);
+    rows[1][i] = 0.5f * (projection.m3[i] - projection.m1[i]);
+    rows[2][i] = projection.m3[i];
+  }
+  // Then of the object-space point, through the affine transform (whose
+  // implicit fourth row is (0, 0, 0, 1)).
+  Mat3x4<float> out{};
+  for (size_t row = 0; row < 3; ++row) {
+    auto& dst = *(&out.m0 + row);
+    const auto& r = rows[row];
+    for (size_t column = 0; column < 4; ++column) {
+      dst[column] = r[0] * objectToView.m0[column] + r[1] * objectToView.m1[column] + r[2] * objectToView.m2[column];
+    }
+    dst[3] += r[3];
+  }
+  return out;
+}
+
 // A fixed virtual screen for the game's 2D content, sized and placed in the
 // recorded center-eye view space: a rectangle `distance` units straight ahead
 // of the game camera, `halfWidth` by `halfHeight` units across. It stays where

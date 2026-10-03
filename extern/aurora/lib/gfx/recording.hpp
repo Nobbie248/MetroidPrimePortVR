@@ -127,6 +127,18 @@ uint8_t stereo_draw_route() noexcept;
 // last set it; kept until set again.
 void set_stereo_head_locked_plane(float tanHalfWidth, float tanHalfHeight, float distance) noexcept;
 stereo_replay::HeadLockedPlane stereo_head_locked_plane() noexcept;
+// A texture matrix the GX FIFO marked as a screen projection
+// (AuroraSetStereoScreenTexMtx): every eye copy of a perspective draw's
+// uniform gets texture matrix `texSlot` derived again from that eye's
+// projection and position matrix `pnSlot` (stereo_uniform.hpp
+// compose_stereo_screen_tex_mtx). `texSlot` is 0xFF when there is none.
+// Resets at frame begin.
+struct StereoScreenTexMtx {
+  uint8_t texSlot = 0xFF;
+  uint8_t pnSlot = 0;
+};
+void set_stereo_screen_tex_mtx(uint8_t texSlot, uint8_t pnSlot) noexcept;
+StereoScreenTexMtx stereo_screen_tex_mtx() noexcept;
 // Stages the eye copies of the GX uniform just pushed at `monoRange` (whose
 // CPU-side bytes are `mono`) and returns the offsets the draw binds per eye:
 // the mono offset for a draw that is identical in both eyes, UINT32_MAX for

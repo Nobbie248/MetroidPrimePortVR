@@ -102,6 +102,53 @@ int main() {
   Check(std::memcmp(eye.data() + textureMatrix0, uniform.data() + textureMatrix0, sizeof(marker)) == 0,
         "texture matrices are untouched");
 
+  // A screen-projecting texture matrix (AuroraSetStereoScreenTexMtx): derived
+  // again from the eye's composed projection and position matrix, so s / q
+  // and t / q are the vertex's own place in the eye image, u to the right
+  // and v down from the top left corner.
+  auto screenUniform = eye;
+  compose_stereo_screen_tex_mtx(screenUniform.data(), layout, 0, 0);
+  Mat3x4<float> outTexture;
+  std::memcpy(&outTexture, screenUniform.data() + textureMatrix0, sizeof(outTexture));
+  {
+    const float object[4] = {0.3f, -0.2f, -4.f, 1.f};
+    const auto dot4 = [](const Vec4<float>& row, const float (&v)[4]) {
+      return row[0] * v[0] + row[1] * v[1] + row[2] * v[2] + row[3] * v[3];
+    };
+    const float viewPoint[4] = {dot4(outPosition.m0, object), dot4(outPosition.m1, object),
+                                dot4(outPosition.m2, object), 1.f};
+    const float clipW = dot4(outProjection.m3, viewPoint);
+    const float u = 0.5f * (dot4(outProjection.m0, viewPoint) / clipW + 1.f);
+    const float v = 0.5f * (1.f - dot4(outProjection.m1, viewPoint) / clipW);
+    const float s = dot4(outTexture.m0, object);
+    const float t = dot4(outTexture.m1, object);
+    const float q = dot4(outTexture.m2, object);
+    Check(Near(q, clipW) && Near(s / q, u) && Near(t / q, v),
+          "the screen texture matrix lands a vertex at its own place in the eye image");
+  }
+  Check(std::memcmp(screenUniform.data() + layout.positionOffset, eye.data() + layout.positionOffset,
+                    kStereoPositionMatrices * sizeof(Mat3x4<float>)) == 0,
+        "the screen texture matrix leaves the position matrices alone");
+  auto ignored = eye;
+  compose_stereo_screen_tex_mtx(ignored.data(), layout, kStereoTextureMatrices, 0);
+  Check(ignored == eye, "a texture matrix slot out of range is ignored");
+  {
+    // Straight ahead of a symmetric frustum is the middle of the image; a
+    // point to the right and up lands right of and above it.
+    Mat4x4<float> symmetric{};
+    symmetric.m0 = Vec4<float>{2.f, 0.f, 0.f, 0.f};
+    symmetric.m1 = Vec4<float>{0.f, 2.f, 0.f, 0.f};
+    symmetric.m3 = Vec4<float>{0.f, 0.f, -1.f, 0.f};
+    const auto ahead = stereo_replay::screen_tex_mtx(symmetric, identity);
+    Check(Near(ahead.m0[2], -0.5f) && Near(ahead.m1[2], -0.5f) && Near(ahead.m2[2], -1.f) &&
+              Near(ahead.m0[0], 1.f) && Near(ahead.m1[1], -1.f),
+          "the screen texture matrix is the halved and shifted clip rows");
+    // (0.25, 0.25, -1): s = 0.75, t = 0.25, q = 1.
+    Check(Near(ahead.m0[0] * 0.25f + ahead.m0[2] * -1.f, 0.75f) &&
+              Near(ahead.m1[1] * 0.25f + ahead.m1[2] * -1.f, 0.25f),
+          "right and up is right of and above the middle of the image");
+  }
+
   float outLight[20];
   std::memcpy(outLight, eye.data() + layout.lightsOffset, sizeof(outLight));
   Check(Near(outLight[0], 5.032f) && Near(outLight[1], 0.f) && Near(outLight[2], 0.f),
@@ -124,6 +171,20 @@ int main() {
   Check(Near(outPosition.m0[3], 0.5f) && Near(outPosition.m1[3], 1.f) && Near(outPosition.m2[3], 6.f) &&
             Near(outPosition.m0[0], 0.5f) && Near(outPosition.m2[2], 2.f),
         "head-locked scales shrink across the view and push along it");
+
+  // The sky (AURORA_STEREO_ROUTE_SKY): the eye's rotation without its offset,
+  // so a dome centred on the camera has no disparity and stays put when the
+  // head moves.
+  const auto skyView = stereo_replay::without_translation(view);
+  Check(Near(skyView.m0[3], 0.f) && Near(skyView.m1[3], 0.f) && Near(skyView.m2[3], 0.f) &&
+            Near(skyView.m0[2], -1.f) && Near(skyView.m2[0], 1.f),
+        "the sky view keeps the rotation and drops the translation");
+  auto sky = uniform;
+  compose_stereo_uniform(sky.data(), layout, StereoEyeCompose{&eyeProjection, &skyView, 1.f, 1.f, 1.f, 1.f});
+  std::memcpy(&outPosition, sky.data() + layout.positionOffset, sizeof(outPosition));
+  Check(Near(outPosition.m0[3], -3.f) && Near(outPosition.m1[3], 2.f) && Near(outPosition.m2[3], 1.f) &&
+            Near(outPosition.m0[2], -1.f),
+        "a sky draw is rotated into the eye without the eye's offset");
 
   // An orthographic projection is 2D content: identical in both eyes.
   auto ortho = uniform;

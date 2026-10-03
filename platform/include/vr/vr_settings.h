@@ -80,6 +80,10 @@ struct PortVrSettings {
     // world into a band of each eye; script camera filters draw "cinema bars"
     // over the view. Both are skipped while the headset runs.
     bool remove_cinematic_bars = true;
+    // PrimedGun (DolphinXR) "Detect Skybox" without its per-draw scan: the
+    // sky dome is drawn with the head's rotation only, so it reads as
+    // infinitely far rather than as a ball sixty units away.
+    bool sky_at_infinity = true;
     float frustum_culling_degrees = 115.0f;
     float metroid_hud_distance = 0.75f;
     float metroid_hud_size = 0.75f;

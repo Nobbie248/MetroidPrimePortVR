@@ -3,6 +3,7 @@
 #include "internal.hpp"
 #include "stereo_overlay.hpp"
 #include "gfx/stereo_eyes.hpp"
+#include "gfx/stereo_replay.hpp"
 #include "gfx/stereo_shadow.hpp"
 #include "webgpu/gpu.hpp"
 
@@ -193,6 +194,11 @@ gfx::StereoFrameState begin_frame(uint64_t contentTag) noexcept {
       mean /= static_cast<float>(AURORA_STEREO_EYE_COUNT);
       (*(&headLocked.m0 + row))[3] = (*(&state.eyes[eye].viewFromCenter.m0 + row))[3] - mean;
     }
+  }
+  // A sky draw keeps the head's rotation and drops every translation: the eye
+  // looks from the camera's centre, so the sky has no disparity.
+  for (uint32_t eye = 0; eye < AURORA_STEREO_EYE_COUNT; ++eye) {
+    state.eyes[eye].skyViewFromCenter = gfx::stereo_replay::without_translation(state.eyes[eye].viewFromCenter);
   }
   if (packet.mode != AURORA_STEREO_FRAME_IMMERSIVE_REPLAY) {
     return state;

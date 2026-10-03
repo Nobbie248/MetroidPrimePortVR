@@ -51,6 +51,8 @@ void BuildPortConfigTab(TabContext& ctx, QTabWidget* tabs) {
             QObject::tr("Off shows the flat game image on the virtual screen."));
   ctx.Check(layout, QObject::tr("Remove cinematic bars"), "vr_remove_cinematic_bars",
             QObject::tr("Keeps the morph ball and visor transitions full size in the headset."));
+  ctx.Check(layout, QObject::tr("Sky at infinity"), "vr_sky_at_infinity",
+            QObject::tr("Draws the sky with the head's rotation only, so planets and stars look far away."));
   ctx.Float(layout, QObject::tr("Virtual screen distance"), "vr_screen_distance_meters")
       ->setToolTip(QObject::tr("Metres; menus and cutscenes hang on this screen."));
   ctx.Float(layout, QObject::tr("Virtual screen width"), "vr_screen_width_meters")

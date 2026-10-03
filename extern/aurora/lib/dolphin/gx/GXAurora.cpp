@@ -109,3 +109,11 @@ void AuroraSetStereoHeadLockedPlane(f32 tanHalfWidth, f32 tanHalfHeight, f32 dis
   GX_WRITE_F32(tanHalfHeight);
   GX_WRITE_F32(distance);
 }
+
+void AuroraSetStereoScreenTexMtx(u32 texMtx, u32 pnMtx) {
+  GX_WRITE_AURORA(GX_AURORA_STEREO_SCREEN_TEX_MTX);
+  // GX_TEXMTXn = GX_TEXMTX0 + 3n, GX_PNMTXn = 3n; anything else (GX_IDENTITY) ends it.
+  const bool valid = texMtx >= GX_TEXMTX0 && texMtx < GX_IDENTITY && pnMtx < GX_TEXMTX0;
+  GX_WRITE_U8(valid ? static_cast<u8>((texMtx - GX_TEXMTX0) / 3) : 0xFF);
+  GX_WRITE_U8(valid ? static_cast<u8>(pnMtx / 3) : 0);
+}

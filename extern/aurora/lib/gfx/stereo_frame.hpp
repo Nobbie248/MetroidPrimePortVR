@@ -9,7 +9,8 @@
 // pass binds an eye copy of its uniform (gfx/stereo_uniform.hpp) staged when
 // the mono uniform was built, with the eye's frustum and pose composed in; a
 // 2D (orthographic) draw binds its mono uniform and so lands identically in
-// both eyes; a draw routed AURORA_STEREO_ROUTE_SKIP is left out of the eyes.
+// both eyes; a draw routed AURORA_STEREO_ROUTE_SKIP is left out of the eyes;
+// a draw routed AURORA_STEREO_ROUTE_SKY takes the eye's rotation only.
 //
 // The packet is consumed at frame begin (stereo_host::begin_frame), on the
 // game thread, so the eye parameters are fixed before the first uniform is
@@ -42,6 +43,10 @@ struct StereoEyeParams {
   // from the head centre (half the IPD), for draws that stay in front of the
   // head (AURORA_STEREO_ROUTE_HEAD_LOCKED).
   Mat3x4<float> headLockedViewFromCenter{};
+  // viewFromCenter without its translation: the head's rotation and this
+  // eye's cant, the eye at the camera's centre, for draws that stand for
+  // infinity (AURORA_STEREO_ROUTE_SKY).
+  Mat3x4<float> skyViewFromCenter{};
 };
 
 // The finished eye image for the sink, as ref-counted handles so a frame in

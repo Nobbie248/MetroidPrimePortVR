@@ -166,6 +166,7 @@ void TestDefaultsMatchGame() {
       {"vr_world_scale", FormatFloat(s.world_scale)},
       {"vr_immersive_replay", FormatBool(s.immersive_replay)},
       {"vr_remove_cinematic_bars", FormatBool(s.remove_cinematic_bars)},
+      {"vr_sky_at_infinity", FormatBool(s.sky_at_infinity)},
       {"vr_screen_distance_meters", FormatFloat(s.screen_distance_meters)},
       {"vr_screen_width_meters", FormatFloat(s.screen_width_meters)},
       {"vr_lean_back_degrees", FormatFloat(s.lean_back_degrees)},

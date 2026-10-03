@@ -65,6 +65,7 @@ struct FrameRecorder {
   bool suppressRenderWorker = false;
   uint8_t stereoRoute = AURORA_STEREO_ROUTE_WORLD;
   stereo_replay::HeadLockedPlane headLockedPlane;
+  StereoScreenTexMtx stereoScreenTexMtx;
 #ifdef AURORA_GFX_DEBUG_GROUPS
   std::vector<std::string> debugGroupStack;
 #endif
@@ -553,6 +554,7 @@ void begin_recording(FramePacket& packet, size_t frameSlot) {
   g_recorder.mergedDrawCallCount = 0;
   g_recorder.suspendedEfbPass.reset();
   g_recorder.stereoRoute = AURORA_STEREO_ROUTE_WORLD;
+  g_recorder.stereoScreenTexMtx = {};
 
   current_render_passes().emplace_back();
   auto& pass = current_render_passes()[0];
@@ -824,6 +826,12 @@ void set_stereo_head_locked_plane(float tanHalfWidth, float tanHalfHeight, float
 
 stereo_replay::HeadLockedPlane stereo_head_locked_plane() noexcept { return g_recorder.headLockedPlane; }
 
+void set_stereo_screen_tex_mtx(uint8_t texSlot, uint8_t pnSlot) noexcept {
+  g_recorder.stereoScreenTexMtx = {texSlot, pnSlot};
+}
+
+StereoScreenTexMtx stereo_screen_tex_mtx() noexcept { return g_recorder.stereoScreenTexMtx; }
+
 std::array<uint32_t, 2> stage_stereo_uniforms(const uint8_t* mono, Range monoRange,
                                               const StereoUniformLayout& layout) noexcept {
   constexpr std::array<uint32_t, 2> none{UINT32_MAX, UINT32_MAX};
@@ -893,16 +901,26 @@ std::array<uint32_t, 2> stage_stereo_uniforms(const uint8_t* mono, Range monoRan
     } else {
       const bool headLocked =
           route == AURORA_STEREO_ROUTE_HEAD_LOCKED || route == AURORA_STEREO_ROUTE_HEAD_LOCKED_2D;
+      // A sky draw (AURORA_STEREO_ROUTE_SKY) takes the eye's rotation only.
+      const Mat3x4<float>* viewFromCenter = headLocked                            ? &params.headLockedViewFromCenter
+                                            : route == AURORA_STEREO_ROUTE_SKY ? &params.skyViewFromCenter
+                                                                               : &params.viewFromCenter;
       compose_stereo_uniform(
           scratch.data(), layout,
           StereoEyeCompose{
               .projection = &params.projection,
-              .viewFromCenter = headLocked ? &params.headLockedViewFromCenter : &params.viewFromCenter,
+              .viewFromCenter = viewFromCenter,
               .positionScaleXY = headLocked ? state.headLockedScaleXY : 1.0f,
               .positionScaleZ = headLocked ? state.headLockedScaleZ : 1.0f,
               .renderScaleX = renderScaleX,
               .renderScaleY = renderScaleY,
           });
+      // A screen-projecting texture matrix (AuroraSetStereoScreenTexMtx) is
+      // derived again from the eye's composed projection and position matrix.
+      const auto screenTexMtx = g_recorder.stereoScreenTexMtx;
+      if (screenTexMtx.texSlot != 0xFF) {
+        compose_stereo_screen_tex_mtx(scratch.data(), layout, screenTexMtx.texSlot, screenTexMtx.pnSlot);
+      }
     }
     offsets[eye] = push(frame.uniforms, scratch.data(), layout.size, alignment).offset;
   }

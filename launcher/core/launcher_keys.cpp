@@ -27,6 +27,7 @@ constexpr KeyInfo kKeys[] = {
     {"vr_world_scale", K::Float, "1.5", 0.5f, 4.0f, 0.05f},
     {"vr_immersive_replay", K::Bool, "1"},
     {"vr_remove_cinematic_bars", K::Bool, "1"},
+    {"vr_sky_at_infinity", K::Bool, "1"},
     {"vr_screen_distance_meters", K::Float, "1.5", 0.5f, 5.0f, 0.05f},
     {"vr_screen_width_meters", K::Float, "2", 0.5f, 5.0f, 0.05f},
     {"vr_lean_back_degrees", K::Float, "0", -45.0f, 45.0f, 1.0f},

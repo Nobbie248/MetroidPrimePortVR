@@ -37,6 +37,8 @@
 #include "MetroidPrime/CActor.hpp"
 #include "MetroidPrime/Cameras/CCameraManager.hpp"
 #include "port_debug.h"
+#include "vr/vr_view.h"
+#include <dolphin/gx/GXAurora.h>
 #endif
 
 #pragma inline_max_size(250)
@@ -1938,6 +1940,16 @@ void CElementGen::RenderParticlesIndirectTexture() {
   systemViewCopy = CTransform4f::Translate(xe8_globalTranslation) * x10c_globalScaleTransform *
                    systemViewCopy * x178_localScaleTransform;
   CGraphics::SetModelMatrix(systemViewCopy);
+#ifdef TARGET_PC
+  // Port: the screen copy is sampled where each vertex itself lands on the screen, through a
+  // screen-projecting texture matrix (GX_TEXCOORD1 below), instead of the rectangle retail worked
+  // out on the CPU for its copy of just that rectangle; the port copies the whole viewport once.
+  // PortVr: that CPU rectangle was the mono (body) camera's, so in the headset each eye refracted
+  // a piece of its view from the wrong place. Told the slots, the stereo replay derives the
+  // matrix again per eye, and the particle refracts what lies behind it in that eye's own view.
+  CGraphics::LoadScreenProjectionTexMtx(GX_TEXMTX0);
+  AuroraSetStereoScreenTexMtx(GX_TEXMTX0, GX_PNMTX0);
+#endif
 
   CGX::SetAlphaCompare(GX_ALWAYS, 0, GX_AOP_AND, GX_ALWAYS, 0);
 
@@ -1980,7 +1992,12 @@ void CElementGen::RenderParticlesIndirectTexture() {
 
   CGX::SetNumTexGens(3);
   CGX::SetTexCoordGen(GX_TEXCOORD0, GX_TG_MTX2x4, GX_TG_TEX0, GX_IDENTITY, false, GX_PTIDENTITY);
+#ifdef TARGET_PC
+  // Port: the copy's coordinates from the position, through the matrix loaded above.
+  CGX::SetTexCoordGen(GX_TEXCOORD1, GX_TG_MTX3x4, GX_TG_POS, GX_TEXMTX0, false, GX_PTIDENTITY);
+#else
   CGX::SetTexCoordGen(GX_TEXCOORD1, GX_TG_MTX2x4, GX_TG_TEX1, GX_IDENTITY, false, GX_PTIDENTITY);
+#endif
   CGX::SetTexCoordGen(GX_TEXCOORD2, GX_TG_MTX2x4, GX_TG_TEX2, GX_IDENTITY, false, GX_PTIDENTITY);
 
   float indMtx[2][3] = {
@@ -2040,10 +2057,21 @@ void CElementGen::RenderParticlesIndirectTexture() {
     rstl::sort(sortItems, sortItems + particleCount, sComp);
   }
 
+#ifdef TARGET_PC
+  // Port: no TEX1; the copy's coordinates come from the position (GX_TEXCOORD1 above).
+  static const GXVtxDescList skIndVtxDescList[] = {
+      {GX_VA_POS, GX_DIRECT},
+      {GX_VA_CLR0, GX_DIRECT},
+      {GX_VA_TEX0, GX_DIRECT},
+      {GX_VA_TEX2, GX_DIRECT},
+      {GX_VA_NULL, GX_NONE},
+  };
+#else
   static const GXVtxDescList skIndVtxDescList[] = {
       {GX_VA_POS, GX_DIRECT},  {GX_VA_CLR0, GX_DIRECT}, {GX_VA_TEX0, GX_DIRECT},
       {GX_VA_TEX1, GX_DIRECT}, {GX_VA_TEX2, GX_DIRECT}, {GX_VA_NULL, GX_NONE},
   };
+#endif
   CGX::SetVtxDescv(skIndVtxDescList);
 
 #ifdef TARGET_PC
@@ -2099,6 +2127,59 @@ void CElementGen::RenderParticlesIndirectTexture() {
     CGraphics::CClippedScreenRect clipRect = CGraphics::ClipScreenRectFromMS(
         CVector3f(vpX - size, vpY, vpZ - size), CVector3f(size + vpX, vpY, size + vpZ), kTF_RGB565);
 
+#ifdef TARGET_PC
+    // PortVr: the rectangle is the body camera's screen, and immersive the eyes look elsewhere
+    // (the head turns, looks up and down and stands off the body on its own), so there any
+    // particle in front of the camera is drawn and the eyes clip it themselves.
+    bool visible = clipRect.IsValid();
+    if (!visible && PortVr::VrImmersive()) {
+      const CVector3f viewPos = CGraphics::GetViewMatrix().TransposeMultiply(
+          CGraphics::GetModelMatrix() * CVector3f(vpX, vpY, vpZ));
+      visible = viewPos.GetY() > CGraphics::GetProjectionState().GetNear();
+    }
+
+    if (visible) {
+      if (!portCopied) {
+        GXSetTexCopySrc(static_cast< u16 >(portLeft), static_cast< u16 >(portTop),
+                        static_cast< u16 >(portWidth), static_cast< u16 >(portHeight));
+        GXSetTexCopyDst(static_cast< u16 >(portWidth), static_cast< u16 >(portHeight),
+                        GX_TF_RGB565, GX_FALSE);
+        const bool useVideoFilter = CGraphics::GetUseVideoFilter();
+        CGraphics::SetUseVideoFilter(false);
+        GXCopyTex(CGraphics::GetDolphinSpareBuffer(), GX_FALSE);
+        CGraphics::SetUseVideoFilter(useVideoFilter);
+        GXPixModeSync();
+        CGraphics::LoadDolphinSpareTexture(portWidth, portHeight, GX_TF_RGB565, NULL,
+                                           CGraphics::kSpareBufferTexMapID);
+        portCopied = true;
+      }
+      // No TEX1: the copy's coordinates come from the position (GX_TEXCOORD1 above).
+      uint color = particle->x34_color.GetColor_u32();
+      CGX::Begin(GX_QUADS, GX_VTXFMT0, 4);
+
+      GXPosition3f32(size + vpX, vpY, size + vpZ);
+      GXColor1u32(color);
+      GXTexCoord2f32(uvs.xMax, uvs.yMax);
+      GXTexCoord2f32(uvsInd.xMax, uvsInd.yMax);
+
+      GXPosition3f32(vpX - size, vpY, size + vpZ);
+      GXColor1u32(color);
+      GXTexCoord2f32(uvs.xMin, uvs.yMax);
+      GXTexCoord2f32(uvsInd.xMin, uvsInd.yMax);
+
+      GXPosition3f32(vpX - size, vpY, vpZ - size);
+      GXColor1u32(color);
+      GXTexCoord2f32(uvs.xMin, uvs.yMin);
+      GXTexCoord2f32(uvsInd.xMin, uvsInd.yMin);
+
+      GXPosition3f32(size + vpX, vpY, vpZ - size);
+      GXColor1u32(color);
+      GXTexCoord2f32(uvs.xMax, uvs.yMin);
+      GXTexCoord2f32(uvsInd.xMax, uvsInd.yMin);
+
+      CGX::End();
+    }
+#else
     int width = clipRect.GetTexWidth();
     int height = clipRect.GetHeight();
     float minU = clipRect.GetMinU();
@@ -2108,32 +2189,6 @@ void CElementGen::RenderParticlesIndirectTexture() {
 
     if (clipRect.IsValid()) {
       void* dest = CGraphics::GetDolphinSpareBuffer();
-#ifdef TARGET_PC
-      if (!portCopied) {
-        GXSetTexCopySrc(static_cast< u16 >(portLeft), static_cast< u16 >(portTop),
-                        static_cast< u16 >(portWidth), static_cast< u16 >(portHeight));
-        GXSetTexCopyDst(static_cast< u16 >(portWidth), static_cast< u16 >(portHeight),
-                        GX_TF_RGB565, GX_FALSE);
-        const bool useVideoFilter = CGraphics::GetUseVideoFilter();
-        CGraphics::SetUseVideoFilter(false);
-        GXCopyTex(dest, GX_FALSE);
-        CGraphics::SetUseVideoFilter(useVideoFilter);
-        GXPixModeSync();
-        CGraphics::LoadDolphinSpareTexture(portWidth, portHeight, GX_TF_RGB565, NULL,
-                                           CGraphics::kSpareBufferTexMapID);
-        portCopied = true;
-      }
-      // From the particle's own rectangle to the same texels in the viewport copy.
-      const float uScale = static_cast< float >(width) / static_cast< float >(portWidth);
-      const float uBase = static_cast< float >(clipRect.GetX() - portLeft) / static_cast< float >(portWidth);
-      const float vScale = static_cast< float >(height) / static_cast< float >(portHeight);
-      const float vBase = static_cast< float >(clipRect.GetY() - portTop) / static_cast< float >(portHeight);
-      minU = uBase + minU * uScale;
-      maxU = uBase + maxU * uScale;
-      minV = vBase + minV * vScale;
-      maxV = vBase + maxV * vScale;
-      {
-#else
       GXSetTexCopySrc(static_cast< u16 >(clipRect.GetX()), static_cast< u16 >(clipRect.GetY()),
                       static_cast< u16 >(clipRect.GetWidth()), static_cast< u16 >(height));
       GXSetTexCopyDst(static_cast< u16 >(width), static_cast< u16 >(height), GX_TF_RGB565,
@@ -2151,7 +2206,6 @@ void CElementGen::RenderParticlesIndirectTexture() {
         CGraphics::LoadDolphinSpareTexture(width, height, GX_TF_RGB565, NULL,
                                            CGraphics::kSpareBufferTexMapID);
 
-#endif
         uint color = particle->x34_color.GetColor_u32();
         CGX::Begin(GX_QUADS, GX_VTXFMT0, 4);
 
@@ -2182,6 +2236,7 @@ void CElementGen::RenderParticlesIndirectTexture() {
         CGX::End();
       }
     }
+#endif
 
 #if NONMATCHING
     if (SORT) {
@@ -2192,6 +2247,9 @@ void CElementGen::RenderParticlesIndirectTexture() {
 #endif
   }
 
+#ifdef TARGET_PC
+  AuroraSetStereoScreenTexMtx(GX_IDENTITY, GX_PNMTX0);
+#endif
   CGX::SetNumIndStages(0);
   CGX::SetTevDirect(GX_TEVSTAGE1);
 }

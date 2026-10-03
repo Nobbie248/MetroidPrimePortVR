@@ -624,6 +624,15 @@ void handle_aurora(ByteReader& reader) noexcept {
       g_gxState.dirty |= DirtyUniform;
       gfx::set_stereo_head_locked_plane(tanHalfWidth, tanHalfHeight, distance);
     }
+  } else if (subCmd == GX_AURORA_STEREO_SCREEN_TEX_MTX) {
+    const u8 texSlot = reader.read<u8>();
+    const u8 pnSlot = reader.read<u8>();
+    const auto current = gfx::stereo_screen_tex_mtx();
+    if (current.texSlot != texSlot || current.pnSlot != pnSlot) {
+      // The eye uniform copies depend on it.
+      g_gxState.dirty |= DirtyUniform;
+      gfx::set_stereo_screen_tex_mtx(texSlot, pnSlot);
+    }
   } else if (subCmd >= GX_AURORA_LOAD_ARRAYBASE && subCmd <= (GX_AURORA_LOAD_ARRAYBASE | 0x0f)) {
     const u32 attrIdx = subCmd - GX_AURORA_LOAD_ARRAYBASE + GX_VA_POS;
     const u64 arrayAddr = reader.read<u64>();

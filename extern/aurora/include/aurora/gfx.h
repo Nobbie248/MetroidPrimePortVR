@@ -87,6 +87,10 @@ typedef enum AuroraStereoDrawRoute {
   // dolphin/gx/GXAurora.h) and its EFB copies taken from each eye through that plane: a 2D window onto the view,
   // such as Metroid Prime's scan visor, keeps pointing where the head does and magnifies each eye's own view.
   AURORA_STEREO_ROUTE_HEAD_LOCKED_2D = 6,
+  // A draw attached to the camera that stands for infinity, such as Metroid Prime's sky (a dome of some sixty
+  // units centred on the camera, pushed into the far depth range): the eyes see it with the head's rotation
+  // only, no eye offset, so it has no disparity and does not shift when the head moves.
+  AURORA_STEREO_ROUTE_SKY = 7,
 } AuroraStereoDrawRoute;
 // AURORA_STEREO_ROUTE_HEAD_LOCKED draws are scaled about the camera origin
 // before the eye offset: sizeScale sets their angular size, distanceScale

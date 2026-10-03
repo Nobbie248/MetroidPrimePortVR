@@ -317,6 +317,10 @@ public:
                                       GXTexMapID texId);
   static void LoadDolphinSpareTexture(int width, int height, GXCITexFmt fmt, GXTlut tlut,
                                       void* data, GXTexMapID texId);
+  // Port: loads texture matrix `id` (GX_TEXMTX0..9) with the 3x4 (s, t, q) matrix that projects
+  // positions onto the screen through the current projection and modelview, for a GX_TG_MTX3x4
+  // texgen from GX_TG_POS: s / q and t / q are the vertex's own place in a copy of the viewport.
+  static void LoadScreenProjectionTexMtx(GXTexMtx id);
   // Advances the animation clock by simulation ticks (not rendered frames), so
   // animations stay real-time when the frame rate is uncapped.
   static void TickRenderTimings(uint ticks = 1);

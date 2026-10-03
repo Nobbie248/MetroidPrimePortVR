@@ -31,6 +31,7 @@
 #include "dolphin/gx.h"
 #ifdef TARGET_PC
 #include "aurora/gfx.h"
+#include "vr/vr_view.h"
 #endif
 #include "float.h"
 #include "limits.h"
@@ -615,6 +616,13 @@ void CInGameGuiManager::Update(const CStateManager& mgr, float dt, CArchitecture
     mgr.SetViewportScaleX(scaleX);
     mgr.SetViewportScaleY(scaleY);
   }
+#ifdef TARGET_PC
+  if (PortVr::VrRemoveCinematicBars()) {
+    // PortVr: a shrunken viewport squeezes the world into a band of each eye.
+    mgr.SetViewportScaleX(1.f);
+    mgr.SetViewportScaleY(1.f);
+  }
+#endif
   x1f8_25_playerAlive = mgr.GetPlayerState()->IsAlive();
 }
 

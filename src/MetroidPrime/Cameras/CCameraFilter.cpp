@@ -1,6 +1,9 @@
 #include "MetroidPrime/Cameras/CCameraBlurPass.hpp"
 #include "MetroidPrime/Cameras/CCameraFilterPass.hpp"
 #include "MetroidPrime/Tweaks/CTweakGui.hpp"
+#ifdef TARGET_PC
+#include "vr/vr_view.h"
+#endif
 
 #include "Kyoto/Graphics/CGX.hpp"
 #include "Kyoto/Graphics/CGraphics.hpp"
@@ -436,6 +439,12 @@ void CCameraFilterPass::DrawFilterShape(EFilterShape shape, const CColor& color,
     }
     break;
   case kFS_CinemaBars:
+#ifdef TARGET_PC
+    // PortVr: bars glued to the view are not drawn in the headset.
+    if (PortVr::VrRemoveCinematicBars()) {
+      break;
+    }
+#endif
     DrawWideScreen(color, tex, lod);
     break;
   case kFS_RandomStatic:

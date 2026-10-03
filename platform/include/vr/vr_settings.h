@@ -75,6 +75,11 @@ struct PortVrSettings {
     bool vr_menu_requires_head_zone = false;
     bool vr_menu_floating = false;
     bool frustum_culling_enabled = true;
+    // PrimedGun (DolphinXR) RemoveCinematicBars: the morph ball and visor
+    // transitions letterbox by shrinking the 3D viewport, which squeezes the
+    // world into a band of each eye; script camera filters draw "cinema bars"
+    // over the view. Both are skipped while the headset runs.
+    bool remove_cinematic_bars = true;
     float frustum_culling_degrees = 115.0f;
     float metroid_hud_distance = 0.75f;
     float metroid_hud_size = 0.75f;

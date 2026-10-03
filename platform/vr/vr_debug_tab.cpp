@@ -91,6 +91,9 @@ void DrawVrDebugTab() {
   ImGui::SeparatorText("Camera");
   changed |= ImGui::Checkbox("No camera bob or idle sway", &s.patch_no_idle_sway);
   changed |= ImGui::Checkbox("No arm cannon idle fidget", &s.patch_disable_arm_cannon_idle_fidget);
+  changed |= ImGui::Checkbox("Remove cinematic bars", &s.remove_cinematic_bars);
+  ImGui::TextWrapped("The morph ball and visor letterbox shrink the 3D view, which distorts it in the headset; "
+                     "this keeps the view full and skips the cinema-bar overlay.");
 
   ImGui::SeparatorText("Controls");
   int mode = static_cast< int >(s.controller_mode);

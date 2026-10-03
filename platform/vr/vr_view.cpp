@@ -125,6 +125,10 @@ bool VrNoArmCannonFidget() noexcept {
     return ImmersiveNow() && GetVrSettings().patch_disable_arm_cannon_idle_fidget;
 }
 
+bool VrRemoveCinematicBars() noexcept {
+    return OpenXRIsRunning() && GetVrSettings().remove_cinematic_bars;
+}
+
 bool VrCannonTransform(const CStateManager& mgr, const CPlayer& player, const CTransform4f& cameraXf,
                        CTransform4f& gunXf) noexcept {
     (void)mgr;

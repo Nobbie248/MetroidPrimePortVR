@@ -40,6 +40,9 @@ bool VrCullingFrustum(const CTransform4f& cameraXf, float nearZ, CFrustumPlanes&
 bool VrFlattenLookPitch() noexcept;
 bool VrNoCameraBob() noexcept;
 bool VrNoArmCannonFidget() noexcept;
+// The headset is running and the settings remove the letterbox: the game's
+// viewport scale stays 1 and the cinema-bars camera filter is not drawn.
+bool VrRemoveCinematicBars() noexcept;
 
 // The 6DOF cannon. Once per simulation tick from CPlayer::UpdateGunTransform:
 // when the tracked controller drives the cannon, replaces `gunXf` (world) and

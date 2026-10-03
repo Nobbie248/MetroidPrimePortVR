@@ -235,6 +235,11 @@ void PADSetVirtualStatus(u32 port, const PADStatus* status);
 void PADClearVirtualStatus(u32 port);
 void PADClearAllVirtualStatus();
 
+/* A virtual pad's rumble: while the callback returns TRUE for a channel, PADControlMotor hands it
+ * that channel's commands instead of driving the controller assigned there. NULL removes it. */
+typedef BOOL (*PADMotorCallback)(u32 chan, u32 cmd);
+void PADSetMotorCallback(PADMotorCallback callback);
+
 /**
  * Set the default controller mapping used.
  *

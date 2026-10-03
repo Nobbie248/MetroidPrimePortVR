@@ -140,6 +140,7 @@ private:
                          (1u << SDL_GAMEPAD_AXIS_RIGHTX) | (1u << SDL_GAMEPAD_AXIS_RIGHTY) |
                          (1u << SDL_GAMEPAD_AXIS_LEFT_TRIGGER) | (1u << SDL_GAMEPAD_AXIS_RIGHT_TRIGGER);
         desc.name = "OpenXR Controllers";
+        desc.Rumble = Rumble;
         const SDL_JoystickID id = SDL_AttachVirtualJoystick(&desc);
         if (id == 0) {
             Refused("SDL_AttachVirtualJoystick");
@@ -164,7 +165,17 @@ private:
         }
         if (id != 0) {
             SDL_DetachVirtualJoystick(id);
+            // A rumble left on when the pad went away would otherwise keep playing.
+            OpenXRSetRumble(0.0f);
         }
+    }
+
+    // The game's rumble on whichever port this pad was given, at the strength
+    // that port's controller tab sets, for the pacing thread to play on the
+    // controllers. SDL calls it from the thread that rumbles the pad.
+    static bool SDLCALL Rumble(void*, Uint16 low_frequency, Uint16 high_frequency) {
+        OpenXRSetRumble(static_cast<float>(std::max(low_frequency, high_frequency)) / 65535.0f);
+        return true;
     }
 
     void Refused(const char* operation) const {

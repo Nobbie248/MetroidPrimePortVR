@@ -7,6 +7,7 @@
 #include <SDL3/SDL_mouse.h>
 
 #include <array>
+#include <atomic>
 #include <filesystem>
 #include <limits>
 #include <ranges>
@@ -35,6 +36,7 @@ std::array<PADButtonMapping, PAD_BUTTON_COUNT> g_defaultButtonsStandard{{
 
 std::array<PADStatus, PAD_CHANMAX> g_virtualPadStatus{};
 std::array<bool, PAD_CHANMAX> g_virtualPadActive{};
+std::atomic<PADMotorCallback> g_motorCallback{nullptr};
 
 std::array<PADButtonMapping, PAD_BUTTON_COUNT> g_defaultButtonsXBox360{{
     {SDL_GAMEPAD_BUTTON_SOUTH, PAD_BUTTON_A},
@@ -995,7 +997,12 @@ void PADClearAllVirtualStatus() {
   g_virtualPadActive.fill(false);
 }
 
+void PADSetMotorCallback(const PADMotorCallback callback) { g_motorCallback.store(callback); }
+
 void PADControlMotor(const u32 chan, const u32 cmd) {
+  if (const PADMotorCallback callback = g_motorCallback.load(); callback != nullptr && callback(chan, cmd)) {
+    return;
+  }
   const auto controller = aurora::input::get_controller_for_player(chan);
   if (should_use_device_rumble(chan, controller)) {
     u16 low = 0;

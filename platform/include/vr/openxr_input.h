@@ -60,8 +60,9 @@ OpenXRControllerMode OpenXRGetControllerMode() noexcept;
 // closes, the game sees idle controllers: the pointer and the triggers belong
 // to the panel.
 //
-// Haptics: PrimedGun's rumble request (OpenXRSetRumble) is applied every frame
-// to the hand(s) the settings name, scaled by the rumble intensity.
+// Haptics: the game's rumble request (OpenXRSetRumble, from the PrimedGun pad's
+// port 0 motor or the virtual gamepad's rumble) is applied every frame to the
+// hand(s) the settings name, scaled by the rumble intensity.
 //
 // Lifetime: Create after the session exists (attaches the action set, which
 // OpenXR permits once per session), Sync once per xrWaitFrame, Idle while the

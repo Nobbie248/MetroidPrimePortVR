@@ -16,6 +16,7 @@
 
 #include <algorithm>
 #include <array>
+#include <atomic>
 #include <cmath>
 #include <cstring>
 #include <mutex>
@@ -64,6 +65,18 @@ bool g_was_active = false;
 bool g_recenter_was_pressed = false; // the right stick click's last state
 bool g_was_gameplay = false;
 uint32_t g_gameplay_samples = 0;
+std::atomic<bool> g_owns_motor{false}; // port 0's rumble goes to the headset controllers
+
+// PADControlMotor's hook. While the headset controllers own port 0, its motor
+// drives their haptics, on or off as PrimedGun's GCPad::SetOutput fed them,
+// instead of the physical pad assigned to that port.
+BOOL ClaimPortZeroMotor(u32 chan, u32 cmd) {
+    if (chan != 0 || !g_owns_motor.load(std::memory_order_relaxed)) {
+        return FALSE;
+    }
+    OpenXRSetRumble(cmd == PAD_MOTOR_RUMBLE ? 1.0f : 0.0f);
+    return TRUE;
+}
 
 Quat Normalize(Quat q) noexcept {
     const float length = std::sqrt(q[0] * q[0] + q[1] * q[1] + q[2] * q[2] + q[3] * q[3]);
@@ -334,6 +347,9 @@ void VrPadUpdate(const CStateManager* mgr) noexcept {
     if (!controllers) {
         if (g_was_active) {
             PADClearVirtualStatus(0);
+            // The motor goes back to port 0's pad, and the headset stops.
+            g_owns_motor.store(false, std::memory_order_relaxed);
+            OpenXRSetRumble(0.0f);
             g_was_active = false;
         }
         std::lock_guard lock(g_mutex);
@@ -341,6 +357,14 @@ void VrPadUpdate(const CStateManager* mgr) noexcept {
         g_wheel = {};
         g_gameplay_samples = 0;
         return;
+    }
+    if (!g_was_active) {
+        // The pad that had port 0 may be mid-pulse, and its stop would now
+        // reach the headset instead: stop it before the controllers take over.
+        PADControlMotor(0, PAD_MOTOR_STOP_HARD);
+        OpenXRSetRumble(0.0f);
+        PADSetMotorCallback(ClaimPortZeroMotor);
+        g_owns_motor.store(true, std::memory_order_relaxed);
     }
     g_was_active = true;
     // PrimedGun's one-click height set: the right stick click recenters the

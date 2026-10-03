@@ -58,9 +58,10 @@ struct OpenXRInputSnapshot {
 void OpenXRPublishInputSnapshot(const OpenXRInputSnapshot& snapshot) noexcept;
 OpenXRInputSnapshot OpenXRGetInputSnapshot() noexcept;
 
-// Game thread -> pacing thread: PrimedGun's rumble (15 ms pulses on a 100 ms
-// cycle at the configured intensity, on the hand(s) the settings name).
-// amplitude 0 stops it.
+// Game thread -> pacing thread: the game's rumble, from port 0's motor while
+// the VR pad owns that port (vr_pad.cpp, on or off) or from the virtual
+// gamepad's rumble in Gamepad mode. The pacing thread plays it on the hand(s)
+// the settings name, scaled by the rumble intensity. amplitude 0 stops it.
 void OpenXRSetRumble(float amplitude) noexcept;
 float OpenXRTakeRumble() noexcept;
 

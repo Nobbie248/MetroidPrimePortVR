@@ -11,6 +11,9 @@
 // the aim pose; the aim ray's hit on it (or the hand's travel, as a fallback)
 // picks Power / Wave / Ice / Plasma by its dominant axis, and letting go pulses
 // the C-stick that way for eight samples.
+//
+// The visor gesture (vr_visor_dpad.h): with the off-hand controller held next
+// to the headset, its stick is the D-pad, which picks the visors.
 
 #pragma once
 
@@ -33,6 +36,8 @@ struct VrPadState {
     bool weapon_panel = false;  // the beam wheel is open
     int weapon_selected = -1;   // 0 Power, 1 Wave, 2 Ice, 3 Plasma, -1 none
     uint32_t weapon_hand = 1;   // 0 left, 1 right
+    bool visor_zone = false;    // the off hand is at the head: its stick is the D-pad
+    int visor_direction = -1;   // VisorDpad::Dir: 0 up (combat), 1 right (X-ray), 2 down (thermal), 3 left (scan)
 };
 VrPadState GetVrPadState() noexcept;
 

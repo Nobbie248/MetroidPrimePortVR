@@ -6,17 +6,21 @@
 #include "vr/openxr_integration.h"
 #include "vr/openxr_screen_math.h"
 #include "vr/vr_settings.h"
+#include "vr/vr_visor_dpad.h"
 
 #include "MetroidPrime/CStateManager.hpp"
 #include "MetroidPrime/Cameras/CCameraManager.hpp"
 #include "MetroidPrime/Player/CPlayer.hpp"
 #include "MetroidPrime/Player/CPlayerState.hpp"
+#include "MetroidPrime/ScriptObjects/CScriptGrapplePoint.hpp"
+#include "MetroidPrime/TCastTo.hpp"
 
 #include <dolphin/pad.h>
 
 #include <algorithm>
 #include <array>
 #include <atomic>
+#include <chrono>
 #include <cmath>
 #include <cstring>
 #include <mutex>
@@ -61,6 +65,7 @@ struct WheelState {
 std::mutex g_mutex;
 VrPadState g_state;
 WheelState g_wheel;
+VisorDpad::Tracker g_visor;
 bool g_was_active = false;
 bool g_recenter_was_pressed = false; // the right stick click's last state
 bool g_was_gameplay = false;
@@ -132,6 +137,41 @@ int8_t ToStick(float value) noexcept {
 }
 
 bool Pressed(float value) noexcept { return value > 0.5f; }
+
+double NowSeconds() noexcept {
+    using namespace std::chrono;
+    return duration< double >(steady_clock::now().time_since_epoch()).count();
+}
+
+// The guard at the top of CPlayer::UpdateVisorState: a visor press counts only
+// unmorphed, out of a grapple and a grapple point lock, between transitions and
+// outside a scan. Anything else the game drops.
+bool VisorPressAccepted(const CStateManager& mgr, const CPlayer& player) {
+    if (player.GetOrbitState() == CPlayer::kOS_Grapple ||
+        TCastToConstPtr< CScriptGrapplePoint >(mgr.GetObjectById(player.GetOrbitTargetId()))) {
+        return false;
+    }
+    return player.GetMorphballTransitionState() == CPlayer::kMS_Unmorphed &&
+           !mgr.GetPlayerState()->GetIsVisorTransitioning() &&
+           player.GetPlayerScanState() == CPlayer::kSS_NotScanning;
+}
+
+// The game's control map gives the visors to the D-pad (up combat, right
+// X-ray, down thermal, left scan on the retail disc).
+uint16_t DpadButton(VisorDpad::Dir dir) noexcept {
+    switch (dir) {
+    case VisorDpad::Dir::Up:
+        return PAD_BUTTON_UP;
+    case VisorDpad::Dir::Right:
+        return PAD_BUTTON_RIGHT;
+    case VisorDpad::Dir::Down:
+        return PAD_BUTTON_DOWN;
+    case VisorDpad::Dir::Left:
+        return PAD_BUTTON_LEFT;
+    default:
+        return 0;
+    }
+}
 
 // A grip "press" per PrimedGun: the squeeze past half travel, or on a Valve
 // Index the grip force / trackpad force against the configured thresholds.
@@ -355,6 +395,7 @@ void VrPadUpdate(const CStateManager* mgr) noexcept {
         std::lock_guard lock(g_mutex);
         g_state = {};
         g_wheel = {};
+        g_visor.Reset();
         g_gameplay_samples = 0;
         return;
     }
@@ -367,19 +408,11 @@ void VrPadUpdate(const CStateManager* mgr) noexcept {
         g_owns_motor.store(true, std::memory_order_relaxed);
     }
     g_was_active = true;
-    // PrimedGun's one-click height set: the right stick click recenters the
-    // immersive origin on where the head is now (position only, no yaw).
-    {
-        const bool pressed = snapshot.controllers[1].connected && snapshot.controllers[1].thumbstick_click;
-        if (pressed && !g_recenter_was_pressed) {
-            OpenXRRequestRecenter();
-        }
-        g_recenter_was_pressed = pressed;
-    }
 
     // The mapping, from the game's own state.
     bool gameplay = false;
     bool orbit = false;
+    bool visor_press_accepted = false;
     if (mgr != nullptr && mgr->GetPlayer() != nullptr) {
         const CPlayer* player = mgr->GetPlayer();
         const bool first_person = player->GetCameraState() == CPlayer::kCS_FirstPerson;
@@ -390,6 +423,7 @@ void VrPadUpdate(const CStateManager* mgr) noexcept {
             const CPlayer::EPlayerOrbitState state = player->GetOrbitState();
             orbit = state == CPlayer::kOS_OrbitObject || state == CPlayer::kOS_ForcedOrbitObject ||
                     state == CPlayer::kOS_OrbitPoint || state == CPlayer::kOS_OrbitCarcass;
+            visor_press_accepted = VisorPressAccepted(*mgr, *player);
         }
     }
     if (gameplay && !g_was_gameplay) {
@@ -402,9 +436,46 @@ void VrPadUpdate(const CStateManager* mgr) noexcept {
     const bool grips_ready = g_gameplay_samples >= kGripGraceSamples;
 
     const uint32_t weapon_hand = settings.use_right_hand ? 1u : 0u;
-    const OpenXRControllerState& left = snapshot.controllers[0];
-    const OpenXRControllerState& right = snapshot.controllers[1];
+    const uint32_t visor_hand = weapon_hand == 1 ? 0u : 1u; // PrimedGun's D-pad hand: the off hand
+    OpenXRControllerState left = snapshot.controllers[0];
+    OpenXRControllerState right = snapshot.controllers[1];
     const OpenXRControllerState& weapon = snapshot.controllers[weapon_hand];
+
+    // The visor gesture, in gameplay only (PrimedGun: first person, unmorphed).
+    VisorDpad::Output visor;
+    {
+        const OpenXRControllerState& hand = snapshot.controllers[visor_hand];
+        VisorDpad::Input in;
+        in.armed = settings.xr_dpad_enabled && gameplay && hand.connected && hand.aim_pose.valid &&
+                   snapshot.head_pose.valid;
+        in.near_head = in.armed && VisorDpad::HandNearHead(hand.aim_pose.position, snapshot.head_pose.position,
+                                                           settings.xr_dpad_head_radius,
+                                                           settings.xr_dpad_head_y_below);
+        in.stick_x = hand.thumbstick_x;
+        in.stick_y = hand.thumbstick_y;
+        in.deadzone = VisorDpad::EffectiveDeadzone(settings.xr_dpad_deadzone);
+        in.accepting = visor_press_accepted;
+        in.now = NowSeconds();
+        visor = g_visor.Update(in);
+    }
+    // While the hand is at the head its stick is the D-pad's alone: no walking,
+    // strafing, turning or jumping from it.
+    if (visor.zone) {
+        OpenXRControllerState& hand = visor_hand == 0 ? left : right;
+        hand.thumbstick_x = 0.0f;
+        hand.thumbstick_y = 0.0f;
+    }
+
+    // PrimedGun's one-click height set: the right stick click recenters the
+    // immersive origin on where the head is now (position only, no yaw).
+    // PrimedGun ignores it while the visor gesture is up.
+    {
+        const bool pressed = right.connected && right.thumbstick_click && !visor.zone;
+        if (pressed && !g_recenter_was_pressed) {
+            OpenXRRequestRecenter();
+        }
+        g_recenter_was_pressed = pressed;
+    }
 
     PADStatus pad{};
     pad.err = PAD_ERR_NONE;
@@ -416,6 +487,7 @@ void VrPadUpdate(const CStateManager* mgr) noexcept {
     // The beam wheel owns the weapon hand's B while it is held; the orbit lock
     // keeps its L (the game does the locking) and the pad's C-stick is free.
     UpdateWeaponWheel(weapon, gameplay && weapon.secondary, gameplay, pad);
+    pad.button |= DpadButton(visor.held);
     PADSetVirtualStatus(0, &pad);
 
     std::lock_guard lock(g_mutex);
@@ -425,6 +497,8 @@ void VrPadUpdate(const CStateManager* mgr) noexcept {
     g_state.weapon_panel = g_wheel.open;
     g_state.weapon_selected = static_cast<int>(g_wheel.selected);
     g_state.weapon_hand = weapon_hand;
+    g_state.visor_zone = visor.zone;
+    g_state.visor_direction = static_cast<int>(visor.direction);
 }
 
 VrPadState GetVrPadState() noexcept {

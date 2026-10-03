@@ -4,6 +4,7 @@
 
 #include "vr/openxr_integration.h"
 #include "vr/prime_vr_policy.h"
+#include "vr/vr_pad.h"
 #include "vr/vr_settings.h"
 
 #include <imgui.h>
@@ -30,6 +31,21 @@ bool SliderMetres(const char* label, float& value, float limit) {
 
 bool SliderDegrees(const char* label, float& value, float limit) {
   return ImGui::SliderFloat(label, &value, -limit, limit, "%.1f deg");
+}
+
+const char* VisorDirectionName(int direction) {
+  switch (direction) {
+  case 0:
+    return "up (combat)";
+  case 1:
+    return "right (X-ray)";
+  case 2:
+    return "down (thermal)";
+  case 3:
+    return "left (scan)";
+  default:
+    return "centred";
+  }
 }
 
 } // namespace
@@ -116,6 +132,19 @@ void DrawVrDebugTab() {
   changed |= ImGui::SliderFloat("Rumble intensity", &s.rumble_intensity, 0.f, 1.f, "%.2f");
   changed |= ImGui::Checkbox("Grip inputs", &s.grip_inputs_enabled);
   changed |= ImGui::Checkbox("Jump with the primary button", &s.combat_jump_use_primary_button);
+
+  ImGui::SeparatorText("Visor gesture");
+  changed |= ImGui::Checkbox("Pick visors with the off hand next to the head", &s.xr_dpad_enabled);
+  ImGui::TextWrapped("Hold the off-hand controller beside the headset and push its stick: up combat, left scan, "
+                     "down thermal, right X-ray. Meanwhile that stick does not move Samus.");
+  changed |= ImGui::SliderFloat("Head zone radius", &s.xr_dpad_head_radius, 0.05f, 0.6f, "%.2f m");
+  changed |= ImGui::SliderFloat("Head zone below", &s.xr_dpad_head_y_below, 0.0f, 0.6f, "%.2f m");
+  changed |= ImGui::SliderFloat("Gesture stick deadzone", &s.xr_dpad_deadzone, 0.05f, 0.95f, "%.2f");
+  ImGui::TextWrapped("The zone reaches 6 cm past the radius, down to 4 cm past the 'below' distance and 28 cm "
+                     "above the head; the deadzone counts up to 0.25 (all as in PrimedGun).");
+  const VrPadState pad = GetVrPadState();
+  ImGui::Text("Off hand: %s   stick: %s", pad.visor_zone ? "at the head" : "away",
+              pad.visor_zone ? VisorDirectionName(pad.visor_direction) : "-");
 
   ImGui::SeparatorText("Virtual screen (menus, cinematics)");
   changed |= ImGui::SliderFloat("Screen distance", &s.screen_distance_meters, 0.5f, 5.f, "%.2f m");

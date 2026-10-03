@@ -1,6 +1,9 @@
 #include "MetroidPrime/Cameras/CCameraManager.hpp"
 
 #include "port_debug.h"
+#ifdef TARGET_PC
+#include "vr/vr_view.h"
+#endif
 
 #include "Kyoto/Math/CQuaternion.hpp"
 #include "Kyoto/Math/CRelAngle.hpp"
@@ -235,6 +238,10 @@ void CCameraManager::SetCurrentCameraId(TUniqueId uid) { x0_curCameraId = uid; }
 
 void CCameraManager::UpdateAudioListener(CStateManager& mgr) {
   CTransform4f xf = GetCurrentCameraTransform(mgr);
+#ifdef TARGET_PC
+  // PortVr: directional audio follows the head, not the body.
+  xf = PortVr::VrHeadFacingTransform(xf);
+#endif
 
   CSfxManager::UpdateListener(xf.GetTranslation(), CVector3f::Zero(), xf.GetColumn(kDY),
                               xf.GetColumn(kDZ), CAudioSys::kMaxVolume);

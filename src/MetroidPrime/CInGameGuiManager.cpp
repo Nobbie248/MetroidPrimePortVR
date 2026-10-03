@@ -29,6 +29,9 @@
 #include "MetroidPrime/TCastTo.hpp"
 #include "MetroidPrime/Tweaks/CTweakAutoMapper.hpp"
 #include "dolphin/gx.h"
+#ifdef TARGET_PC
+#include "aurora/gfx.h"
+#endif
 #include "float.h"
 #include "limits.h"
 
@@ -304,6 +307,12 @@ void CInGameGuiManager::Draw(const CStateManager& mgr) const {
   }
   if (x3c_pauseScreenBlur->IsGameDraw()) {
     x34_samusHud->GetTargetingManager().Draw(mgr, true);
+#ifdef TARGET_PC
+    // PortVr: the visor, helmet and HUD are drawn in the GUI camera's own space,
+    // so the headset keeps them in front of the head. The reticle above stays in
+    // the world (CSamusHud::Draw routes its own reticle draw the same way).
+    AuroraSetStereoDrawRoute(AURORA_STEREO_ROUTE_HEAD_LOCKED);
+#endif
     CGraphics::SetDepthRange(1.f / 64.f, 1.f / 32.f);
     const bool scanVisor = mgr.GetPlayerState()->GetActiveVisor(mgr) == CPlayerState::kPV_Scan;
     if (drawVisor && x1f0_enablePlayerVisor != 0) {
@@ -331,6 +340,9 @@ void CInGameGuiManager::Draw(const CStateManager& mgr) const {
       x34_samusHud->Draw(mgr, x1f4_visorStaticAlpha * (1.f - staticAlpha), x1e0_helmetVisMode,
                          hudVis, targeting && !scanVisor);
     }
+#ifdef TARGET_PC
+    AuroraSetStereoDrawRoute(AURORA_STEREO_ROUTE_WORLD);
+#endif
   }
 
   const bool preDrawBlur =

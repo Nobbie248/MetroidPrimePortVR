@@ -19,6 +19,7 @@
 #include "port_textures.h"
 #include "port_prompts.h"
 #include "port_build_info.h"
+#include "crash_handler.h"
 #include "port_log.h"
 #include "port_mods.h"
 #include "port_room_geo.h"
@@ -49,6 +50,10 @@
 
 extern "C" int metroid_main(int argc, char** argv);
 extern "C" void AIPortShutdown(void);
+
+// PortVr: the OpenXR host layer (platform/vr).
+#include "vr/openxr_integration.h"
+#include "vr/vr_settings.h"
 
 namespace {
 #if defined(__ANDROID__)
@@ -414,6 +419,8 @@ const char* DefaultTexturesPath() {
 } // namespace
 
 int main(int argc, char** argv) {
+    // A symbolised stack and a minidump for any crash, before anything else runs.
+    PortInstallCrashHandler();
     if (argc == 2 && std::strcmp(argv[1], "--version") == 0) {
         std::printf("Metroid Prime native port %s\n", MP_BUILD_REVISION);
         return 0;
@@ -525,6 +532,15 @@ int main(int argc, char** argv) {
     config.msaa = static_cast<uint32_t>(PortDebug::Msaa());
     config.maxTextureAnisotropy = static_cast<uint16_t>(PortDebug::Anisotropy());
 
+#if defined(_WIN32)
+    // SDL's Windows joystick thread held the joystick lock while the game
+    // thread sat in SDL_GetGamepadPlayerIndex (PADRead) during an elevator's
+    // world load, and the game froze for good with a GameCube adapter and a
+    // headset's controllers attached. Polling the joysticks from the game
+    // thread's event pump instead never contends with it.
+    SDL_SetHint(SDL_HINT_JOYSTICK_THREAD, "0");
+#endif
+
 #if defined(__ANDROID__)
     // SDL3 drops touch-derived mouse events by default, and ImGui's SDL3
     // backend only understands mouse events. The touch overlay in Java claims
@@ -563,7 +579,18 @@ int main(int argc, char** argv) {
                        stderr);
         }
     }
-    aurora_initialize(argc, argv, &config);
+    // PortVr: the OpenXR instance and the adapter it wants come before Aurora
+    // picks a device, so the eyes are copied on the compositor's own GPU.
+    PortVr::ApplyVrEnvironmentOverrides();
+    PortVr::PushVrSettingsToAurora();
+    const PortVr::OpenXRStartupResult vrStartup = PortVr::OpenXRPrepareAurora(config);
+    if (vrStartup == PortVr::OpenXRStartupResult::Unavailable) {
+        PortLog::Write("port: OpenXR unavailable: %s\n", PortVr::OpenXRLastError().c_str());
+        if (PortVr::GetVrSettings().required) {
+            return 1;
+        }
+    }
+    const AuroraInfo auroraInfo = aurora_initialize(argc, argv, &config);
     // From what the device gave, which can be less than was asked for.
     if (aurora_get_frame_buffer_scale() != frameBufferScale) {
         PortLog::Write("port: frame buffers at %ux, all this device allows\n", aurora_get_frame_buffer_scale());
@@ -673,6 +700,22 @@ int main(int argc, char** argv) {
     // succeed (the game submits GX during early init, before its main loop).
     aurora_update();
 
+    // PortVr: the session, the eye swapchains and the pacing thread, while
+    // Aurora's frame worker is still idle. A failure falls back to the desktop
+    // unless the settings require the headset.
+    if (vrStartup == PortVr::OpenXRStartupResult::Prepared) {
+        if (PortVr::OpenXRStartAfterAurora(auroraInfo.backend)) {
+            PortLog::Write("port: OpenXR session started\n");
+        } else {
+            PortLog::Write("port: OpenXR did not start: %s\n", PortVr::OpenXRLastError().c_str());
+            if (PortVr::GetVrSettings().required) {
+                aurora_dvd_close();
+                aurora_shutdown();
+                return 1;
+            }
+        }
+    }
+
     int result = 1;
     try {
         result = metroid_main(argc, argv);
@@ -680,6 +723,9 @@ int main(int argc, char** argv) {
         PortLog::Write( "metroid_prime_port: %s\n", error.what());
     }
 
+    // PortVr: stop publishing stereo work and destroy the session before
+    // Aurora's device goes.
+    PortVr::OpenXRShutdownBeforeAurora();
     AIPortShutdown();
 #if !defined(__ANDROID__)
     // An import still running reads the disc.

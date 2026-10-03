@@ -121,6 +121,10 @@ void populate_pipeline_config(PipelineConfig& config, GXPrimitive primitive, GXV
 GXBindGroups build_bind_groups(const ShaderInfo& info) noexcept { return {}; }
 ShaderInfo build_shader_info(const ShaderConfig& config) noexcept { return {}; }
 gfx::Range build_uniform(const ShaderInfo& info) noexcept { return {.size = 1}; }
+gfx::Range build_uniform(const ShaderInfo& info, std::array<uint32_t, 2>& stereoUniformOffsets) noexcept {
+  stereoUniformOffsets = {UINT32_MAX, UINT32_MAX};
+  return {.size = 1};
+}
 void resolve_sampled_textures(const ShaderInfo& info) noexcept {}
 } // namespace aurora::gx
 

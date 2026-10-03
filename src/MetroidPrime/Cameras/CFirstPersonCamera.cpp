@@ -1,6 +1,9 @@
 #include "MetroidPrime/Cameras/CFirstPersonCamera.hpp"
 
 #include "port_debug.h"
+#ifdef TARGET_PC
+#include "vr/vr_view.h"
+#endif
 
 #include "MetroidPrime/CStateManager.hpp"
 #include "MetroidPrime/Cameras/CCameraManager.hpp"
@@ -177,6 +180,17 @@ void CFirstPersonCamera::UpdateTransform(CStateManager& mgr, float dt) {
     break;
   }
 
+#ifdef TARGET_PC
+  if (PortVr::VrFlattenLookPitch()) {
+    // PortVr: the headset supplies the pitch; the game camera keeps the yaw of
+    // whatever the look logic chose (free look, lock-on, pitch volumes).
+    lookDir[kDZ] = 0.f;
+    if (!lookDir.CanBeNormalized()) {
+      lookDir = playerXf.GetForward();
+      lookDir[kDZ] = 0.f;
+    }
+  }
+#endif
   if (lookDir.CanBeNormalized()) {
     lookDir.Normalize();
   }
@@ -340,11 +354,16 @@ void CFirstPersonCamera::UpdateTransform(CStateManager& mgr, float dt) {
 
   CPlayerCameraBob* bob = player->CameraBobObject();
   CTransform4f bobXf = bob->GetCameraBobTransformation();
+#ifdef TARGET_PC
+  const bool portVrNoBob = PortVr::VrNoCameraBob();
+#else
+  const bool portVrNoBob = false;
+#endif
   if (player->GetMorphballTransitionState() == CPlayer::kMS_Morphed ||
       player->GetOrbitState() == CPlayer::kOS_Grapple ||
       player->GetGrappleState() != CPlayer::kGS_None ||
       mgr.GetGameState() == CStateManager::kGS_SoftPaused ||
-      mgr.GetCameraManager()->IsInCinematicCamera() || x1d4_closeInTimer > 0.f) {
+      mgr.GetCameraManager()->IsInCinematicCamera() || x1d4_closeInTimer > 0.f || portVrNoBob) {
     bobXf = CTransform4f::Identity();
     bob->SetCameraBobTransform(bobXf);
   }

@@ -18,6 +18,9 @@ public:
   static void CreateFuncLookup(CAiFuncMap* funcMap);
   static const CAiStateFunc GetStateFunc(const char* func);
   static const CAiTriggerFunc GetTriggerFunc(const char* func);
+#ifdef TARGET_PC
+  static void VerifyFuncMap(const char* when);
+#endif
 
   CStateMachine* GetStateMachine();
   CAi(TUniqueId, bool, const rstl::string&, const CEntityInfo&, const CTransform4f&,

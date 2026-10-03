@@ -13,6 +13,10 @@
 #include "port_disc.h"
 #include "port_textures.h"
 #include "port_prompts.h"
+// PortVr: the headset paces the loop and reads the game mode from here.
+#include "vr/openxr_integration.h"
+#include "vr/prime_vr_policy.h"
+#include "vr/vr_pad.h"
 
 #include "stdint.h"
 #include "stdio.h"
@@ -66,6 +70,7 @@ extern bool PortSmokeFrame(unsigned frame);
 #include "MetroidPrime/CAudioStateWin.hpp"
 #include "MetroidPrime/CConsoleOutputWindow.hpp"
 #include "MetroidPrime/Cameras/CCameraManager.hpp"
+#include "MetroidPrime/CStateManager.hpp"
 #include "MetroidPrime/CDecalManager.hpp"
 #include "MetroidPrime/CEnvFxManager.hpp"
 #include "MetroidPrime/CErrorOutputWindow.hpp"
@@ -804,6 +809,11 @@ bool CMain::CheckReset() {
   return false;
 }
 
+// PortVr: whether the last presented frame drew the world (the policy's game
+// mode), and the headset's latest frame request, which the loop draws for.
+static bool sVrLastGameFrameDrawn = false;
+static PortVr::OpenXRFrameRequest sVrFrameRequest;
+
 int CMain::RsMain(int argc, const char* const* argv) {
   PPCSetFpIEEEMode();
   CStopwatch timer;
@@ -961,6 +971,9 @@ int CMain::RsMain(int argc, const char* const* argv) {
       // Port: apply the selected aspect ratio; no-op unless it changed (e.g. the
       // debug overlay's aspect combo).
       ApplyAspectMode();
+      // PortVr: the headset controllers the pacing thread last published, as a
+      // gamepad (Gamepad controller mode) where the game polls controllers.
+      PortVr::OpenXRApplyControllerState();
       // Port: feed the pad into ImGui's gamepad navigation (and toggle the
       // overlay with Back/Select) before the frame is built.
       PortDebug::UpdateControllerNav();
@@ -982,6 +995,9 @@ int CMain::RsMain(int argc, const char* const* argv) {
       }
       CARAMManager::CollectGarbage();
       CARAMToken::UpdateAllDMAs();
+      // PortVr: PrimedGun's control scheme on port 0, from the headset
+      // controllers, before the ticks read the pads.
+      PortVr::VrPadUpdate(PortDebug::StateManager());
       if (!archSupport->UpdateTicks()) {
         x160_24_finished = true;
       }
@@ -1006,16 +1022,39 @@ int CMain::RsMain(int argc, const char* const* argv) {
       // the bottleneck, and a big area's first load took 20 s and more.
       const double beginSceneStart = archSupport->GetStopwatch2().GetElapsedTime();
       const uint64_t tickDoneNs = SDL_GetTicksNS();
+      // PortVr: what the headset may show this frame. The world counts as "in
+      // game" when the previous presented frame drew it; anything else (front
+      // end, attract, transitions) is shown on the virtual screen.
+      PortVr::VRGameMode vrGameMode =
+          sVrLastGameFrameDrawn ? PortVr::VRGameMode::InGame : PortVr::VRGameMode::FrontEnd;
+      if (sVrLastGameFrameDrawn) {
+        if (const CStateManager* vrMgr = PortDebug::StateManager()) {
+          if (vrMgr->GetCameraManager() != nullptr &&
+              vrMgr->GetCameraManager()->IsInCinematicCamera()) {
+            vrGameMode = PortVr::VRGameMode::Cinematic;
+          } else if (vrMgr->GetInMapScreen() ||
+                     vrMgr->GetGameState() == CStateManager::kGS_Paused) {
+            vrGameMode = PortVr::VRGameMode::Paused;
+          }
+        }
+      }
+      PortVr::PrimeVRPolicyPublishGameMode(vrGameMode,
+                                           static_cast< uint64_t >(archSupport->GetFramesDrawn()));
       if (!x160_26_screenFading && gpRender->BeginScene()) {
         const double beginSceneWait =
             archSupport->GetStopwatch2().GetElapsedTime() - beginSceneStart;
+        // PortVr: a pacing-thread teardown is serviced here, between Aurora's
+        // begin and the seal of this frame.
+        PortVr::OpenXRServiceProducerFrameBoundary();
         // Port: Aurora frames are bracketed inside CGraphics::Begin/EndScene.
         float interpolation = archSupport->GetTickInterpolation();
         if (interpolation < 0.f)
           interpolation = 0.f;
         else if (interpolation > 1.f)
           interpolation = 1.f;
-        if (PortDebug::FrameLimitEnabled())
+        // The headset draws at its own rate, so the 60 FPS limiter never
+        // disables interpolation while it paces the loop.
+        if (PortDebug::FrameLimitEnabled() && !PortVr::OpenXRIsRunning())
           interpolation = -1.f;
         PortDebug::PresentOverride(interpolation);
         CCameraManager::SetPresentationInterpolation(interpolation);
@@ -1038,6 +1077,7 @@ int CMain::RsMain(int argc, const char* const* argv) {
         gpRender->EndScene();
         presented = true;
 
+        sVrLastGameFrameDrawn = x161_24_gameFrameDrawn;
         if (x161_24_gameFrameDrawn) {
           ++archSupport->GetFramesDrawn();
           x161_24_gameFrameDrawn = false;
@@ -1092,7 +1132,13 @@ int CMain::RsMain(int argc, const char* const* argv) {
       // two could never be told apart - which is the only thing worth reporting
       // when a frame overruns its budget.
       const uint64_t workEndNs = SDL_GetTicksNS();
-      if (PortDebug::FrameLimitEnabled() && !PortDebug::Turbo()) {
+      if (PortVr::OpenXRIsRunning()) {
+        // PortVr: the headset paces the loop. The pacing thread publishes one
+        // request per packet it hands Aurora; the loop draws once per request.
+        // A timeout (session idle, headset off) keeps the loop turning.
+        PortVr::OpenXRWaitForFrameRequest(sVrFrameRequest, 10);
+        nextFrameDeadline = SDL_GetTicksNS();
+      } else if (PortDebug::FrameLimitEnabled() && !PortDebug::Turbo()) {
         nextFrameDeadline += framePeriodNs;
         const uint64_t now = SDL_GetTicksNS();
         if (nextFrameDeadline > now) {

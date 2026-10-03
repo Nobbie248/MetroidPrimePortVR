@@ -4,6 +4,7 @@
 #include <aurora/aurora.h>
 
 #include "port_debug.h"
+#include "vr/prime_vr_policy.h"
 
 // Tracks whether an Aurora frame is currently open. GXInit (CGraphics::Startup)
 // submits register writes the Aurora worker processes, so a frame must be open
@@ -11,7 +12,7 @@
 namespace {
 bool s_auroraFrameOpen = false;
 bool AuroraFrameBegin() {
-  if (!s_auroraFrameOpen && aurora_begin_frame()) {
+  if (!s_auroraFrameOpen && aurora_begin_frame_tagged(PortVr::PrimeVRPolicyContentTag())) {
     // Only mark open when Aurora actually begins a frame; otherwise a later
     // end_frame would desynchronise its frame-slot accounting.
     s_auroraFrameOpen = true;
@@ -20,7 +21,9 @@ bool AuroraFrameBegin() {
 }
 void AuroraFrameEnd() {
   if (s_auroraFrameOpen) {
-    aurora_end_frame();
+    // PortVr: the frame is sealed with the presentation policy's safety tag, so
+    // the headset only ever replays a stereo packet built for this content.
+    aurora_end_frame_tagged(PortVr::PrimeVRPolicyContentTag());
     s_auroraFrameOpen = false;
   }
 }

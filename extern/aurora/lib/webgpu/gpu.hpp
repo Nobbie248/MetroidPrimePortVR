@@ -68,6 +68,8 @@ void resize_swapchain(uint32_t width, uint32_t height, uint32_t nativeWidth, uin
 // Changes MSAA (1 or 4) and the anisotropy that GX_ANISO_4 maps to. Call between frames with a live surface.
 void set_quality(uint32_t msaaSamples, uint16_t anisotropy);
 TextureWithSampler create_render_texture(uint32_t width, uint32_t height, bool multisampled);
+// A depth attachment in the configured depth format and MSAA sample count.
+TextureWithSampler create_depth_texture(uint32_t width, uint32_t height);
 const TextureWithSampler& present_source() noexcept;
 wgpu::BindGroup create_copy_bind_group(const TextureWithSampler& source);
 void set_resampler(AuroraSampler sampler) noexcept;

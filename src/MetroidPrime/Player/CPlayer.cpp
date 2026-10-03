@@ -1,6 +1,9 @@
 #include "MetroidPrime/Player/CPlayer.hpp"
 
 #include "port_debug.h"
+#ifdef TARGET_PC
+#include "vr/vr_view.h"
+#endif
 
 #include "Collision/CInternalCollisionStructure.hpp"
 #include "Kyoto/CDependencyGroup.hpp"
@@ -736,6 +739,11 @@ void CPlayer::UpdateGunTransform(const CVector3f& gunPos, CStateManager& mgr) {
     break;
   }
 
+#ifdef TARGET_PC
+  // PortVr: the arm cannon follows the tracked controller (6DOF), holster lift
+  // included; the aim prediction and assist below then work from that pose.
+  PortVr::VrCannonTransform(mgr, *this, camXf, gunXf);
+#endif
   x490_gun->SetTransform(gunXf);
   CTransform4f out = gunXf;
   UpdateAimTargetPrediction(out, mgr);

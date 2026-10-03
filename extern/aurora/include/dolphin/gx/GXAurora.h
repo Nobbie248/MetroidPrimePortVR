@@ -179,6 +179,12 @@ extern "C" {
 
 #define GX2_SET_POLYGON_OFFSET 0x1000
 
+/**
+ * Stereo replay draw route for the draws that follow (AuroraStereoDrawRoute in aurora/gfx.h).
+ * Must be followed by one u8.
+ */
+#define GX_AURORA_STEREO_DRAW_ROUTE 0x0050
+
 
 /*
  * Debug marker stuff
@@ -227,6 +233,12 @@ void AuroraGXSync(void);
  * Overrides the automatically scaled values set by the logical GXSetViewport.
  */
 void GXSetViewportRender(f32 left, f32 top, f32 wd, f32 ht, f32 nearz, f32 farz);
+
+/**
+ * Routes the GX draws that follow through the stereo replay (an AuroraStereoDrawRoute). Ordered with the
+ * draws through the FIFO; resets to AURORA_STEREO_ROUTE_WORLD at every frame begin.
+ */
+void AuroraSetStereoDrawRoute(u32 route);
 
 /**
  * Sets the actual render scissor in native framebuffer coordinates.

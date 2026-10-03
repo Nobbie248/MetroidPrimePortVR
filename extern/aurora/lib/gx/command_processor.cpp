@@ -138,6 +138,7 @@ struct DrawCache {
   u8 lineMode = 0;
   bool hasPipeline = false;
   gfx::Range uniformRange{};
+  std::array<uint32_t, 2> stereoUniformOffsets{UINT32_MAX, UINT32_MAX};
   gfx::Range fogRange{};
   FogRangeLutKey fogRangeKey{};
   bool hasFogRange = false;
@@ -433,7 +434,7 @@ static void push_gx_draw(GXPrimitive prim, GXVtxFmt fmt, u16 vtxCount, gfx::Rang
 
   const bool uniformValid = (state.dirty & DirtyUniform) == 0 && cache.uniformRange.size != 0;
   if (!uniformValid) {
-    cache.uniformRange = build_uniform(cache.shaderInfo);
+    cache.uniformRange = build_uniform(cache.shaderInfo, cache.stereoUniformOffsets);
     state.dirty &= ~DirtyUniform;
   }
   if (cache.config.shaderConfig.fogRangeEnabled) {
@@ -468,6 +469,7 @@ static void push_gx_draw(GXPrimitive prim, GXVtxFmt fmt, u16 vtxCount, gfx::Rang
       .instanceCount = instanceCount,
       .bindGroups = cache.bindGroups,
       .dstAlpha = state.dstAlpha,
+      .stereoUniformOffset = cache.stereoUniformOffsets,
   });
 }
 
@@ -589,6 +591,14 @@ void handle_aurora(ByteReader& reader) noexcept {
       g_gxState.xfRegValid.reset(reg);
     }
     g_gxState.dirty |= DirtyUniform;
+  } else if (subCmd == GX_AURORA_STEREO_DRAW_ROUTE) {
+    const u8 route = reader.read<u8>();
+    if (route != gfx::stereo_draw_route()) {
+      // The eye uniform copies depend on the route, and a draw under a new
+      // route must not merge into the previous one.
+      g_gxState.dirty |= DirtyUniform;
+      gfx::set_stereo_draw_route(route);
+    }
   } else if (subCmd >= GX_AURORA_LOAD_ARRAYBASE && subCmd <= (GX_AURORA_LOAD_ARRAYBASE | 0x0f)) {
     const u32 attrIdx = subCmd - GX_AURORA_LOAD_ARRAYBASE + GX_VA_POS;
     const u64 arrayAddr = reader.read<u64>();
@@ -884,6 +894,7 @@ void handle_aurora(ByteReader& reader) noexcept {
 void clear_draw_cache() noexcept {
   sDrawCache.bindGeneration = 0;
   sDrawCache.uniformRange = {};
+  sDrawCache.stereoUniformOffsets = {UINT32_MAX, UINT32_MAX};
   sDrawCache.fogRange = {};
   sDrawCache.hasFogRange = false;
 }

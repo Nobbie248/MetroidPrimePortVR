@@ -20,6 +20,8 @@
 #include "port_mouse.h"
 #include "port_textures.h"
 #include "port_build_info.h"
+#include "vr/vr_debug_tab.h"
+#include "vr/vr_settings.h"
 #if defined(__ANDROID__)
 #include "touch_pad.h"
 #endif
@@ -308,6 +310,10 @@ std::string DigitsOnly(const std::string& text) {
 void ApplyDiscord() { PortDiscord::Configure(sDiscord, sDiscordAppId); }
 
 void ApplySetting(const std::string& key, const std::string& value) {
+  // VR (PrimedGun) settings live in their own table (vr/vr_settings.cpp).
+  if (PortVr::ApplyVrSetting(key, value)) {
+    return;
+  }
   if (key == "frame_limit") {
     sFrameLimitEnabled = ParseBool(value);
   } else if (key == "vsync") {
@@ -589,6 +595,7 @@ void SaveSettings() {
     }
     file << '\n';
   }
+  PortVr::WriteVrSettings(file);
   file.flush();
   std::fprintf(stderr, "metroid_prime_port: saved settings to %s\n", path.c_str());
   sSettingsDirty = false;
@@ -2078,6 +2085,10 @@ void SaveSettingsNow() {
   EnsureInitialized();
   SaveSettings();
 }
+
+// A VR setting changed (vr/vr_settings.cpp): write the file on the next
+// occasion the overlay would, as for any of its own settings.
+void MarkVrSettingsDirty() { sSettingsDirty = true; }
 
 // The overlay is a full-screen panel with a page list instead of tabs, which
 // fits a touchscreen and reads better on the desktop too. The desktop can go
@@ -4028,6 +4039,7 @@ const DebugPage kDebugPages[] = {
     {"Extras", DrawExtrasTab},   {"Tracker", DrawTrackerTab},
     {"States", DrawSaveStatesTab}, {"Session", DrawSessionTab},
     {"Chat", DrawChatTab},       {"Debug", DrawDebugTab},
+    {"VR", PortVr::DrawVrDebugTab},
 };
 
 // The innermost window under the finger that can actually scroll vertically,

@@ -1,6 +1,7 @@
 #include "shader_info.hpp"
 
 #include "../gfx/recording.hpp"
+#include "../gfx/stereo_uniform.hpp"
 
 #include <cmath>
 
@@ -516,10 +517,22 @@ static void fill_uniform(ByteBuffer& buf, const ShaderInfo& info) noexcept {
 }
 
 gfx::Range build_uniform(const ShaderInfo& info) noexcept {
+  std::array<uint32_t, 2> unused{};
+  return build_uniform(info, unused);
+}
+
+gfx::Range build_uniform(const ShaderInfo& info, std::array<uint32_t, 2>& stereoUniformOffsets) noexcept {
   ZoneScoped;
   static ByteBuffer buf;
   buf.clear();
   fill_uniform(buf, info);
-  return gfx::push_uniform(buf.data(), buf.size());
+  const auto range = gfx::push_uniform(buf.data(), buf.size());
+  // The eye copies are composed from the CPU-side bytes while they are in hand:
+  // the staged uniform lives in write-mapped memory, which is slow to read back.
+  stereoUniformOffsets = gfx::stage_stereo_uniforms(
+      buf.data(), range,
+      gfx::StereoUniformLayout::for_gx(info.lineMode, info.lightingEnabled,
+                                       static_cast<uint32_t>(info.loadsTevReg.count()), range.size));
+  return range;
 }
 } // namespace aurora::gx

@@ -1,5 +1,10 @@
 #include "MetroidPrime/HUD/CSamusHud.hpp"
 
+#ifdef TARGET_PC
+#include "aurora/gfx.h"
+#include "dolphin/gx.h"
+#endif
+
 #include "Collision/CollisionUtil.hpp"
 #include "GuiSys/CGuiCamera.hpp"
 #include "GuiSys/CGuiFrame.hpp"
@@ -1567,7 +1572,14 @@ void CSamusHud::Draw(const CStateManager& mgr, float alpha, uint helmetVis, bool
     DrawAttachedEnemyEffect(mgr);
     x51c_camFilter2.Draw();
     if (targetingManager) {
+#ifdef TARGET_PC
+      // PortVr: the reticle sits on its target in the world, not on the helmet.
+      AuroraSetStereoDrawRoute(AURORA_STEREO_ROUTE_WORLD);
+#endif
       x8_targetingMgr.Draw(mgr, false);
+#ifdef TARGET_PC
+      AuroraSetStereoDrawRoute(AURORA_STEREO_ROUTE_HEAD_LOCKED);
+#endif
     }
   }
   CStopwatch timer;

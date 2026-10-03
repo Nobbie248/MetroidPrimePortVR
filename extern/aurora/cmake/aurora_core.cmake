@@ -70,7 +70,15 @@ if (AURORA_ENABLE_GX)
             lib/webgpu/gpu_prof.cpp
             lib/dawn/BackendBinding.cpp
             lib/dawn/TracyPlatform.cpp
+            lib/gfx/stereo_eyes.cpp
+            lib/stereo_host.cpp
+            lib/stereo_overlay.cpp
     )
+    if (CMAKE_SYSTEM_NAME STREQUAL Windows)
+        # The OpenXR D3D12 stereo bridge (zero-readback eye copies on Dawn's queue).
+        target_sources(aurora_core PRIVATE lib/webgpu/d3d12_interop.cpp)
+        target_link_libraries(aurora_core PRIVATE d3d12 dxgi)
+    endif ()
     if (CMAKE_CXX_COMPILER_FRONTEND_VARIANT STREQUAL "GNU")
         set_source_files_properties(lib/dawn/TracyPlatform.cpp PROPERTIES COMPILE_FLAGS -fno-rtti)
     endif ()

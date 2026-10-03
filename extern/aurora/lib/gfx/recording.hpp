@@ -1,8 +1,11 @@
 #pragma once
 
+#include "stereo_frame.hpp"
 #include "types.hpp"
 
+#include <array>
 #include <cstddef>
+#include <cstdint>
 #include <string>
 
 namespace aurora::gfx::detail {
@@ -107,4 +110,21 @@ void set_viewport(const Viewport& viewport) noexcept;
 void set_scissor(const ClipRect& scissor) noexcept;
 void push_debug_group(std::string label);
 void insert_debug_marker(std::string label);
+
+// --- stereo replay (stereo_frame.hpp) ---
+struct StereoUniformLayout;
+// The frame's stereo state: set right after begin_frame on the game thread,
+// read back before end_frame for the frame worker's hand-off.
+void set_frame_stereo(const StereoFrameState& state) noexcept;
+StereoFrameState recorded_stereo_state() noexcept;
+// The draw route the GX FIFO last set (AuroraStereoDrawRoute), applied to the
+// uniforms staged from now on. Resets to WORLD at frame begin.
+void set_stereo_draw_route(uint8_t route) noexcept;
+uint8_t stereo_draw_route() noexcept;
+// Stages the eye copies of the GX uniform just pushed at `monoRange` (whose
+// CPU-side bytes are `mono`) and returns the offsets the draw binds per eye:
+// the mono offset for a draw that is identical in both eyes, UINT32_MAX for
+// one that is left out of them.
+std::array<uint32_t, 2> stage_stereo_uniforms(const uint8_t* mono, Range monoRange,
+                                              const StereoUniformLayout& layout) noexcept;
 } // namespace aurora::gfx

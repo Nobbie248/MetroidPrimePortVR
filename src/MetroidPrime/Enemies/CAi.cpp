@@ -1,4 +1,9 @@
 #include "MetroidPrime/Enemies/CAi.hpp"
+
+#ifdef TARGET_PC
+#include "port_log.h"
+#include <cstring>
+#endif
 #include "Collision/CMaterialList.hpp"
 #include "Kyoto/Math/CMath.hpp"
 #include "MetroidPrime/CActorLights.hpp"
@@ -230,21 +235,151 @@ CAiFuncMap::CAiFuncMap() {
   rstl::sort_by_key(x0_states, cstr_less());
   rstl::sort_by_key(x10_triggers, cstr_less());
   CAi::CreateFuncLookup(this);
+#ifdef TARGET_PC
+  PortLog::Write("[ai] function map built: %d states at %p, %d triggers at %p, entry %zu bytes\n",
+                 x0_states.size(), static_cast< const void* >(&x0_states[0]), x10_triggers.size(),
+                 static_cast< const void* >(&x10_triggers[0]), sizeof(CAiStateFunc));
+  Verify("construction");
+#endif
 }
 
+#ifdef TARGET_PC
+namespace {
+// The index of `name` in a static name table by pointer identity (the map
+// stored exactly those pointers), so a corrupt key is never dereferenced.
+int StaticIndex(const char* const* names, int count, const char* name) {
+  for (int i = 0; i < count; ++i) {
+    if (names[i] == name) {
+      return i;
+    }
+  }
+  return -1;
+}
+
+void LogBytes(const char* label, const void* data, size_t size) {
+  char text[128];
+  size_t used = 0;
+  const unsigned char* bytes = static_cast< const unsigned char* >(data);
+  for (size_t i = 0; i < size && used + 3 < sizeof(text); ++i) {
+    used += static_cast< size_t >(snprintf(text + used, sizeof(text) - used, "%02x", bytes[i]));
+  }
+  PortLog::Write("[ai]   %s %s\n", label, text);
+}
+
+template < typename Entry, typename Func >
+int VerifyTable(const char* what, Entry* entries, int count, const char* const* names, const Func* funcs,
+                int staticCount, const char* when, bool& rebuild) {
+  int bad = 0;
+  for (int i = 0; i < count; ++i) {
+    const int k = StaticIndex(names, staticCount, entries[i].first);
+    if (k < 0) {
+      PortLog::Write("[ai] %s entry %d has a corrupt name pointer %p (%s)\n", what, i,
+                     static_cast< const void* >(entries[i].first), when);
+      rebuild = true;
+      ++bad;
+      continue;
+    }
+    if (memcmp(&entries[i].second, &funcs[k], sizeof(Func)) != 0) {
+      if (bad == 0) {
+        PortLog::Write("[ai] %s entry %d '%s' at %p differs from the static table (%s)\n", what, i, names[k],
+                       static_cast< const void* >(&entries[i]), when);
+        LogBytes("found   ", &entries[i].second, sizeof(Func));
+        LogBytes("expected", &funcs[k], sizeof(Func));
+      }
+      entries[i].second = funcs[k];
+      ++bad;
+    }
+  }
+  return bad;
+}
+} // namespace
+
+void CAiFuncMap::Verify(const char* when) const {
+  static int sReports = 0;
+  CAiFuncMap* self = const_cast< CAiFuncMap* >(this);
+  bool rebuild = false;
+  int bad = 0;
+  if (x0_states.size() != kStateCount || x10_triggers.size() != kTriggerCount) {
+    PortLog::Write("[ai] function map sizes are wrong: %d states, %d triggers (%s)\n", x0_states.size(),
+                   x10_triggers.size(), when);
+    rebuild = true;
+  } else {
+    bad += VerifyTable("state", &self->x0_states[0], x0_states.size(), gkStateNames, gkStateFuncs,
+                       kStateCount, when, rebuild);
+    bad += VerifyTable("trigger", &self->x10_triggers[0], x10_triggers.size(), gkTriggerNames,
+                       gkTriggerFuncs, kTriggerCount, when, rebuild);
+  }
+  if (rebuild) {
+    self->x0_states.clear();
+    self->x10_triggers.clear();
+    for (int i = 0; i < kStateCount; ++i) {
+      self->x0_states.push_back(rstl::pair< const char*, CAiStateFunc >(gkStateNames[i], gkStateFuncs[i]));
+    }
+    for (int i = 0; i < kTriggerCount; ++i) {
+      self->x10_triggers.push_back(
+          rstl::pair< const char*, CAiTriggerFunc >(gkTriggerNames[i], gkTriggerFuncs[i]));
+    }
+    rstl::sort_by_key(self->x0_states, cstr_less());
+    rstl::sort_by_key(self->x10_triggers, cstr_less());
+    PortLog::Write("[ai] function map rebuilt (%s)\n", when);
+  } else if (bad != 0 && sReports++ < 20) {
+    PortLog::Write("[ai] function map: %d entries restored (%s)\n", bad, when);
+  }
+}
+
+void CAi::VerifyFuncMap(const char* when) {
+  if (mFuncMap != nullptr) {
+    mFuncMap->Verify(when);
+  }
+}
+#endif
+
 const CAiStateFunc CAiFuncMap::GetStateFunc(const char* const state) const {
+#ifdef TARGET_PC
+  Verify("state lookup");
+#endif
   CAiStateFunc func = nullptr;
   rstl::vector< rstl::pair< const char*, CAiStateFunc > >::const_iterator it =
       rstl::find_by_key(x0_states, state, cstr_less());
   if (it != x0_states.end()) {
     func = it->second;
   }
+#ifdef TARGET_PC
+  else {
+    // Many AFSM states (RangeCheck, StuckCheck...) legitimately have no
+    // function and only triggers; mention each unknown name once.
+    static char sLogged[64][32];
+    static int sLoggedCount = 0;
+    bool seen = false;
+    for (int i = 0; i < sLoggedCount; ++i) {
+      if (strncmp(sLogged[i], state, 31) == 0) {
+        seen = true;
+        break;
+      }
+    }
+    if (!seen && sLoggedCount < 64) {
+      strncpy(sLogged[sLoggedCount], state, 31);
+      sLogged[sLoggedCount][31] = '\0';
+      ++sLoggedCount;
+      PortLog::Write("[ai] AI state '%s' has no function (triggers only)\n", state);
+    }
+  }
+#endif
   return func;
 }
 
 const CAiTriggerFunc CAiFuncMap::GetTriggerFunc(const char* trigger) const {
+#ifdef TARGET_PC
+  Verify("trigger lookup");
+#endif
   rstl::vector< rstl::pair< const char*, CAiTriggerFunc > >::const_iterator it =
       rstl::find_by_key(x10_triggers, trigger, cstr_less());
+#ifdef TARGET_PC
+  if (it == x10_triggers.end()) {
+    PortLog::Write("[ai] unknown AI trigger '%s'\n", trigger);
+    return nullptr;
+  }
+#endif
   return it->second;
 }
 CAi::CAi(TUniqueId uid, bool active, const rstl::string& name, const CEntityInfo& entityInfo,

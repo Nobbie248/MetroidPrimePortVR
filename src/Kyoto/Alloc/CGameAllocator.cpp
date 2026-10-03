@@ -324,10 +324,22 @@ uint CGameAllocator::FixupAllocPtrs(SGameMemInfo* info, const uint len, uint rou
   const bool topOfHeap = (hint & kHI_TopOfHeap) != 0;
   uint ret = 0;
   const size_t blockLength = info->x4_len;
+#ifdef TARGET_PC
+  // Port: requests round up to 32 bytes but the block header is 64 bytes here
+  // (32 on the GameCube, where a remainder was therefore always either one
+  // whole header, absorbed below, or enough for a block). A free block 32
+  // bytes larger than the request would be split into a block of -32 bytes,
+  // which corrupts the chain. Absorb any remainder too small for a header.
+  if (blockLength != roundedLen && blockLength < roundedLen + sizeof(SGameMemInfo) + 32) {
+    ret = static_cast< uint >(blockLength - roundedLen);
+    roundedLen = static_cast< uint >(blockLength);
+  }
+#else
   if (blockLength == roundedLen + sizeof(SGameMemInfo)) {
     ret = sizeof(SGameMemInfo);
     roundedLen += sizeof(SGameMemInfo);
   }
+#endif
 
   SGameMemInfo* newPtr = info;
   if (blockLength != roundedLen) {

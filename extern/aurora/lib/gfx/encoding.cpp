@@ -4,6 +4,7 @@
 
 #include "clear.hpp"
 #include "depth_peek.hpp"
+#include "draw_payload.hpp"
 #include "pipeline_cache.hpp"
 #include "probe.hpp"
 #include "tex_copy_conv.hpp"
@@ -18,6 +19,7 @@
 
 #include <algorithm>
 #include <array>
+#include <cmath>
 #include <cstdint>
 #include <cstring>
 #include <string>
@@ -47,6 +49,119 @@ void apply_scissor(const wgpu::RenderPassEncoder& pass, const ClipRect& sc, cons
   const auto w = std::clamp(static_cast<uint32_t>(sc.width), 0u, size.width - x);
   const auto h = std::clamp(static_cast<uint32_t>(sc.height), 0u, size.height - y);
   pass.SetScissorRect(x, y, w, h);
+}
+
+// --- stereo eye passes (stereo_frame.hpp) ---
+
+// The recorded commands of an EFB pass re-issued into one eye target. GX draws
+// bind their eye uniform (gx::render_eye), clear draws cover the eye, viewports
+// and scissors scale from the EFB to the eye, and everything else is mono-only.
+void render_stereo_eye_pass_commands(const wgpu::RenderPassEncoder& pass, RenderPass& passInfo, uint32_t eye) {
+  const auto& eyePass = passInfo.stereo.eyes[eye];
+  const auto& sourceSize = passInfo.colorAttachments[SceneColorAttachmentIndex].size;
+  const float scaleX =
+      sourceSize.width != 0 ? static_cast<float>(eyePass.size.width) / static_cast<float>(sourceSize.width) : 1.f;
+  const float scaleY = sourceSize.height != 0
+                           ? static_cast<float>(eyePass.size.height) / static_cast<float>(sourceSize.height)
+                           : 1.f;
+  g_currentPipeline = UINTPTR_MAX;
+  pass.SetBindGroup(0, resources().staticBindGroup);
+  pass.SetBindGroup(2, gx::g_emptyTextureBindGroup);
+
+  for (auto& cmd : passInfo.commands) {
+    switch (cmd.type) {
+    case CommandType::SetViewport: {
+      const auto& vp = cmd.data.setViewport;
+      apply_viewport(pass, Viewport{
+                               .left = vp.left * scaleX,
+                               .top = vp.top * scaleY,
+                               .width = vp.width * scaleX,
+                               .height = vp.height * scaleY,
+                               .znear = vp.znear,
+                               .zfar = vp.zfar,
+                           });
+    } break;
+    case CommandType::SetScissor: {
+      const auto& sc = cmd.data.setScissor;
+      const auto left = static_cast<int32_t>(std::floor(static_cast<float>(sc.x) * scaleX));
+      const auto top = static_cast<int32_t>(std::floor(static_cast<float>(sc.y) * scaleY));
+      const auto right = static_cast<int32_t>(std::ceil(static_cast<float>(sc.x + sc.width) * scaleX));
+      const auto bottom = static_cast<int32_t>(std::ceil(static_cast<float>(sc.y + sc.height) * scaleY));
+      apply_scissor(pass,
+                    ClipRect{
+                        .x = std::max(left, 0),
+                        .y = std::max(top, 0),
+                        .width = std::max(right - std::max(left, 0), 0),
+                        .height = std::max(bottom - std::max(top, 0), 0),
+                    },
+                    eyePass.size);
+    } break;
+    case CommandType::Draw: {
+      auto& draw = cmd.data.draw;
+      if (draw.kind == DrawKind::GX) {
+        gx::render_eye(inline_payload<gx::DrawData>(draw.payload.data()), pass, eye);
+      } else if (draw.kind == DrawKind::Clear) {
+        clear::render(inline_payload<clear::DrawData>(draw.payload.data()), pass, eyePass.size);
+      }
+    } break;
+    case CommandType::CustomDraw:
+    case CommandType::DebugMarker:
+      break;
+    }
+  }
+}
+
+// One eye's render pass over the same attachments semantics as the mono pass
+// (its clears and loads mirrored), on the eye target.
+void render_stereo_eye_pass(wgpu::CommandEncoder& cmd, RenderPass& passInfo, uint32_t passIndex, uint32_t eye) {
+  const auto& eyePass = passInfo.stereo.eyes[eye];
+  if (!eyePass.colorView) {
+    return;
+  }
+  const auto& source = passInfo.colorAttachments[SceneColorAttachmentIndex];
+  const wgpu::RenderPassColorAttachment attachment{
+      .view = eyePass.colorView,
+      .resolveTarget = eyePass.resolveView,
+      .loadOp = source.loadOp != wgpu::LoadOp::Undefined ? source.loadOp
+                                                         : (source.clear ? wgpu::LoadOp::Clear : wgpu::LoadOp::Load),
+      .storeOp = source.storeOp,
+      .clearValue =
+          {
+              .r = source.clearValue.x(),
+              .g = source.clearValue.y(),
+              .b = source.clearValue.z(),
+              .a = source.clearValue.w(),
+          },
+  };
+  wgpu::RenderPassDepthStencilAttachment depthStencilAttachment{};
+  const wgpu::RenderPassDepthStencilAttachment* depthStencilAttachmentPtr = nullptr;
+  if (eyePass.depthView && passInfo.depthStencilView) {
+    depthStencilAttachment = {
+        .view = eyePass.depthView,
+        .depthLoadOp = passInfo.hasDepth ? (passInfo.depthLoadOp != wgpu::LoadOp::Undefined
+                                                ? passInfo.depthLoadOp
+                                                : (passInfo.clearDepth ? wgpu::LoadOp::Clear : wgpu::LoadOp::Load))
+                                         : wgpu::LoadOp::Undefined,
+        .depthStoreOp = passInfo.hasDepth ? passInfo.depthStoreOp : wgpu::StoreOp::Undefined,
+        .depthClearValue = passInfo.clearDepthValue,
+        .stencilLoadOp = passInfo.hasStencil ? passInfo.stencilLoadOp : wgpu::LoadOp::Undefined,
+        .stencilStoreOp = passInfo.hasStencil ? passInfo.stencilStoreOp : wgpu::StoreOp::Undefined,
+        .stencilClearValue = passInfo.stencilClearValue,
+    };
+    depthStencilAttachmentPtr = &depthStencilAttachment;
+  }
+  const auto label = fmt::format("Stereo eye {} pass {}", eye, passIndex);
+  const wgpu::RenderPassDescriptor renderPassDescriptor{
+      .label = label.c_str(),
+      .colorAttachmentCount = 1,
+      .colorAttachments = &attachment,
+      .depthStencilAttachment = depthStencilAttachmentPtr,
+      .timestampWrites = webgpu::gpu_prof::pass_writes(label),
+  };
+  auto pass = cmd.BeginRenderPass(&renderPassDescriptor);
+  render_stereo_eye_pass_commands(pass, passInfo, eye);
+  pass.End();
+  g_currentPipeline = UINTPTR_MAX;
 }
 
 DrawContext make_draw_context(const RenderPass& passInfo) {
@@ -249,6 +364,14 @@ void render(wgpu::CommandEncoder& cmd, FramePacket& frame, RenderPass& passInfo,
   auto pass = cmd.BeginRenderPass(&renderPassDescriptor);
   render_pass(pass, frame, passInfo);
   pass.End();
+
+  // The same pass into each eye, before this pass's resolve so an eye draw
+  // samples the EFB copies at the same point in the frame as the mono draw did.
+  if (passInfo.stereo.enabled) {
+    for (uint32_t eye = 0; eye < AURORA_STEREO_EYE_COUNT; ++eye) {
+      render_stereo_eye_pass(cmd, passInfo, passIndex, eye);
+    }
+  }
 
   if (passInfo.captureDepthSnapshot) {
     depth_peek::encode_frame_snapshot(cmd, passInfo.copySourceDepthView,

@@ -1,5 +1,8 @@
 #include "MetroidPrime/Player/CPlayerGun.hpp"
 #include "port_debug.h"
+#ifdef TARGET_PC
+#include "vr/vr_view.h"
+#endif
 #ifdef MP_ENABLE_SMOKE_DRIVER
 #include "port_smoke.h"
 #endif
@@ -593,7 +596,13 @@ void CPlayerGun::Render(const CStateManager& mgr, const CVector3f& pos,
 
   const CGameCamera& cam = mgr.GetCameraManager()->GetCurrentCamera(mgr);
   CGraphics::SetDepthRange(kDepthGun, kDepthWorld);
+#ifdef TARGET_PC
+  // PortVr: the model sits at PrimedGun's model offset from the tracked pose.
+  CTransform4f offsetWorldXf(CTransform4f::Translate(pos + PortVr::VrCannonModelOffsetWorld()) *
+                             GetGunMotionTransform());
+#else
   CTransform4f offsetWorldXf(CTransform4f::Translate(pos) * GetGunMotionTransform());
+#endif
   CTransform4f elbowOffsetXf(offsetWorldXf * x508_elbowLocalXf);
   if (x32c_chargePhase != kCP_NotCharging && !IsWeaponStateSet(0x10)) {
     offsetWorldXf.AddTranslation(CVector3f(x34c_shakeX, 0.f, x350_shakeZ));
@@ -865,7 +874,14 @@ void CPlayerGun::Update(float grappleSwingT, float cameraBobT, float dt, CStateM
   GetLctrWithShake(x418_beamLocalXf, beamModel, rstl::string_l(CGunWeapon::skMuzzleLocator), false,
                    true);
   GetLctrWithShake(x508_elbowLocalXf, beamModel, rstl::string_l("elbow"), false, false);
+#ifdef TARGET_PC
+  // PortVr: a tracked cannon does not sway with the camera bob.
+  x4a8_gunWorldXf = PortVr::VrCannonTracked()
+                        ? x3e8_xf * x4d8_gunLocalXf
+                        : x3e8_xf * x4d8_gunLocalXf * x550_camBob.GetCameraBobTransformation();
+#else
   x4a8_gunWorldXf = x3e8_xf * x4d8_gunLocalXf * x550_camBob.GetCameraBobTransformation();
+#endif
 
   if (x740_grappleArm->GetActive() && !x740_grappleArm->IsGrappling()) {
     UpdateLeftArmTransform(beamModel, mgr);
@@ -2025,7 +2041,12 @@ void CPlayerGun::UpdateGunIdle(bool inStrikeCooldown, float camBobT, float dt, C
         AsyncLoadFidget(mgr);
         break;
       case CFidget::kS_Loading:
+#ifdef TARGET_PC
+        // PortVr: no idle fidget on a tracked cannon.
+        if (IsFidgetLoaded() && !PortVr::VrNoArmCannonFidget())
+#else
         if (IsFidgetLoaded())
+#endif
           EnterFidget(mgr);
         break;
       case CFidget::kS_StillMinorFidget:

@@ -5,7 +5,10 @@
 #include "resource_cache.hpp"
 
 #include "clear.hpp"
+#include "draw_payload.hpp"
 #include "pipeline_cache.hpp"
+#include "stereo_eyes.hpp"
+#include "stereo_uniform.hpp"
 #include "render_worker.hpp"
 #include "tex_copy_conv.hpp"
 #include "tex_palette_conv.hpp"
@@ -35,6 +38,12 @@
 namespace aurora::gfx {
 using namespace detail;
 
+// stereo_uniform.hpp mirrors the GX uniform's fixed counts so the tests need no GX headers.
+static_assert(kStereoPositionMatrices == gx::MaxPnMtx);
+static_assert(kStereoTextureMatrices == gx::MaxTexMtx);
+static_assert(kStereoLights == GX::MaxLights);
+static_assert(kStereoLightBytes == sizeof(gx::Light));
+
 namespace {
 constexpr Module Log{"aurora::gfx"};
 
@@ -53,6 +62,7 @@ struct FrameRecorder {
   Viewport cachedViewport;
   ClipRect cachedScissor;
   bool suppressRenderWorker = false;
+  uint8_t stereoRoute = AURORA_STEREO_ROUTE_WORLD;
 #ifdef AURORA_GFX_DEBUG_GROUPS
   std::vector<std::string> debugGroupStack;
 #endif
@@ -103,6 +113,7 @@ void set_efb_targets(RenderPass& pass) {
   pass.msaaSamples = layout.sampleCount;
   pass.hasDepth = true;
   pass.hasStencil = false;
+  pass.efb = true;
 }
 
 void set_single_color_target(RenderPass& pass, wgpu::TextureFormat format, const wgpu::Extent3D size,
@@ -303,36 +314,7 @@ void push_command(CommandType type, const Command::Data& data) {
   });
 }
 
-template <class T>
-concept InlinePayload =
-    std::is_trivially_copyable_v<T> && std::is_aggregate_v<T> && std::is_trivially_destructible_v<T>;
-
-template <InlinePayload T>
-T& inline_payload(void* ptr) noexcept {
-  // C++20 equivalent of C++23's std::start_lifetime_as
-  return *std::launder(static_cast<T*>(std::memmove(ptr, ptr, sizeof(T))));
-}
-
-template <auto Renderer, InlinePayload T>
-void encode_draw(void* payload, const wgpu::RenderPassEncoder& pass, const RenderPass& passInfo) {
-  const T& data = inline_payload<T>(payload);
-  if constexpr (std::is_invocable_v<decltype(Renderer), const T&, const wgpu::RenderPassEncoder&,
-                                    const wgpu::Extent3D&>) {
-    Renderer(data, pass, passInfo.colorAttachments[SceneColorAttachmentIndex].size);
-  } else {
-    static_assert(std::is_invocable_v<decltype(Renderer), const T&, const wgpu::RenderPassEncoder&>);
-    Renderer(data, pass);
-  }
-}
-
-template <auto Renderer, InlinePayload T>
-DrawCommand make_draw_command(const T& data) {
-  static_assert(sizeof(T) <= InlineDrawPayloadSize);
-  static_assert(alignof(T) <= alignof(std::max_align_t));
-  DrawCommand command{.encoder = encode_draw<Renderer, T>};
-  std::memcpy(command.payload.data(), &data, sizeof(data));
-  return command;
-}
+// Inline payload helpers: draw_payload.hpp (shared with the stereo eye encoder).
 
 void push_draw_command(DrawCommand data) {
   push_command(CommandType::Draw, Command::Data{.draw = data});
@@ -406,6 +388,8 @@ void resume_efb_pass_loading(const RenderPass& prevPass) {
       .clearDepth = false,
       .hasDepth = prevPass.hasDepth,
       .hasStencil = prevPass.hasStencil,
+      // Still the EFB: the stereo replay carries on into the eyes after a copy.
+      .efb = prevPass.efb,
   };
   for (uint32_t i = 0; i < newPass.colorAttachmentCount; ++i) {
     newPass.colorAttachments[i].loadOp = wgpu::LoadOp::Undefined;
@@ -520,7 +504,35 @@ void enqueue_op(FramePacket& frame, uint32_t opIndex) {
   });
 }
 
+// Gives an EFB pass of an immersive frame its eye passes: encoding.cpp
+// re-encodes the pass into each eye target right after the mono pass.
+void stereo_seal_pass(FramePacket& frame, uint32_t passIndex) {
+  if (passIndex >= frame.renderPasses.size()) {
+    return;
+  }
+  auto& pass = frame.renderPasses[passIndex];
+  auto& state = frame.stereo;
+  if (!state.immersive || !pass.efb || pass.sealed || pass.stereo.enabled) {
+    return;
+  }
+  for (uint32_t eye = 0; eye < AURORA_STEREO_EYE_COUNT; ++eye) {
+    const auto& target = stereo_eye_target(eye);
+    if (!target.valid()) {
+      return;
+    }
+    pass.stereo.eyes[eye] = StereoEyePass{
+        .colorView = target.color.view,
+        .resolveView = target.sampleCount > 1 ? target.resolved.view : wgpu::TextureView{},
+        .depthView = target.depth.view,
+        .size = {target.width, target.height, 1},
+    };
+  }
+  pass.stereo.enabled = true;
+  state.replayed = true;
+}
+
 void enqueue_pass(FramePacket& frame, uint32_t passIndex) {
+  stereo_seal_pass(frame, passIndex);
   seal_pass(frame, passIndex);
   const auto opIndex = static_cast<uint32_t>(frame.ops.size());
   frame.ops.emplace_back(capture_frame_op(frame, FrameOpType::RenderPass, passIndex));
@@ -538,6 +550,7 @@ void begin_recording(FramePacket& packet, size_t frameSlot) {
   g_recorder.drawCallCount = 0;
   g_recorder.mergedDrawCallCount = 0;
   g_recorder.suspendedEfbPass.reset();
+  g_recorder.stereoRoute = AURORA_STEREO_ROUTE_WORLD;
 
   current_render_passes().emplace_back();
   auto& pass = current_render_passes()[0];
@@ -782,6 +795,89 @@ void set_scissor(const ClipRect& cmd) noexcept {
   }
 }
 
+// --- stereo replay ---
+
+void set_frame_stereo(const StereoFrameState& state) noexcept {
+  if (!g_recorder.active()) {
+    return;
+  }
+  g_recorder.frame().stereo = state;
+}
+
+StereoFrameState recorded_stereo_state() noexcept {
+  if (!g_recorder.active()) {
+    return {};
+  }
+  return g_recorder.frame().stereo;
+}
+
+void set_stereo_draw_route(uint8_t route) noexcept { g_recorder.stereoRoute = route; }
+
+uint8_t stereo_draw_route() noexcept { return g_recorder.stereoRoute; }
+
+std::array<uint32_t, 2> stage_stereo_uniforms(const uint8_t* mono, Range monoRange,
+                                              const StereoUniformLayout& layout) noexcept {
+  constexpr std::array<uint32_t, 2> none{UINT32_MAX, UINT32_MAX};
+  if (!g_recorder.active()) {
+    return none;
+  }
+  auto& frame = g_recorder.frame();
+  const auto& state = frame.stereo;
+  if (!state.immersive || g_recorder.inOffscreen || g_recorder.currentRenderPass == UINT32_MAX) {
+    return none;
+  }
+  const uint8_t route = g_recorder.stereoRoute;
+  if (route == AURORA_STEREO_ROUTE_SKIP) {
+    return none;
+  }
+  if (!layout.valid() || monoRange.size != layout.size) {
+    return none;
+  }
+  // 2D content and full-screen effects: the same uniform in both eyes.
+  const std::array<uint32_t, 2> same{monoRange.offset, monoRange.offset};
+  if (route == AURORA_STEREO_ROUTE_FULLSCREEN || route == AURORA_STEREO_ROUTE_SCREEN_2D) {
+    return same;
+  }
+  if (!stereo_uniform_is_perspective(mono, layout)) {
+    return same;
+  }
+  const size_t alignment = resources().limits.minUniformBufferOffsetAlignment;
+  const size_t needed =
+      2 * (AURORA_ALIGN(static_cast<size_t>(layout.size), alignment) + alignment) + gx::MaxUniformSize;
+  if (frame.uniforms.size() + needed > frame.uniforms.capacity()) {
+    if (!frame.stereo.uniformsExhausted) {
+      Log.warn("Stereo replay ran out of uniform space at {} bytes; the rest of frame {} is mono only",
+               frame.uniforms.size(), frame.frameId);
+      frame.stereo.uniformsExhausted = true;
+    }
+    return none;
+  }
+  const auto& pass = current_render_passes()[g_recorder.currentRenderPass];
+  const auto& monoSize = pass.colorAttachments[SceneColorAttachmentIndex].size;
+  thread_local std::vector<uint8_t> scratch;
+  std::array<uint32_t, 2> offsets{};
+  for (uint32_t eye = 0; eye < AURORA_STEREO_EYE_COUNT; ++eye) {
+    scratch.assign(mono, mono + layout.size);
+    const auto& params = state.eyes[eye];
+    const bool headLocked = route == AURORA_STEREO_ROUTE_HEAD_LOCKED;
+    compose_stereo_uniform(
+        scratch.data(), layout,
+        StereoEyeCompose{
+            .projection = &params.projection,
+            .viewFromCenter = headLocked ? &params.headLockedViewFromCenter : &params.viewFromCenter,
+            .positionScaleXY = headLocked ? state.headLockedScaleXY : 1.0f,
+            .positionScaleZ = headLocked ? state.headLockedScaleZ : 1.0f,
+            .renderScaleX =
+                monoSize.width != 0 ? static_cast<float>(params.width) / static_cast<float>(monoSize.width) : 1.0f,
+            .renderScaleY = monoSize.height != 0
+                                ? static_cast<float>(params.height) / static_cast<float>(monoSize.height)
+                                : 1.0f,
+        });
+    offsets[eye] = push(frame.uniforms, scratch.data(), layout.size, alignment).offset;
+  }
+  return offsets;
+}
+
 template <>
 void push_draw_command(clear::DrawData data) {
   push_draw_command(make_draw_command<clear::render>(data));
@@ -832,6 +928,8 @@ void resolve_pass_into(TextureHandle texture, ClipRect rect, bool clearColor, bo
       .clearDepth = clearDepth,
       .hasDepth = prevPass.hasDepth,
       .hasStencil = prevPass.hasStencil,
+      // Still the EFB after a copy: the stereo replay carries on into the eyes.
+      .efb = prevPass.efb,
   };
   const bool fullColorClear = clearColor && clearAlpha;
   for (uint32_t i = 0; i < newPass.colorAttachmentCount; ++i) {

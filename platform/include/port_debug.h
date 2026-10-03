@@ -344,6 +344,9 @@ bool Visible();
 // Writes the settings file now instead of waiting for the next overlay frame,
 // so a disc chosen during startup is remembered even if no frame is drawn yet.
 void SaveSettingsNow();
+// Marks the settings file dirty from outside the overlay (the VR settings
+// store), so it is written on exit or by SaveSettingsNow like any other change.
+void MarkVrSettingsDirty();
 // Thread-safe snapshot of the overlay's visibility, for the Android touch
 // controls. Unlike Visible() it performs no lazy initialization, so it is safe
 // to call from the UI thread.

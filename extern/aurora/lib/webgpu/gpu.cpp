@@ -40,6 +40,22 @@ void clear_offscreen_cache();
 namespace aurora::webgpu {
 static Module Log("aurora::gpu");
 
+#if defined(WEBGPU_DAWN) && defined(_WIN32)
+// RequestAdapterOptionsLUID is a Dawn-native extension (dawn/native/D3DBackend.h)
+// whose wire representation is a WebGPU chained header plus the Win32 LUID.
+// Spell that C ABI directly so RequestAdapter consumes it through the ordinary
+// WebGPU entry point; this is how the OpenXR runtime's adapter is pinned.
+struct RequestAdapterOptionsLuidWire {
+  wgpu::ChainedStruct chain{};
+  // Win32's LUID {DWORD LowPart; LONG HighPart;}, spelled out so this file
+  // needs no windows.h.
+  struct {
+    uint32_t LowPart = 0;
+    int32_t HighPart = 0;
+  } adapterLuid{};
+};
+#endif
+
 wgpu::Device g_device;
 wgpu::Queue g_queue;
 wgpu::Surface g_surface;
@@ -365,7 +381,7 @@ Viewport calculate_present_viewport(uint32_t surface_width, uint32_t surface_hei
   };
 }
 
-static TextureWithSampler create_depth_texture(uint32_t width, uint32_t height) {
+TextureWithSampler create_depth_texture(uint32_t width, uint32_t height) {
   const wgpu::Extent3D size{
       .width = width,
       .height = height,
@@ -804,12 +820,23 @@ bool initialize(AuroraBackend auroraBackend, bool allowCpu) {
     return false;
   }
   {
-    const wgpu::RequestAdapterOptions options{
+    wgpu::RequestAdapterOptions options{
         .featureLevel = wgpu::FeatureLevel::Compatibility,
         .powerPreference = wgpu::PowerPreference::HighPerformance,
         .backendType = backend,
         .compatibleSurface = g_surface,
     };
+#if defined(WEBGPU_DAWN) && defined(_WIN32)
+    RequestAdapterOptionsLuidWire luidOptions{};
+    if (backend == wgpu::BackendType::D3D12 && g_config.xrInterop && g_config.hasD3D12AdapterLuid) {
+      luidOptions.chain.sType = wgpu::SType::RequestAdapterOptionsLUID;
+      luidOptions.adapterLuid.LowPart = g_config.d3d12AdapterLuidLow;
+      luidOptions.adapterLuid.HighPart = g_config.d3d12AdapterLuidHigh;
+      options.nextInChain = &luidOptions.chain;
+      Log.info("Pinning D3D12 adapter to OpenXR LUID {:08x}:{:08x}",
+               static_cast<uint32_t>(luidOptions.adapterLuid.HighPart), luidOptions.adapterLuid.LowPart);
+    }
+#endif
     Log.info("Requesting adapter\n  Feature level: {}\n  Power preference: {}\n  Backend: {}\n  Compatible surface: {}",
              magic_enum::enum_name(options.featureLevel), magic_enum::enum_name(options.powerPreference),
              magic_enum::enum_name(options.backendType), static_cast<bool>(options.compatibleSurface));
@@ -938,6 +965,16 @@ bool initialize(AuroraBackend auroraBackend, bool allowCpu) {
       }
 #ifdef TRACY_ENABLE
       if (feature == wgpu::FeatureName::TimestampQuery) {
+        requiredFeatures.push_back(feature);
+      }
+#endif
+#if defined(WEBGPU_DAWN) && defined(_WIN32)
+      // The OpenXR stereo bridge (lib/webgpu/d3d12_interop.cpp) imports its eye
+      // intermediates as shared D3D12 resources and orders them with a shared
+      // fence. Dawn only lists these under allow_unsafe_apis (set on the instance).
+      if (g_config.xrInterop && g_backendType == wgpu::BackendType::D3D12 &&
+          (feature == wgpu::FeatureName::SharedTextureMemoryD3D12Resource ||
+           feature == wgpu::FeatureName::SharedFenceDXGISharedHandle)) {
         requiredFeatures.push_back(feature);
       }
 #endif

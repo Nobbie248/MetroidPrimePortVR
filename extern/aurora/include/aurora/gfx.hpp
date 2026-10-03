@@ -8,7 +8,7 @@
 
 namespace aurora::gfx {
 
-inline constexpr size_t InlineDrawPayloadSize = 128;
+inline constexpr size_t InlineDrawPayloadSize = 160;
 inline constexpr size_t MaxColorAttachments = 8;
 inline constexpr uint32_t SceneColorAttachmentIndex = 0;
 

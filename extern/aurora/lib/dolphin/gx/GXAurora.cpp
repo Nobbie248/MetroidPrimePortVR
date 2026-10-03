@@ -97,3 +97,8 @@ void GXRestoreFrameBuffer() {
   GX_WRITE_AURORA(GX_AURORA_END_OFFSCREEN);
   aurora::gx::fifo::publish();
 }
+
+void AuroraSetStereoDrawRoute(u32 route) {
+  GX_WRITE_AURORA(GX_AURORA_STEREO_DRAW_ROUTE);
+  GX_WRITE_U8(static_cast<u8>(route));
+}

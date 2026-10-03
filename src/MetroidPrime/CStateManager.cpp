@@ -2,6 +2,10 @@
 #include "MetroidPrime/CStateManager.hpp"
 #include "port_apclient.h"
 #include "port_debug.h"
+#ifdef TARGET_PC
+#include "MetroidPrime/Enemies/CAi.hpp"
+#include "vr/vr_view.h"
+#endif
 #include "port_discord.h"
 #include "port_hold_toggle.h"
 #include "port_livesplit.h"
@@ -1220,6 +1224,10 @@ void CStateManager::CrossTouchActors() {
 }
 
 void CStateManager::Think(float dt) {
+#ifdef TARGET_PC
+  // Port: catch the AI function map being overwritten as early as possible.
+  CAi::VerifyFuncMap("tick");
+#endif
   const float deathTime = x84c_player->GetDeathTime();
   if (deathTime > 0.f) {
     x84c_player->DoThink(dt, *this);
@@ -2423,6 +2431,10 @@ void CStateManager::PreRender() {
   const CTransform4f curCamXf = x870_cameraManager->GetCurrentCameraTransform(*this);
   CFrustumPlanes frustum(curCamXf, 0.017453292f * curCam.GetFov(), curCam.GetAspectRatio(),
                          curCam.GetNearClipDistance(), false, 100.f);
+#ifdef TARGET_PC
+  // PortVr: cull against where the head looks, with the headset's wider cone.
+  PortVr::VrCullingFrustum(curCamXf, curCam.GetNearClipDistance(), frustum);
+#endif
 
   for (CGameArea::CChainIterator areaIt = x850_world->ChainHead(CWorld::kC_Alive);
        areaIt != CWorld::AliveAreasEnd(); ++areaIt) {
@@ -2483,6 +2495,9 @@ CFrustumPlanes CStateManager::SetupViewForDraw(const CViewport& viewport) const 
                            cam.GetNearClipDistance(), zFar);
 
   CFrustumPlanes frustum(camXf, fov, aspect, cam.GetNearClipDistance(), false, 100.f);
+#ifdef TARGET_PC
+  PortVr::VrCullingFrustum(camXf, cam.GetNearClipDistance(), frustum);
+#endif
   gpRender->SetClippingPlanes(frustum);
   gpRender->PrimColor(CColor::White());
   gpRender->SetModelMatrix(CTransform4f::Identity());
@@ -3001,6 +3016,9 @@ void CStateManager::ResetViewAfterDraw(const CViewport& backupViewport,
   const CGameCamera& cam = x870_cameraManager->GetCurrentCamera(*this);
   CFrustumPlanes frustum(backupViewMatrix, 0.017453292f * cam.GetFov(), cam.GetAspectRatio(),
                          cam.GetNearClipDistance(), false, 100.f);
+#ifdef TARGET_PC
+  PortVr::VrCullingFrustum(backupViewMatrix, cam.GetNearClipDistance(), frustum);
+#endif
   gpRender->SetClippingPlanes(frustum);
 
   const CViewport& viewport = CGraphics::GetViewport();

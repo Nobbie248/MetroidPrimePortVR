@@ -12,6 +12,16 @@ set(CMAKE_COLOR_DIAGNOSTICS ON)
 include(CTest)
 option(MP_BUILD_TESTS "Build native-port regression tests" ON)
 option(MP_ENABLE_SMOKE_DRIVER "Enable the opt-in real-disc lifecycle test driver" OFF)
+# OpenXR VR (PrimedGun v2). The functional backend is Windows D3D12, so only
+# Windows defaults to carrying the loader.
+set(MP_ENABLE_OPENXR_DEFAULT OFF)
+if(WIN32)
+    set(MP_ENABLE_OPENXR_DEFAULT ON)
+endif()
+option(MP_ENABLE_OPENXR "Build OpenXR VR support" ${MP_ENABLE_OPENXR_DEFAULT})
+unset(MP_ENABLE_OPENXR_DEFAULT)
+set(MP_OPENXR_SDK_DIR "" CACHE PATH
+    "Optional OpenXR-SDK source tree; when empty, use a package or fetch the pinned SDK")
 option(MP_ANDROID_NOD_STUB "Use a non-functional nod stub for Android build probes" OFF)
 
 # The decompiled game/engine sources and the port code around them are written
@@ -87,10 +97,65 @@ else()
         -include ${CMAKE_CURRENT_SOURCE_DIR}/platform/compat.h)
 endif()
 
+# OpenXR loader: a system package, an explicit SDK tree, or the pinned SDK
+# fetched at configure time (static loader), as Wiicompiled VR does.
+set(MP_OPENXR_TARGET "")
+if(MP_ENABLE_OPENXR)
+    if(NOT WIN32)
+        message(WARNING "OpenXR is only wired for Windows in this port; disabling MP_ENABLE_OPENXR")
+        set(MP_ENABLE_OPENXR OFF)
+    else()
+        if(NOT MP_OPENXR_SDK_DIR AND NOT FETCHCONTENT_SOURCE_DIR_OPENXR)
+            find_package(OpenXR CONFIG QUIET)
+        endif()
+        if(NOT TARGET OpenXR::openxr_loader AND NOT TARGET openxr_loader)
+            include(FetchContent)
+            set(BUILD_API_LAYERS OFF CACHE BOOL "" FORCE)
+            set(BUILD_TESTS OFF CACHE BOOL "" FORCE)
+            set(BUILD_CONFORMANCE_TESTS OFF CACHE BOOL "" FORCE)
+            set(BUILD_SDK_TESTS OFF CACHE BOOL "" FORCE)
+            set(DYNAMIC_LOADER OFF CACHE BOOL "" FORCE)
+            if(MP_OPENXR_SDK_DIR)
+                if(NOT EXISTS "${MP_OPENXR_SDK_DIR}/CMakeLists.txt")
+                    message(FATAL_ERROR "MP_OPENXR_SDK_DIR does not contain OpenXR-SDK: ${MP_OPENXR_SDK_DIR}")
+                endif()
+                add_subdirectory("${MP_OPENXR_SDK_DIR}" "${CMAKE_BINARY_DIR}/openxr-sdk" EXCLUDE_FROM_ALL)
+            else()
+                FetchContent_Declare(openxr
+                    URL https://github.com/KhronosGroup/OpenXR-SDK/archive/refs/tags/release-1.1.61.tar.gz
+                    URL_HASH SHA256=d5e2773d282642e6e250bd10266f316fc3ff3b8602c83db009a1f434205998e6
+                    DOWNLOAD_EXTRACT_TIMESTAMP TRUE
+                    EXCLUDE_FROM_ALL)
+                FetchContent_MakeAvailable(openxr)
+            endif()
+        endif()
+        if(TARGET OpenXR::openxr_loader)
+            set(MP_OPENXR_TARGET OpenXR::openxr_loader)
+        elseif(TARGET openxr_loader)
+            set(MP_OPENXR_TARGET openxr_loader)
+        else()
+            message(FATAL_ERROR "OpenXR was enabled but no loader target was provided")
+        endif()
+        message(STATUS "OpenXR VR enabled (loader target ${MP_OPENXR_TARGET})")
+    endif()
+endif()
+if(MP_ENABLE_OPENXR)
+    # The game hooks and the host layer both test this.
+    target_compile_definitions(mp_game PUBLIC MP_ENABLE_OPENXR=1)
+endif()
+
 # Port entry point and platform shims (Aurora owns the real main; see
 # aurora/main.h). Android loads the target through SDL's Java activity.
 set(MP_PORT_SOURCES
+    platform/vr/vr_settings.cpp
+    platform/vr/prime_vr_policy.cpp
+    platform/vr/openxr_controller_snapshot.cpp
+    platform/vr/openxr_integration.cpp
+    platform/vr/vr_pad.cpp
+    platform/vr/vr_view.cpp
+    platform/vr/vr_debug_tab.cpp
     platform/main.cpp
+    platform/crash_handler.cpp
     platform/debug_ui.cpp
     platform/disc.cpp
     platform/shims.cpp
@@ -142,9 +207,22 @@ if(ANDROID)
 else()
     add_executable(metroid_prime_port ${MP_PORT_SOURCES})
 endif()
+if(MP_ENABLE_OPENXR)
+    target_sources(metroid_prime_port PRIVATE
+        platform/vr/openxr_runtime.cpp
+        platform/vr/openxr_diagnostics.cpp
+        platform/vr/openxr_passthrough.cpp
+        platform/vr/openxr_settings_panel.cpp
+        platform/vr/openxr_input.cpp)
+    if(WIN32)
+        target_sources(metroid_prime_port PRIVATE platform/vr/openxr_d3d12.cpp)
+        target_link_libraries(metroid_prime_port PRIVATE d3d12 dxgi)
+    endif()
+    target_link_libraries(metroid_prime_port PRIVATE ${MP_OPENXR_TARGET})
+endif()
 if(WIN32)
     # shell32/ole32/advapi32: finding Dolphin's folder (port_gci.cpp).
-    target_link_libraries(metroid_prime_port PRIVATE ws2_32 shell32 ole32 advapi32)
+    target_link_libraries(metroid_prime_port PRIVATE ws2_32 shell32 ole32 advapi32 dbghelp)
     # UTF-8 as the ANSI code page, so the UTF-8 paths SDL returns work with the
     # narrow file APIs; see the manifest. CMake merges it into the linker's own.
     target_sources(metroid_prime_port PRIVATE packaging/metroid_prime_port.manifest)
@@ -320,6 +398,10 @@ if(MP_BUILD_TESTS)
     target_compile_definitions(port_disc_tests PRIVATE TARGET_PC)
     add_executable(port_mouse_tests tests/port_mouse.cpp)
     target_include_directories(port_mouse_tests PRIVATE platform/include)
+    # The stereo replay's uniform composition (extern/aurora/lib/gfx/stereo_uniform.hpp): pure
+    # functions over the GX uniform bytes, so the test needs no GPU and no GX headers.
+    add_executable(port_vr_stereo_tests tests/port_vr_stereo.cpp)
+    target_include_directories(port_vr_stereo_tests PRIVATE extern/aurora/include extern/aurora/lib)
     # Drives a real SDL virtual gamepad through the touch overlay's own code.
     # That code was Android-only and untested, so a wrong button mapping could
     # not fail anywhere except on a phone.
@@ -378,7 +460,7 @@ if(MP_BUILD_TESTS)
     add_test(NAME port_gci_tests COMMAND port_gci_tests)
     set_tests_properties(port_gci_tests PROPERTIES TIMEOUT 15 LABELS port)
     aurora_copy_runtime_dlls(port_gci_tests)
-    foreach(test IN ITEMS port_buffer_tests port_ai_tests port_randomizer_tests port_apclient_tests port_musyx_tests port_disc_tests port_mouse_tests port_touch_pad_tests port_json_tests port_ws_tests port_mods_tests port_room_env_tests port_importers_tests port_custom_res_tests port_hold_toggle_tests port_tick_pair_tests port_livesplit_tests port_discord_tests port_savestate_tests port_timing_tests port_audio_math_tests)
+    foreach(test IN ITEMS port_buffer_tests port_ai_tests port_randomizer_tests port_apclient_tests port_musyx_tests port_disc_tests port_mouse_tests port_touch_pad_tests port_json_tests port_ws_tests port_mods_tests port_room_env_tests port_importers_tests port_custom_res_tests port_hold_toggle_tests port_tick_pair_tests port_livesplit_tests port_discord_tests port_savestate_tests port_timing_tests port_audio_math_tests port_vr_stereo_tests)
         add_test(NAME ${test} COMMAND ${test})
         set_tests_properties(${test} PROPERTIES TIMEOUT 15 LABELS port)
         aurora_copy_runtime_dlls(${test})

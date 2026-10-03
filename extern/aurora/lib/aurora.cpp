@@ -11,6 +11,7 @@
 #include "gx/gx.hpp"
 #include "gx/texture.hpp"
 #include "imgui.hpp"
+#include "stereo_host.hpp"
 #include "webgpu/gpu.hpp"
 #include "webgpu/gpu_prof.hpp"
 #include <webgpu/webgpu_cpp.h>
@@ -312,7 +313,7 @@ const AuroraEvent* update() noexcept {
   return window::poll_events();
 }
 
-bool begin_frame() noexcept {
+bool begin_frame(uint64_t contentTag) noexcept {
   ZoneScoped;
 #ifdef AURORA_ENABLE_GX
   {
@@ -354,6 +355,8 @@ bool begin_frame() noexcept {
   if (!gfx::begin_frame()) {
     return false;
   }
+  // The stereo packet for this frame, before the first uniform is staged.
+  gfx::set_frame_stereo(stereo_host::begin_frame(contentTag));
   // A failed staging-buffer acquisition must not leave an ImGui frame open.
   imgui::new_frame(window::get_window_size());
   gx::fifo::begin_frame();
@@ -361,7 +364,7 @@ bool begin_frame() noexcept {
   return true;
 }
 
-void end_frame() noexcept {
+void end_frame(uint64_t contentTag) noexcept {
   ZoneScoped;
 #ifdef AURORA_ENABLE_GX
   gx::fifo::drain();
@@ -369,6 +372,7 @@ void end_frame() noexcept {
   gx::texture::end_frame();
   gfx::finish();
   auto imguiDrawData = imgui::freeze();
+  const uint32_t logicalFrame = gfx::current_frame();
 
   const auto& presentSource = webgpu::present_source();
   const auto viewport = webgpu::calculate_present_viewport(webgpu::g_graphicsConfig.surfaceConfiguration.width,
@@ -385,7 +389,8 @@ void end_frame() noexcept {
   }
 #endif
 
-  gfx::end_frame([rmlBindGroup = std::move(rmlBindGroup), rmlOverlay, viewport,
+  const auto stereoState = gfx::recorded_stereo_state();
+  gfx::end_frame([rmlBindGroup = std::move(rmlBindGroup), rmlOverlay, viewport, contentTag, logicalFrame, stereoState,
                   imguiDrawData = std::move(imguiDrawData)](
                      wgpu::CommandEncoder& encoder, std::vector<gfx::AfterSubmitCallback> afterSubmitCallbacks) {
     if (g_screenshotRequested.exchange(false, std::memory_order_acq_rel)) {
@@ -471,6 +476,8 @@ void end_frame() noexcept {
     } else {
       Log.info("Skipping present; window not presentable");
     }
+    // The headset's eyes, whether or not the window could be presented.
+    const auto stereoSink = stereo_host::encode(encoder, stereoState, logicalFrame, contentTag);
     webgpu::gpu_prof::frame_end(encoder);
     const wgpu::CommandBufferDescriptor cmdBufDescriptor{.label = "Redraw command buffer"};
     const auto buffer = encoder.Finish(&cmdBufDescriptor);
@@ -479,6 +486,8 @@ void end_frame() noexcept {
       g_queue.Submit(1, &buffer);
     }
     webgpu::gpu_prof::after_submit();
+    // The bridge's native follow-up on the same queue, then its completion callback.
+    stereo_host::submitted(stereoSink);
     if (canPresent && g_surface) {
       ZoneScopedN("Present");
       wgpu::ConvertibleStatus status = wgpu::Status::Error;
@@ -566,10 +575,21 @@ void request_screenshot() noexcept {
 AuroraInfo aurora_initialize(int argc, char* argv[], const AuroraConfig* config) {
   return aurora::initialize(argc, argv, *config);
 }
-void aurora_shutdown() { aurora::shutdown(); }
+void aurora_shutdown() {
+#ifdef AURORA_ENABLE_GX
+  aurora::stereo_host::shutdown();
+#endif
+  aurora::shutdown();
+}
 const AuroraEvent* aurora_update() { return aurora::update(); }
-bool aurora_begin_frame() { return aurora::begin_frame(); }
-void aurora_end_frame() { aurora::end_frame(); }
+bool aurora_begin_frame() { return aurora::begin_frame(AURORA_STEREO_CONTENT_TAG_UNKNOWN); }
+bool aurora_begin_frame_tagged(uint64_t contentTag) { return aurora::begin_frame(contentTag); }
+void aurora_end_frame() { aurora::end_frame(AURORA_STEREO_CONTENT_TAG_UNKNOWN); }
+void aurora_end_frame_tagged(uint64_t contentTag) { aurora::end_frame(contentTag); }
+void aurora_end_frame_ex(uint64_t contentTag, void* imguiFrame) {
+  (void)imguiFrame;
+  aurora::end_frame(contentTag);
+}
 AuroraBackend aurora_get_backend() { return aurora::g_config.desiredBackend; }
 const AuroraBackend* aurora_get_available_backends(size_t* count) {
   if (count != nullptr) {

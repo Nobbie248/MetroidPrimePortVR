@@ -3,6 +3,7 @@
 #include "pipeline_cache.hpp"
 #include "types.hpp"
 #include "tex_palette_conv.hpp"
+#include "stereo_frame.hpp"
 #include "texture.hpp"
 
 #include <array>
@@ -32,8 +33,17 @@ struct CustomDrawCommand {
 struct RenderPass;
 using DrawEncoder = void (*)(void* payload, const wgpu::RenderPassEncoder& pass, const RenderPass& passInfo);
 
+// What a draw's payload is, for the encoders that treat some draws specially
+// (the stereo eye passes re-issue GX and clear draws and leave the rest mono).
+enum class DrawKind : uint8_t {
+  Other,
+  GX,
+  Clear,
+};
+
 struct DrawCommand {
   DrawEncoder encoder = nullptr;
+  DrawKind kind = DrawKind::Other;
   alignas(std::max_align_t) std::array<std::byte, InlineDrawPayloadSize> payload{};
 };
 
@@ -106,6 +116,9 @@ struct RenderPass {
   bool discardable = false;
   bool captureDepthSnapshot = false;
   bool sealed = false;
+  // The frame's EFB (scene) target: the passes the stereo replay re-encodes per eye.
+  bool efb = false;
+  StereoPassReplay stereo;
   std::vector<tex_palette_conv::ConvRequest> paletteConvs;
 
   RenderTargetLayout target_layout() const noexcept;
@@ -204,6 +217,7 @@ struct FramePacket {
   size_t stagingBuffer = 0;
   StagingHighWater copied;
   AuroraStats stats{};
+  StereoFrameState stereo;
 };
 
 } // namespace aurora::gfx::detail

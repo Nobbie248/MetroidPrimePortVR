@@ -52,7 +52,16 @@ struct TextureRef {
   , size(size)
   , format(format)
   , mipCount(mipCount)
-  , gxFormat(gxFormat) {}
+  , gxFormat(gxFormat) {
+    count_live(1);
+  }
+  TextureRef(const TextureRef&) = delete;
+  TextureRef& operator=(const TextureRef&) = delete;
+  ~TextureRef() { count_live(-1); }
+
+private:
+  // Live totals for aurora_get_texture_stats (render targets apart from sampled textures).
+  void count_live(int sign) noexcept;
 };
 
 TextureHandle new_static_texture_2d(uint32_t width, uint32_t height, uint32_t mips, u32 gxFormat,

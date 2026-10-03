@@ -1,6 +1,7 @@
 #include "MetroidPrime/Player/CPlayer.hpp"
 
 #include "port_debug.h"
+#include "port_freecam.h"
 #ifdef TARGET_PC
 #include "vr/vr_view.h"
 #endif
@@ -2265,7 +2266,11 @@ void CPlayer::PreRender(CStateManager& mgr, const CFrustumPlanes& frustum) {
     x730_transitionModels[i]->AnimationData()->PreRender();
   }
 
-  if (x2f4_cameraState != kCS_FirstPerson) {
+  if (x2f4_cameraState != kCS_FirstPerson
+#ifdef TARGET_PC
+      || PortFreeCam::ShowPlayer()
+#endif
+  ) {
     CActor::PreRender(mgr, frustum);
   }
 }
@@ -2305,7 +2310,14 @@ void CPlayer::Render(const CStateManager& mgr) const {
     }
   }
 
-  if (x2f4_cameraState != kCS_FirstPerson && doRender) {
+  bool firstPerson = x2f4_cameraState == kCS_FirstPerson;
+#ifdef TARGET_PC
+  // Port: the free camera shows the body the first-person view leaves out.
+  if (PortFreeCam::ShowPlayer()) {
+    firstPerson = false;
+  }
+#endif
+  if (!firstPerson && doRender) {
     bool doTransitionRender = false;
     bool doBallRender = false;
     switch (x2f8_morphBallState) {

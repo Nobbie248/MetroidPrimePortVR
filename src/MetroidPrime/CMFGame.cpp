@@ -25,6 +25,7 @@
 #include "rstl/math.hpp"
 
 #include "port_debug.h"
+#include "port_freecam.h"
 
 CMFGame::CMFGame(rstl::ncrc_ptr< CStateManager > stateManager,
                  rstl::ncrc_ptr< CInGameGuiManager > guiManager,
@@ -245,6 +246,10 @@ void CMFGame::Draw() const {
   }
 
   mGuiManager->PreDraw(*mStateManager, IsCameraActiveFlow());
+#ifdef TARGET_PC
+  // The debug free camera looks at the world, not through the visor.
+  if (!PortFreeCam::Active() || mFlowState != kGFS_InGame)
+#endif
   mGuiManager->Draw(*mStateManager);
 
   if (mFlowState == kGFS_CinematicSkip) {

@@ -22,6 +22,9 @@ constexpr uint32_t kGravitySuitCmdl = 0x95946E41; // Node1_11.CMDL
 constexpr uint32_t kGravitySuitAncs = 0x27A97006; // Node1_11.ANCS
 constexpr uint32_t kVisorCmdl = 0x61DAB956;       // Node1_39_1.CMDL
 constexpr uint32_t kVisorAncs = 0x9F0C908A;       // Node1_39_1.ANCS
+constexpr uint32_t kBlueShieldCmdl = 0x0734977A; // blueShield_v1.CMDL
+constexpr uint32_t kBlueShieldVerticalCmdl = 0x18D0AEE6;
+constexpr uint32_t kMissileShieldCmdl = 0xEFDFFB8C;
 
 uint32_t Get32(const std::vector<uint8_t>& data, size_t at) {
   return (uint32_t(data[at]) << 24) | (uint32_t(data[at + 1]) << 16) |
@@ -104,6 +107,47 @@ bool Build(uint32_t id, const DiscReader& read, Resource& out) {
     return true;
   };
 
+  if (id >= kShieldBase && id < kShieldEnd) {
+    // The missile shield with its glow and body recoloured. randomprime
+    // ships painted textures for these; the port tints the disc's own.
+    struct Look {
+      float glow[3]; // what the glow's red becomes
+      float body[3]; // the metal's mean colour, of 255
+    };
+    static const Look kLooks[kShieldKinds] = {
+        {{0.25f, 0.8f, 1.f}, {75, 56, 34}},  {{0.f, 1.f, 1.f}, {69, 86, 93}},
+        {{1.3f, 0.f, 0.f}, {106, 51, 35}},   {{2.f, 2.f, 2.f}, {158, 167, 162}},
+        {{0.5f, 0.f, 1.f}, {47, 23, 63}},    {{1.f, 1.f, 0.f}, {73, 64, 57}},
+        {{0.f, 1.f, 0.f}, {53, 46, 34}},
+    };
+    static const uint32_t kSources[4] = {0x5B97098E, 0x5C7B215C, 0x6E09EA6B, 0xFA0C2AE8};
+    static const float kBodyMean[3] = {83, 81, 77};
+    const uint32_t base = id & ~7u;
+    const uint32_t part = id & 7u;
+    const Look& look = kLooks[(id - kShieldBase) / 8];
+    if (part == 7)
+      return discModel(kMissileShieldCmdl,
+                       {{0, base}, {1, base + 1}, {2, base + 2}, {3, base + 3}});
+    if (part > 3)
+      return false;
+    float matrix[3][3] = {};
+    for (int c = 0; c < 3; ++c) {
+      if (part == 2) {
+        matrix[c][c] = look.body[c] / kBodyMean[c];
+      } else {
+        // The glow is red over a grey base: keep the base, colour the red.
+        matrix[c][0] = look.glow[c];
+        matrix[c][1] = matrix[c][2] = (1.f - look.glow[c]) / 2.f;
+      }
+    }
+    std::vector<uint8_t> txtr;
+    if (!read(kSources[part], txtr) || !TintTxtr(txtr, matrix))
+      return false;
+    out.type = kTXTR;
+    out.data.swap(txtr);
+    return true;
+  }
+
   switch (id) {
   case kNothingTxtr:
     out.type = kTXTR;
@@ -117,6 +161,41 @@ bool Build(uint32_t id, const DiscReader& read, Resource& out) {
     out.type = kTXTR;
     out.data = Embedded(kPhazonSuitTxtr2Data);
     return true;
+  case kDoorPowerHolorimTxtr:
+    out.type = kTXTR;
+    out.data = Embedded(kDoorPowerHolorimData);
+    return true;
+  case kDoorBombHolorimTxtr:
+    out.type = kTXTR;
+    out.data = Embedded(kDoorBombHolorimData);
+    return true;
+  case kDoorBombPatternTxtr:
+    out.type = kTXTR;
+    out.data = Embedded(kDoorBombPatternData);
+    return true;
+  case kDoorBombColorTxtr:
+    out.type = kTXTR;
+    out.data = Embedded(kDoorBombColorData);
+    return true;
+  // randomprime's create_custom_door_cmdl: the blue shield with another rim.
+  case kDoorPowerCmdl:
+    return discModel(kBlueShieldCmdl, {{0, kDoorPowerHolorimTxtr}});
+  case kDoorPowerCmdl + 1:
+    return discModel(kBlueShieldVerticalCmdl, {{0, kDoorPowerHolorimTxtr}});
+  case kDoorBombCmdl:
+    return discModel(kBlueShieldCmdl, {{0, kDoorBombHolorimTxtr}});
+  case kDoorBombCmdl + 1:
+    return discModel(kBlueShieldVerticalCmdl, {{0, kDoorBombHolorimTxtr}});
+  case kDoorMissileCmdl:
+    return discModel(kBlueShieldCmdl, {{0, 0x459582C1}});
+  case kDoorMissileCmdl + 1:
+    return discModel(kBlueShieldVerticalCmdl, {{0, 0x459582C1}});
+  case kDoorDisabledCmdl:
+    return discModel(kBlueShieldCmdl, {{0, 0x717AABCE}});
+  case kDoorDisabledCmdl + 1:
+    return discModel(kBlueShieldVerticalCmdl, {{0, 0x717AABCE}});
+  case kDoorPlasmaVerticalCmdl:
+    return discModel(kBlueShieldVerticalCmdl, {{0, 0x61A6945B}});
   case kNothingCmdl:
     return discModel(kMetroidCmdl, {{0, kNothingTxtr}, {1, kNothingTxtr}, {2, kNothingTxtr},
                                     {3, kNothingTxtr}, {4, kNothingTxtr}, {5, kNothingTxtr},
@@ -153,6 +232,52 @@ bool Build(uint32_t id, const DiscReader& read, Resource& out) {
 }
 
 } // namespace
+
+bool TintTxtr(std::vector<uint8_t>& txtr, const float matrix[3][3]) {
+  const size_t kHeader = 12;
+  if (txtr.size() < kHeader || Get32(txtr, 0) != 10)
+    return false;
+  auto tint = [&](uint16_t c) {
+    const float in[3] = {float((c >> 11) & 31) / 31.f, float((c >> 5) & 63) / 63.f,
+                         float(c & 31) / 31.f};
+    static const float kMax[3] = {31.f, 63.f, 31.f};
+    uint16_t result = 0;
+    for (int ch = 0; ch < 3; ++ch) {
+      float v = matrix[ch][0] * in[0] + matrix[ch][1] * in[1] + matrix[ch][2] * in[2];
+      v = v < 0.f ? 0.f : v > 1.f ? 1.f : v;
+      result = uint16_t(result << (ch == 1 ? 6 : 5) | uint16_t(v * kMax[ch] + 0.5f));
+    }
+    return result;
+  };
+  for (size_t at = kHeader; at + 8 <= txtr.size(); at += 8) {
+    const uint16_t c0 = uint16_t(txtr[at] << 8 | txtr[at + 1]);
+    const uint16_t c1 = uint16_t(txtr[at + 2] << 8 | txtr[at + 3]);
+    // c0 > c1 is the four-colour mode; otherwise index 3 is transparent.
+    const bool four = c0 > c1;
+    uint16_t n0 = tint(c0);
+    uint16_t n1 = tint(c1);
+    if (four ? n0 < n1 : n0 > n1) {
+      std::swap(n0, n1);
+      for (int i = 4; i < 8; ++i) {
+        uint8_t b = txtr[at + i];
+        // 0 and 1 trade places, and with four colours so do 2 and 3.
+        for (int shift = 0; shift < 8; shift += 2)
+          if (four || ((b >> shift) & 2) == 0)
+            b ^= uint8_t(1 << shift);
+        txtr[at + i] = b;
+      }
+    } else if (four && n0 == n1) {
+      // Equal colours would mean the other mode: one colour, opaque.
+      for (int i = 4; i < 8; ++i)
+        txtr[at + i] = 0;
+    }
+    txtr[at] = uint8_t(n0 >> 8);
+    txtr[at + 1] = uint8_t(n0);
+    txtr[at + 2] = uint8_t(n1 >> 8);
+    txtr[at + 3] = uint8_t(n1);
+  }
+  return true;
+}
 
 bool SetCmdlTexture(std::vector<uint8_t>& cmdl, uint32_t index, uint32_t texture) {
   // Header: magic, version, flags, AABB (6 floats), section count, material
@@ -200,7 +325,7 @@ const Resource* Find(uint32_t id, const DiscReader& read) {
   if (!Build(id, read, *resource)) {
     // Unknown ids fail quietly (a randomprime disc's other custom assets are
     // found in its PAKs before this is asked); a known one means an odd disc.
-    if (id <= kCombatAncs)
+    if (id <= kCombatAncs || (id >= kDoorPowerHolorimTxtr && id < kShieldEnd))
       PortLog::Write("custom resource %08X: disc source missing or unexpected\n", id);
     resource.reset();
   }

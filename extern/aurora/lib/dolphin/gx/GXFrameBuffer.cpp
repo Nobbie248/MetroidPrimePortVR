@@ -11,6 +11,9 @@
 #include "../../gx/texture.hpp"
 #include "../vi/vi_internal.hpp"
 
+#include <cstdio>
+#include <cstdlib>
+
 #include <algorithm>
 #include <cmath>
 
@@ -46,8 +49,12 @@ void copy_tex(const void* dest, GXBool clear) noexcept {
       .height = dstHeight,
       .format = texCopyFmt,
   };
+  static u64 s_copySerial = 0;
   auto it = g_gxState.copyTextureCache.find(key);
   if (it == g_gxState.copyTextureCache.end()) {
+    // Enough sizes for a few fog volumes' chunks (full, last column, last row, corner) in a frame.
+    constexpr size_t kSizesPerDest = 16;
+    trim_copy_sizes(dest, kSizesPerDest - 1);
     gfx::TextureHandle handle;
     if (gfx::tex_copy_conv::needs_conversion(texCopyFmt)) {
       handle = gfx::new_conv_texture(dstWidth, dstHeight, texCopyFmt, "Copy Conv Texture");
@@ -60,6 +67,12 @@ void copy_tex(const void* dest, GXBool clear) noexcept {
       handle = gfx::new_render_texture(dstWidth, dstHeight, fmt, "Resolved Texture");
     }
     it = g_gxState.copyTextureCache.emplace(key, GXState::CopyTextureRef{.handle = handle, .revision = 0}).first;
+    static const bool logNew = std::getenv("MP_LOG_COPY_TEX") != nullptr;
+    if (logNew) {
+      std::fprintf(stderr, "[copytex] new %p %ux%u (logical %ux%u) fmt %u, %zu cached\n", dest, dstWidth, dstHeight,
+                   g_gxState.texCopyDstWidth, g_gxState.texCopyDstHeight, static_cast<unsigned>(texCopyFmt),
+                   g_gxState.copyTextureCache.size());
+    }
   }
   auto& handle = it->second;
 
@@ -81,6 +94,7 @@ void copy_tex(const void* dest, GXBool clear) noexcept {
   gfx::resolve_pass_into(handle.handle, rect, clearColor, clearAlpha, clearDepth, g_gxState.clearColor,
                          clear_depth_value(), texCopyFmt);
   ++handle.revision;
+  handle.lastCopy = ++s_copySerial;
   handle.width = g_gxState.texCopyDstWidth;
   handle.height = g_gxState.texCopyDstHeight;
   g_gxState.copyTextures[dest] = handle;

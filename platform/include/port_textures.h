@@ -13,7 +13,7 @@
 // device-agnostic pack keeps working. MP_TEXTURE_DEVICE overrides the name. The
 // set is reloaded when the active device changes.
 //
-// A user pack (MP_USER_TEXTURES, else `user_textures` in the pref folder) is
+// A user pack (MP_USER_TEXTURES, else `user_textures` in the user folder) is
 // layered over that built-in set, with the same device-folder rules. Nothing
 // the app does on update touches it. On Android it is filled by the overlay's
 // folder picker, which copies the chosen folder to `<user root>.new`; the swap

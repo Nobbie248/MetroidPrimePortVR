@@ -136,13 +136,15 @@ extern "C" {
 #define GX_AURORA_SET_PBR_PROBE 0x0045
 
 /**
- * Port extension: per-material constants for PBR draws, as four vec4f. The first is a
+ * Port extension: per-material constants for PBR draws, as six vec4f. The first is a
  * multiplier on the emissive map (rgb; 1 leaves it as sampled) and, in w, the threshold of
  * a height-blended alpha. The second is a backlight weight (rgb, linear): a rim of the
  * surface's base colour times that weight, scaled by the light reaching the surface, on the
  * edges facing away from the viewer; zero is off; its w is the shading mode. The third's x
- * is the edge width of a second layer's blend (0: none) and the fourth the scale and offset
- * of each layer's height (see GXSetPBRMaterial). Stays in effect until changed.
+ * is the edge width of a second layer's blend (0: none), its y the kind of a special
+ * surface and z that kind's strength; the fourth is the scale and offset of each layer's
+ * height, the fifth the kind's parameters and the sixth world up in view space (see
+ * GXSetPBRMaterial). Stays in effect until changed.
  */
 #define GX_AURORA_SET_PBR_MATERIAL 0x0046
 
@@ -176,6 +178,20 @@ extern "C" {
 #define GX_AURORA_CREATE_PBR_VOLUME 0x004B
 #define GX_AURORA_DESTROY_PBR_VOLUME 0x004C
 #define GX_AURORA_SET_PBR_VOLUME 0x004D
+
+/**
+ * Port extension: the tone curve of the following PBR draws, as three vec4f (see
+ * GXSetPBRTone). A slope of 0 (x of the second) goes back to the built-in highlight
+ * roll-off. Stays in effect until changed.
+ */
+#define GX_AURORA_SET_PBR_TONE 0x004E
+
+// Distance-field texturing for the following draws: every texture sample is read as
+// a signed distance (red, edge at 0.5) and becomes coverage, one screen pixel wide:
+// rgb = inside the shape, a = inside the shape grown out to `edge`.
+// Payload:
+//   u8 edge (distance of the outer edge x 255; 128 = the shape itself, 0 = off)
+#define GX_AURORA_SET_SDF 0x004F
 
 #define GX2_SET_POLYGON_OFFSET 0x1000
 

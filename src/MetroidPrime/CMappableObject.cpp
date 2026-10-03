@@ -4,7 +4,10 @@
 #include "MetroidPrime/Tweaks/CTweakAutoMapper.hpp"
 #include "MetroidPrime/Tweaks/CTweakPlayerRes.hpp"
 
+#include "port_map_icons.h"
+
 #include "Kyoto/Basics/CBasics.hpp"
+#include "Kyoto/CResFactory.hpp"
 #include "Kyoto/CSimplePool.hpp"
 #include "Kyoto/Graphics/CColor.hpp"
 #include "Kyoto/Graphics/CGX.hpp"
@@ -191,6 +194,15 @@ void CMappableObject::Draw(int curArea, const CMapWorldInfo& mwInfo, float alpha
   default:
     iconRes = gpTweakPlayerRes->xc_elevatorIcon;
     break;
+  }
+
+  // A mod's own arrow for this type is already coloured (port_map_icons.h).
+  if (x0_type >= PortMapIcons::kFirstArrowType && x0_type <= PortMapIcons::kLastArrowType) {
+    const CAssetId arrow = static_cast< CAssetId >(PortMapIcons::ArrowId(x0_type));
+    if (gpResourceFactory->GetResourceTypeById(arrow) == 'TXTR') {
+      iconRes = arrow;
+      iconColor = CColor(0xffffffff);
+    }
   }
 
   TLockedToken< CTexture > tex = gpSimplePool->GetObj(SObjectTag('TXTR', iconRes));

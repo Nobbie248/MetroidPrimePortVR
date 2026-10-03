@@ -947,6 +947,50 @@ void evict_copy_texture(const void* dest) noexcept {
   }
 }
 
+// The copy pool is keyed by dest and size, and a dest copied at a size that follows the
+// screen (Metroid Prime's fog volumes copy a chunk the size of the volume's projected box
+// into two fixed buffers) gets a new texture for every size it reaches, none ever freed: on
+// a phone, where GPU memory is RAM, a walk round Magmoor grew past a gigabyte. Keep the
+// `keep` sizes written most recently for dest and free the rest.
+void trim_copy_sizes(const void* dest, size_t keep) noexcept {
+  size_t count = 0;
+  for (const auto& [key, _] : g_gxState.copyTextureCache) {
+    count += key.dest == dest;
+  }
+  if (count <= keep) {
+    return;
+  }
+  const auto current = g_gxState.copyTextures.find(dest);
+  const void* currentIdentity =
+      current != g_gxState.copyTextures.end() && current->second.handle ? current->second.handle.get() : nullptr;
+  absl::flat_hash_set<const void*> sourceIdentities;
+  for (; count > keep; --count) {
+    auto oldest = g_gxState.copyTextureCache.end();
+    for (auto it = g_gxState.copyTextureCache.begin(); it != g_gxState.copyTextureCache.end(); ++it) {
+      if (it->first.dest == dest && it->second.handle.get() != currentIdentity &&
+          (oldest == g_gxState.copyTextureCache.end() || it->second.lastCopy < oldest->second.lastCopy)) {
+        oldest = it;
+      }
+    }
+    if (oldest == g_gxState.copyTextureCache.end()) {
+      break;
+    }
+    if (oldest->second.handle) {
+      sourceIdentities.insert(oldest->second.handle.get());
+    }
+    g_gxState.copyTextureCache.erase(oldest);
+  }
+  for (auto& [_, cache] : s_tlutObjectCaches) {
+    for (auto it = cache.dynamicPaletteTextures.begin(); it != cache.dynamicPaletteTextures.end();) {
+      if (sourceIdentities.contains(it->first.sourceIdentity)) {
+        cache.dynamicPaletteTextures.erase(it++);
+      } else {
+        ++it;
+      }
+    }
+  }
+}
+
 void resolve_sampled_textures(const ShaderInfo& info) noexcept {
   ZoneScoped;
   apply_pending_invalidations();

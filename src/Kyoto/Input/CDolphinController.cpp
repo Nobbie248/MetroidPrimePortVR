@@ -1,4 +1,5 @@
 #include "Kyoto/Input/CDolphinController.hpp"
+#include "port_console.h"
 #include "port_debug.h"
 #include <SDL3/SDL_gamepad.h>
 #include <SDL3/SDL_keyboard.h>
@@ -14,9 +15,28 @@
 
 #ifdef TARGET_PC
 #include "port_controls.h"
+#include "port_input_map.h"
 #endif
 
 #include <string.h>
+
+namespace {
+static_assert(PortInputMap::kPadA == PAD_BUTTON_A && PortInputMap::kPadL == PAD_TRIGGER_L &&
+                  PortInputMap::kPadR == PAD_TRIGGER_R && PortInputMap::kPadUp == PAD_BUTTON_UP &&
+                  PortInputMap::kPadStart == PAD_BUTTON_START && PortInputMap::kPadZ == PAD_TRIGGER_Z,
+              "PortInputMap's pad bits are dolphin/pad.h's");
+
+// The D-pad picks beams while the shift is held (PortInputMap::ShiftDPadToCStick).
+void ApplyBeamShift(PADStatus& status) {
+  unsigned buttons = status.button;
+  int x = status.substickX;
+  int y = status.substickY;
+  PortInputMap::ShiftDPadToCStick(buttons, x, y);
+  status.button = static_cast< u16 >(buttons);
+  status.substickX = static_cast< s8 >(x);
+  status.substickY = static_cast< s8 >(y);
+}
+} // namespace
 
 CDolphinController::CDolphinController()
 : x1c4_validControllers(PAD_CHAN0_BIT | PAD_CHAN1_BIT | PAD_CHAN2_BIT | PAD_CHAN3_BIT)
@@ -63,32 +83,56 @@ void CDolphinController::ReadDevices() {
   PADRead(status);
   PADClamp(status);
   // Not SDL_GetMouseState: that counts touches as left clicks.
-  unsigned held = PortDebug::MouseHeldButtons() &
-                  (SDL_BUTTON_LMASK | SDL_BUTTON_RMASK | SDL_BUTTON_MMASK);
+  unsigned held = PortDebug::MouseHeldButtons() & PortInputMap::kMouseButtonMask;
   bool inputFocused = SDL_GetKeyboardFocus() != nullptr;
 #ifdef MP_ENABLE_SMOKE_DRIVER
   held = PortSmokeMouseButtons(held);
   inputFocused = inputFocused || PortSmokeMouseEnabled() || PortSmokeScriptedInput();
 #endif
-  const unsigned mouse = PortDebug::MouseWeaponButtons(held);
-  // Out of first-person aim a left click is still A: bombs in morph ball, and
-  // advancing text boxes and menus. Its gate also waits for a release, so a
-  // held charge carried into morph ball does not drop a bomb.
-  if (PortDebug::MouseMenuButtons(held, inputFocused) != 0) {
-    status[0].err = PAD_ERR_NONE;
-    status[0].button |= PAD_BUTTON_A;
+  // The console's pad commands work in a window without focus.
+  inputFocused = inputFocused || PortConsoleEnabled();
+  int mouseActions[PortInputMap::kMouseButtonCount];
+  for (int i = 0; i < PortInputMap::kMouseButtonCount; ++i) {
+    mouseActions[i] = PortDebug::MouseAction(i);
   }
+  const unsigned mouse = PortDebug::MouseWeaponButtons(held);
+  // Out of first-person aim the buttons bound to A and B still press them:
+  // bombs and boosts in morph ball, advancing text boxes and menus. Its gate
+  // also waits for a release, so a held charge carried into morph ball does
+  // not drop a bomb. Only those buttons feed the gate, so a held side button
+  // with nothing to do there does not hold it shut.
+  const unsigned menuPad = PortInputMap::kPadA | PortInputMap::kPadB;
+  const PortInputMap::SMouseResult menuMouse = PortInputMap::MouseActions(
+      mouseActions,
+      PortDebug::MouseMenuButtons(held & PortInputMap::MouseButtonsFor(mouseActions, menuPad),
+                                  inputFocused),
+      menuPad);
+  if (menuMouse.buttons != 0) {
+    status[0].err = PAD_ERR_NONE;
+    status[0].button |= static_cast< u16 >(menuMouse.buttons);
+  }
+  bool mouseShift = false;
   if (PortDebug::MouseGameplayActive() && PortDebug::MouseCaptured() && PortDebug::MouseButtons()) {
     // Add held states to the normal PAD path: its press/release edges drive
     // charge shots and missile cooldowns. Saved bindings remain untouched.
     status[0].err = PAD_ERR_NONE;
-    if (mouse & SDL_BUTTON_LMASK) status[0].button |= PAD_BUTTON_A;
-    if (mouse & SDL_BUTTON_MMASK) status[0].button |= PAD_BUTTON_Y;
-    if (mouse & SDL_BUTTON_RMASK) {
-      status[0].button |= PAD_TRIGGER_L;
-      status[0].triggerL = 150; // fully depressed, after PADClamp's dead zone
-    }
+    const PortInputMap::SMouseResult actions = PortInputMap::MouseActions(mouseActions, mouse);
+    status[0].button |= static_cast< u16 >(actions.buttons);
+    // Fully depressed, after PADClamp's dead zone.
+    if (actions.buttons & PAD_TRIGGER_L) status[0].triggerL = 150;
+    if (actions.buttons & PAD_TRIGGER_R) status[0].triggerR = 150;
+    mouseShift = actions.shift;
   }
+  // Alt controller buttons (Controls tab): Aurora maps one native button to
+  // each PAD button, the port ORs in a second.
+  if (status[0].err == PAD_ERR_NONE) {
+    const unsigned alt = PortControls::HeldAltPadButtons();
+    status[0].button |= static_cast< u16 >(alt);
+    if ((alt & PAD_TRIGGER_L) && status[0].triggerL < 150) status[0].triggerL = 150;
+    if ((alt & PAD_TRIGGER_R) && status[0].triggerR < 150) status[0].triggerR = 150;
+  }
+  // The beam shift, bound in the Controls tab (left shift by default).
+  const bool shiftHeld = mouseShift || PortControls::ShiftHeld();
   for (int i = 0; i < 4; ++i) {
     // One disconnected port must not prevent the other ports updating. Clear
     // stale held buttons on disconnect and keep UI interaction out of gameplay.
@@ -99,6 +143,7 @@ void CDolphinController::ReadDevices() {
     }
   }
   memcpy(x4_status, status, sizeof(status));
+  PortDebug::SetBeamShiftHeld(shiftHeld && inputFocused && !PortDebug::Visible());
 
   // Twin-stick: feed the right stick into the first-person aim and consume it,
   // so it does not also drive the game's own free-look.
@@ -111,34 +156,33 @@ void CDolphinController::ReadDevices() {
     x4_status[0].substickY = 0;
 
     // Beams are selected from the C-stick, which twin-stick just consumed, so
-    // holding a modifier lets the D-pad stand in for it: the four directions
-    // select beams instead of switching visors. The L trigger works on a pad;
-    // the Android overlay's RB sends left shift, which also gives a keyboard
-    // binding on desktop. Directions must match the C-stick's (positive X is
-    // right, positive Y is up) so each D-pad direction picks the same beam that
-    // direction on the C-stick would.
+    // under twin-stick left shift (the Android overlay's RB sends it) is a beam
+    // shift too, and so are the L trigger and LB unless a pad button is bound
+    // as the shift (Remastered's layout locks on with L and jumps with LB).
     const bool* keys = SDL_GetKeyboardState(nullptr);
     SDL_Gamepad* pad = PADGetSDLGamepadForIndex(0);
+    const bool padShiftBound = PortDebug::ShiftBinding(2) >= 0;
     const bool beamModifier =
-        (x4_status[0].button & PAD_TRIGGER_L) != 0 ||
-        (keys != nullptr && keys[SDL_SCANCODE_LSHIFT] != 0) ||
-        (pad != nullptr && SDL_GetGamepadButton(pad, SDL_GAMEPAD_BUTTON_LEFT_SHOULDER));
+        shiftHeld || (keys != nullptr && keys[SDL_SCANCODE_LSHIFT] != 0) ||
+        (!padShiftBound && ((x4_status[0].button & PAD_TRIGGER_L) != 0 ||
+                            (pad != nullptr && SDL_GetGamepadButton(pad, SDL_GAMEPAD_BUTTON_LEFT_SHOULDER))));
     if (beamModifier) {
-      const int x = ((x4_status[0].button & PAD_BUTTON_RIGHT) != 0 ? 127 : 0) -
-                    ((x4_status[0].button & PAD_BUTTON_LEFT) != 0 ? 127 : 0);
-      const int y = ((x4_status[0].button & PAD_BUTTON_UP) != 0 ? 127 : 0) -
-                    ((x4_status[0].button & PAD_BUTTON_DOWN) != 0 ? 127 : 0);
-      x4_status[0].substickX = static_cast< s8 >(x);
-      x4_status[0].substickY = static_cast< s8 >(y);
-      x4_status[0].button &= ~(PAD_BUTTON_UP | PAD_BUTTON_DOWN | PAD_BUTTON_LEFT | PAD_BUTTON_RIGHT);
+      ApplyBeamShift(x4_status[0]);
     }
   } else {
     PortDebug::SetTwinStickRightY(0.f);
+    // Without twin-stick the C-stick still picks beams; the shift gives the
+    // D-pad the same job, for a keyboard or a pad whose C-stick is awkward.
+    if (shiftHeld && x4_status[0].err == PAD_ERR_NONE) {
+      ApplyBeamShift(x4_status[0]);
+    }
   }
 
   // Start+Back is the debug overlay chord; do not also pause the game with it.
+  // Either alone may be bound to Start (the Remastered preset pauses on Back).
   if (SDL_Gamepad* pad = PADGetSDLGamepadForIndex(0)) {
-    if (SDL_GetGamepadButton(pad, SDL_GAMEPAD_BUTTON_BACK)) {
+    if (SDL_GetGamepadButton(pad, SDL_GAMEPAD_BUTTON_BACK) &&
+        SDL_GetGamepadButton(pad, SDL_GAMEPAD_BUTTON_START)) {
       x4_status[0].button &= ~PAD_BUTTON_START;
     }
   }

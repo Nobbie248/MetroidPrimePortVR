@@ -465,11 +465,16 @@ static void fill_uniform(ByteBuffer& buf, const ShaderInfo& info) noexcept {
     buf.append(g_gxState.pbrBacklight);
     buf.append(g_gxState.pbrLayer);
     buf.append(g_gxState.pbrLayerHeight);
+    buf.append(g_gxState.pbrParam);
+    buf.append(g_gxState.pbrUp);
     buf.append(g_gxState.pbrCubeParams);
     for (const auto& v : g_gxState.pbrAmbient) {
       buf.append(v);
     }
     for (const auto& v : g_gxState.pbrVolumeRows) {
+      buf.append(v);
+    }
+    for (const auto& v : g_gxState.pbrTone) {
       buf.append(v);
     }
   }

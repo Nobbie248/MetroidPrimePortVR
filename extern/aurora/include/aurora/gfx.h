@@ -29,6 +29,12 @@ typedef struct {
 } AuroraStats;
 
 const AuroraStats* aurora_get_stats();
+// Live GPU textures: [0] sampled only, [1] render targets/copies. Bytes are the mip chain's size.
+typedef struct {
+  uint32_t count[2];
+  uint64_t bytes[2];
+} AuroraTextureStats;
+void aurora_get_texture_stats(AuroraTextureStats* out);
 // The AuroraConfig::frameBufferScale in use: the device may allow less than was asked for.
 uint32_t aurora_get_frame_buffer_scale();
 float aurora_get_fps();

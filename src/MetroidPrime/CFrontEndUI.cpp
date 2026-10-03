@@ -1762,9 +1762,15 @@ CIOWin::EMessageReturn CFrontEndUI::Update(float dt, CArchitectureQueue& queue) 
           if (saveUI != nullptr && saveUI->GetUIType() == CSaveGameScreen::kUIT_SaveReady) {
             gpGameState->SetCardSerial(saveUI->GetCardSerial());
           }
-          // Like StartGame, an Archipelago seed starts at the Landing Site.
-          if (const uint32_t world = PortAp::NewGameWorld())
+          // Like StartGame, an Archipelago seed starts in its own room.
+          uint32_t world, area;
+          if (PortAp::NewGameStart(world, area)) {
             gpGameState->SetCurrentWorldId(CAssetId(world));
+            CWorldState& worldState = gpGameState->CurrentWorldState();
+            worldState.SetAreaId(TAreaId(0));
+            worldState.SetDesiredAreaAssetId(area != 0 ? static_cast< CAssetId >(area)
+                                                       : kInvalidAssetId);
+          }
           TransitionToFive();
         }
         break;
@@ -2245,8 +2251,14 @@ void CFrontEndUI::Draw() const {
       const uint vidHeight = xcc_curMoviePtr->GetHeight();
       // Signed arithmetic: the video is narrower than a widescreen viewport, so
       // an unsigned subtraction would underflow and throw the quad off-screen.
+#ifdef TARGET_PC
+      int centerX;
+      int centerY;
+      xcc_curMoviePtr->PortGetMargins(vpWidth, vpHeight, centerX, centerY);
+#else
       const int centerX = (static_cast< int >(vidWidth) - vpWidth) / 2;
       const int centerY = (static_cast< int >(vidHeight) - vpHeight) / 2;
+#endif
       int vl = vpLeft - centerX;
       int vr = vpLeft + vpWidth + centerX;
       int vb = vpTop + vpHeight + centerY;

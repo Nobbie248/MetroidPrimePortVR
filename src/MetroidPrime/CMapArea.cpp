@@ -23,6 +23,13 @@
 
 #include <stdint.h>
 
+#ifdef TARGET_PC
+#include "port_apclient.h"
+
+#include <utility>
+#include <vector>
+#endif
+
 
 
 CMapArea::CMapArea(CInputStream& in, uint size)
@@ -295,10 +302,55 @@ const CVector3f& CMapArea::GetAreaPostTranslate(const IWorld& world, int aid) {
     return CVector3f::Zero();
   }
 }
+#ifdef TARGET_PC
+// A randomized game's door types (Archipelago's door colours) on the map. A
+// vertical door's icon keeps its side: only the three beam doors have those.
+void CMapArea::PortSetDoorTypes(uint mapa) {
+  std::vector< std::pair< uint32_t, int > > doors;
+  if (!PortAp::MapDoors(mapa, doors))
+    return;
+  static const CMappableObject::EMappableObjectType kSided[3][3] = {
+      {CMappableObject::kMOT_IceDoorCeiling, CMappableObject::kMOT_IceDoorFloor,
+       CMappableObject::kMOT_IceDoorFloor2},
+      {CMappableObject::kMOT_WaveDoorCeiling, CMappableObject::kMOT_WaveDoorFloor,
+       CMappableObject::kMOT_WaveDoorFloor2},
+      {CMappableObject::kMOT_PlasmaDoorCeiling, CMappableObject::kMOT_PlasmaDoorFloor,
+       CMappableObject::kMOT_PlasmaDoorFloor2},
+  };
+  for (int i = 0; i < x28_mappableObjCount; ++i) {
+    CMappableObject& object = x38_moStart[i];
+    const int old = object.GetType();
+    if (old > CMappableObject::kMOT_PlasmaDoorFloor2)
+      continue;
+    for (size_t k = 0; k < doors.size(); ++k) {
+      if ((doors[k].first & 0x03FFFFFF) != (uint(object.GetObjId().Value()) & 0x03FFFFFF))
+        continue;
+      int side = -1;
+      for (int beam = 0; beam < 3; ++beam)
+        for (int s = 0; s < 3; ++s)
+          if (kSided[beam][s] == old)
+            side = s;
+      const int type = doors[k].second;
+      if (side >= 0 && type >= CMappableObject::kMOT_IceDoor)
+        object.PortSetType(kSided[type - CMappableObject::kMOT_IceDoor][side]);
+      else
+        object.PortSetType(CMappableObject::EMappableObjectType(type));
+      break;
+    }
+  }
+}
+#endif
+
 static CAssetId gHackAssetId = kInvalidAssetId;
 
 const CFactoryFnReturn FMapAreaFactory(const SObjectTag& objTag, CInputStream& in,
                                  const CVParamTransfer&) {
   gHackAssetId = objTag.GetId();
+#ifdef TARGET_PC
+  CMapArea* area = rs_new CMapArea(in, gpResourceFactory->ResourceSize(objTag));
+  area->PortSetDoorTypes(objTag.GetId());
+  return CFactoryFnReturn(area);
+#else
   return CFactoryFnReturn(rs_new CMapArea(in, gpResourceFactory->ResourceSize(objTag)));
+#endif
 }

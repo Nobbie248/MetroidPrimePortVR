@@ -122,7 +122,17 @@ public:
   void ResetMorphBallTransitionFlash();
   void CreateSpiderBallParticles(const CVector3f& ballPos, const CVector3f& trackPoint);
   ESpiderBallState GetSpiderBallState() const { return x187c_spiderBallState; }
+#ifdef TARGET_PC
+  // `suit` (the model tables' index) picks a mod's look of the model for that
+  // suit, when it has one: see PortSuitVariant.
+  static CModelData* GetMorphBallModel(const rstl::string& name, const float radius, int suit = 0);
+  // The id a mod gives its look of resource `id` for a suit, when it has one of
+  // that type (port_model_variant.h); otherwise `id`. A Remastered import has
+  // one model per suit where retail picks a material set of a shared one.
+  static CAssetId PortSuitVariant(CAssetId id, FourCC type, int suit);
+#else
   static CModelData* GetMorphBallModel(const rstl::string& name, const float radius);
+#endif
   // GetMorphBallModel__10CMorphBallFRCQ24rstl66basic_string<c,Q24rstl14char_traits<c>,Q24rstl17rmemory_allocator>f
   // global
   bool IsBoosting() const { return x1de4_24_inBoost; }

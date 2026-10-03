@@ -6,6 +6,11 @@ on:
     branches: [port, main, master]
   pull_request:
 
+# Pushes often arrive a few minutes apart; only the newest one's result matters.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
   build:
     runs-on: ubuntu-24.04
@@ -20,6 +25,15 @@ jobs:
       - uses: hendrikmuhs/ccache-action@v1
         with:
           key: linux-${{ matrix.compiler }}
+      # Configure downloads and unpacks about a dozen dependencies. Keep the
+      # unpacked sources and the stamps that say they are current; the build
+      # directories beside them are left out, since ccache covers those.
+      - uses: actions/cache@v4
+        with:
+          path: |
+            build/native/_deps/*-src
+            build/native/_deps/*-subbuild
+          key: deps-linux-${{ hashFiles('CMakeLists.txt', 'extern/aurora/**/CMakeLists.txt', 'extern/aurora/**/*.cmake') }}
       - name: Configure
         env:
           COMPILER: ${{ matrix.compiler }}

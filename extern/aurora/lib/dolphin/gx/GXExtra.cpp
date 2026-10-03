@@ -46,6 +46,11 @@ void GXSetPBR(GXBool enable) {
   GX_WRITE_U8(enable ? 1 : 0);
 }
 
+void GXSetSDF(u8 edge) {
+  GX_WRITE_AURORA(GX_AURORA_SET_SDF);
+  GX_WRITE_U8(edge);
+}
+
 void GXCopyProbeFace(u32 face) {
   GX_WRITE_AURORA(GX_AURORA_COPY_PROBE_FACE);
   GX_WRITE_U8(static_cast<u8>(face));
@@ -62,7 +67,12 @@ void GXSetPBRProbe(const f32 viewToProbe[3][3], f32 weight) {
   }
 }
 
-void GXSetPBRMaterial(const f32 emissive[3], const f32 backlight[3], f32 heightBlend, f32 mode, const f32 layer[5]) {
+static u32 sPBRDebugView = 0;
+
+void GXSetPBRDebugView(u32 view) { sPBRDebugView = view; }
+
+void GXSetPBRMaterial(const f32 emissive[3], const f32 backlight[3], f32 heightBlend, f32 mode, const f32 layer[5],
+                      const f32 kind[6], const f32 up[3]) {
   GX_WRITE_AURORA(GX_AURORA_SET_PBR_MATERIAL);
   GX_WRITE_F32(emissive[0]);
   GX_WRITE_F32(emissive[1]);
@@ -73,12 +83,19 @@ void GXSetPBRMaterial(const f32 emissive[3], const f32 backlight[3], f32 heightB
   GX_WRITE_F32(backlight[2]);
   GX_WRITE_F32(mode);
   GX_WRITE_F32(layer[0]);
-  GX_WRITE_F32(0.f);
-  GX_WRITE_F32(0.f);
-  GX_WRITE_F32(0.f);
+  GX_WRITE_F32(kind[0]);
+  GX_WRITE_F32(kind[1]);
+  GX_WRITE_F32(static_cast<f32>(sPBRDebugView));
   for (int i = 1; i < 5; ++i) {
     GX_WRITE_F32(layer[i]);
   }
+  for (int i = 2; i < 6; ++i) {
+    GX_WRITE_F32(kind[i]);
+  }
+  GX_WRITE_F32(up[0]);
+  GX_WRITE_F32(up[1]);
+  GX_WRITE_F32(up[2]);
+  GX_WRITE_F32(0.f);
 }
 
 void GXCreatePBRCube(u32 id, u32 size, u32 mipCount, const void* texels, u32 length) {
@@ -134,6 +151,15 @@ void GXSetPBRVolume(u32 id, const f32 rows[6][4]) {
   GX_WRITE_AURORA(GX_AURORA_SET_PBR_VOLUME);
   GX_WRITE_U32(rows != nullptr ? id : 0);
   for (int row = 0; row < 6; ++row) {
+    for (int i = 0; i < 4; ++i) {
+      GX_WRITE_F32(rows != nullptr ? rows[row][i] : 0.f);
+    }
+  }
+}
+
+void GXSetPBRTone(const f32 rows[3][4]) {
+  GX_WRITE_AURORA(GX_AURORA_SET_PBR_TONE);
+  for (int row = 0; row < 3; ++row) {
     for (int i = 0; i < 4; ++i) {
       GX_WRITE_F32(rows != nullptr ? rows[row][i] : 0.f);
     }

@@ -10,7 +10,9 @@
 //    mod, replaces that resource in every PAK that holds it. The PAK is served
 //    as a virtual file: its table patched to point past the original data, where
 //    the loose file is appended. An id no PAK holds is added to NoARAM.pak,
-//    which stays loaded from boot, so mods can bring new resources.
+//    which stays loaded from boot, so mods can bring new resources. What
+//    would take NoARAM.pak past kMaxFileSize goes into new PAKs instead
+//    (ExtraPakName), which the game loads right after it.
 //  - a file named <8 hex digits>.dds, anywhere in the mod, is the full-size
 //    image of the TXTR with that id (BC7, BC5, BC3, BC1 or RGBA8, with mips).
 //    The TXTR itself still loads (the mod's own small one, or the disc's) and
@@ -96,6 +98,18 @@ struct LooseResource {
 VirtualFile PatchPak(const std::vector<uint8_t>& header, const PakTable& table, uint64_t originalSize,
                      const std::vector<const LooseResource*>& loose, const std::string& sourceHost = {},
                      const std::vector<const LooseResource*>& added = {});
+// A PAK holding only `added` (none: an empty but valid PAK).
+VirtualFile NewPak(const std::vector<const LooseResource*>& added);
+
+// The largest file the game can read: CDvdFile and the DVD calls hold its
+// length and offsets as s32, so a bigger PAK fails its first read at boot.
+constexpr uint64_t kMaxFileSize = 0x80000000u - 32;
+// Splits the resources nothing holds into PAK-sized groups: the first fills
+// what `homeSize` (NoARAM.pak with its own resources swapped in) leaves under
+// kMaxFileSize and may be empty, each later one is a new PAK. A resource too
+// big for any PAK is left out.
+std::vector<std::vector<const LooseResource*>> SplitAdded(const std::vector<const LooseResource*>& added,
+                                                           uint64_t homeSize);
 
 // How a Reader reaches the file being patched. Tests supply their own.
 struct SourceIo {
@@ -159,6 +173,12 @@ const Status& CurrentStatus();
 std::string Folder();
 // Every .pak on the disc (with mods applied), as (entry number, path).
 std::vector<std::pair<int32_t, std::string>> DiscPaks();
+// The PAKs holding the added resources NoARAM.pak has no room for, for
+// AddPakFileAsync (no ".pak"): "PortMods1", "PortMods2", ... A reload keeps the
+// count from going down (the dropped ones stay as empty PAKs), since the
+// game reopens every PAK it had.
+int ExtraPakCount();
+std::string ExtraPakName(int index);
 
 // Native textures, for CTexture. HasNativeTexture: a mod has <id>.dds.
 // BindTexture: registers that .dds under `owner`, which the texture then passes
@@ -170,10 +190,16 @@ void UnbindTexture(const void* owner);
 // How many .dds files the mods supply, and how many are bound now.
 size_t NativeTextureCount();
 size_t NativeTexturesBound();
+// The .sdfont a mod supplies (port_hd_font.h), the last mod's when several do; empty when none.
+std::string FontPath();
 // The <MREA id>.roomenv a mod supplies for an area (port_room_env.h); empty when none.
 std::string RoomEnvPath(uint32_t mrea);
+// The <FRME id>.hudbars a mod supplies for a HUD frame (port_hud_bars.h); empty when none.
+std::string HudBarsPath(uint32_t frame);
 // The <MREA id>.roomgeo a mod supplies for an area (port_room_geo.h); empty when none.
 std::string RoomGeoPath(uint32_t mrea);
+// The same for its liquid surfaces (port_room_liquid.h).
+std::string RoomLiquidPath(uint32_t mrea);
 // Whether any mod folder holds room geometry. Reads the disk, and needs no Initialize:
 // the frame buffers are sized from it before there is a renderer.
 bool HasRoomGeometry();

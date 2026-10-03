@@ -29,6 +29,29 @@ struct RomfsFile {
   uint64_t size = 0;
 };
 
+// A file read at any offset. `path` is a path, or "fd:<n>" for a descriptor
+// the caller already holds: Android's file picker gives a content:// address,
+// which only the system can open, and an image of several GB is not worth
+// copying to get a path. The descriptor is duplicated, so the caller keeps its own.
+class SourceFile {
+public:
+  SourceFile() = default;
+  SourceFile(const SourceFile&) = delete;
+  SourceFile& operator=(const SourceFile&) = delete;
+  ~SourceFile() { Close(); }
+
+  bool Open(const std::string& path);
+  void Close();
+  // The bytes read, fewer than `size` at the end of the file.
+  size_t ReadSome(uint64_t offset, void* out, size_t size);
+  // False unless all of `size` bytes were read.
+  bool ReadAt(uint64_t offset, void* out, size_t size);
+
+private:
+  std::ifstream m_stream;
+  int m_fd = -1;
+};
+
 class Nsp {
 public:
   Nsp() = default;
@@ -53,7 +76,7 @@ private:
   bool ReadSection(uint64_t offset, void* out, size_t size, std::string& error) const;
 
   bool m_open = false;
-  mutable std::ifstream m_file;
+  mutable SourceFile m_file;
   // Absolute position of the section in the .nsp, and of the RomFS inside it.
   uint64_t m_sectionBase = 0;
   uint64_t m_sectionSize = 0;

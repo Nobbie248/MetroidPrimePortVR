@@ -26,6 +26,8 @@
 
 #include "Kyoto/Audio/CSfxManager.hpp"
 #include "Kyoto/Graphics/CGraphics.hpp"
+#include "Kyoto/Input/CControllerGamepadData.hpp"
+#include "Kyoto/Input/IController.hpp"
 #include "Kyoto/Math/CFrustumPlanes.hpp"
 #include "Kyoto/Math/CMath.hpp"
 #include "Kyoto/Math/CRelAngle.hpp"
@@ -34,6 +36,7 @@
 #include "Kyoto/Math/CloseEnough.hpp"
 
 #include "port_apclient.h"
+#include "port_debug.h"
 #include "port_livesplit.h"
 #include "port_skip_cutscenes.h"
 #include "rstl/algorithm.hpp"
@@ -295,6 +298,14 @@ void CScriptSpecialFunction::AcceptScriptMsg(EScriptObjectMessage msg, TUniqueId
         CPlayerState& pState = *mgr.PlayerState();
         pState.SetPickup(CPlayerState::kIT_Missiles,
                          pState.GetItemCapacity(CPlayerState::kIT_Missiles));
+#ifdef TARGET_PC
+        // Port: an Archipelago seed's missile stations refill power bombs too
+        // (randomprime's missileStationPbRefill, on in every seed).
+        if (PortAp::SeedGivesStartItems()) {
+          pState.SetPickup(CPlayerState::kIT_PowerBombs,
+                           pState.GetItemCapacity(CPlayerState::kIT_PowerBombs));
+        }
+#endif
       }
       break;
     }
@@ -641,6 +652,22 @@ void CScriptSpecialFunction::ThinkSaveStation(float, CStateManager& mgr) {
       SendScriptMsgs(kSS_MaxReached, mgr, kSM_None);
     } else {
       SendScriptMsgs(kSS_Zero, mgr, kSM_None);
+      // Port: an Archipelago seed warps to its start room when the save is
+      // declined with L and R held (randomprime's patch_warp_to_start).
+      const CControllerGamepadData& pad = gpController->GetGamepadData(0);
+      uint32_t startWorld = 0;
+      uint32_t startArea = 0;
+      if (pad.GetButton(kBU_L).GetIsPressed() && pad.GetButton(kBU_R).GetIsPressed() &&
+          PortAp::WarpToStart(startWorld, startArea)) {
+        PortDebug::RequestWorldTeleport(startWorld, startArea);
+        // The Impact Crater's relay would bring Samus back in at this station.
+        if (mgr.GetWorld()->GetAreaAlways(GetCurrentAreaId()).GetAreaAssetId() == 0x93668996) {
+          const TUniqueId relay = mgr.GetIdForScript(TEditorId(0x00000093));
+          if (mgr.ObjectById(relay) != nullptr) {
+            mgr.SendScriptMsgAlways(relay, GetUniqueId(), kSM_Deactivate);
+          }
+        }
+      }
     }
   }
 }

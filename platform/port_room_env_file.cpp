@@ -8,7 +8,7 @@ namespace PortRoomEnv {
 namespace {
 
 constexpr uint32_t kMagic = 0x5645504D; // 'MPEV'
-constexpr uint32_t kVersion = 3;
+constexpr uint32_t kVersion = 4;
 constexpr size_t kHeaderSize = 32;
 constexpr size_t kProbeSize = 100;
 constexpr size_t kCubeHeaderSize = 16;
@@ -222,6 +222,21 @@ bool Parse(std::vector<uint8_t>&& data, File& out, std::string& error) {
     }
     if (!std::isfinite(out.exposure[0]) || !std::isfinite(out.exposure[1]) || out.exposure[1] < out.exposure[0]) {
       out.exposure[0] = out.exposure[1] = 0.f;
+    }
+    at += 8;
+  }
+  if (version >= 4) {
+    if (data.size() - at < 8) {
+      error = "cut short";
+      return false;
+    }
+    out.exposureBias = GetFloat(data.data() + at);
+    out.contrast = GetFloat(data.data() + at + 4);
+    if (!std::isfinite(out.exposureBias)) {
+      out.exposureBias = 0.f;
+    }
+    if (!(out.contrast >= 0.f && out.contrast <= 1.f)) {
+      out.contrast = 0.f;
     }
   }
   out.data = std::move(data);

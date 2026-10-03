@@ -42,6 +42,15 @@ static const char* const skBallModel = "SamusBallANCS";
 static const CVector3f skDefaultScale(1.f, 1.f, 1.f);
 static const CVector3f skInitialOffset(0.f, 0.f, 0.8f);
 
+#ifdef TARGET_PC
+// The named ball model, or a mod's look of it for this suit (as in game).
+static SObjectTag PortSuitVariantTag(const char* name, int suit) {
+  const SObjectTag* tag = gpResourceFactory->GetResourceIdByName(name);
+  return SObjectTag(tag->GetType(),
+                    CMorphBall::PortSuitVariant(tag->GetId(), tag->GetType(), suit));
+}
+#endif
+
 CSamusDoll::CSamusDoll(const CDependencyGroup& suitDgrp, const CDependencyGroup& ballDgrp,
                        const CPlayerState::EPlayerSuit suit, const CPlayerState::EBeamId beam,
                        const bool hasSpiderBall, const bool hasGrappleBeam)
@@ -69,7 +78,11 @@ CSamusDoll::CSamusDoll(const CDependencyGroup& suitDgrp, const CDependencyGroup&
 , xb0_userRot(x70_fixedRot)
 , xc0_userZoom(-3.6f)
 , xc4_viewInterp(0.f)
+#ifdef TARGET_PC
+, x1d4_spiderBallGlass(gpSimplePool->GetObj(PortSuitVariantTag(CMorphBall::skSpiderBallGlass[suit].x0_name, suit)))
+#else
 , x1d4_spiderBallGlass(gpSimplePool->GetObj(CMorphBall::skSpiderBallGlass[suit].x0_name))
+#endif
 , x1e0_ballMatIdx(hasSpiderBall ? CMorphBall::skSpiderBallCharacter[suit].x4_shader
                                 : CMorphBall::skBallCharacter[suit].x4_shader)
 , x1e4_glassMatIdx(CMorphBall::skSpiderBallGlass[suit].x4_shader)
@@ -142,8 +155,13 @@ bool CSamusDoll::CheckLoadComplete() {
   x134_suitModelBoots = BuildSuitModelDataBoots(x44_suit);
   const SMorphBallModelInfo* characters =
       x270_24_hasSpiderBall ? CMorphBall::skSpiderBallCharacter : CMorphBall::skBallCharacter;
+#ifdef TARGET_PC
+  CAnimRes res(PortSuitVariantTag(characters[x44_suit].x0_name, x44_suit).GetId(), 0,
+               skDefaultScale, 0, true);
+#else
   CAnimRes res(gpResourceFactory->GetResourceIdByName(characters[x44_suit].x0_name)->GetId(), 0,
                skDefaultScale, 0, true);
+#endif
   x184_ballModelData = CModelData(res);
   x1e0_ballMatIdx = characters[x44_suit].x4_shader;
   x270_31_loaded = true;

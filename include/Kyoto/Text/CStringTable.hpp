@@ -38,6 +38,8 @@ public:
 #ifdef TARGET_PC
   // Replaces string idx with UTF-16 text (no terminator).
   void PortSetString(int idx, const unsigned short* text, int length);
+  // Makes the table hold `count` empty strings.
+  void PortSetCount(int count);
   // Makes this table the watched STRG strgId (see mPortWatchedId).
   void PortWatch(uint strgId);
 #endif

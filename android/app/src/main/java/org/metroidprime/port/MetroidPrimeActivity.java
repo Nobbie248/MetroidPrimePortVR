@@ -1,13 +1,20 @@
 package org.metroidprime.port;
 
+import android.Manifest;
+import android.app.AlertDialog;
 import android.content.ClipData;
 import android.content.Context;
 import android.content.Intent;
+import android.content.pm.PackageManager;
 import android.content.res.AssetManager;
 import android.database.Cursor;
 import android.net.Uri;
+import android.os.Build;
 import android.os.Bundle;
+import android.os.Environment;
+import android.os.Process;
 import android.provider.DocumentsContract;
+import android.provider.Settings;
 import android.util.Log;
 
 import dev.encounter.aurora.AuroraSurface;
@@ -15,7 +22,9 @@ import dev.encounter.aurora.AuroraSurface;
 import org.libsdl.app.SDLActivity;
 import org.libsdl.app.SDLSurface;
 
+import java.io.BufferedReader;
 import java.io.File;
+import java.io.FileReader;
 import java.io.FileOutputStream;
 import java.io.IOException;
 import java.io.InputStream;
@@ -26,12 +35,18 @@ public final class MetroidPrimeActivity extends SDLActivity {
     private static final String TAG = "MetroidPrimePort";
     // Distinct from SDL's own dialog request codes, which count up from 0.
     private static final int REQUEST_TEXTURE_PACK = 0x7e57;
+    private static final int REQUEST_STORAGE = 0x7e58;
+    // The Remastered import's .nsp (+0) and prod.keys (+1).
+    private static final int REQUEST_REMASTERED = 0x7e59;
     private TouchControlsView touchControls;
     private final AtomicBoolean texturePackCopying = new AtomicBoolean();
+    // The data folder the texture pack being picked is copied into.
+    private volatile String texturePackFolder;
 
     // Implemented in platform/debug_ui.cpp.
     private static native void nativeTexturePackStatus(String status);
     private static native void nativeTexturePackReady();
+    private static native void nativeRemasteredPicked(int which, String uri);
 
     @Override
     protected String[] getLibraries() {
@@ -62,6 +77,76 @@ public final class MetroidPrimeActivity extends SDLActivity {
                 android.widget.RelativeLayout.LayoutParams.MATCH_PARENT,
                 android.widget.RelativeLayout.LayoutParams.MATCH_PARENT));
         }
+        warnIfDataFolderUnreachable();
+    }
+
+    // The data was moved to shared storage (port_paths.h reads the same file),
+    // but the permission to reach it is gone - revoked, or the app was
+    // reinstalled. The game falls back to app storage; say so before it starts
+    // rather than letting the saves look lost.
+    private void warnIfDataFolderUnreachable() {
+        File marker = new File(getFilesDir(), "data_folder.txt");
+        if (!marker.isFile() || hasStorageAccess()) {
+            return;
+        }
+        String folder = "";
+        try (BufferedReader reader = new BufferedReader(new FileReader(marker))) {
+            String line = reader.readLine();
+            folder = line != null ? line.trim() : "";
+        } catch (IOException e) {
+            Log.w(TAG, "Could not read " + marker, e);
+        }
+        new AlertDialog.Builder(this)
+            .setTitle("Data folder not reachable")
+            .setMessage("Your saves and settings are in " + folder + ", which the game may not open "
+                + "without the \"All files access\" permission. Until it is allowed and the game "
+                + "restarted, the copy in app storage is used.")
+            .setPositiveButton("Allow access", (dialog, which) -> requestStorageAccess())
+            .setNegativeButton("Not now", null)
+            .show();
+    }
+
+    // Whether native code may read and write shared storage with plain file
+    // calls. Called from port_data_folder.cpp.
+    public boolean hasStorageAccess() {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+            return Environment.isExternalStorageManager();
+        }
+        return checkSelfPermission(Manifest.permission.WRITE_EXTERNAL_STORAGE)
+            == PackageManager.PERMISSION_GRANTED;
+    }
+
+    // Opens the system's "All files access" page (Android 11+) or asks for the
+    // storage permission (9-10).
+    public void requestStorageAccess() {
+        runOnUiThread(() -> {
+            if (Build.VERSION.SDK_INT < Build.VERSION_CODES.R) {
+                requestPermissions(new String[]{Manifest.permission.WRITE_EXTERNAL_STORAGE}, REQUEST_STORAGE);
+                return;
+            }
+            try {
+                startActivity(new Intent(Settings.ACTION_MANAGE_APP_ALL_FILES_ACCESS_PERMISSION,
+                    Uri.parse("package:" + getPackageName())));
+            } catch (android.content.ActivityNotFoundException e) {
+                // Some builds only have the list of all apps.
+                try {
+                    startActivity(new Intent(Settings.ACTION_MANAGE_ALL_FILES_ACCESS_PERMISSION));
+                } catch (android.content.ActivityNotFoundException e2) {
+                    Log.w(TAG, "No settings page for all files access", e2);
+                }
+            }
+        });
+    }
+
+    // Starts the game again in a new process (RestartActivity), so the data
+    // folder chosen in the overlay is picked up.
+    public void restartApp() {
+        runOnUiThread(() -> {
+            Intent intent = new Intent(this, RestartActivity.class);
+            intent.putExtra(RestartActivity.EXTRA_PID, Process.myPid());
+            intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
+            startActivity(intent);
+        });
     }
 
     @Override
@@ -72,13 +157,15 @@ public final class MetroidPrimeActivity extends SDLActivity {
         super.onPause();
     }
 
-    // Called from the debug overlay, on the SDL thread.
-    public void pickTexturePack() {
+    // Called from the debug overlay, on the SDL thread, with the data folder
+    // the pack goes into.
+    public void pickTexturePack(String folder) {
         runOnUiThread(() -> {
             if (texturePackCopying.get()) {
                 nativeTexturePackStatus("A texture pack is still being copied.");
                 return;
             }
+            texturePackFolder = folder;
             try {
                 startActivityForResult(new Intent(Intent.ACTION_OPEN_DOCUMENT_TREE), REQUEST_TEXTURE_PACK);
             } catch (android.content.ActivityNotFoundException e) {
@@ -87,12 +174,52 @@ public final class MetroidPrimeActivity extends SDLActivity {
         });
     }
 
+    // Called from the debug overlay, on the SDL thread: picks the Remastered
+    // .nsp (which 0) or prod.keys (which 1). Neither has a MIME type of its own.
+    public void pickRemasteredFile(int which) {
+        runOnUiThread(() -> {
+            Intent intent = new Intent(Intent.ACTION_OPEN_DOCUMENT)
+                .addCategory(Intent.CATEGORY_OPENABLE)
+                .setType("*/*");
+            try {
+                startActivityForResult(intent, REQUEST_REMASTERED + which);
+            } catch (android.content.ActivityNotFoundException e) {
+                Log.w(TAG, "No document picker", e);
+            }
+        });
+    }
+
+    // The pick is written down before native hears of it: the game is often
+    // killed behind the picker for its memory, and then this runs in a new
+    // process whose overlay reads the file (RemasteredPickFile in debug_ui.cpp).
+    private void rememberRemasteredPick(int which, Uri uri) {
+        persistUri(uri);
+        File file = new File(getFilesDir(), "remastered_pick_" + which + ".txt");
+        try (FileOutputStream out = new FileOutputStream(file)) {
+            out.write((uri.toString() + "\n").getBytes(java.nio.charset.StandardCharsets.UTF_8));
+        } catch (IOException e) {
+            Log.w(TAG, "Could not write " + file, e);
+        }
+        try {
+            nativeRemasteredPicked(which, uri.toString());
+        } catch (UnsatisfiedLinkError e) {
+            // The library did not load; the file is read once it does.
+        }
+    }
+
     @Override
     protected void onActivityResult(int requestCode, int resultCode, Intent data) {
         if (requestCode == REQUEST_TEXTURE_PACK) {
             Uri tree = data != null && resultCode == RESULT_OK ? data.getData() : null;
             if (tree != null) {
                 copyTexturePack(tree);
+            }
+            return;
+        }
+        if (requestCode == REQUEST_REMASTERED || requestCode == REQUEST_REMASTERED + 1) {
+            Uri uri = data != null && resultCode == RESULT_OK ? data.getData() : null;
+            if (uri != null) {
+                rememberRemasteredPick(requestCode - REQUEST_REMASTERED, uri);
             }
             return;
         }
@@ -119,7 +246,7 @@ public final class MetroidPrimeActivity extends SDLActivity {
         }
     }
 
-    // Copies the picked folder's textures into <files>/user_textures.new, which
+    // Copies the picked folder's textures into <data>/user_textures.new, which
     // the native side swaps in for user_textures on its next frame. A copy rather
     // than reading through the URI: the grant can be revoked, and the loader
     // needs real paths. The built-in set is never touched.
@@ -129,8 +256,10 @@ public final class MetroidPrimeActivity extends SDLActivity {
         }
         nativeTexturePackStatus("Copying the texture pack...");
         new Thread(() -> {
-            File staging = new File(getFilesDir(), "user_textures.partial");
-            File ready = new File(getFilesDir(), "user_textures.new");
+            String folder = texturePackFolder;
+            File root = folder != null && !folder.isEmpty() ? new File(folder) : getFilesDir();
+            File staging = new File(root, "user_textures.partial");
+            File ready = new File(root, "user_textures.new");
             try {
                 deleteTree(staging);
                 int[] copied = {0};

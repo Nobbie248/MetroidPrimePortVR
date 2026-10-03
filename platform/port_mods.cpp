@@ -3,11 +3,15 @@
 // result with Aurora's DVD overlays.
 
 #include "port_mods.h"
+#include "port_paths.h"
 
 #include "port_debug.h"
+#include "port_hd_font.h"
+#include "port_hud_bars.h"
 #include "port_log.h"
 #include "port_room_env.h"
 #include "port_room_geo.h"
+#include "port_room_liquid.h"
 
 #include <aurora/dvd.h>
 #include <dolphin/gx.h>
@@ -40,7 +44,11 @@ std::vector<std::string> sOverlayNames;
 std::unordered_map<uint32_t, std::string> sNativeTextures;
 // <MREA id>.roomenv files, by area.
 std::unordered_map<uint32_t, std::string> sRoomEnvs;
+std::string sFont;
 std::unordered_map<uint32_t, std::string> sRoomGeos;
+std::unordered_map<uint32_t, std::string> sRoomLiquids;
+// <FRME id>.hudbars files, by frame.
+std::unordered_map<uint32_t, std::string> sHudBars;
 struct BoundTexture {
   aurora::texture::ReplacementRegistration registration;
   uint32_t id = 0;
@@ -49,6 +57,8 @@ std::unordered_map<const void*, BoundTexture> sBoundTextures;
 // Reload: the textures that were bound, to bind again from the new set.
 std::vector<std::pair<const void*, uint32_t>> sRebind;
 bool sOverlaysRegistered = false;
+// PortMods<n>.pak files served (ExtraPakCount); never goes down.
+int sExtraPaks = 0;
 
 std::string PathString(const fs::path& path) {
   const auto u8 = path.u8string();
@@ -216,16 +226,9 @@ std::string Folder() {
   if (const char* env = std::getenv("MP_MODS"); env != nullptr && env[0] != '\0') {
     dir = env;
   } else {
-    if (const char* env = std::getenv("MP_USER_PATH"); env != nullptr && env[0] != '\0') {
-      dir = env;
-    } else if (char* pref = SDL_GetPrefPath(nullptr, "Metroid Prime")) {
-      dir = pref;
-      SDL_free(pref);
-    } else {
+    dir = PortPaths::UserFolder();
+    if (dir.empty()) {
       return {};
-    }
-    if (dir.back() != '/' && dir.back() != '\\') {
-      dir += '/';
     }
     dir += "mods";
   }
@@ -281,6 +284,10 @@ std::vector<std::pair<int32_t, std::string>> DiscPaks() {
   return paks;
 }
 
+int ExtraPakCount() { return sExtraPaks; }
+
+std::string ExtraPakName(int index) { return "PortMods" + std::to_string(index + 1); }
+
 bool HasNativeTexture(uint32_t id) { return sNativeTextures.count(id) != 0; }
 
 bool BindTexture(const void* owner, uint32_t id) {
@@ -306,14 +313,26 @@ void UnbindTexture(const void* owner) {
   }
 }
 
+std::string FontPath() { return sFont; }
+
 std::string RoomEnvPath(uint32_t mrea) {
   const auto found = sRoomEnvs.find(mrea);
   return found != sRoomEnvs.end() ? found->second : std::string();
 }
 
+std::string HudBarsPath(uint32_t frame) {
+  const auto found = sHudBars.find(frame);
+  return found != sHudBars.end() ? found->second : std::string();
+}
+
 std::string RoomGeoPath(uint32_t mrea) {
   const auto found = sRoomGeos.find(mrea);
   return found != sRoomGeos.end() ? found->second : std::string();
+}
+
+std::string RoomLiquidPath(uint32_t mrea) {
+  const auto found = sRoomLiquids.find(mrea);
+  return found != sRoomLiquids.end() ? found->second : std::string();
 }
 
 size_t NativeTextureCount() { return sNativeTextures.size(); }
@@ -322,6 +341,7 @@ size_t NativeTexturesBound() { return sBoundTextures.size(); }
 void BeginReload() {
   // Its models go while the pool they came from is still there.
   PortRoomGeo::Reset();
+  PortRoomLiquid::Reset();
   sRebind.clear();
   for (const auto& [owner, bound] : sBoundTextures) {
     aurora::texture::unregister_replacement(bound.registration);
@@ -333,6 +353,8 @@ void BeginReload() {
 void FinishReload() {
   Initialize();
   PortRoomEnv::Reset();
+  PortHdFont::Reset();
+  PortHudBars::Reset();
   // A texture whose image is gone keeps its stub until the game loads it again.
   for (const auto& [owner, id] : sRebind) {
     BindTexture(owner, id);
@@ -344,7 +366,10 @@ void Initialize() {
   sStatus = {};
   sNativeTextures.clear();
   sRoomEnvs.clear();
+  sFont.clear();
   sRoomGeos.clear();
+  sRoomLiquids.clear();
+  sHudBars.clear();
   sStatus.folder = Folder();
   sStatus.active = PortDebug::ModsEnabled();
   if (sStatus.folder.empty()) {
@@ -404,17 +429,33 @@ void Initialize() {
         native[id] = PathString(file);
         continue;
       }
+      if (PortHdFont::ParseFileName(name)) {
+        sFont = PathString(file);
+        continue;
+      }
       if (PortRoomEnv::ParseFileName(name, id)) {
         sRoomEnvs[id] = PathString(file);
+        continue;
+      }
+      if (PortHudBars::ParseFileName(name, id)) {
+        sHudBars[id] = PathString(file);
         continue;
       }
       if (PortRoomGeo::ParseFileName(name, id)) {
         sRoomGeos[id] = PathString(file);
         continue;
       }
+      if (PortRoomLiquid::ParseFileName(name, id)) {
+        sRoomLiquids[id] = PathString(file);
+        continue;
+      }
       if (ParseLooseName(name, type, id)) {
         if (size == 0) {
           Message(info.name + ": " + relative + " is empty; ignored");
+          continue;
+        }
+        if (size > kMaxFileSize - 64) {
+          Message(info.name + ": " + relative + " is too big; ignored");
           continue;
         }
         loose[{type, id}] = {type, id, PathString(file), size, info.name};
@@ -432,7 +473,7 @@ void Initialize() {
         }
         continue;
       }
-      if (size >= 0xFFFFFFE0u) {
+      if (size > kMaxFileSize) {
         Message(info.name + ": " + relative + " is too big; ignored");
         continue;
       }
@@ -448,6 +489,7 @@ void Initialize() {
   // NoARAM.pak, which the game keeps loaded from boot.
   std::set<std::pair<uint32_t, uint32_t>> used;
   std::map<int32_t, std::shared_ptr<VirtualFile>> patched;
+  std::vector<std::shared_ptr<VirtualFile>> extra;
   if (!loose.empty()) {
     struct Pending {
       int32_t entry;
@@ -462,6 +504,9 @@ void Initialize() {
     std::set<uint32_t> knownIds;
     int32_t homeEntry = -1;
     for (const auto& [entry, path] : DiscPaks()) {
+      if (entry >= aurora_dvd_base_entry_count()) {
+        continue; // a PortMods<n>.pak from before a reload
+      }
       const auto whole = replaced.find(entry);
       Pending pak{entry, path, whole != replaced.end() ? whole->second.hostPath : std::string()};
       if (!ReadPakHeader(pak.hostPath, entry, pak.header, pak.size, pak.table)) {
@@ -499,20 +544,38 @@ void Initialize() {
         used.insert(key);
       }
     }
+    // NoARAM.pak takes what fits under kMaxFileSize, PortMods<n>.pak the rest.
+    std::vector<std::vector<const LooseResource*>> groups(1);
+    for (const Pending& pak : pending) {
+      if (pak.entry == homeEntry) {
+        uint64_t homeSize = (pak.size + 31) & ~uint64_t(31);
+        for (const LooseResource* resource : pak.take) {
+          homeSize += (resource->hostSize + 31) & ~uint64_t(31);
+        }
+        groups = SplitAdded(added, homeSize);
+      }
+    }
     for (Pending& pak : pending) {
       const bool home = pak.entry == homeEntry;
-      if (pak.take.empty() && (!home || added.empty())) {
+      if (pak.take.empty() && (!home || groups[0].empty())) {
         continue;
       }
       auto file = std::make_shared<VirtualFile>(PatchPak(pak.header, pak.table, pak.size, pak.take, pak.hostPath,
-                                                         home ? added : std::vector<const LooseResource*>{}));
-      if (file->size == 0 || file->size >= 0xFFFFFFE0u) {
-        Message("cannot patch " + pak.path);
+                                                         home ? groups[0] : std::vector<const LooseResource*>{}));
+      if (file->size == 0 || file->size > kMaxFileSize) {
+        Message("cannot patch " + pak.path + " (" + std::to_string(file->size >> 20) + " MiB)");
         continue;
       }
       file->discPath = pak.path;
       file->sourceEntry = pak.entry;
       patched[pak.entry] = std::move(file);
+    }
+    for (size_t i = 1; i < groups.size(); ++i) {
+      auto file = std::make_shared<VirtualFile>(NewPak(groups[i]));
+      file->discPath = "/" + ExtraPakName(int(extra.size())) + ".pak";
+      PortLog::Write("mods: %zu added resource(s) in %s (%llu MiB)\n", groups[i].size(), file->discPath.c_str(),
+                     static_cast<unsigned long long>(file->size >> 20));
+      extra.push_back(std::move(file));
     }
     for (const auto& [key, resource] : loose) {
       if (used.count(key) != 0) {
@@ -549,6 +612,17 @@ void Initialize() {
     sFiles.push_back(std::move(file));
   }
   for (auto& [entry, file] : patched) {
+    sFiles.push_back(std::move(file));
+  }
+  // The game reopens every PAK it had at a reload, so a PortMods<n>.pak no longer
+  // needed stays, empty.
+  while (int(extra.size()) < sExtraPaks) {
+    auto file = std::make_shared<VirtualFile>(NewPak({}));
+    file->discPath = "/" + ExtraPakName(int(extra.size())) + ".pak";
+    extra.push_back(std::move(file));
+  }
+  sExtraPaks = int(extra.size());
+  for (auto& file : extra) {
     sFiles.push_back(std::move(file));
   }
   if (sFiles.empty()) {

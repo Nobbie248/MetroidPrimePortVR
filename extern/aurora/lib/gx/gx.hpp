@@ -314,6 +314,8 @@ struct GXState {
     // Logical (unscaled) GXSetTexCopyDst size of the latest copy to this dest.
     u32 width = 0;
     u32 height = 0;
+    // copy_tex call that last wrote this pooled texture (trim_copy_sizes keeps the newest).
+    u64 lastCopy = 0;
 
     operator bool() const noexcept { return handle.operator bool(); }
   };
@@ -389,16 +391,20 @@ struct GXState {
   u8 numTevStages = 0;
   u8 numTexGens = 0;
   bool pbr = false; // GX_AURORA_SET_PBR
+  u8 sdf = 0; // GX_AURORA_SET_SDF
   Mat3x4<float> pbrProbe; // GX_AURORA_SET_PBR_PROBE
   Vec4<float> pbrEmissive{1.f, 1.f, 1.f, 0.f}; // GX_AURORA_SET_PBR_MATERIAL
   Vec4<float> pbrBacklight{0.f, 0.f, 0.f, 0.f};
   Vec4<float> pbrLayer{0.f, 0.f, 0.f, 0.f};       // x: the edge width of a second layer's blend
   Vec4<float> pbrLayerHeight{1.f, 0.f, 1.f, 0.f}; // scale and offset of each layer's height
+  Vec4<float> pbrParam{0.f, 0.f, 0.f, 0.f};       // the parameters of pbrLayer's kind (y; z its strength)
+  Vec4<float> pbrUp{0.f, 1.f, 0.f, 0.f};          // world up in view space
   u32 pbrCube = 0; // GX_AURORA_SET_PBR_CUBE
   Vec4<float> pbrCubeParams{0.f, 0.f, 0.f, 0.f}; // see GXSetPBRCube
   std::array<Vec4<float>, 6> pbrAmbient{}; // GX_AURORA_SET_PBR_AMBIENT
   u32 pbrVolume = 0; // GX_AURORA_SET_PBR_VOLUME
   std::array<Vec4<float>, 6> pbrVolumeRows{}; // see GXSetPBRVolume
+  std::array<Vec4<float>, 3> pbrTone{}; // GX_AURORA_SET_PBR_TONE
 
   // GX2 polygon offset state
   f32 frontOffset = 0.0f;
@@ -455,6 +461,7 @@ void clear_static_texture_cache() noexcept;
 void clear_copy_texture_cache() noexcept;
 void trim_copy_texture_cache() noexcept;
 void evict_copy_texture(const void* dest) noexcept;
+void trim_copy_sizes(const void* dest, size_t keep) noexcept;
 void evict_texture_object(u32 texObjId) noexcept;
 void evict_tlut_object(u32 tlutObjId) noexcept;
 Vec2<uint32_t> logical_fb_size() noexcept;
@@ -512,6 +519,8 @@ struct ShaderConfig {
   u8 fogRangeEnabled : 1 = false;
   u8 pad1 : 5 = 0;
   u8 pbr = 0; // GX_AURORA_SET_PBR
+  u8 sdf = 0; // GX_AURORA_SET_SDF
+  std::array<u8, 3> pad2{};
   std::array<AttrConfig, MaxVtxAttr> attrs;
   std::array<TevSwap, MaxTevSwap> tevSwapTable;
   std::array<TevStage, MaxTevStages> tevStages;

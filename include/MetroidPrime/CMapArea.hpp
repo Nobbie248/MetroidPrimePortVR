@@ -44,6 +44,9 @@ public:
   ~CMapArea();
 
   int GetNumMappableObjects() const { return x28_mappableObjCount; }
+#ifdef TARGET_PC
+  void PortSetDoorTypes(uint mapa);
+#endif
   const CMappableObject& GetMappableObject(int idx) const { return x38_moStart[idx]; }
   int GetNumSurfaces() const { return x30_surfaceCount; }
   const CMapAreaSurface& GetSurface(int idx) const { return x40_surfaceStart[idx]; }

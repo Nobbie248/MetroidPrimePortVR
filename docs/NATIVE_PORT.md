@@ -29,6 +29,12 @@ For Windows, run from an MSVC developer shell and add
 `-DCMAKE_C_COMPILER=clang-cl -DCMAKE_CXX_COMPILER=clang-cl` to configure.
 Plain MSVC `cl.exe`, MinGW, macOS, and ARM builds are not currently validated.
 
+If `ccache` is installed, configure compiles through it, and on Linux `mold`
+links when it is installed. Turn them off with `-DMP_USE_CCACHE=OFF` /
+`-DMP_USE_MOLD=OFF`. The cache is shared between build directories in the same
+checkout, so a new `build/<name>` mostly fills from it instead of recompiling.
+One configuration takes about 0.5 GB of cache (`ccache -M` sets the limit).
+
 No disc or generated game-asset headers are needed to compile. The two embedded
 default-font resources are read from the mounted retail DOL at runtime, using
 the addresses in `config/GM8E01_00/symbols.txt`. Native builds do not depend on
@@ -55,10 +61,15 @@ path. Preserve the accompanying dependency licenses/notices.
 ./build/native/metroid_prime_port "/path/to/Metroid Prime (USA) (v1.00).iso"
 ```
 
-Alternatively set `MP_DISC`, keep the image beside the executable, or let the
-port ask for it: when no disc is found it opens the platform's file dialog and
+Alternatively set `MP_DISC`, keep the image beside the executable (or in a
+folder beside it; for an AppImage, beside the `.AppImage` file), which starts
+the game with no prompt, or let the port ask for it. A plain `.iso`/`.gcm` there
+is only taken when its header says GM8E01 v1.00, so another game's image next to
+it is skipped; compressed formats are taken as found, after a matching plain
+image. Otherwise, when no disc is found it opens the platform's file dialog and
 remembers the answer as `disc_path` in the settings file. There is no prompt
-when the port has no window to show one on, as on a build runner. The disc must
+when the port has no window to show one on, or with `MP_NO_DISC_DIALOG=1`
+(for scripted runs that do have a window, as on a build runner). The disc must
 identify as **GM8E01, disc 0, revision 0**; other revisions/regions are
 rejected. Nod/Aurora supports additional image
 containers, but the same retail content is required.
@@ -68,17 +79,41 @@ graphics. The same revision appears in the launch log and F1 Performance tab.
 Include it when reporting a copied build from another machine; a `-dirty` suffix
 means the executable was built with uncommitted source changes.
 
-Aurora selects user/cache directories through its SDL platform paths and logs
-them at initialization. `MP_USER_PATH` and `MP_CACHE_PATH` override these with
-explicit directories; use separate directories for automated testing so runs do
-not share normal saves/settings. Screenshots are written to `screenshots/` in
-the working directory.
+A copied build is self-contained: everything the port writes goes in the folder
+holding the executable (for an AppImage, the folder the `.AppImage` file is in).
+That is `port_settings.ini`, `mods/`, `savestates/`, `importers/`,
+`user_textures/`, the randomizer and Archipelago files, the controller bindings
+and the shader caches (`dawn_cache.db`, `pipeline_cache.db`), next to the memory
+card in `<region>/Card A`. The disc image is auto-detected there too (or one
+level below), and texture replacements are loaded from `textures/` when present;
+`MP_DISC` and `MP_TEXTURES` override those two. The launch log names the folder
+(`port: user folder ...`).
 
-A copied build is self-contained by default: the memory card is written to
-`<executable dir>/<region>/Card A`, the disc image is auto-detected next to the
-executable (or one level below it), and texture replacements are loaded from
-`<executable dir>/textures` when present. `MP_DISC` and `MP_TEXTURES` still
-override these.
+The per-user folder (`~/.local/share/Metroid Prime`, `%APPDATA%\Metroid Prime`)
+is used only when:
+
+- the executable's folder cannot be written to (a Flatpak, a system package), or
+- it already holds a `port_settings.ini` from an older build and the
+  executable's folder has none. Move its contents next to the executable to make
+  that install portable.
+
+On Android the folder starts in the app's own storage, which other apps and file
+managers cannot reach. F1 > Extras > Data folder moves it to
+`/storage/emulated/0/MetroidPrime/` (the shared storage root): it asks for "All
+files access" (Android 11+; storage permission on 9/10), copies saves, settings,
+mods, save states, the texture pack and the copied disc there with a progress
+bar (built-in textures and the pipeline cache stay behind), then restarts the
+game. If the shared folder already holds data, it offers to use that data or to
+copy over it. The choice is kept in `data_folder.txt` in app storage; "Move
+back to app storage" reverses it, and "Delete the old copy" frees the space the
+old folder still takes. If access is revoked later, the game starts from app
+storage and says so, with buttons to grant access again or stay there.
+
+`MP_USER_PATH` overrides the folder
+and `MP_CACHE_PATH` the caches alone; use separate directories for automated
+testing so runs do not share normal saves/settings (the memory card stays with
+the executable either way). Screenshots are written to `screenshots/` in the
+working directory.
 
 ### A Wayland session hangs at startup
 
@@ -306,13 +341,13 @@ every source texture to `<cachePath>/texture_dumps` as DDS, for authoring
 replacements.
 
 A user pack is layered over that built-in set, with the same folder rules. It
-lives in `user_textures` in the pref folder (`~/.local/share/Metroid Prime/`
+lives in `user_textures` in the user folder (next to the executable; for a read-only install `~/.local/share/Metroid Prime/`
 on Linux, `~/.var/app/io.github.odrannnn.metroidprimeport/data/Metroid Prime/`
 in the Flatpak, `%APPDATA%\Metroid Prime\` on Windows), or wherever
 `MP_USER_TEXTURES` points, so updates never touch it; the overlay's Render page
 has a Reload button. On Android, Render > Texture pack > Choose texture pack
 folder opens the system folder picker and copies the folder's `.png`/`.dds`
-files into app storage (pick it again after changing it; Remove deletes the
+files into the data folder (pick it again after changing it; Remove deletes the
 copy). The copy lands in `user_textures.new` and is swapped in on the next
 frame, or at the next start if the app closed first. Priorities: built-in 0,
 user pack 1, binding icons 2, so a remapped action still shows its binding.
@@ -375,7 +410,7 @@ screen quickly to see the result.
 
 ### Mods folder
 
-`mods` in the pref folder (or wherever `MP_MODS` points; created on first
+`mods` in the user folder (or wherever `MP_MODS` points; created on first
 start) replaces disc data without touching the disc image. Each folder in it is
 a mod, applied in name order so a later name wins; folders starting with `.` are
 skipped. Inside a mod:
@@ -407,6 +442,23 @@ skipped. Inside a mod:
   later mod's TXTR without a `.dds` drops an earlier mod's `.dds` for that id.
   On a GPU without BC support (most phones) the TXTR is drawn instead. The log
   and the Mods panel count them (`mods: <n> native texture(s)`).
+- a file named `<name>.sdfont`, anywhere in the mod, is a distance-field font
+  (each texel holds how far it is from the glyph's edge), which stays sharp at
+  any resolution. The port draws its glyphs in place of the disc's bitmap ones
+  for the Deface fonts (HUD, menus, scans, logbook), fitted to the disc's
+  capital H; the layout is still the disc's (advances, kerning, line breaks),
+  so text sits where it did. From a character the file lacks, the rest of
+  that run of text is drawn from the disc. The last mod with one wins,
+  `MP_HD_FONT=0` turns it off, and the layout is in
+  `platform/include/port_hd_font.h`.
+- a file named `<FRME id, 8 hex digits>.hudbars`, anywhere in the mod, gives
+  the energy-bar widgets of that HUD frame their own shape: per bar, named
+  after its widget, a strip of stations (two points and their texture
+  coordinates) from the empty end to the full end. The game still supplies the
+  value, the colours and the texture; the port fills the strip by its measured
+  length, so stations need not be evenly spaced, and blends it as the widget's
+  draw flags say. The last mod with one for a frame wins, and the layout is in
+  `platform/include/port_hud_bars.h`.
 - a file named `<MREA id, 8 hex digits>.roomenv`, anywhere in the mod, is that
   area's lighting environment for PBR materials: reflection probes, each a box
   of the world with a prefiltered HDR cube map (BC6H) of what surrounds it. A
@@ -417,11 +469,16 @@ skipped. Inside a mod:
   of it comes from, per colour. A PBR model standing in a grid takes the
   colour and direction of its ambient light from the points around its origin;
   the game's ambient colour only sets how bright it is. A file also carries
-  the room's tonemap values and the range its auto exposure is held to, and a
-  probe's scale turns its cube (stored normalised) back into radiance. With
-  `MP_ROOM_ENV_EXPOSURE=1` those set one exposure for the whole room: cubes
-  keep their level relative to it and the baked ambient is used at its own
-  brightness, without the game's. Off by default (see below). Files load and unload with their areas, and a cube is decoded
+  the room's tonemap values and its auto exposure settings, and a
+  probe's scale turns its cube (stored normalised) back into radiance. Those
+  set one exposure for the frame, the way Remastered does: the room the
+  camera is in is exposed by its own radiance, its exposure bias and the
+  range its auto exposure is held to, cubes and baked ambient keep their
+  level relative to that, and the result goes through that room's tone curve
+  (the formulas are Remastered's own; the frame's average is stood in for by
+  the room's middle probe). `MP_ROOM_ENV_EXPOSURE=0` turns that off: every
+  cube is then exposed to middle grey and the game's ambient sets the level.
+  Files load and unload with their areas, and a cube is decoded
   on first use. The layout is in `platform/include/port_room_env.h`.
 - a file named `<MREA id, 8 hex digits>.roomgeo`, anywhere in the mod, is that
   area's static geometry: a list of models, each with the transform that
@@ -434,6 +491,20 @@ skipped. Inside a mod:
   times the usual size (see `MP_FRAME_BUFFERS`), since these rooms are many
   times retail's vertex count; a mod loaded into a running game without them
   is not drawn until the next start.
+- a file named `<MREA id, 8 hex digits>.roomliquid`, anywhere in the mod, holds
+  that area's liquid surfaces (water, poison, lava) as models: each is drawn in
+  place of the fluid plane of the area's water object that stands where its
+  transform says, at the height the game gives that plane, so a rising or
+  draining liquid still moves. The object itself is untouched (fog, splashes,
+  damage). Little-endian: the tag `MPRL`, a version (1), a count, then per
+  surface a type (0 water, 1 poison, 2 lava), a CMDL id and a 3x4 matrix, 56
+  bytes. Their materials carry a `PBR4` record of kind 5 (water, poison: a
+  colour, an opacity and two moving normal maps) or 6 (a lava pool: a pattern
+  carried along a flow map, coloured by a ramp).
+  The Thermal and X-Ray visors show the surface too: the Thermal visor's passes
+  shade it as they shade a fluid plane (the hot pass adds it), and the X-Ray
+  visor draws it unchanged. `MP_ROOM_LIQUID=0` or the
+  console's `roomliquid off` draws the retail planes instead.
 - a PBR material (flag bit 14) may end in a 28-byte record: six big-endian floats
   (emissive multiplier rgb, backlight weight rgb) and the tag `PBRM`, inside the
   material's own span in the offset table. The multiplier scales the emissive map;
@@ -441,11 +512,11 @@ skipped. Inside a mod:
   viewer. A material without the record gets 1 and 0.
   Two longer forms follow the same six floats: `PBR2` (36 bytes) adds a height-blend
   threshold and a mode (1 unlit: the material's own colour and glow; 2 the base
-  map's alpha scales the glow; 3 both), and `PBR3` (56 bytes) adds a second
-  layer's edge width and the scale and offset of both layers' heights. A `PBR3`
+  map's alpha scales the glow; 4 the vertex colour tints the surface; summed),
+  and `PBR3` (56 bytes) adds a second layer's edge width and the scale and offset of both layers' heights. A `PBR3`
   material binds three more maps (base, metal/roughness, normal of the second
   layer) and blends the two by the vertex alpha and the base maps' alphas.
-  A colour attribute on a PBR material tints its albedo.
+  A colour attribute tints a PBR material's albedo only with mode 4.
 - text and image files (`.txt`, `.md`, `.json`, `.png`, ...) are ignored
   silently, so a mod can carry its readme.
 
@@ -457,7 +528,8 @@ checkbox per mod (`mods_disabled`, `/`-separated names); both take effect on
 the next start. `tools/extract_textures.py`'s `disc_files`/`pak_resources` get
 a resource's original bytes to edit. Checked with a `0552A456.STRG` (the file
 select's "New Game") read from the disc and from a whole-file `MiscData.pak`
-mod. On Android the folder is in app storage with no picker yet.
+mod. On Android `mods/` is in the data folder; move that to shared storage
+(F1 > Extras > Data folder) to add mods with a file manager.
 
 #### Reloading without a restart
 
@@ -490,10 +562,19 @@ alone, so a script should pass it on to its children. Desktop only.
 
 #### Metroid Prime Remastered models
 
+**Very experimental and currently unsupported.** The import, the room
+environments and above all room geometry are work in progress: expect wrong
+or missing models, lighting that is off, crashes and heavy memory use, and a
+re-import after most updates. Bug reports about a game running with this mod
+are not handled for now; remove `mods/remastered-models` to get the retail
+game back.
+
 The port can build a model mod from your own copy of Metroid Prime Remastered;
 nothing of it ships. F1 > Extras > Mods > "Metroid Prime Remastered models"
 takes the game's `.nsp` and your console's key file (`~/.switch/prod.keys` is
-filled in when it exists), and Import converts in the background while the game
+filled in when it exists). The panel remembers both files once they are picked
+or used, as `remastered_nsp` and `remastered_keys` in the settings file (on
+Android, the picked documents). Import converts in the background while the game
 runs, on all but two cores. The result is staged in `mods/.remastered-models.importing`
 and becomes `mods/remastered-models` when you press Load it now (a mod reload,
 above) or at the next start, replacing an older one;
@@ -515,16 +596,88 @@ baked ambient grid. A grid of more than about a million points is stored at
 half resolution, which keeps every file under 25 MB. A world that can't be
 read is reported and skipped; the models are installed all the same.
 
-With `MP_REMASTERED_GEOMETRY=all` (or a comma-separated list of room names)
-the import also writes the rooms' static geometry: every model a room places,
+With "Room geometry too" ticked in the panel (it is by default; there is no
+such box on Android), or `MP_REMASTERED_GEOMETRY=all` (or a comma-separated
+list of room names, or `none`) for the command line and the console, the
+import also writes the rooms' static geometry: every model a room places,
 converted as above with textures capped at 1024 px, and a `.roomgeo` per
-area, in the mod's `roomgeo` folder. Experimental and off by default: the
-full set is 7675 models and 4.4 GB, the rooms have no baked lighting, and
-blended materials are drawn opaque.
+area, in the mod's `roomgeo` folder. Experimental: the full set is about
+8,500 models and brings the mod from 1 GB to 6.5 GB, and the game has to be
+restarted to draw it.
+
+The room geometry also brings the rooms' liquid
+surfaces: each water, poison or lava volume's own surface model, converted
+with that room's colour, opacity, wave directions and flow, and a
+`.roomliquid` per area in the `roomgeo` folder.
+
+The import also carries over Remastered's rewording of the English text (scan
+entries, logbook, pickups: 120 strings in 100 tables on the US disc). Each
+changed table is written as `<id>.STRG` in the mod's `text` folder: the
+disc's own table with the reworded strings replaced. A string is replaced only
+when its words differ, so layout-only differences stay as on the disc;
+Remastered's hand-placed line breaks (fitted to its own boxes) are kept only
+where the disc's string breaks a line too, the rest left to word wrap;
+highlight colours are kept (`&push;&main-color=…;…&pop;`) and the layout tags
+a disc string opens with are carried over. Strings that name a button of
+Remastered's controls or use one of its icons keep the disc's text, as do
+strings with characters outside ASCII. `MP_REMASTERED_TEXT=0` leaves the text
+out.
+
+It also writes Remastered's typeface as `font/deface.sdfont` (see above): the
+FONT asset with the most characters, its first face.
+
+The in-game HUD is carried over as well, into the mod's `hud` folder: the
+combat, scan, thermal, X-ray, ball and base frames. The disc's frame stays the
+skeleton, so every widget the game looks up by name is still there; a widget
+Remastered has under the same name takes its placement, colour and model from
+there, and the models and pictures Remastered added are placed under their
+parents. Each frame is written as `<id>.FRME` with its models (`.CMDL`), its
+pictures (a small `.TXTR` and, above 64 px, a `.dds`) and, for the energy,
+missile and threat bars, a `.hudbars`. `MP_REMASTERED_HUD=0` leaves the HUD
+out. The map screen comes too, with one difference: Remastered lays it out for
+a wider view and shows fewer prompts, so its legend, area name and hint are
+set from Remastered on the disc's plane, and the prompts it lacks keep the
+disc's places. The map's icons come as well, into `map/`: the save, missile
+and elevator stations replace the disc's textures, and the six arrows of a
+door between floors, which the disc draws with one tinted texture, get
+Remastered's own under ids the port looks for (`port_map_icons.h`). So do the
+rooms: Remastered's map of a world (`CMAP`) names no room of the disc, so its
+areas are paired with the disc's by place and size, and the few it reshaped
+(14 over the seven worlds) are written as `<id>.MAPA` with the disc's doors
+and markers; the rest keep the disc's map. Experimental: the pause and message
+screens are still the disc's, as is the map's compass, which the disc does not
+have.
+
+The menu movies come along too, into the mod's `Video` folder under the disc's
+names: the title, the file select and its transitions, and four of the attract
+movies (the other six, and the credits and ending movies, stay the disc's).
+Remastered's are H.264; the game plays THP, a JPEG per frame, so each is decoded
+once and written again, by default as 1600x900 at 30 frames a second (the disc's
+own rate; the game's decoder does not keep up with 60 at that size), about
+550 MB for the sixteen. `MP_REMASTERED_MOVIES=1280x720@30` picks another size
+and rate, `MP_REMASTERED_MOVIES=0` leaves them out. A movie of any size is
+fitted to the view with its shape kept, so in 4:3 these have bars above and
+below.
+
+The decoding is done by **ffmpeg**, run as a separate program: `MP_FFMPEG` if
+set, else an `ffmpeg` next to the game's executable, else the one on the path.
+The Windows package has one next to the executable; on Linux install it from
+your distribution.
+Without one the import finishes without the movies and says so; install ffmpeg
+and use "Import movies" in the same panel (or `--import-remastered-movies
+<nsp> [keys]`), which adds only the movies to the mod already there.
+Android cannot start a program like that, so there the system's own decoder
+(MediaCodec) reads the movies and the port writes the JPEGs itself; nothing has
+to be installed.
 
 Measured on the development machine: 342 models and 275 room environments, 44
 seconds on 16 threads, 2.3 GB of memory at the peak, 1.1 GB on disk (half of it
-the room environments). Desktop only.
+the room environments).
+
+On Android the panel has two buttons that open the system's file picker, one
+for the `.nsp` and one for the key file. Neither file is copied: the import
+reads them where they are. It runs on two threads there to keep its memory
+down. Not yet run on a device.
 
 ### Platforms
 
@@ -605,11 +758,15 @@ a temporary directory instead of mounting.
 - Keyboard defaults: WASD / IJKL for sticks, X/Z/C/V for A/B/X/Y, Return for
   Start, arrows for D-pad, Q/E for L/R, and F for Z. Existing mappings take
   precedence. SDL controllers are supported.
-- F1: debug overlay. F10: 60 FPS cap/unlimited presentation. F12: screenshot.
+- F1: debug overlay. F10: 60 FPS cap/unlimited presentation. F11: fullscreen.
+  F12: screenshot.
+- Fullscreen (F1 > Render, persisted as `fullscreen`): a borderless window over
+  the whole screen on desktop, toggled with F11; on Android it hides the status
+  and navigation bars (on by default there; a swipe from the edge shows them
+  for a moment).
 - Settings changed in the F1 overlay (aspect, vsync, render scale, frame limit,
   mouse aim/inversion/sensitivity, audio mutes) are saved to
-  `port_settings.ini` in the user directory (`MP_USER_PATH`, else Aurora's SDL
-  preference path) and restored on the next launch. The Session tab shows the
+  `port_settings.ini` in the user folder (next to the executable, see above) and restored on the next launch. The Session tab shows the
   path and has a **Save settings now** button. Environment variables still
   override the file for that run, and are written back into it if any setting is
   changed during that run.
@@ -632,6 +789,39 @@ a temporary directory instead of mounting.
   to 0.2 s before landing still counts. It reads the gyro aim's source but works
   with gyro aim off. The phone's gyro is turned to the screen's orientation, so
   pitch and yaw stay right in landscape.
+  A press of the beam shift springs too (beams don't change in morph ball), as
+  X does in Remastered; jump (B) stays the Boost Ball's alone. A shift held from
+  before the ball formed has to be let go first.
+- Beam shift (Controls tab): while it is held, the D-pad picks beams the way the
+  C-stick does, and visors stay on the plain D-pad, so both are reachable without
+  a C-stick. It has two key slots (`shift_key`, `shift_key_alt`; default left
+  shift, which already did this under twin stick), a pad slot (`shift_pad`, a
+  button or trigger, default none, because Aurora maps LB on many pads to L), and
+  it can go on a mouse button. Twin stick keeps left shift as its own modifier,
+  and L and LB too while `shift_pad` is unbound.
+- Alt controller buttons (Controls tab, "Alt button" column, persisted as
+  `pad_alt`, 16 comma-separated native codes indexed by the PAD bit, -1 for
+  none): a second controller button or trigger per GameCube button. Aurora maps
+  one native button to each PAD button, so the port reads the alt one itself and
+  ORs it in (`PortControls::HeldAltPadButtons`, from `CDolphinController`).
+- Control presets (Controls tab). Keyboard: **Classic** (the first-run layout)
+  and **Mouse & keyboard** (WASD, E fire, Space jump, left ctrl/C morph, F
+  missile, Q lock on, left alt free look, Tab/M map, 1-4 beams and 5-8 visors
+  through whichever C-stick direction or D-pad button the disc's tweak gives
+  each, arrows on the D-pad too; turns mouse aim on and twin stick off, since
+  twin stick takes the C-stick). Both also reset the mouse buttons and the beam
+  shift keys. Controller: **GameCube** (Aurora's default), **Remastered**
+  (Remastered's Dual Sticks: RT or right face button fire, LT lock on, bottom
+  face button or LB jump, left
+  morph, RB missile, Start map, Back pause, right stick click free look, top
+  face button as the pad beam shift (which springs in morph ball, as any bound
+  beam shift does), Scan and X-Ray swapped; twin stick on),
+  **Modern** and **Southpaw**. Only Remastered sets `shift_pad`, `pad_alt` and
+  `swap_scan_xray`; the others clear them. Remastered and Modern are off for a
+  GameCube adapter.
+- Swap the Scan and X-Ray visor buttons (Input tab, persisted as
+  `swap_scan_xray`, off by default): each visor takes the other's D-pad
+  direction, as in Remastered (D-pad right Scan, left X-Ray).
 - Fast Morph (Input tab and pause Options > Controller, persisted as
   `fast_morph`, off by default): morph ball transitions in the style of Metroid
   Prime 4. Morphing takes 0.2 s instead of 1 s and unmorphing is instant; both
@@ -652,7 +842,8 @@ a temporary directory instead of mounting.
   "Keyboard & mouse" assigns a key or mouse button to each pad button and stick
   axis; "Controller" assigns a physical controller button or axis. Bindings are
   saved by Aurora next to the other controller data, with buttons to clear the
-  keyboard bindings and restore the controller defaults.
+  keyboard bindings and restore the controller defaults. The beam shift and the
+  mouse buttons are rows here too (port settings, not Aurora's).
 - `MP_HUD_WIDE=1` (Render tab, persisted as `hud_wide`): widescreen HUD. The
   aspect-matched in-game HUD frames keep each element's shape but move it away
   from the screen centre, so edge elements (scan panels, energy bar, map) reach
@@ -721,7 +912,8 @@ a temporary directory instead of mounting.
   stay hidden. Pickup dots (`map_pickups`, also pause Options > Visor, off by
   default, always on in randomized games) draw a plain white dot on the map and
   minimap for every pickup not yet collected, in rooms the map shows. The dots
-  never tell what the item is. The positions come from
+  never tell what the item is; an Archipelago game colours them by its logic
+  (`map_logic_colors`, see `ARCHIPELAGO.md`). The positions come from
   `tools/gen_map_pickups.py` (`platform/port_map_pickups.inc`). The Tracker
   tab shows item percentage, energy tanks, missile
   capacity (in packs of 5, launcher included), power bombs, artifacts, missing
@@ -742,6 +934,19 @@ a temporary directory instead of mounting.
   until Show cheats is ticked (`cheats`, off by default). Invulnerable
   (`invulnerable`, off by default) makes Samus take no damage; it stays on
   across runs until unticked, and `MP_GODMODE=<0|1>` overrides it for one run.
+- F1 > Debug > Log, "Write the log to a file" (`log_file`, off by default):
+  everything the game prints to stdout/stderr, including the
+  line Aurora prints before it aborts, also goes to `metroid_prime_port.log` in
+  the user folder; the previous run's is kept as `metroid_prime_port.old.log`.
+  Ticking it starts the log at once; unticking stops it at the next start.
+  On Linux a forked copy process tees a pipe to the terminal and the file, so
+  nothing written before a crash is lost; on Windows the streams go to the file
+  only. On Android the logcat lines (port, Aurora, SDL, and stdout/stderr,
+  which are copied into logcat under the `stdout` tag while the log runs) are
+  written to the file one line at a time; it lives in
+  `Android/data/org.metroidprime.port/files/` (reachable over USB) unless the
+  data folder was moved to shared storage, where it sits in that folder.
+  `MP_LOG_FILE=<0|1>` overrides the setting for one run.
 - Save states (F1 > States): eight slots in `savestates/` under the pref
   folder (`slot<N>.mpss`). F5 saves to the selected slot and F9 loads it
   (`savestate_hotkeys`, on by default). A state holds the whole game save
@@ -754,7 +959,7 @@ a temporary directory instead of mounting.
   rides the elevator after loading, like stepping onto it. Console:
   `state list | last | save [n] | load [n] | undo | slot <n>`.
 - Memory card transfer (F1 > Extras > Memory card): moves saves between the
-  port's card (a GCI folder, `USA/Card A` in the pref folder, or the current
+  port's card (a GCI folder, `USA/Card A` next to the executable, or the current
   Archipelago game's) and Dolphin's. Import takes a Dolphin `.gci`, a whole raw
   card image (`MemoryCardA.USA.raw`, every Metroid Prime file in it) or, from the
   console, a folder of `.gci` files; only GM8E/01 files are taken. The game
@@ -800,14 +1005,19 @@ a temporary directory instead of mounting.
   up by default; `MP_MOUSE_INVERT_X=1` and `MP_MOUSE_INVERT_Y=1` invert either axis.
   SDL and the compositor own pointer locking; capture is released outside
   playable first person (menus, cinematics, morph ball, and scripted input locks).
-- In mouse mode, **left-click fires / holds a charge / releases a charged shot**,
-  **right-click holds lock-on**, and **middle-click fires missiles**. These feed
-  the normal PAD/gun input path, preserving charge timing and weapon cooldowns.
-  Existing keyboard/controller weapon bindings are also available; saved mapping
-  files are not rewritten. `MP_DISABLE_MOUSE_BUTTONS=1` opts out of these aliases.
-  Outside playable first person (morph ball, text boxes, menus) left-click is a
-  plain A press, so it lays bombs and advances text; like the weapon buttons it
-  only counts after the button has been seen released.
+- In mouse mode the five mouse buttons act as pad buttons, set in the Controls
+  tab's "Mouse buttons" list (`mouse_left`, `mouse_middle`, `mouse_right`,
+  `mouse_x1`, `mouse_x2`: none, a pad button, a D-pad direction or the beam
+  shift). By default **left-click fires / holds a charge / releases a charged
+  shot** (A), **right-click holds lock-on** (L) and **middle-click fires
+  missiles** (Y); the side buttons are unset. Either keyboard
+  preset restores them too. They feed the normal PAD/gun input path, preserving charge
+  timing and weapon cooldowns, and L/R also press the analog trigger fully.
+  Keyboard/controller bindings still work alongside them.
+  `MP_DISABLE_MOUSE_BUTTONS=1` opts out. Outside playable first person (morph
+  ball, text boxes, menus) only the buttons set to A or B count, so the left
+  button still lays bombs and advances text. Every mouse button only counts
+  after it has been seen released.
 - Outside lock-on, A/D (the left-stick lateral axis) strafe in mouse mode rather
   than applying the console's turning torque. Movement uses the current mouse
   heading and the game's acceleration, friction, surface restraints and collision
@@ -856,7 +1066,7 @@ a temporary directory instead of mounting.
   plain tick state, as the frame limiter does. The console's `present` sets it
   live; see `docs/FRAME_INTERPOLATION.md` (section 7) for the comparison
   recipe.
-- `MP_CONSOLE=<port>` (smoke builds only, `1` = 4777, POSIX only): a debug
+- `MP_CONSOLE=<port>` (any build, `1` = 4777, POSIX only): a debug
   command console on 127.0.0.1. Its `press`/`stick` input is read even when
   the window has no keyboard focus. `tools/mpcon.py` is the client: one-shot
   (`tools/mpcon.py 'warp chozo 492CBF4A' 'objs eyeball' shot`), a script
@@ -877,37 +1087,51 @@ a temporary directory instead of mounting.
   gyro rates in rad/s), `shot` (prints the bmp path), `present
   <0..1|cycle|tick|off>`, `hold <0|1>` (stop ticking), `step [ticks]` (run
   that many ticks while held), `interp [actor|pose|particle|all <0|1>]`,
-  `aspect <4:3|16:9|window>`, `fov <45..90>`, `msaa <1|4>`, `aniso <1..16>`, `hudscale <50..100>`, `helmet <0|1>`, `visorfx <0|1>`, `crosshair <25..100>`, `reveal <0|1>`, `pickups <0|1>`, `tracker`, `state list | last | save [n] | load [n] | undo | slot <n>`, `viewmodel <cmdl> [dist] [yaw] [pitch] | off | status | light <0|1>` (draws any model, retail or a mod's, in front of the camera with the arm cannon hidden; dist 0 fits its bounds; `light 1` swaps the flat white ambient for a key light, which PBR mod materials need to shade), `probe [off|on|mirror|window]` (the PBR reflection probe, live: `mirror` and `window` show the probe itself on PBR materials, as a reflection and looked straight through; no argument prints the mode), `remastered [start <image.nsp> [key file] | cancel]` (the Remastered model import and its progress), `mods [reload]` (what is loaded; `reload` reads the mods folder again), `roomgeo [on|off|overlay | at <x> <y> <z> [margin] | hide <cmdl> | show [cmdl]]` (a mod's room geometry: in place of the retail area, off, or drawn over it; `at` lists the instances whose box holds a point and `hide` stops drawing a model, for finding which one a surface belongs to; no argument prints what is loaded and drawn), `timer <0|1>`, `igt <seconds>`, `livesplit <0|1> | addr <host:port> | send <command> | status`, `discord <0|1> | id <application id> | status`, `gci list | import <path> | export <dir or .raw> | dolphin import|export`, `ap [connect <server> <slot> [password] | disconnect | recent | resume <n> | say <text> | chat]`, `wait <frames>`, `quit`; `help` lists them. Ids are hex editor ids, `u<n>`
+  `aspect <4:3|16:9|window>`, `fov <45..90>`, `msaa <1|4>`, `aniso <1..16>`, `hudscale <50..100>`, `helmet <0|1>`, `visorfx <0|1>`, `crosshair <25..100>`, `reveal <0|1>`, `pickups <0|1>`, `tracker`, `state list | last | save [n] | load [n] | undo | slot <n>`, `viewmodel <cmdl> [dist] [yaw] [pitch] | off | status | light <0|1>` (draws any model, retail or a mod's, in front of the camera with the arm cannon hidden; dist 0 fits its bounds; `light 1` swaps the flat white ambient for a key light, which PBR mod materials need to shade), `probe [off|on|mirror|window]` (the PBR reflection probe, live: `mirror` and `window` show the probe itself on PBR materials, as a reflection and looked straight through; no argument prints the mode), `remastered [start <image.nsp> [key file] | cancel]` (the Remastered model import and its progress), `mods [reload]` (what is loaded; `reload` reads the mods folder again), `roomgeo [on|off|overlay | at <x> <y> <z> [margin] | hide <cmdl> | show [cmdl]]` (a mod's room geometry: in place of the retail area, off, or drawn over it; `at` lists the instances whose box holds a point and `hide` stops drawing a model, for finding which one a surface belongs to; no argument prints what is loaded and drawn), `roomgeo lights on|off` (light room geometry with the area's lights even where the room has baked light), `roomgeo pick` (the instances the middle of the view looks through, nearest first, with each model's materials), `roomgeo mats <cmdl>` (a loaded model's materials: flags, PBR or TEV, the PBR record), `roomgeo mat <cmdl> <material> <field> <value...> | mat clear` (changes a value of a material's PBR record as drawn, until cleared or the next start; fields `emissive`, `backlight`, `height`, `mode`, `kind`, `strength`, `p0`-`p3`, or an index 0 to 18; emissive multiplies the emissive map, so it shows only on a material that has one), `roomliquid [on|off]` (a mod's liquid surfaces in place of the retail fluid planes; no argument prints what is loaded and drawn), `roomenv [on|off|exposure on|off|volume on|off|ambient <scale>|show off|coords|light|info [<x> <y> <z>]]` (room environments: `volume` is the baked light per pixel, `ambient` scales the baked ambient, `show` draws the grid's coordinates or light in place of the surface, `info` prints exposure, tone curve, probe and baked ambient at the view or a point), `view [off|albedo|normal|rough|metal|ao|ambient|reflection|glow|exposure|kind]` (what PBR surfaces show: one input of the shading in place of the result), `stats` (the last frame's draws and buffers, the heap, room geometry and environments), `hdfont [on|off]`, `touchpad [attach|detach|stick <x> <y>]` (a virtual gamepad of the kind Android's touch overlay uses, to test controller hotplug against it on any platform), `freecam [on|off|freeze on|off|player on|off|speed <n>|pos <x> <y> <z>|look <yaw> <pitch>]` (see below), `timer <0|1>`, `igt <seconds>`, `livesplit <0|1> | addr <host:port> | send <command> | status`, `discord <0|1> | id <application id> | status`, `gci list | import <path> | export <dir or .raw> | dolphin import|export`, `ap [connect <server> <slot> [password] | disconnect | recent | resume <n> | say <text> | chat]`, `wait <frames>`, `quit`; `help` lists them. Ids are hex editor ids, `u<n>`
   unique ids or exact debug names. Every reply ends with `=> ok` or
   `=> err: <why>`, and the client exits 1 if any command failed. Game commands
   run inside the state manager tick, so they fail with "not ticking" on the
   title screen or while paused. Pair with `MP_TURBO` for speed.
+- Free camera (F1 > Debug > Camera, or the console's `freecam`): the world is
+  drawn from a viewpoint of its own while the player stays put, without the
+  HUD and the arm cannon. It starts at the game camera; the left stick moves,
+  the C stick (or a captured mouse) turns, R is four times as fast, L and Z
+  (or the d-pad's down and up) go down and up. `freeze` stops the game's simulation while it flies,
+  which also makes two screenshots of one view comparable. Samus's body is
+  drawn where the player stands (`player off` or "Show Samus" hides it). The same page's
+  Rendering section has the console's `view`, `probe`, `hdfont`, `roomgeo` and
+  `roomenv` switches.
 - `MP_PBR_PROBE=<off|on|mirror|window>` (or 0-3): the reflection probe PBR mod
   materials reflect, on by default. The console's `probe` changes it live.
+- `MP_PBR_ANISO=<1-16>`: the most anisotropic filtering a PBR mod's native maps
+  take, 2 by default whatever the Anisotropy setting says: higher levels turn a
+  tiled floor into streaks towards the horizon.
 - `MP_GODMODE=<0|1>`: the Invulnerable cheat for this run, whatever the setting
   says. The console's `god [on|off]` changes the setting itself.
+- `MP_LOG_FILE=<0|1>`: the file log (`metroid_prime_port.log` in the user
+  folder) for this run, whatever the `log_file` setting says.
 - `MP_ROOM_GEO=<0|1|overlay>`: whether a mod's `.roomgeo` replaces an area's
   geometry (default 1; `overlay` draws both). Console `roomgeo [on|off|overlay]`,
   which also prints what is loaded and what the last frame streamed.
   `MP_FRAME_BUFFERS=<1..16>` scales the buffers a frame's vertices, arrays and
   uniforms are streamed through (1 = 5 + 8 + 24 MiB); it is 12 when a mod has
   room geometry. A frame that outgrows them aborts with a buffer overflow.
+- `MP_ROOM_LIQUID=0`: ignore the mods' `.roomliquid` files and draw the
+  retail fluid planes (console `roomliquid [on|off]`, which also counts what is
+  loaded and drawn).
 - `MP_ROOM_ENV=0`: ignore the mods' `.roomenv` files (console `roomenv
   [on|off]`, which also counts what is loaded). For tuning:
   `MP_ROOM_ENV_GAIN` (exposure, default 1), `MP_ROOM_ENV_LOD` (the mip a
   roughness of 1 reflects, default 5) and `MP_ROOM_ENV_AMBIENT` (scale of the
   baked ambient light, default 1; 0 keeps the game's ambient colour).
-  `MP_ROOM_ENV_EXPOSURE=1` (console `roomenv exposure on|off`) exposes by
-  room instead of by cube. In the two rooms measured it brings models closer
-  to retail's brightness (the morph ball 113 against retail's 132, from 77),
-  but it rests on a constant fitted across rooms with a spread of one stop,
-  so it stays opt-in until more rooms are looked at.
+  `MP_ROOM_ENV_EXPOSURE=0` (console `roomenv exposure on|off`) exposes each
+  cube on its own instead of the frame by the camera's room, and drops the
+  room's tone curve. Files older than version 4 lack the exposure bias and
+  the curve's contrast, so re-import to get the right levels.
   Room geometry is lit by the baked ambient grid per pixel, as a 3D texture,
   and takes no area lights (Remastered has no lightmaps; this grid is its room
   lighting). `MP_ROOM_ENV_VOLUME=0` goes back to the area's lights, as does
-  `MP_ROOM_GEO_AREA_LIGHTS=1`. For tuning: `MP_ROOM_ENV_VOLUME_GAIN` (default
-  0.6, chosen by eye over four rooms; 1 is the room's own exposure and washes
-  out without Remastered's tone curve), `MP_ROOM_ENV_VOLUME_BIAS` (metres off
+  `MP_ROOM_GEO_AREA_LIGHTS=1`. For tuning: `MP_ROOM_ENV_VOLUME_BIAS` (metres off
   the surface a sample is taken, default 0.25) and `MP_ROOM_ENV_VOLUME_SHOW`
   (1 draws the texture coordinates, 2 the light alone, 3 the shading normal).
 - `tools/pbr_shots.py`: contact sheets of models under PBR, for comparing mod

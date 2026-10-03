@@ -149,6 +149,15 @@ public:
   void SetPickup(const EItemType type, const int amount);
   static float GetEnergyTankCapacity();
   static float GetBaseHealthCapacity();
+  // Port: the energy a tank holds (100 on the disc); the suit's own is one less.
+  static void PortSetEnergyTankCapacity(float capacity);
+#ifdef TARGET_PC
+  // Port: the most missiles and power bombs a pickup may raise the capacity
+  // to (250 and 8 on the disc).
+  static void PortSetAmmoLimits(int missiles, int powerBombs);
+  // Port: sets an ammo count as saved, past the limits in force.
+  void PortRestoreAmmo(EItemType type, int amount, int capacity);
+#endif
   const float CalculateHealth();
   void InitializePowerUp(CPlayerState::EItemType type, int capacity);
   void SetPowerUp(CPlayerState::EItemType type, int capacity);

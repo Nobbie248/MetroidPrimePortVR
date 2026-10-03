@@ -267,6 +267,40 @@ void TestAdd(const fs::path& dir) {
   }
   Check(gap, "table padding");
 }
+
+void TestNewPak(const fs::path& dir) {
+  const PortMods::VirtualFile empty = PortMods::NewPak({});
+  std::vector<uint8_t> out = ReadAll(empty, 4096);
+  PortMods::PakTable table;
+  size_t needed = 0;
+  Check(out.size() == empty.size && PortMods::ParsePakTable(out.data(), out.size(), table, needed) &&
+            table.resources.empty(),
+        "empty new PAK");
+
+  const fs::path path = dir / "00000055.TXTR";
+  std::ofstream(path, std::ios::binary) << std::string(40, 'D');
+  PortMods::LooseResource res{kTXTR, 0x55, path.string(), 40, "test"};
+  const PortMods::VirtualFile file = PortMods::NewPak({&res});
+  out = ReadAll(file, 4096);
+  Check(out.size() == file.size && PortMods::ParsePakTable(out.data(), out.size(), table, needed) &&
+            table.resources.size() == 1 && table.resources[0].id == 0x55 &&
+            std::string(out.begin() + table.resources[0].offset, out.begin() + table.resources[0].offset + 40) ==
+                std::string(40, 'D'),
+        "new PAK with a resource");
+}
+
+void TestSplit() {
+  const uint64_t big = 0x30000000; // 768 MiB
+  PortMods::LooseResource a{kTXTR, 1, {}, big, "t"}, b{kTXTR, 2, {}, big, "t"}, c{kTXTR, 3, {}, big, "t"};
+  PortMods::LooseResource huge{kTXTR, 4, {}, PortMods::kMaxFileSize, "t"};
+  auto groups = PortMods::SplitAdded({&a, &b, &c, &huge}, 0x10000000);
+  Check(groups.size() == 2 && groups[0].size() == 2 && groups[1].size() == 1 && groups[1][0] == &c,
+        "overflow into a second group, too big skipped");
+  groups = PortMods::SplitAdded({&a}, PortMods::kMaxFileSize - 64);
+  Check(groups.size() == 2 && groups[0].empty() && groups[1].size() == 1, "full home PAK");
+  groups = PortMods::SplitAdded({}, 0);
+  Check(groups.size() == 1 && groups[0].empty(), "nothing added");
+}
 } // namespace
 
 int main() {
@@ -278,6 +312,8 @@ int main() {
   TestParse();
   TestPatch(dir);
   TestAdd(dir);
+  TestNewPak(dir);
+  TestSplit();
   fs::remove_all(dir, ec);
   if (sFailures != 0) {
     std::fprintf(stderr, "%d failure(s)\n", sFailures);

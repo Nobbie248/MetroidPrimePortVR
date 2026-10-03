@@ -883,10 +883,16 @@ void CCubeModel::DisableShadowMaps() { sbRenderModelShadow = false; }
 float CCubeMaterial::sPortPBRProbeWeight = 0.f;
 int CCubeMaterial::sPortPBRProbeMode = -1;
 uint CCubeMaterial::sPortPBRDraws = 0;
+CCubeMaterial::EPortPBRThermal CCubeMaterial::sPortPBRThermal = CCubeMaterial::kPT_None;
 
 bool CCubeMaterial::PortPBRAllowed(const CModelFlags& flags) {
-  return !sbRenderModelBlack && !sbRenderModelShadow && !CCubeRenderer::That()->GetThermal() &&
+  return !sbRenderModelBlack &&
+         (!CCubeRenderer::That()->GetThermal() || sPortPBRThermal != kPT_None) &&
          flags.GetTrans() == CModelFlags::kT_Opaque;
+}
+
+bool CCubeMaterial::PortScreenCopyUsed() {
+  return !sbRenderModelShadow && !CCubeRenderer::That()->GetThermal();
 }
 #endif
 

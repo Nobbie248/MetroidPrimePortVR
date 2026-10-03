@@ -8,9 +8,10 @@ namespace PortRoomGeo {
 namespace {
 
 constexpr uint32_t kMagic = 0x4752504D; // 'MPRG'
-constexpr uint32_t kVersion = 1;
+constexpr uint32_t kVersion = 2;
 constexpr size_t kHeaderBytes = 12;
-constexpr size_t kInstanceBytes = 4 + 12 * 4;
+constexpr size_t kInstanceBytes = 4 + 12 * 4; // version 1; version 2 adds 4 + links
+constexpr size_t kLinkBytes = 8;
 
 int HexDigit(char c) {
   if (c >= '0' && c <= '9') {
@@ -65,27 +66,56 @@ bool Parse(const std::vector<uint8_t>& data, std::vector<Instance>& out, std::st
     error = "not a room geometry file";
     return false;
   }
-  if (ReadU32(data.data() + 4) != kVersion) {
+  const uint32_t version = ReadU32(data.data() + 4);
+  if (version != 1 && version != kVersion) {
     error = "unknown version";
     return false;
   }
   const uint32_t count = ReadU32(data.data() + 8);
-  if (count > (data.size() - kHeaderBytes) / kInstanceBytes) {
+  const size_t instanceBytes = version == 1 ? kInstanceBytes : kInstanceBytes + 4;
+  if (count > (data.size() - kHeaderBytes) / instanceBytes) {
     error = "truncated";
     return false;
   }
+  out.clear();
   out.resize(count);
+  size_t at = kHeaderBytes;
   for (uint32_t i = 0; i < count; ++i) {
-    const uint8_t* const p = data.data() + kHeaderBytes + size_t(i) * kInstanceBytes;
-    out[i].model = ReadU32(p);
+    if (data.size() - at < instanceBytes) {
+      error = "truncated";
+      out.clear();
+      return false;
+    }
+    const uint8_t* const p = data.data() + at;
+    Instance& instance = out[i];
+    instance.model = ReadU32(p);
     for (int j = 0; j < 12; ++j) {
       const uint32_t bits = ReadU32(p + 4 + j * 4);
-      std::memcpy(&out[i].transform[j], &bits, 4);
-      if (!std::isfinite(out[i].transform[j])) {
+      std::memcpy(&instance.transform[j], &bits, 4);
+      if (!std::isfinite(instance.transform[j])) {
         error = "bad transform";
         out.clear();
         return false;
       }
+    }
+    at += instanceBytes;
+    if (version == 1) {
+      continue;
+    }
+    instance.layer = p[kInstanceBytes];
+    instance.active = p[kInstanceBytes + 1] != 0;
+    const size_t links = size_t(p[kInstanceBytes + 2]) | size_t(p[kInstanceBytes + 3]) << 8;
+    if ((data.size() - at) / kLinkBytes < links) {
+      error = "truncated";
+      out.clear();
+      return false;
+    }
+    instance.links.resize(links);
+    for (Link& link : instance.links) {
+      link.sender = ReadU32(data.data() + at);
+      link.state = data[at + 4];
+      link.action = data[at + 5];
+      at += kLinkBytes;
     }
   }
   return true;
@@ -103,6 +133,18 @@ std::vector<uint8_t> Write(const std::vector<Instance>& instances) {
       uint32_t bits;
       std::memcpy(&bits, &instance.transform[j], 4);
       PutU32(out, bits);
+    }
+    const size_t links = instance.links.size() < 0xffff ? instance.links.size() : 0xffff;
+    out.push_back(instance.layer);
+    out.push_back(instance.active ? 1 : 0);
+    out.push_back(uint8_t(links));
+    out.push_back(uint8_t(links >> 8));
+    for (size_t j = 0; j < links; ++j) {
+      PutU32(out, instance.links[j].sender);
+      out.push_back(instance.links[j].state);
+      out.push_back(instance.links[j].action);
+      out.push_back(0);
+      out.push_back(0);
     }
   }
   return out;

@@ -26,11 +26,25 @@
 
 namespace PortRemastered {
 
+// A liquid's surface as its room describes it. The ids are in a pak's byte order.
+struct RoomLiquid {
+  enum Type { kWater = 0, kPoison = 1, kLava = 2 };
+  int type = kWater;
+  std::array<uint8_t, 16> model{};  // a WMDL, or a lava pool's CMDL
+  // Water and poison only, as the model itself is a bare sheet.
+  bool hasNormal = false;
+  std::array<uint8_t, 16> normal{};         // the wave normal map
+  float tint[4] = {0.1f, 0.3f, 0.35f, 0.7f};  // colour, and the opacity seen straight on
+  float normalScale[2] = {0.08f, 0.08f};    // texcoords per unit of the model, along x and z
+  float waveAngle[2] = {30.0f, 90.0f};      // the two wave layers' directions, in degrees
+};
+
 struct RoomIO {
   // A retail (GameCube) resource by FourCC type ('MLVL', 'MREA') and id, from
   // the unmodded disc, in the decompressed form the game's own loader sees.
   std::function<bool(uint32_t type, uint32_t id, std::vector<uint8_t>& out)> retail;
-  // Stores one output file, "<MREA id as 8 upper case hex>.roomenv" or ".roomgeo".
+  // Stores one output file, "<MREA id as 8 upper case hex>.roomenv", ".roomgeo" or
+  // ".roomliquid".
   std::function<bool(const std::string& name, const std::vector<uint8_t>& data)> write;
   // Optional; with it each room's static geometry is written too, as
   // "<MREA id>.roomgeo" (read by port_room_geo.h). Converts one Remastered model,
@@ -39,6 +53,10 @@ struct RoomIO {
   // so the caller remembers what it has converted. These files are not counted
   // in `written`.
   std::function<bool(const std::array<uint8_t, 16>& model, uint32_t& cmdl)> model;
+  // Optional; with it each room's liquid surfaces are written too, as
+  // "<MREA id>.roomliquid" (read by port_room_liquid.h). Converts one surface's model
+  // and gives the CMDL's id, as `model` does; it is asked once per surface.
+  std::function<bool(const RoomLiquid& liquid, uint32_t& cmdl)> liquid;
   // Optional: the rooms (by pak name) to write geometry for; all of them without.
   std::function<bool(const std::string& room)> wantsGeometry;
   std::function<void(const std::string& line)> log;  // optional

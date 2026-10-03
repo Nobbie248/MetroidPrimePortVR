@@ -15,6 +15,14 @@ namespace PortDebug {
 // CStateManager::Update). Null before gameplay starts.
 void SetStateManager(CStateManager* mgr);
 CStateManager* StateManager();
+// Where the world is drawn from and which way it looks (the free camera's while it is
+// on); false outside a world.
+bool ViewRay(float origin[3], float forward[3]);
+// What PBR surfaces show in place of their shaded result (GXSetPBRDebugView); 0 is off.
+int PbrViewCount();
+const char* PbrViewName(int view);
+int PbrView();
+void SetPbrView(int view);
 // Requests an area change; consumed and executed by the game update so it does
 // not run from the render/UI path.
 void RequestTeleport(int areaId);
@@ -112,6 +120,11 @@ void SetFrameLimitEnabled(bool enabled);
 void RecordFrame(uint64_t durationNs, unsigned ticks, bool presented);
 bool VsyncEnabled();
 void SetVsyncEnabled(bool enabled);
+// Setting `fullscreen`: a borderless fullscreen window on desktop (F11 toggles
+// it), the status and navigation bars hidden on Android. Applied at window
+// creation; Set changes the live window too.
+bool Fullscreen();
+void SetFullscreen(bool enabled);
 // 0 = auto (native, driven by the display scale), otherwise a fixed multiplier.
 float RenderScale();
 void SetRenderScale(float scale);
@@ -160,6 +173,16 @@ void SetRevealMap(bool enabled);
 // and Archipelago games force it on (PortMapPickups::Active).
 bool MapPickups();
 void SetMapPickups(bool enabled);
+// In an Archipelago game, colour the dots by the seed's logic like a tracker
+// (green in logic, yellow sequence break, blue visible only, red out of reach,
+// grey checked). On by default; off gives the plain white dots.
+bool MapLogicColors();
+void SetMapLogicColors(bool enabled);
+// The apworld's staggered_suit_damage, which the server doesn't send: 0 the
+// game's rule, 1 progressive (the apworld's default, and the port's), 2
+// additive. Only an Archipelago seed uses it.
+int ApSuitDamage();
+void SetApSuitDamage(int mode);
 // randomprime's skippable cutscenes: every cinematic can be skipped with the
 // usual button. Rooms load patched, so a change applies to rooms loaded
 // afterwards. Randomizer and Archipelago games force it on
@@ -203,10 +226,33 @@ void SetTwinStick(bool enabled);
 // 0 when twin-stick is off (the game input still carries it then).
 float TwinStickRightY();
 void SetTwinStickRightY(float y);
+// The bound beam shift is held in game this poll (no overlay, window focused),
+// which springs the Spring Ball in morph ball, as X does in Remastered.
+bool BeamShiftHeld();
+void SetBeamShiftHeld(bool held);
 // Spring Ball (C-stick up in morph ball, as in Metroid Prime Trilogy) once the
 // Morph Ball Bombs are held. A connected Archipelago seed overrides it.
 bool SpringBall();
 void SetSpringBall(bool enabled);
+// The Scan and X-Ray visors trade D-pad directions (Remastered's Dual Sticks
+// layout), off by default.
+bool SwapScanXray();
+void SetSwapScanXray(bool enabled);
+// The beam shift's bindings (PortControls::ShiftHeld): slots 0 and 1 are keys
+// or mouse buttons (scancode or PAD_KEY_MOUSE_*), slot 2 a controller button
+// (SDL gamepad button or PAD_NATIVE_BUTTON_TRIGGER_*); -1 for none.
+int ShiftBinding(int slot);
+void SetShiftBinding(int slot, int code);
+// A second controller button for a GameCube button (Aurora maps one each),
+// ORed in by CDolphinController: `bit` is the PAD_BUTTON_* / PAD_TRIGGER_* bit's
+// position, the code as ShiftBinding's slot 2; -1 for none.
+constexpr int kPadAltCount = 16;
+int PadAltButton(int bit);
+void SetPadAltButton(int bit, int code);
+// What mouse button `button` (0 left, 1 middle, 2 right, 3 X1, 4 X2) does under
+// mouse aim: a PortInputMap::EMouseAction.
+int MouseAction(int button);
+void SetMouseAction(int button, int action);
 // Speedrun support: an on-screen in-game time (the play time the save shows)
 // and the LiveSplit Server client (port_livesplit.h), which connects to
 // "host:port" while enabled.
@@ -241,6 +287,10 @@ std::string CardExportDolphin();
 // Cheat: the player takes no damage (F1 > Debug > cheats, MP_GODMODE, console `god`).
 bool Invulnerable();
 void SetInvulnerable(bool enabled);
+// Write the log to <user folder>/metroid_prime_port.log (port_log_file.h). MP_LOG_FILE=1
+// turns it on for one run without changing the setting.
+bool LogFile();
+void SetLogFile(bool enabled);
 // Fast Morph, as in Metroid Prime 4: short morph/unmorph transitions that keep
 // momentum (capped at walking speed when unmorphing on the ground).
 bool FastMorph();
@@ -302,8 +352,8 @@ const int kCrosshairSizeDefault = 50;
 int CrosshairSize();
 void SetCrosshairSize(int percent);
 unsigned MouseWeaponButtons(unsigned held);
-// Outside mouse gameplay (morph ball, text boxes, menus) the left button is a
-// plain A press; returns SDL_BUTTON_LMASK while it should be held.
+// Outside mouse gameplay (morph ball, text boxes, menus) the buttons bound to A
+// or B still press them; returns the held buttons (SDL masks) that may count.
 unsigned MouseMenuButtons(unsigned held, bool focused);
 // Real-mouse button state (SDL_BUTTON_*MASK), fed from the event loop. Touch-
 // and pen-synthesised mouse buttons are left out; see PortMouse::HeldButtons.

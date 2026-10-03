@@ -1,5 +1,6 @@
 #include "port_randomizer.h"
 #include "port_log.h"
+#include "port_paths.h"
 
 #include <SDL3/SDL.h>
 
@@ -67,22 +68,8 @@ State& GetState() {
 }
 
 std::string UserDirectory() {
-  std::string dir;
-  if (const char* env = std::getenv("MP_USER_PATH")) {
-    if (env[0] != '\0')
-      dir = env;
-  }
-  if (dir.empty()) {
-    if (char* pref = SDL_GetPrefPath(nullptr, "Metroid Prime")) {
-      dir = pref;
-      SDL_free(pref);
-    } else {
-      dir = ".";
-    }
-  }
-  if (!dir.empty() && dir.back() != '/' && dir.back() != '\\')
-    dir += '/';
-  return dir;
+  const std::string& dir = PortPaths::UserFolder();
+  return dir.empty() ? std::string("./") : dir;
 }
 
 std::string SeedPath() {

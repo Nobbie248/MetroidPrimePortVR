@@ -32,8 +32,5 @@ unsigned PortSmokeMouseButtons(unsigned realButtons);
 void PortSmokeMouseBeforeUpdate(CStateManager& mgr);
 void PortSmokeMouseAfterUpdate(CStateManager& mgr);
 void PortSmokeMouseShot(bool charged, bool secondary);
-// The debug command console (platform/port_console.cpp, MP_CONSOLE=<port>).
-bool PortConsoleFrame(unsigned frame);
-void PortConsoleTick(CStateManager& mgr);
 void PortSmokeMouseGunView(const CStateManager& mgr, const CPlayerGun& gun,
                           const CTransform4f& worldView);

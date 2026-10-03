@@ -156,6 +156,37 @@ bool PatchArea(uint32_t mreaId, const uint8_t* scly, size_t size, std::vector< u
     else
       PortLog::Write("randomizer: Artifact Temple patch doesn't match, left as is\n");
   }
+  std::vector< uint8_t > seedOps;
+  if (mreaId == kArtifactTemple && !out.empty() && PortAp::TempleOps(seedOps)) {
+    // The seed's own temple rules, on top of the randomizer's temple.
+    std::vector< uint8_t > temple;
+    if (ApplyOps(out.data(), out.size(), seedOps.data(), seedOps.size(), temple) == 0)
+      out.swap(temple);
+    else
+      PortLog::Write("archipelago: the seed's Artifact Temple patch doesn't match, left as is\n");
+  }
+  std::vector< uint8_t > roomOps;
+  if (PortAp::RoomOps(mreaId, out.empty() ? scly : out.data(), out.empty() ? size : out.size(),
+                      roomOps)) {
+    // The seed's smaller options.
+    std::vector< uint8_t > changed;
+    if (ApplyOps(out.empty() ? scly : out.data(), out.empty() ? size : out.size(), roomOps.data(),
+                 roomOps.size(), changed) == 0)
+      out.swap(changed);
+    else
+      PortLog::Write("archipelago: room %08X's option patch doesn't match, left as is\n", mreaId);
+  }
+  std::vector< uint8_t > doorOps;
+  const bool patched = !out.empty();
+  if (PortAp::DoorOps(mreaId, patched ? out.data() : scly, patched ? out.size() : size, doorOps)) {
+    // The seed's door types.
+    std::vector< uint8_t > doors;
+    if (ApplyOps(patched ? out.data() : scly, patched ? out.size() : size, doorOps.data(),
+                 doorOps.size(), doors) == 0)
+      out.swap(doors);
+    else
+      PortLog::Write("archipelago: room %08X's door patch doesn't match, left as is\n", mreaId);
+  }
   return !out.empty();
 }
 

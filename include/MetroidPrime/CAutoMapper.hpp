@@ -278,9 +278,14 @@ private:
   EZoomState x324_zoomState;
   int x328_;
   bool x32c_loadingDummyWorld;
+  // Port: the map screen's compass, when a mod has one (port_map_icons.h).
+  rstl::single_ptr< TCachedToken< CModel > > x330_compassShell;
+  rstl::single_ptr< TCachedToken< CModel > > x334_compassNeedle;
+
+  void DrawCompass(float alpha) const;
 };
 NESTED_CHECK_SIZEOF(CAutoMapper, SAutoMapperHintStep, 0xc)
 NESTED_CHECK_SIZEOF(CAutoMapper, SAutoMapperHintLocation, 0x10)
-CHECK_SIZEOF(CAutoMapper, 0x330)
+CHECK_SIZEOF(CAutoMapper, 0x330 + 0x8)
 
 #endif // _CAUTOMAPPER

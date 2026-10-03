@@ -248,6 +248,39 @@ VirtualFile PatchPak(const std::vector<uint8_t>& header, const PakTable& table, 
   return file;
 }
 
+VirtualFile NewPak(const std::vector<const LooseResource*>& added) {
+  // Version, an unused word, no names, no resources.
+  std::vector<uint8_t> header(16, 0);
+  WriteBE32(header.data(), kPakVersion);
+  PakTable table;
+  table.headerEnd = header.size();
+  return PatchPak(header, table, header.size(), {}, {}, added);
+}
+
+std::vector<std::vector<const LooseResource*>> SplitAdded(const std::vector<const LooseResource*>& added,
+                                                           uint64_t homeSize) {
+  std::vector<std::vector<const LooseResource*>> groups(1);
+  // The size PatchPak gives the group with one more entry and `data` more bytes.
+  uint64_t base = homeSize;
+  uint64_t data = 0;
+  auto sizeWith = [&](uint64_t more) {
+    return RoundUp32(base + RoundUp32((groups.back().size() + 1) * 20)) + data + RoundUp32(more);
+  };
+  for (const LooseResource* resource : added) {
+    if (RoundUp32(16 + 20) + RoundUp32(resource->hostSize) > kMaxFileSize) {
+      continue;
+    }
+    if (sizeWith(resource->hostSize) > kMaxFileSize) {
+      groups.emplace_back();
+      base = 16;
+      data = 0;
+    }
+    groups.back().push_back(resource);
+    data += RoundUp32(resource->hostSize);
+  }
+  return groups;
+}
+
 // --- Reader ---------------------------------------------------------------------
 
 struct Reader::Host {

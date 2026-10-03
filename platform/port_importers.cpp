@@ -4,6 +4,7 @@
 #include "port_importers.h"
 
 #include "port_mods.h"
+#include "port_paths.h"
 
 #include <SDL3/SDL.h>
 
@@ -93,17 +94,9 @@ std::string Folder() {
 #if defined(__ANDROID__)
   return {};
 #else
-  std::string dir;
-  if (const char* env = std::getenv("MP_USER_PATH"); env != nullptr && env[0] != '\0') {
-    dir = env;
-  } else if (char* pref = SDL_GetPrefPath(nullptr, "Metroid Prime")) {
-    dir = pref;
-    SDL_free(pref);
-  } else {
+  std::string dir = PortPaths::UserFolder();
+  if (dir.empty()) {
     return {};
-  }
-  if (dir.back() != '/' && dir.back() != '\\') {
-    dir += '/';
   }
   dir += "importers";
   std::error_code ec;

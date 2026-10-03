@@ -3,9 +3,16 @@
 // to build the windows between aurora_begin_frame and aurora_end_frame.
 
 #include "port_debug.h"
+#include "port_freecam.h"
+#include "port_hd_font.h"
+#include "port_room_env.h"
+#include "port_room_geo.h"
 #include "port_log.h"
+#include "port_log_file.h"
+#include "port_paths.h"
 #include "port_apclient.h"
 #include "port_controls.h"
+#include "port_data_folder.h"
 #include "port_gci.h"
 #include "port_mods.h"
 #include "port_importers.h"
@@ -18,6 +25,7 @@
 #include "port_savestate.h"
 #include "port_skip_cutscenes.h"
 #include "port_mouse.h"
+#include "port_input_map.h"
 #include "port_textures.h"
 #include "port_build_info.h"
 #include "vr/vr_debug_tab.h"
@@ -27,6 +35,7 @@
 #endif
 
 #include "MetroidPrime/Cameras/CCameraManager.hpp"
+#include "Kyoto/Graphics/CCubeMaterial.hpp"
 #include "MetroidPrime/CHealthInfo.hpp"
 #include "MetroidPrime/CGameArea.hpp"
 #include "MetroidPrime/CMapWorld.hpp"
@@ -40,6 +49,7 @@
 
 #include <aurora/aurora.h>
 #include <aurora/gfx.h>
+#include <dolphin/gx/GXExtra.h>
 #include <dolphin/pad.h>
 #include <dolphin/vi.h>
 #include <imgui.h>
@@ -65,6 +75,8 @@
 #include <android/log.h>
 #include <SDL3/SDL_joystick.h>
 #include <SDL3/SDL_system.h>
+#include <cctype>
+#include <unistd.h>
 #endif
 
 #include <algorithm>
@@ -112,6 +124,12 @@ unsigned sTimingFrames = 0, sTimingTicks = 0;
 double sActualFps = 0.0, sActualTps = 0.0;
 double sThroughputFps = 0.0;
 bool sVsyncEnabled = false;
+// Android hides the status and navigation bars by default; a desktop starts windowed.
+#if defined(__ANDROID__)
+bool sFullscreen = true;
+#else
+bool sFullscreen = false;
+#endif
 bool sOverlayWindowed = false; // desktop: the old floating tabbed window
 float sRenderScale = 1.f;
 PortDebug::EAspectMode sAspectMode = PortDebug::kAspect_4_3;
@@ -121,18 +139,23 @@ bool sHideHelmet = false;
 bool sHideVisorEffects = false;
 bool sRevealMap = false;
 bool sMapPickups = false;
+bool sMapLogicColors = true;
+int sApSuitDamage = 1;
 bool sCheats = false;
 bool sSkippableCutscenes = false;
 bool sSaveStateHotkeys = true;
 bool sMouseAim = false;
 bool sTwinStick = false;
 float sTwinStickRightY = 0.f;
+bool sBeamShiftHeld = false;
 bool sSpringBall = false;
+bool sSwapScanXray = false;
 bool sFastMorph = false;
 bool sInvulnerable = false;
 // MP_GODMODE, for this run only: -1 unset, else 0 or 1. Never saved, and changing the
 // setting ends it.
 int sInvulnerableRun = -1;
+bool sLogFile = false;
 bool sLockOnToggle = false;
 bool sStickyCharge = false;
 bool sSpringFlick = false;
@@ -163,6 +186,19 @@ bool sMouseGameplayActive = false;
 bool sMouseInvertX = false;
 bool sMouseInvertY = false;
 bool sMouseButtons = true;
+// What each mouse button does under mouse aim (PortInputMap::EMouseAction).
+int sMouseActions[PortInputMap::kMouseButtonCount] = {
+    PortInputMap::DefaultMouseAction(0), PortInputMap::DefaultMouseAction(1),
+    PortInputMap::DefaultMouseAction(2), PortInputMap::DefaultMouseAction(3),
+    PortInputMap::DefaultMouseAction(4)};
+// The beam shift: two keys or mouse buttons (scancode or PAD_KEY_MOUSE_*) and
+// a controller button (an SDL gamepad button or PAD_NATIVE_BUTTON_TRIGGER_*),
+// -1 for none.
+int sShiftBindings[3] = {SDL_SCANCODE_LSHIFT, -1, -1};
+// A second controller button per PAD button, indexed by the PAD bit's position;
+// the same codes as the shift's pad slot, -1 for none.
+int sPadAltButtons[PortDebug::kPadAltCount] = {-1, -1, -1, -1, -1, -1, -1, -1,
+                                               -1, -1, -1, -1, -1, -1, -1, -1};
 bool sMouseCrosshair = true;
 int sCrosshairSize = PortDebug::kCrosshairSizeDefault;
 PortMouse::AimState sMouseAimState;
@@ -201,6 +237,11 @@ bool sResetRequested = false;
 std::atomic< bool > sToggleRequested{false};
 // F5 = 1 (save), F9 = 2 (load), from the event watch; handled on the game thread.
 std::atomic< int > sSaveStateHotkey{0};
+// F11 asks for a fullscreen toggle; DrawUI applies it on the main thread.
+std::atomic< bool > sFullscreenHotkey{false};
+// The window's own fullscreen state as SDL last reported it (-1 = no report
+// yet), so leaving fullscreen through the window manager updates the setting.
+std::atomic< int > sWindowFullscreen{-1};
 // Mirrors sVisible for readers on other threads, so they never touch the lazy
 // initialization or the ImGui state owned by the game thread.
 std::atomic< bool > sOverlayVisible{false};
@@ -230,6 +271,10 @@ CStateManager* sStateManager = nullptr;
 int sPendingTeleport = -1;
 bool sHasWorldTeleport = false;
 std::string sDiscPath;
+// The Remastered import's image and key file as last used: paths, or on Android
+// the picked content:// addresses (the picker keeps their read grant).
+std::string sRemasteredImagePath;
+std::string sRemasteredKeysPath;
 uint32_t sWorldTeleportWorld = 0;
 uint32_t sWorldTeleportArea = 0;
 bool sWorldSweepRequested = false;
@@ -257,28 +302,22 @@ struct WorldSweep {
 } sWorldSweep;
 
 std::string SettingsFilePath() {
-  std::string dir;
-  if (const char* env = std::getenv("MP_USER_PATH")) {
-    if (env[0] != '\0') {
-      dir = env;
-    }
-  }
-  if (dir.empty()) {
-    if (char* pref = SDL_GetPrefPath(nullptr, "Metroid Prime")) {
-      dir = pref;
-      SDL_free(pref);
-    } else {
-      dir = ".";
-    }
-  }
-  if (!dir.empty() && dir.back() != '/' && dir.back() != '\\') {
-    dir += '/';
-  }
-  return dir + "port_settings.ini";
+  const std::string& dir = PortPaths::UserFolder();
+  return (dir.empty() ? std::string("./") : dir) + "port_settings.ini";
 }
 
 bool ParseBool(const std::string& value) {
   return value == "1" || value == "true" || value == "on" || value == "yes";
+}
+
+// The mouse button a settings key such as "mouse_left" names, or -1.
+int MouseButtonSetting(const std::string& key) {
+  for (int i = 0; i < PortInputMap::kMouseButtonCount; ++i) {
+    if (key == PortInputMap::MouseButtonKey(i)) {
+      return i;
+    }
+  }
+  return -1;
 }
 
 std::string Trim(const std::string& text) {
@@ -318,10 +357,16 @@ void ApplySetting(const std::string& key, const std::string& value) {
     sFrameLimitEnabled = ParseBool(value);
   } else if (key == "vsync") {
     sVsyncEnabled = ParseBool(value);
+  } else if (key == "fullscreen") {
+    sFullscreen = ParseBool(value);
   } else if (key == "overlay_windowed") {
     sOverlayWindowed = ParseBool(value);
   } else if (key == "disc_path") {
     sDiscPath = value;
+  } else if (key == "remastered_nsp") {
+    sRemasteredImagePath = value;
+  } else if (key == "remastered_keys") {
+    sRemasteredKeysPath = value;
   } else if (key == "render_scale") {
     const float f = static_cast< float >(std::atof(value.c_str()));
     if (std::isfinite(f) && f >= 0.f && f <= 4.f) {
@@ -350,6 +395,11 @@ void ApplySetting(const std::string& key, const std::string& value) {
     sRevealMap = ParseBool(value);
   } else if (key == "map_pickups") {
     sMapPickups = ParseBool(value);
+  } else if (key == "map_logic_colors") {
+    sMapLogicColors = ParseBool(value);
+  } else if (key == "ap_suit_damage") {
+    const int mode = std::atoi(value.c_str());
+    sApSuitDamage = mode >= 0 && mode <= 2 ? mode : 1;
   } else if (key == "cheats") {
     sCheats = ParseBool(value);
   } else if (key == "skippable_cutscenes") {
@@ -418,6 +468,34 @@ void ApplySetting(const std::string& key, const std::string& value) {
     }
   } else if (key == "spring_ball") {
     sSpringBall = ParseBool(value);
+  } else if (key == "swap_scan_xray") {
+    sSwapScanXray = ParseBool(value);
+  } else if (key == "shift_key" || key == "shift_key_alt" || key == "shift_pad") {
+    const int slot = key == "shift_key" ? 0 : key == "shift_key_alt" ? 1 : 2;
+    // A number, or the value is ignored (atoi would read junk as scancode 0).
+    char* end = nullptr;
+    const long code = std::strtol(value.c_str(), &end, 10);
+    if (end != value.c_str() && *end == '\0') {
+      sShiftBindings[slot] = static_cast< int >(code);
+    }
+  } else if (key == "pad_alt") {
+    // kPadAltCount comma-separated codes; a short or malformed list keeps the
+    // rest as they are.
+    const char* cursor = value.c_str();
+    for (int i = 0; i < PortDebug::kPadAltCount && *cursor != '\0'; ++i) {
+      char* end = nullptr;
+      const long code = std::strtol(cursor, &end, 10);
+      if (end == cursor) {
+        break;
+      }
+      sPadAltButtons[i] = static_cast< int >(code);
+      cursor = *end == ',' ? end + 1 : end;
+    }
+  } else if (MouseButtonSetting(key) >= 0) {
+    const int action = PortInputMap::MouseActionFromName(value.c_str());
+    if (action >= 0) {
+      sMouseActions[MouseButtonSetting(key)] = action;
+    }
   } else if (key == "speedrun_timer") {
     sSpeedrunTimer = ParseBool(value);
   } else if (key == "livesplit") {
@@ -440,6 +518,8 @@ void ApplySetting(const std::string& key, const std::string& value) {
     sFastMorph = ParseBool(value);
   } else if (key == "invulnerable") {
     sInvulnerable = ParseBool(value);
+  } else if (key == "log_file") {
+    sLogFile = ParseBool(value);
   } else if (key == "lock_on_toggle") {
     sLockOnToggle = ParseBool(value);
   } else if (key == "sticky_charge") {
@@ -535,6 +615,8 @@ void SaveSettings() {
   file << "hide_visor_effects=" << (sHideVisorEffects ? 1 : 0) << '\n';
   file << "reveal_map=" << (sRevealMap ? 1 : 0) << '\n';
   file << "map_pickups=" << (sMapPickups ? 1 : 0) << '\n';
+  file << "map_logic_colors=" << (sMapLogicColors ? 1 : 0) << '\n';
+  file << "ap_suit_damage=" << sApSuitDamage << '\n';
   file << "cheats=" << (sCheats ? 1 : 0) << '\n';
   file << "skippable_cutscenes=" << (sSkippableCutscenes ? 1 : 0) << '\n';
   file << "savestate_hotkeys=" << (sSaveStateHotkeys ? 1 : 0) << '\n';
@@ -553,6 +635,7 @@ void SaveSettings() {
   file << "mods=" << (sModsEnabled ? 1 : 0) << '\n';
   file << "mods_disabled=" << sModsDisabled << '\n';
   file << "vsync=" << (sVsyncEnabled ? 1 : 0) << '\n';
+  file << "fullscreen=" << (sFullscreen ? 1 : 0) << '\n';
   file << "overlay_windowed=" << (sOverlayWindowed ? 1 : 0) << '\n';
   file << "render_scale=" << sRenderScale << '\n';
   file << "frame_limit=" << (sFrameLimitEnabled ? 1 : 0) << '\n';
@@ -565,8 +648,18 @@ void SaveSettings() {
   file << "mouse_aim=" << (sMouseAim ? 1 : 0) << '\n';
   file << "twin_stick=" << (sTwinStick ? 1 : 0) << '\n';
   file << "spring_ball=" << (sSpringBall ? 1 : 0) << '\n';
+  file << "swap_scan_xray=" << (sSwapScanXray ? 1 : 0) << '\n';
+  file << "shift_key=" << sShiftBindings[0] << '\n';
+  file << "shift_key_alt=" << sShiftBindings[1] << '\n';
+  file << "shift_pad=" << sShiftBindings[2] << '\n';
+  file << "pad_alt=";
+  for (int i = 0; i < PortDebug::kPadAltCount; ++i) {
+    file << (i != 0 ? "," : "") << sPadAltButtons[i];
+  }
+  file << '\n';
   file << "fast_morph=" << (sFastMorph ? 1 : 0) << '\n';
   file << "invulnerable=" << (sInvulnerable ? 1 : 0) << '\n';
+  file << "log_file=" << (sLogFile ? 1 : 0) << '\n';
   file << "lock_on_toggle=" << (sLockOnToggle ? 1 : 0) << '\n';
   file << "sticky_charge=" << (sStickyCharge ? 1 : 0) << '\n';
   file << "spring_ball_flick=" << (sSpringFlick ? 1 : 0) << '\n';
@@ -578,11 +671,21 @@ void SaveSettings() {
   file << "mouse_invert_x=" << (sMouseInvertX ? 1 : 0) << '\n';
   file << "mouse_invert_y=" << (sMouseInvertY ? 1 : 0) << '\n';
   file << "mouse_buttons=" << (sMouseButtons ? 1 : 0) << '\n';
+  for (int i = 0; i < PortInputMap::kMouseButtonCount; ++i) {
+    file << PortInputMap::MouseButtonKey(i) << '=' << PortInputMap::MouseActionInfo(sMouseActions[i]).name
+         << '\n';
+  }
   file << "mouse_crosshair=" << (sMouseCrosshair ? 1 : 0) << '\n';
   file << "crosshair_size=" << sCrosshairSize << '\n';
   file << "mouse_sensitivity=" << sMouseSensitivity << '\n';
   if (!sDiscPath.empty()) {
     file << "disc_path=" << sDiscPath << '\n';
+  }
+  if (!sRemasteredImagePath.empty()) {
+    file << "remastered_nsp=" << sRemasteredImagePath << '\n';
+  }
+  if (!sRemasteredKeysPath.empty()) {
+    file << "remastered_keys=" << sRemasteredKeysPath << '\n';
   }
   file << "ai_audio=" << (sAiAudioEnabled ? 1 : 0) << '\n';
   file << "musyx_audio=" << (sMusyxAudioEnabled ? 1 : 0) << '\n';
@@ -651,6 +754,15 @@ bool SDLCALL debug_event_watch(void*, SDL_Event* event) {
       (event->key.scancode == SDL_SCANCODE_F5 || event->key.scancode == SDL_SCANCODE_F9)) {
     sSaveStateHotkey.store(event->key.scancode == SDL_SCANCODE_F5 ? 1 : 2,
                            std::memory_order_release);
+  }
+  if (event->type == SDL_EVENT_KEY_DOWN && !event->key.repeat &&
+      event->key.scancode == SDL_SCANCODE_F11) {
+    sFullscreenHotkey.store(true, std::memory_order_release);
+  }
+  if (event->type == SDL_EVENT_WINDOW_ENTER_FULLSCREEN ||
+      event->type == SDL_EVENT_WINDOW_LEAVE_FULLSCREEN) {
+    sWindowFullscreen.store(event->type == SDL_EVENT_WINDOW_ENTER_FULLSCREEN ? 1 : 0,
+                            std::memory_order_release);
   }
   if (IsPhysicalInput(*event)) {
     sPhysicalInput.store(true, std::memory_order_release);
@@ -912,6 +1024,21 @@ void SetVsyncEnabled(bool enabled) {
   aurora_enable_vsync(enabled);
 }
 
+bool Fullscreen() {
+  EnsureInitialized();
+  return sFullscreen;
+}
+
+void SetFullscreen(bool enabled) {
+  EnsureInitialized();
+  if (sFullscreen != enabled) {
+    sFullscreen = enabled;
+    MarkDirty();
+  }
+  PortLog::Write("metroid_prime_port: fullscreen %s\n", enabled ? "on" : "off");
+  VISetWindowFullscreen(enabled);
+}
+
 float RenderScale() {
   EnsureInitialized();
   return sRenderScale;
@@ -1000,6 +1127,28 @@ bool MapPickups() {
 void SetMapPickups(bool enabled) {
   EnsureInitialized();
   sMapPickups = enabled;
+  MarkDirty();
+}
+
+bool MapLogicColors() {
+  EnsureInitialized();
+  return sMapLogicColors;
+}
+
+void SetMapLogicColors(bool enabled) {
+  EnsureInitialized();
+  sMapLogicColors = enabled;
+  MarkDirty();
+}
+
+int ApSuitDamage() {
+  EnsureInitialized();
+  return sApSuitDamage;
+}
+
+void SetApSuitDamage(int mode) {
+  EnsureInitialized();
+  sApSuitDamage = mode >= 0 && mode <= 2 ? mode : 1;
   MarkDirty();
 }
 
@@ -1116,6 +1265,10 @@ float TwinStickRightY() { return sTwinStickRightY; }
 
 void SetTwinStickRightY(float y) { sTwinStickRightY = y; }
 
+bool BeamShiftHeld() { return sBeamShiftHeld; }
+
+void SetBeamShiftHeld(bool held) { sBeamShiftHeld = held; }
+
 bool SpringBall() {
   EnsureInitialized();
   return sSpringBall;
@@ -1125,6 +1278,60 @@ void SetSpringBall(bool enabled) {
   EnsureInitialized();
   sSpringBall = enabled;
   MarkDirty();
+}
+
+bool SwapScanXray() {
+  EnsureInitialized();
+  return sSwapScanXray;
+}
+
+void SetSwapScanXray(bool enabled) {
+  EnsureInitialized();
+  sSwapScanXray = enabled;
+  MarkDirty();
+}
+
+int ShiftBinding(int slot) {
+  EnsureInitialized();
+  return slot >= 0 && slot < 3 ? sShiftBindings[slot] : -1;
+}
+
+void SetShiftBinding(int slot, int code) {
+  EnsureInitialized();
+  if (slot >= 0 && slot < 3) {
+    sShiftBindings[slot] = code;
+    MarkDirty();
+  }
+}
+
+int PadAltButton(int bit) {
+  EnsureInitialized();
+  return bit >= 0 && bit < kPadAltCount ? sPadAltButtons[bit] : -1;
+}
+
+void SetPadAltButton(int bit, int code) {
+  EnsureInitialized();
+  if (bit >= 0 && bit < kPadAltCount && sPadAltButtons[bit] != code) {
+    sPadAltButtons[bit] = code;
+    MarkDirty();
+  }
+}
+
+int MouseAction(int button) {
+  EnsureInitialized();
+  return button >= 0 && button < PortInputMap::kMouseButtonCount ? sMouseActions[button]
+                                                                  : PortInputMap::kMA_None;
+}
+
+void SetMouseAction(int button, int action) {
+  EnsureInitialized();
+  if (button >= 0 && button < PortInputMap::kMouseButtonCount && action >= 0 &&
+      action < PortInputMap::kMA_Count) {
+    sMouseActions[button] = action;
+    // A button held as it changes must not start the new action mid-press.
+    sMouseButtonGate.Reset();
+    MarkDirty();
+  }
 }
 
 bool SpeedrunTimer() {
@@ -1220,6 +1427,17 @@ void SetInvulnerable(bool enabled) {
   EnsureInitialized();
   sInvulnerable = enabled;
   sInvulnerableRun = -1;
+  MarkDirty();
+}
+
+bool LogFile() {
+  EnsureInitialized();
+  return sLogFile;
+}
+
+void SetLogFile(bool enabled) {
+  EnsureInitialized();
+  sLogFile = enabled;
   MarkDirty();
 }
 
@@ -1381,8 +1599,8 @@ int OrientationQuarters(SDL_DisplayOrientation orientation) {
   }
 }
 
-// Pitch (x, positive tilts the far edge up) and yaw rates in rad/s from the
-// chosen source; false when there is none.
+// Pitch (x, positive tilts the far edge up) and yaw (positive turns right)
+// rates in rad/s from the chosen source; false when there is none.
 bool ReadGyroRates(float& pitch, float& yaw) {
   if (sGyroOverride) {
     pitch = sGyroOverridePitch;
@@ -1403,8 +1621,9 @@ bool ReadGyroRates(float& pitch, float& yaw) {
         }
         float data[3];
         if (SDL_GetGamepadSensorData(pad, SDL_SENSOR_GYRO, data, 3)) {
-          // Radians per second; x is pitch, y is yaw.
-          yaw = data[1];
+          // Radians per second; x is pitch, y is yaw. Sensor rates are
+          // counter-clockwise positive, so a positive y turns left.
+          yaw = -data[1];
           pitch = data[0];
           haveRates = true;
           sGyroStatus = "controller";
@@ -1432,7 +1651,8 @@ bool ReadGyroRates(float& pitch, float& yaw) {
       if (SDL_GetSensorData(sPhoneGyro, data, 3)) {
         // The phone reports its own axes (x right, y up in its natural
         // orientation), so turn them to the screen's, as SDL does for its
-        // accelerometer: landscape would otherwise swap pitch and yaw.
+        // accelerometer: landscape would otherwise swap pitch and yaw. The
+        // rate about the screen's up axis is negated, as for a pad.
         const SDL_DisplayID display = SDL_GetPrimaryDisplay();
         const int quarters = (OrientationQuarters(SDL_GetCurrentDisplayOrientation(display)) -
                               OrientationQuarters(SDL_GetNaturalDisplayOrientation(display)) + 4) %
@@ -1440,19 +1660,19 @@ bool ReadGyroRates(float& pitch, float& yaw) {
         switch (quarters) {
         case 1:
           pitch = -data[1];
-          yaw = data[0];
+          yaw = -data[0];
           break;
         case 2:
           pitch = -data[0];
-          yaw = -data[1];
+          yaw = data[1];
           break;
         case 3:
           pitch = data[1];
-          yaw = -data[0];
+          yaw = data[0];
           break;
         default:
           pitch = data[0];
-          yaw = data[1];
+          yaw = -data[1];
           break;
         }
         haveRates = true;
@@ -1573,8 +1793,7 @@ unsigned MouseWeaponButtons(unsigned held) {
 unsigned MouseMenuButtons(unsigned held, bool focused) {
   return sMouseMenuGate.Poll(MouseAim() && MouseButtons() && !MouseGameplayActive() &&
                                  !Visible() && focused,
-                             held) &
-         SDL_BUTTON_LMASK;
+                             held);
 }
 void NoteMouseButton(bool synthetic, unsigned mask, bool down) {
   sMouseHeldButtons.Note(synthetic, mask, down);
@@ -1790,6 +2009,35 @@ void SetStateManager(CStateManager* mgr) {
   sStateManager = mgr;
 }
 CStateManager* StateManager() { return sStateManager; }
+bool ViewRay(float origin[3], float forward[3]) {
+  if (sStateManager == nullptr || sStateManager->GetCameraManager() == nullptr) {
+    return false;
+  }
+  const CTransform4f view =
+      PortFreeCam::View(sStateManager->GetCameraManager()->GetCurrentCameraTransform(*sStateManager));
+  const CVector3f at = view.GetTranslation();
+  const CVector3f to = view.GetForward();
+  origin[0] = at.GetX();
+  origin[1] = at.GetY();
+  origin[2] = at.GetZ();
+  forward[0] = to.GetX();
+  forward[1] = to.GetY();
+  forward[2] = to.GetZ();
+  return true;
+}
+
+namespace {
+const char* const kPbrViews[] = {"off",     "albedo",     "normal", "rough",    "metal", "ao",
+                                 "ambient", "reflection", "glow",   "exposure", "kind"};
+int sPbrView = 0;
+} // namespace
+int PbrViewCount() { return int(sizeof(kPbrViews) / sizeof(kPbrViews[0])); }
+const char* PbrViewName(int view) { return view >= 0 && view < PbrViewCount() ? kPbrViews[view] : "?"; }
+int PbrView() { return sPbrView; }
+void SetPbrView(int view) {
+  sPbrView = view >= 0 && view < PbrViewCount() ? view : 0;
+  GXSetPBRDebugView(u32(sPbrView));
+}
 void RequestTeleport(int areaId) { sPendingTeleport = areaId; }
 bool ConsumeTeleportRequest(int& areaId) {
   if (sPendingTeleport < 0) {
@@ -2684,12 +2932,50 @@ void DrawMemoryCard() {
       "folder.");
 }
 
-#if !defined(__ANDROID__)
 // The Remastered import (port_remastered_import.h): the user's own image and
 // key file, converted here into the remastered-models mod.
 std::mutex sRemasteredPickMutex;
 std::vector<std::pair<int, std::string>> sRemasteredPicks;
 
+#if defined(__ANDROID__)
+// Not SDL_ShowOpenFileDialog: Android often kills the game behind the picker
+// for its memory (seen on a tablet: the pick came back to a new process), and
+// SDL's callback dies with it. MetroidPrimeActivity.pickRemasteredFile writes
+// the picked address to this file, which the panel reads, in this process or
+// the next one.
+std::string RemasteredPickFile(int which) {
+  const char* root = SDL_GetAndroidInternalStoragePath();
+  return std::string(root != nullptr ? root : ".") + "/remastered_pick_" + std::to_string(which) + ".txt";
+}
+
+void TakeRemasteredPickFiles() {
+  for (int which = 0; which < 2; ++which) {
+    std::ifstream in(RemasteredPickFile(which));
+    std::string uri;
+    if (std::getline(in, uri) && !uri.empty()) {
+      sRemasteredPicks.emplace_back(which, uri);
+    }
+  }
+}
+
+void OpenRemasteredDialog(int which) {
+  JNIEnv* env = static_cast< JNIEnv* >(SDL_GetAndroidJNIEnv());
+  jobject activity = static_cast< jobject >(SDL_GetAndroidActivity());
+  if (env == nullptr || activity == nullptr) {
+    return;
+  }
+  jclass cls = env->GetObjectClass(activity);
+  jmethodID method = env->GetMethodID(cls, "pickRemasteredFile", "(I)V");
+  if (method != nullptr) {
+    env->CallVoidMethod(activity, method, jint(which));
+  }
+  if (env->ExceptionCheck()) {
+    env->ExceptionClear();
+  }
+  env->DeleteLocalRef(cls);
+  env->DeleteLocalRef(activity);
+}
+#else
 void OpenRemasteredDialog(int which) {
   int windowCount = 0;
   SDL_Window** windows = SDL_GetWindows(&windowCount);
@@ -2706,29 +2992,138 @@ void OpenRemasteredDialog(int which) {
   SDL_ShowOpenFileDialog(done, reinterpret_cast< void* >(static_cast< intptr_t >(which)), window,
                          which == 0 ? imageFilters : keyFilters, 2, nullptr, false);
 }
+#endif
+
+#if defined(__ANDROID__)
+// Android's picker gives a content:// address, which only the system can open.
+// The image is several GB, so it is not copied as the disc is: the file is
+// opened here and the import reads it through the descriptor ("fd:<n>", see
+// SourceFile). One descriptor per field, closed when another file is picked.
+std::string OpenRemasteredPick(int which, const std::string& uri) {
+  static int sHeld[2] = {-1, -1};
+  if (sHeld[which] >= 0) {
+    close(sHeld[which]);
+    sHeld[which] = -1;
+  }
+  SDL_IOStream* io = SDL_IOFromFile(uri.c_str(), "rb");
+  if (io == nullptr) {
+    PortLog::Write("metroid_prime_port: could not open the picked file: %s: %s\n", uri.c_str(), SDL_GetError());
+    return {};
+  }
+  const int fd = int(SDL_GetNumberProperty(SDL_GetIOProperties(io), SDL_PROP_IOSTREAM_FILE_DESCRIPTOR_NUMBER, -1));
+  sHeld[which] = fd >= 0 ? dup(fd) : -1;
+  SDL_CloseIO(io);
+  return sHeld[which] >= 0 ? "fd:" + std::to_string(sHeld[which]) : std::string();
+}
+
+// "content://.../document/primary%3ADownload%2Fgame.nsp" -> "game.nsp".
+std::string RemasteredPickName(const std::string& uri) {
+  std::string text;
+  for (size_t i = 0; i < uri.size(); ++i) {
+    if (uri[i] == '%' && i + 2 < uri.size() && std::isxdigit(static_cast< unsigned char >(uri[i + 1])) &&
+        std::isxdigit(static_cast< unsigned char >(uri[i + 2]))) {
+      text += char(std::stoi(uri.substr(i + 1, 2), nullptr, 16));
+      i += 2;
+    } else {
+      text += uri[i];
+    }
+  }
+  const size_t cut = text.find_last_of("/:");
+  return cut == std::string::npos ? text : text.substr(cut + 1);
+}
+#endif
+
+// What the last "Reload mods" came to: it waits for a game to start when none
+// is loaded, and is refused where the game can't be saved.
+void DrawModReloadMessage() {
+  const std::string message = PortSaveState::LastMessage();
+  if (message.find("mods") != std::string::npos || message.find("Mods") != std::string::npos) {
+    ImGui::TextWrapped("%s", message.c_str());
+  }
+}
 
 void DrawRemasteredImport() {
   static char sImage[1024] = "";
   static char sKeys[1024] = "";
+#if defined(__ANDROID__)
+  static std::string sPickNames[2];
+#endif
   static bool sFilled = false;
+  const auto remember = [](int which, const std::string& path) {
+    std::string& saved = which == 0 ? sRemasteredImagePath : sRemasteredKeysPath;
+    if (!path.empty() && saved != path) {
+      saved = path;
+      MarkDirty();
+    }
+  };
   if (!sFilled) {
     sFilled = true;
     std::snprintf(sKeys, sizeof(sKeys), "%s", PortRemastered::DefaultKeysPath().c_str());
+#if defined(__ANDROID__)
+    // The files picked last time open again as if picked now.
+    std::lock_guard lock(sRemasteredPickMutex);
+    if (!sRemasteredImagePath.empty()) {
+      sRemasteredPicks.emplace_back(0, sRemasteredImagePath);
+    }
+    if (!sRemasteredKeysPath.empty()) {
+      sRemasteredPicks.emplace_back(1, sRemasteredKeysPath);
+    }
+    // A pick the previous process never saw: after the remembered ones, so it wins.
+    TakeRemasteredPickFiles();
+#else
+    if (!sRemasteredImagePath.empty()) {
+      std::snprintf(sImage, sizeof(sImage), "%s", sRemasteredImagePath.c_str());
+    }
+    if (!sRemasteredKeysPath.empty()) {
+      std::snprintf(sKeys, sizeof(sKeys), "%s", sRemasteredKeysPath.c_str());
+    }
+#endif
   }
   {
     std::lock_guard lock(sRemasteredPickMutex);
+#if defined(__ANDROID__)
+    for (const auto& [which, path] : sRemasteredPicks) {
+      const std::string opened = OpenRemasteredPick(which, path);
+      std::snprintf(which == 0 ? sImage : sKeys, sizeof(sImage), "%s", opened.c_str());
+      sPickNames[which] = opened.empty() ? "could not be opened" : RemasteredPickName(path);
+      if (!opened.empty()) {
+        remember(which, path);
+      }
+      std::remove(RemasteredPickFile(which).c_str());
+    }
+#else
     for (const auto& [which, path] : sRemasteredPicks) {
       std::snprintf(which == 0 ? sImage : sKeys, sizeof(sImage), "%s", path.c_str());
+      remember(which, path);
     }
+#endif
     sRemasteredPicks.clear();
   }
   if (!ImGui::CollapsingHeader("Metroid Prime Remastered models")) {
     return;
   }
   const PortRemastered::ImportState state = PortRemastered::ImportStatus();
+  ImGui::TextWrapped("Very experimental and currently unsupported: expect wrong or missing models, crashes and "
+                     "heavy memory use. Remove mods/remastered-models to get the retail game back.");
   ImGui::TextWrapped("Converts the models of your own copy of Metroid Prime Remastered into a mod. It needs the "
                      "game's .nsp and your console's key file (prod.keys), and takes a few minutes.");
   ImGui::BeginDisabled(state.running);
+#if defined(__ANDROID__)
+  // No path to type here: the files are picked, and shown by name.
+  if (ImGui::Button("Pick the .nsp...##remastered-image")) {
+    OpenRemasteredDialog(0);
+  }
+  ImGui::SameLine();
+  ImGui::TextUnformatted(sPickNames[0].empty() ? "Metroid Prime Remastered .nsp" : sPickNames[0].c_str());
+  if (ImGui::Button("Pick the keys...##remastered-keys")) {
+    OpenRemasteredDialog(1);
+  }
+  ImGui::SameLine();
+  ImGui::TextUnformatted(sPickNames[1].empty() ? "prod.keys" : sPickNames[1].c_str());
+  ImGui::PushStyleColor(ImGuiCol_Text, ImGui::GetStyleColorVec4(ImGuiCol_TextDisabled));
+  ImGui::TextWrapped("Android may close the game while you pick a file. The pick is kept: open this page again.");
+  ImGui::PopStyleColor();
+#else
   ImGui::SetNextItemWidth(ImGui::GetContentRegionAvail().x * 0.6f);
   ImGui::InputTextWithHint("##remastered-image", "Metroid Prime Remastered .nsp", sImage, sizeof(sImage));
   ImGui::SameLine();
@@ -2741,6 +3136,29 @@ void DrawRemasteredImport() {
   if (ImGui::Button("Browse...##remastered-keys")) {
     OpenRemasteredDialog(1);
   }
+#endif
+#if defined(__ANDROID__)
+  // Off on a phone: the rooms have never run on one, and need storage and
+  // memory many phones lack (a 256 MB game arena and 12x frame buffers).
+  static bool sGeometry = false;
+#else
+  static bool sGeometry = true;
+#endif
+  ImGui::Checkbox("Room geometry too##remastered", &sGeometry);
+  if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled)) {
+    ImGui::SetTooltip("Also converts the rooms themselves, not only the models in them. About 6.5 GB in place of "
+                      "1 GB, and twice as long. Restart the game afterwards.");
+  }
+#if defined(__ANDROID__)
+  // A tap shows no tooltip, so the warning is spelled out.
+  if (sGeometry) {
+    ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(1.f, 0.75f, 0.3f, 1.f));
+    ImGui::TextWrapped("Untested on phones: needs about 6.5 GB free and lots of RAM, and the game may run slowly "
+                       "or be closed by Android. Remove mods/remastered-models to go back.");
+    ImGui::PopStyleColor();
+  }
+#endif
+  PortRemastered::SetImportGeometry(sGeometry);
   ImGui::EndDisabled();
   if (state.running) {
     ImGui::ProgressBar(state.total > 0 ? float(state.done) / float(state.total) : 0.f, ImVec2(-1.f, 0.f),
@@ -2750,17 +3168,48 @@ void DrawRemasteredImport() {
     }
   } else {
     ImGui::BeginDisabled(sImage[0] == '\0' || sKeys[0] == '\0');
+#if !defined(__ANDROID__)
+    // A typed path is kept once it is used (Android keeps what was picked).
+    const auto rememberTyped = [&] {
+      remember(0, sImage);
+      remember(1, sKeys);
+    };
+#else
+    const auto rememberTyped = [] {};
+#endif
     if (ImGui::Button("Import##remastered")) {
+      rememberTyped();
+#if defined(__ANDROID__)
+      // Each worker holds a world's models while it converts them; a phone has
+      // the memory for two of those, not for one per core.
+      PortRemastered::StartImport(sImage, sKeys, 2);
+#else
       PortRemastered::StartImport(sImage, sKeys);
+#endif
+    }
+    ImGui::SameLine();
+    if (ImGui::Button("Import movies##remastered")) {
+      rememberTyped();
+      PortRemastered::StartMovieImport(sImage, sKeys);
+    }
+    if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled)) {
+#if defined(__ANDROID__)
+      ImGui::SetTooltip("Only the menu movies, added to the mod already imported.");
+#else
+      ImGui::SetTooltip("Only the menu movies, added to the mod already imported. Needs ffmpeg.");
+#endif
     }
     ImGui::EndDisabled();
     if (state.finished && state.ok) {
-      ImGui::TextColored(ImVec4(0.5f, 1.f, 0.5f, 1.f), "%s", state.message.c_str());
+      ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.5f, 1.f, 0.5f, 1.f));
+      ImGui::TextWrapped("%s", state.message.c_str());
+      ImGui::PopStyleColor();
       if (ImGui::Button("Load it now##remastered")) {
         PortSaveState::RequestModReload();
       }
       ImGui::SameLine();
       ImGui::TextDisabled("or restart the game");
+      DrawModReloadMessage();
     } else if (state.finished && state.cancelled) {
       ImGui::TextDisabled("The import was cancelled.");
     } else if (state.finished) {
@@ -2777,6 +3226,7 @@ void DrawRemasteredImport() {
   }
 }
 
+#if !defined(__ANDROID__)
 // Importers (port_importers.h): the user's own programs that build a mod.
 // Nothing is drawn until the importers folder holds one.
 void DrawImporters() {
@@ -2876,6 +3326,7 @@ void DrawMods() {
   if (ImGui::IsItemHovered()) {
     ImGui::SetTooltip("Reads the mods folder again and reloads the room, as a save state does.");
   }
+  DrawModReloadMessage();
   for (const std::string& message : status.messages) {
     ImGui::TextColored(ImVec4(1.f, 0.5f, 0.3f, 1.f), "%s", message.c_str());
   }
@@ -2896,8 +3347,8 @@ void DrawMods() {
       "Each folder in the mods folder is a mod; later names win. A file at a disc path "
       "(Metroid1.pak, Audio/..., Video/...) replaces that file, and a resource named "
       "by id and type (1A2B3C4D.TXTR) replaces it in every PAK. Mods load at startup.");
-#if !defined(__ANDROID__)
   DrawRemasteredImport();
+#if !defined(__ANDROID__)
   DrawImporters();
 #endif
 }
@@ -3038,6 +3489,9 @@ void DrawExtrasTab() {
         "Application ID here.");
   }
 
+#if defined(__ANDROID__)
+  PortDataFolder::DrawPanel();
+#endif
   DrawMemoryCard();
   DrawMods();
 }
@@ -3068,9 +3522,12 @@ void PickTexturePack() {
     return;
   }
   jclass cls = env->GetObjectClass(activity);
-  jmethodID method = env->GetMethodID(cls, "pickTexturePack", "()V");
+  jmethodID method = env->GetMethodID(cls, "pickTexturePack", "(Ljava/lang/String;)V");
   if (method != nullptr) {
-    env->CallVoidMethod(activity, method);
+    // The pack is copied into the data folder, wherever that is.
+    jstring folder = env->NewStringUTF(PortPaths::UserFolder().c_str());
+    env->CallVoidMethod(activity, method, folder);
+    env->DeleteLocalRef(folder);
   }
   if (env->ExceptionCheck()) {
     env->ExceptionClear();
@@ -3089,6 +3546,14 @@ void DrawRenderTab() {
     MarkDirty();
   }
 #endif
+  bool fullscreen = sFullscreen;
+#if defined(__ANDROID__)
+  if (ImGui::Checkbox("Fullscreen (hide the status and navigation bars)", &fullscreen)) {
+#else
+  if (ImGui::Checkbox("Fullscreen (F11)", &fullscreen)) {
+#endif
+    SetFullscreen(fullscreen);
+  }
   bool vsync = sVsyncEnabled;
   if (ImGui::Checkbox("Vsync", &vsync)) {
     SetVsyncEnabled(vsync);
@@ -3186,7 +3651,7 @@ void DrawRenderTab() {
 
 // The user's texture pack, layered over the built-in set (see port_textures.h).
 // On Android the folder is picked with the system folder picker and copied into
-// app storage; on the desktop the player fills the folder themselves.
+// the data folder; on the desktop the player fills the folder themselves.
 void DrawTexturePack() {
   ImGui::SeparatorText("Texture pack");
   const char* root = PortTextures::UserRoot();
@@ -3214,7 +3679,7 @@ void DrawTexturePack() {
     SetTexturePackStatus("Texture pack removed.");
   }
   ImGui::TextWrapped(
-      "The folder is copied into the app, so it keeps working if the original is "
+      "The folder is copied into the data folder, so it keeps working if the original is "
       "moved. Pick it again after changing it.");
 #else
   ImGui::TextWrapped("Folder: %s", root);
@@ -3284,6 +3749,15 @@ void DrawInputTab() {
     SetSpringBall(springBall);
   }
   ImGui::EndDisabled();
+  bool swapScanXray = sSwapScanXray;
+  if (ImGui::Checkbox("Swap the Scan and X-Ray visor buttons", &swapScanXray)) {
+    SetSwapScanXray(swapScanXray);
+  }
+  if (ImGui::IsItemHovered(ImGuiHoveredFlags_ForTooltip)) {
+    ImGui::SetTooltip("Each takes the other's D-pad direction, as in Metroid Prime\n"
+                      "Remastered's Dual Sticks layout. The Remastered controller preset\n"
+                      "turns it on and the other presets off.");
+  }
   if (springRule >= 0) {
     ImGui::TextWrapped("Set by the connected Archipelago seed: %s.",
                        springRule == 0   ? "off"
@@ -3292,7 +3766,8 @@ void DrawInputTab() {
   } else {
     ImGui::TextWrapped(
         "A small jump in morph ball, as in Metroid Prime Trilogy, once the Morph "
-        "Ball Bombs are held. Twin stick still passes the right stick up to it.");
+        "Ball Bombs are held. Twin stick still passes the right stick up to it, "
+        "and the beam shift (X in the Remastered preset) springs too.");
   }
   bool springFlick = sSpringFlick;
   if (ImGui::Checkbox("Spring Ball on gyro flick", &springFlick)) {
@@ -3354,7 +3829,7 @@ void DrawInputTab() {
     SetCrosshairSize(crosshairSize);
   }
   ImGui::TextUnformatted("Crosshair size applies under mouse aim and twin stick.");
-  ImGui::TextUnformatted("Left: fire/charge   Right: lock-on   Middle: missile");
+  ImGui::TextUnformatted("Mouse buttons are set in Controls > Keyboard & mouse.");
   ImGui::TextUnformatted("Existing keyboard/controller weapon bindings also work.");
   if (ImGui::SliderFloat("Sensitivity", &sMouseSensitivity, 0.0005f, 0.02f, "%.4f rad/px",
                          ImGuiSliderFlags_Logarithmic)) {
@@ -3445,6 +3920,13 @@ void DrawArchipelagoConnect() {
   }
 
   ImGui::SeparatorText("Archipelago");
+  // The server doesn't send this option, so it is set here to match the seed.
+  int suitDamage = sApSuitDamage;
+  if (ImGui::Combo("Staggered suit damage", &suitDamage, "Default\0Progressive\0Additive\0")) {
+    SetApSuitDamage(suitDamage);
+  }
+  ImGui::SetItemTooltip("Set it to your YAML's staggered_suit_damage (the apworld's default is\n"
+                        "Progressive: damage reduction by how many suits you have).");
   ImGui::InputTextWithHint("Server", "archipelago.gg:38281", sServer, sizeof(sServer));
   ImGui::InputTextWithHint("Slot name", "your player name in the seed", sSlot, sizeof(sSlot));
   ImGui::InputTextWithHint("Password", "only if the room has one", sPassword, sizeof(sPassword),
@@ -3608,6 +4090,27 @@ void DrawSessionTab() {
   ImGui::SameLine();
   if (ImGui::Button("Screenshot (F12)")) {
     aurora::request_screenshot();
+  }
+  ImGui::SameLine();
+  if (ImGui::Button("Exit game")) {
+    ImGui::OpenPopup("Exit game?");
+  }
+  if (ImGui::BeginPopupModal("Exit game?", nullptr, ImGuiWindowFlags_AlwaysAutoResize)) {
+    ImGui::TextUnformatted("Progress since the last save station is lost.");
+    if (ImGui::Button("Exit")) {
+      // The same path as closing the window: the main loop sees AURORA_EXIT
+      // and shuts down cleanly.
+      SaveSettings();
+      SDL_Event quit{};
+      quit.type = SDL_EVENT_QUIT;
+      SDL_PushEvent(&quit);
+      ImGui::CloseCurrentPopup();
+    }
+    ImGui::SameLine();
+    if (ImGui::Button("Cancel")) {
+      ImGui::CloseCurrentPopup();
+    }
+    ImGui::EndPopup();
   }
   ImGui::Separator();
   ImGui::TextUnformatted("Settings are saved automatically when changed.");
@@ -3830,11 +4333,204 @@ void DrawCheats() {
   }
 }
 
+// The free camera: the view leaves the player, who stands still meanwhile.
+void DrawFreeCam() {
+  CStateManager* mgr = StateManager();
+  bool on = PortFreeCam::Active();
+  ImGui::BeginDisabled(mgr == nullptr && !on);
+  if (ImGui::Checkbox("Free camera", &on)) {
+    PortFreeCam::SetActive(on, mgr);
+  }
+  ImGui::EndDisabled();
+  if (!PortFreeCam::Active()) {
+    return;
+  }
+  ImGui::SameLine();
+  bool frozen = PortFreeCam::Frozen();
+  if (ImGui::Checkbox("Freeze the game", &frozen)) {
+    PortFreeCam::SetFrozen(frozen);
+  }
+  ImGui::SameLine();
+  bool showPlayer = PortFreeCam::ShowPlayer();
+  if (ImGui::Checkbox("Show Samus", &showPlayer)) {
+    PortFreeCam::SetShowPlayer(showPlayer);
+  }
+  float speed = PortFreeCam::Speed();
+  if (ImGui::SliderFloat("Speed", &speed, 1.f, 100.f, "%.0f m/s", ImGuiSliderFlags_Logarithmic)) {
+    PortFreeCam::SetSpeed(speed);
+  }
+  PortFreeCam::Pose pose = PortFreeCam::GetPose();
+  float pos[3] = {pose.x, pose.y, pose.z};
+  float look[2] = {pose.yaw, pose.pitch};
+  bool moved = ImGui::InputFloat3("Position", pos, "%.2f");
+  moved |= ImGui::InputFloat2("Yaw, pitch", look, "%.1f");
+  if (moved) {
+    pose.x = pos[0];
+    pose.y = pos[1];
+    pose.z = pos[2];
+    pose.yaw = look[0];
+    pose.pitch = look[1];
+    PortFreeCam::SetPose(pose);
+  }
+  ImGui::TextWrapped("Close this menu to fly: stick moves, C stick or mouse looks, Z / D-pad up "
+                     "rises, L / D-pad down sinks, R goes four times as fast.");
+}
+
+// The switches and readouts for working on what mods draw: room geometry, room
+// environments, PBR.
+void DrawRendering() {
+  int view = PortDebug::PbrView();
+  if (ImGui::BeginCombo("PBR surfaces show", view == 0 ? "the shaded result" : PortDebug::PbrViewName(view))) {
+    for (int i = 0; i < PortDebug::PbrViewCount(); ++i) {
+      if (ImGui::Selectable(i == 0 ? "the shaded result" : PortDebug::PbrViewName(i), i == view)) {
+        PortDebug::SetPbrView(i);
+      }
+    }
+    ImGui::EndCombo();
+  }
+  static const char* const kProbes[] = {"off", "on", "mirror", "window"};
+  int probe = std::clamp(CCubeMaterial::sPortPBRProbeMode, 0, 3);
+  if (ImGui::Combo("Reflection probe", &probe, kProbes, 4)) {
+    CCubeMaterial::sPortPBRProbeMode = probe;
+  }
+  bool font = PortHdFont::Enabled();
+  if (ImGui::Checkbox("HD font", &font)) {
+    PortHdFont::SetEnabled(font);
+  }
+
+  static const char* const kModes[] = {"off", "in place of the room", "on top of the room"};
+  int mode = int(PortRoomGeo::GetMode());
+  if (ImGui::Combo("Room geometry", &mode, kModes, 3)) {
+    PortRoomGeo::SetMode(PortRoomGeo::Mode(mode));
+  }
+  bool areaLights = PortRoomGeo::AreaLights();
+  if (ImGui::Checkbox("Room geometry takes the area's lights", &areaLights)) {
+    PortRoomGeo::SetAreaLights(areaLights);
+  }
+  bool env = PortRoomEnv::Enabled();
+  if (ImGui::Checkbox("Room environments", &env)) {
+    PortRoomEnv::SetEnabled(env);
+  }
+  ImGui::BeginDisabled(!env);
+  bool exposed = PortRoomEnv::RoomExposed();
+  if (ImGui::Checkbox("Exposure by room", &exposed)) {
+    PortRoomEnv::SetRoomExposed(exposed);
+  }
+  ImGui::SameLine();
+  bool volumes = PortRoomEnv::VolumesEnabled();
+  if (ImGui::Checkbox("Baked light per pixel", &volumes)) {
+    PortRoomEnv::SetVolumesEnabled(volumes);
+  }
+  float ambient = PortRoomEnv::AmbientScale();
+  if (ImGui::SliderFloat("Baked ambient scale", &ambient, 0.f, 4.f, "%.2f")) {
+    PortRoomEnv::SetAmbientScale(ambient);
+  }
+  static const char* const kVolumeViews[] = {"the shaded surface", "volume coordinates", "the baked light"};
+  int volumeView = std::clamp(PortRoomEnv::VolumeView(), 0, 2);
+  if (ImGui::Combo("Baked surfaces show", &volumeView, kVolumeViews, 3)) {
+    PortRoomEnv::SetVolumeView(volumeView);
+  }
+  ImGui::EndDisabled();
+
+  // What the middle of the screen looks at.
+  static std::string picked;
+  static uint32_t pickedModel = 0;
+  static std::string materials;
+  float origin[3];
+  float forward[3];
+  const bool inWorld = PortDebug::ViewRay(origin, forward);
+  ImGui::BeginDisabled(!inWorld);
+  if (ImGui::Button("Pick the model ahead")) {
+    picked.clear();
+    pickedModel = PortRoomGeo::Pick(CVector3f(origin[0], origin[1], origin[2]),
+                                    CVector3f(forward[0], forward[1], forward[2]), picked);
+    materials = pickedModel != 0 ? PortRoomGeo::Materials(pickedModel) : std::string();
+    if (picked.empty()) {
+      picked = "No room geometry ahead.";
+    }
+  }
+  ImGui::EndDisabled();
+  if (pickedModel != 0) {
+    ImGui::SameLine();
+    if (ImGui::Button("Hide it")) {
+      PortRoomGeo::SetHidden(pickedModel, true);
+    }
+  }
+  ImGui::SameLine();
+  if (ImGui::Button("Show all")) {
+    PortRoomGeo::SetHidden(0, false);
+  }
+  if (!picked.empty()) {
+    ImGui::TextUnformatted(picked.c_str());
+  }
+  if (!materials.empty() && ImGui::TreeNode("Materials of the first")) {
+    ImGui::TextUnformatted(materials.c_str());
+    ImGui::TreePop();
+  }
+
+  if (ImGui::TreeNode("Frame")) {
+    if (const AuroraStats* stats = aurora_get_stats()) {
+      ImGui::Text("%.0f fps, %u draws (%u merged), %u PBR", aurora_get_fps(), stats->drawCallCount,
+                  stats->mergedDrawCallCount, CCubeMaterial::sPortPBRDraws);
+      ImGui::Text("vertices %.1f MiB, indices %.1f, arrays %.1f, uniforms %.1f, texture uploads %.1f",
+                  stats->lastVertSize / 1048576.f, stats->lastIndexSize / 1048576.f,
+                  stats->lastStorageSize / 1048576.f, stats->lastUniformSize / 1048576.f,
+                  stats->lastTextureUploadSize / 1048576.f);
+      ImGui::Text("pipelines %u made, %u waiting", stats->createdPipelines, stats->queuedPipelines);
+    }
+    AuroraTextureStats textures{};
+    aurora_get_texture_stats(&textures);
+    ImGui::Text("textures %u, %.0f MiB; render targets %u, %.0f MiB", textures.count[0],
+                textures.bytes[0] / 1048576.f, textures.count[1], textures.bytes[1] / 1048576.f);
+    int areas = 0;
+    int instances = 0;
+    int models = 0;
+    int loaded = 0;
+    int drawn = 0;
+    PortRoomGeo::Stats(areas, instances, models, loaded, drawn);
+    ImGui::Text("room geometry: %d area(s), %d of %d model(s) loaded, %d of %d instance(s) drawn", areas, loaded,
+                models, drawn, instances);
+    ImGui::TreePop();
+  }
+  if (inWorld && ImGui::TreeNode("Room environment here")) {
+    ImGui::TextUnformatted(PortRoomEnv::Info(origin).c_str());
+    ImGui::TreePop();
+  }
+}
+
 void DrawDebugTab() {
+  ImGui::SeparatorText("Camera");
+  DrawFreeCam();
+
+  ImGui::SeparatorText("Rendering");
+  DrawRendering();
+
   ImGui::SeparatorText("Audio");
   DrawAudio();
   if (ImGui::CollapsingHeader("Voices")) {
     DrawVoices();
+  }
+
+  ImGui::SeparatorText("Log");
+  bool logFile = sLogFile || PortLogFile::Active();
+  if (ImGui::Checkbox("Write the log to a file", &logFile)) {
+    SetLogFile(logFile);
+    if (logFile) {
+      PortLogFile::Start();
+    }
+  }
+  const std::string logPath = PortLogFile::Path();
+  if (PortLogFile::Active()) {
+    ImGui::TextWrapped("Writing to %s (last run's: metroid_prime_port.old.log).", logPath.c_str());
+    if (!sLogFile) {
+      ImGui::TextDisabled("Stops at the next start.");
+    }
+  } else {
+    ImGui::TextWrapped("Everything the game logs, including the reason for a crash, goes to %s.",
+                       logPath.empty() ? "(no user folder)" : logPath.c_str());
+  }
+  if (!logPath.empty() && ImGui::Button("Copy log path")) {
+    ImGui::SetClipboardText(logPath.c_str());
   }
 
   ImGui::SeparatorText("Cheats");
@@ -3857,6 +4553,94 @@ void DrawTrackerCount(const char* label, const PortTracker::Count& count) {
   }
 }
 
+// The Archipelago checks within reach, coloured as on the map.
+void DrawTrackerLogic() {
+  static PortAp::LogicState state;
+  if (!PortAp::Logic(state)) {
+    return;
+  }
+  ImGui::SeparatorText("Archipelago checks");
+  bool colors = sMapLogicColors;
+  if (ImGui::Checkbox("Colour the map's dots by logic", &colors)) {
+    SetMapLogicColors(colors);
+  }
+  static const ImVec4 kColors[] = {
+      ImVec4(0.95f, 0.30f, 0.30f, 1.f), // out of logic
+      ImVec4(0.35f, 0.60f, 1.00f, 1.f), // inspect
+      ImVec4(1.00f, 0.85f, 0.25f, 1.f), // sequence break
+      ImVec4(0.35f, 0.90f, 0.40f, 1.f), // in logic
+  };
+  static const ImVec4 kGrey(0.55f, 0.55f, 0.55f, 1.f);
+  size_t count = 0;
+  const PortApLogic::Check* checks = PortApLogic::Checks(count);
+  int totals[4] = {};
+  int checked = 0;
+  for (size_t i = 0; i < count; ++i) {
+    if (state.checked[i]) {
+      ++checked;
+    } else {
+      ++totals[static_cast< int >(state.levels[i])];
+    }
+  }
+  ImGui::TextColored(kColors[3], "%d in logic", totals[3]);
+  ImGui::SameLine();
+  ImGui::TextColored(kColors[2], "%d sequence break", totals[2]);
+  ImGui::SameLine();
+  ImGui::TextColored(kColors[1], "%d visible only", totals[1]);
+  ImGui::SameLine();
+  ImGui::TextColored(kColors[0], "%d out of reach", totals[0]);
+  ImGui::SameLine();
+  ImGui::TextColored(kGrey, "%d checked", checked);
+  ImGui::TextWrapped(
+      "Worked out from the items received and the seed's logic options, with the rules of "
+      "the Metroid Prime Archipelago tracker pack. Green is in logic; yellow can be reached "
+      "with a trick the seed doesn't count on; blue can be seen but not collected.");
+
+  // One header per area, holding what can be reached there, best first.
+  const char* area = nullptr;
+  bool open = false;
+  for (size_t i = 0; i < count; ++i) {
+    if (area == nullptr || std::strcmp(area, checks[i].area) != 0) {
+      area = checks[i].area;
+      int inLogic = 0;
+      int other = 0;
+      for (size_t j = 0; j < count; ++j) {
+        if (std::strcmp(checks[j].area, area) != 0 || state.checked[j]) {
+          continue;
+        }
+        if (state.levels[j] == PortApLogic::Level::Normal) {
+          ++inLogic;
+        } else if (state.levels[j] != PortApLogic::Level::None) {
+          ++other;
+        }
+      }
+      char header[160];
+      std::snprintf(header, sizeof(header), "%s (%d in logic, %d other)###aplogic%s", area, inLogic,
+                    other, area);
+      ImGui::SetNextItemOpen(inLogic > 0, ImGuiCond_Once);
+      open = ImGui::CollapsingHeader(header);
+      if (open) {
+        for (int level = 3; level >= 1; --level) {
+          for (size_t j = 0; j < count; ++j) {
+            if (std::strcmp(checks[j].area, area) != 0 || state.checked[j] ||
+                static_cast< int >(state.levels[j]) != level) {
+              continue;
+            }
+            if (checks[j].section[0] != 0) {
+              ImGui::TextColored(kColors[level], "  %s - %s", checks[j].room, checks[j].section);
+            } else {
+              ImGui::TextColored(kColors[level], "  %s", checks[j].room);
+            }
+          }
+        }
+        if (inLogic + other == 0) {
+          ImGui::TextDisabled("  nothing within reach");
+        }
+      }
+    }
+  }
+}
+
 void DrawTrackerTab() {
   bool reveal = sRevealMap;
   if (ImGui::Checkbox("Reveal map", &reveal)) {
@@ -3876,7 +4660,10 @@ void DrawTrackerTab() {
   }
   ImGui::TextWrapped(
       "A white dot marks each item pickup in the rooms the map shows, until you collect "
-      "it. Every item gets the same dot, so it doesn't give away what a pickup holds.");
+      "it. Every item gets the same dot, so it doesn't give away what a pickup holds. "
+      "An Archipelago game colours them by what its logic lets you reach.");
+
+  DrawTrackerLogic();
 
   CStateManager* mgr = sStateManager;
   if (mgr == nullptr || mgr->GetPlayerState() == nullptr) {
@@ -4327,6 +5114,16 @@ void DrawUI() {
     sPresentationSettingsApplied = true;
     aurora_enable_vsync(sVsyncEnabled && !sTurbo);
   }
+  if (sFullscreenHotkey.exchange(false, std::memory_order_acq_rel)) {
+    SetFullscreen(!VIGetWindowFullscreen());
+  }
+#if !defined(__ANDROID__)
+  else if (const int window = sWindowFullscreen.exchange(-1, std::memory_order_acq_rel);
+           window >= 0 && (window != 0) != sFullscreen) {
+    sFullscreen = window != 0;
+    MarkDirty();
+  }
+#endif
   DrawSpeedrunTimer();
   ProcessCardPicks();
 #if !defined(__ANDROID__)
@@ -4479,6 +5276,19 @@ Java_org_metroidprime_port_MetroidPrimeActivity_nativeTexturePackStatus(JNIEnv* 
 extern "C" JNIEXPORT void JNICALL
 Java_org_metroidprime_port_MetroidPrimeActivity_nativeTexturePackReady(JNIEnv*, jclass) {
   PortTextures::RequestUserPackReload();
+}
+
+// A file picked for the Remastered import, while this process lived. The
+// address is also in RemasteredPickFile, for when it did not.
+extern "C" JNIEXPORT void JNICALL
+Java_org_metroidprime_port_MetroidPrimeActivity_nativeRemasteredPicked(JNIEnv* env, jclass, jint which,
+                                                                      jstring uri) {
+  const char* chars = env->GetStringUTFChars(uri, nullptr);
+  if (chars != nullptr) {
+    std::lock_guard lock(PortDebug::sRemasteredPickMutex);
+    PortDebug::sRemasteredPicks.emplace_back(int(which), chars);
+    env->ReleaseStringUTFChars(uri, chars);
+  }
 }
 
 // Whether a real pad, keyboard or mouse was used since the last call.

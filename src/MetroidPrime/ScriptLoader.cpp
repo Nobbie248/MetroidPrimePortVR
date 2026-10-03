@@ -2979,6 +2979,17 @@ CEntity* ScriptLoader::LoadWorldTeleporter(CStateManager& mgr, CInputStream& in,
   bool active = in.Get< bool >();
   CAssetId worldId = in.Get< CAssetId >();
   CAssetId areaId = in.Get< CAssetId >();
+#ifdef TARGET_PC
+  // Port: an Archipelago seed may lead this elevator somewhere else.
+  if (mgr.GetWorld() != nullptr) {
+    uint32_t destWorld = worldId, destArea = areaId;
+    if (PortAp::TeleporterDestination(mgr.GetWorld()->GetWorldAssetId(),
+                                      info.GetEditorId().Value(), destWorld, destArea)) {
+      worldId = static_cast< CAssetId >(destWorld);
+      areaId = static_cast< CAssetId >(destArea);
+    }
+  }
+#endif
 
   if (propCount == 4)
     return rs_new CScriptWorldTeleporter(mgr.AllocateUniqueId(), name, info, active, worldId,

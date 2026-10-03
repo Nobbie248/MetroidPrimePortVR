@@ -61,6 +61,16 @@ self-contained — and it is why `MP_USER_PATH` cannot be used to move saves.
   `docs/NATIVE_PORT.md` in as the `README`. It also packages `textures/` (the
   HD and button-prompt sets), so the artefact zips as-is with no copy from a
   Linux build.
+- **Windows also carries `ffmpeg.exe`**, which the Remastered import runs to
+  decode that game's movies (Windows has no ffmpeg of its own, and the port
+  links no decoder). It is a separate program under the LGPL 2.1, built in the
+  workflow by `tools/build_ffmpeg_min.sh` from the official, unmodified source
+  tarball (pinned by hash) with only the H.264 decoder and the JPEG encoder:
+  no GPL or non-free parts, no external libraries. `dist/licenses/` gets the
+  LGPL text and `ffmpeg.txt`, which names the source URL, its hash and the
+  configure line, so anyone can rebuild or replace it. Keep those three
+  together with the executable in every Windows package. The Linux packages
+  ship no ffmpeg and use the system's.
 - **The AppImage and the APK**: `tools/make_appimage.sh` collects them into
   `usr/share/licenses/metroid-prime-port/` and records which shared libraries it
   bundled in `BUNDLED_LIBRARIES.txt`, so a reader can tell what came from where.
@@ -111,7 +121,7 @@ not the debug key's `CN=Android Debug` (`edd22fdb…`), the arm64 `.so` is 29 MB
 all six third-party notices are in `assets/`, and no `.iso`, `.pak` or `.strg`
 is in the package.
 
-The port targets `versionName "0.7.1"` and `versionCode 9`.
+The port targets `versionName "0.9.0"` and `versionCode 11`.
 
 ## Per-platform packaging
 

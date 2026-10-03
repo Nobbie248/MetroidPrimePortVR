@@ -3,6 +3,7 @@
 
 #include "port_randomizer.h"
 
+#include <algorithm>
 #include <cstdio>
 #include <filesystem>
 #include <fstream>
@@ -308,6 +309,23 @@ int main() {
   Check(reloaded.slot == saved.slot && reloaded.nextItemIndex == saved.nextItemIndex &&
             reloaded.checkedLocations == saved.checkedLocations && reloaded.seed == saved.seed,
         "saved state round-trips");
+  Check(!reloaded.hasLogic, "a state without logic options has none");
+  {
+    State withLogic = saved;
+    withLogic.hasLogic = true;
+    withLogic.logic.trickDifficulty = 1;
+    withLogic.logic.combatLogic = -1;
+    withLogic.logic.progressiveBeams = true;
+    withLogic.logic.mainMissile = true;
+    withLogic.logic.trickAllow = {"Alcove Escape", "A \"quoted\" trick"};
+    withLogic.logic.trickDeny = {"Landing Site Scan Dash"};
+    const std::filesystem::path logicPath = testDir / "logic-state.json";
+    Check(SaveStateFile(logicPath.string(), withLogic), "state with logic options saves");
+    const State logicReloaded = LoadStateFile(logicPath.string());
+    Check(logicReloaded.hasLogic && logicReloaded.logic == withLogic.logic &&
+              logicReloaded.checkedLocations == saved.checkedLocations,
+          "the seed's logic options round-trip through the state file");
+  }
   const std::filesystem::path emptyStatePath = testDir / "empty-state.json";
   const State absentState = LoadStateFile(emptyStatePath.string());
   Check(absentState.slot.empty() && absentState.nextItemIndex == 0 &&
@@ -822,7 +840,8 @@ int main() {
     std::vector<ItemGrant> grants;
     session.HandlePacket(Packet(R"({"cmd":"Connected","slot":1,"team":0,"players":[],
         "checked_locations":[],"slot_data":{"missile_launcher":1,"main_power_bomb":0,
-        "death_link":1,"elevator_randomization":true,"starting_room_name":"Landing Site",
+        "death_link":1,"elevator_randomization":true,"starting_room_name":"Arboretum",
+        "remove_hive_mecha":1,
         "spring_ball":1,"non_varia_heat_damage":1,"required_artifacts":12,
         "etank_capacity":100,"shuffle_unlimited_missiles":0,"pre_scan_elevators":1}})"),
                          outgoing, grants);
@@ -832,8 +851,17 @@ int main() {
     Check(slot.variaOnlyHeat, "non_varia_heat_damage parses");
     Check(slot.springBall == 1, "spring_ball parses");
     Check(slot.preScanElevators, "pre_scan_elevators parses");
-    Check(slot.warnings.size() == 1 && Contains(slot.warnings[0], "elevator"),
-          "only the unsupported option is warned about");
+    Check(session.GetState().hasLogic && session.GetState().logic.mainMissile &&
+              !session.GetState().logic.mainPowerBomb && session.GetState().logic.variaOnlyHeat &&
+              session.GetState().logic.preScanElevators &&
+              session.GetState().logic.trickDifficulty == -1,
+          "slot_data fills the logic options");
+    Check(slot.warnings.empty() && session.GetState().hasWorld &&
+              session.GetState().world.startRoom == "Arboretum" &&
+              session.GetState().world.removeHiveMecha &&
+              !session.GetState().world.backwardsLowerMines &&
+              session.GetState().world.etankCapacity == 100,
+          "the seed's options are taken without a warning");
     Check(session.GetConfig().deathLink && outgoing.size() == 4 &&
               Contains(outgoing[0], "ConnectUpdate") && Contains(outgoing[0], "DeathLink"),
           "the seed's DeathLink option adds the tag");
@@ -1038,6 +1066,491 @@ int main() {
               session.TakeChatLine(line) && line.text == "Samus sent Hookshot" &&
               !session.TakeChatLine(line),
           "the chat log keeps every PrintJSON, announced finds included");
+  }
+
+  {
+    // The seed's layout: slot_data -> Layout -> the saved copy and back.
+    PortJson::Value slotData;
+    size_t offset = 0;
+    const char* reason = nullptr;
+    Check(PortJson::Parse(R"({"starting_room_name":"Arboretum","final_bosses":1,
+        "elevator_mapping":{"Tallon Overworld":{
+          "Transport to Chozo Ruins West":"Transport to Magmoor Caverns East"},
+          "Chozo Ruins":{"Transport to Tallon Overworld North":"Transport to Tallon Overworld North"}}})",
+                          slotData, offset, &reason),
+          "the layout fixture parses");
+    PortApWorld::Layout layout;
+    PortApWorld::Parse(slotData, layout);
+    Check(layout.startRoom == "Arboretum" && layout.finalBosses == 1 &&
+              layout.elevators.size() == 2,
+          "slot_data fills the layout");
+
+    PortJson::Value saved;
+    PortApWorld::Layout reread;
+    Check(PortJson::Parse(PortApWorld::Text(layout), saved, offset, &reason),
+          "the saved layout is JSON");
+    PortApWorld::Parse(saved, reread);
+    Check(reread == layout, "the saved layout reads back the same");
+
+    PortApWorld::Place place;
+    Check(PortApWorld::StartRoom(layout, place) && place.mlvl == 0x83F6FF6Fu &&
+              place.mrea == 0x18AB6106u,
+          "the start room resolves to its world and area");
+    PortApWorld::Layout unknown;
+    Check(!PortApWorld::StartRoom(unknown, place), "no start room means the retail start");
+    unknown.startRoom = "No Such Room";
+    Check(!PortApWorld::StartRoom(unknown, place), "an unknown start room is refused");
+
+    const PortApWorld::Place retailChozo{0x83F6FF6Fu, 0x3E6B2BB7u};
+    PortApWorld::Place dest;
+    // The area bits of the editor id are the loader's, the table has the rest.
+    Check(PortApWorld::TeleporterDestination(layout, 0x39F2DE28u, 0x000E0005u, retailChozo,
+                                             dest) &&
+              dest.mlvl == 0x39F2DE28u && dest.mrea == 0x15D6FF8Bu,
+          "a remapped elevator leads to its new room");
+    Check(!PortApWorld::TeleporterDestination(layout, 0x39F2DE28u, 0x000E0006u, retailChozo, dest),
+          "a teleporter that is no elevator is left alone");
+    const PortApWorld::Place crater{0xC13B09D1u, 0x93668996u};
+    Check(PortApWorld::TeleporterDestination(layout, 0x39F2DE28u, 0x00100001u, crater, dest) &&
+              dest.mlvl == 0x13D79165u && dest.mrea == 0xB4B41C48u,
+          "without Metroid Prime the temple portal leads to the credits");
+    layout.finalBosses = 0;
+    Check(!PortApWorld::TeleporterDestination(layout, 0x39F2DE28u, 0x00100001u, crater, dest),
+          "with both bosses the temple portal is the disc's");
+
+    // The texts: "Transport to Chozo Ruins West" leads to the Root Cave elevator.
+    std::vector< std::string > strings;
+    Check(PortApWorld::Strings(layout, 0x9EE2172Au, strings) && strings.size() == 1 &&
+              strings[0] == "Transport to Tallon Overworld West\n(Root Cave)",
+          "an elevator room's scan names where it leads");
+    Check(PortApWorld::Strings(layout, 0x04685AE9u, strings) && strings.size() == 1 &&
+              strings[0] == "Access to &main-color=#FF3333;Tallon Overworld West (Root Cave) "
+                            "&main-color=#89D6FF;granted. Please step into the hologram.",
+          "its hologram message too, on one line");
+    Check(PortApWorld::Strings(layout, 0x73A833EBu, strings) && strings.size() == 1 &&
+              strings[0] == "Transport to &main-color=#FF3333;Tallon Overworld West (Root Cave)"
+                            "&main-color=#89D6FF; active.",
+          "and its control message");
+    Check(!PortApWorld::Strings(layout, 0x12345678u, strings), "other tables are the disc's");
+    Check(PortApWorld::Strings(layout, 0xB389B6D6u, strings) && strings.size() == 3 &&
+              strings[2] == "Current Mission: Retrieve " +
+                                std::to_string(layout.requiredArtifacts) + " Chozo Artifact" +
+                                (layout.requiredArtifacts != 1 ? "s" : "") +
+                                "\nDefeat Meta Ridley\nDefeat Metroid Prime",
+          "the temple's objective says what the seed asks for");
+
+    Check(PortApWorld::SuitDamageReduction(0, true, true, true) < 0.f,
+          "the default suit damage is the game's own");
+    Check(PortApWorld::SuitDamageReduction(1, false, false, false) == 0.f &&
+              PortApWorld::SuitDamageReduction(1, false, false, true) == 0.1f &&
+              PortApWorld::SuitDamageReduction(1, true, false, true) == 0.2f &&
+              PortApWorld::SuitDamageReduction(1, true, true, true) == 0.5f,
+          "progressive suit damage counts the suits");
+    Check(PortApWorld::SuitDamageReduction(2, true, false, false) == 0.1f &&
+              PortApWorld::SuitDamageReduction(2, false, true, false) == 0.1f &&
+              PortApWorld::SuitDamageReduction(2, false, false, true) == 0.3f &&
+              PortApWorld::SuitDamageReduction(2, true, false, true) == 0.4f &&
+              PortApWorld::SuitDamageReduction(2, true, true, true) == 0.5f,
+          "additive suit damage adds each suit's part");
+
+    Check(PortApWorld::TempleOps(layout).empty() && !PortApWorld::SkipsRidley(layout),
+          "a retail temple needs no patch");
+    layout.requiredArtifacts = 5;
+    const std::vector< uint8_t > fewer = PortApWorld::TempleOps(layout);
+    // Two edits (counter value, auto-reset) and twelve connections.
+    Check(fewer.size() == 17 + 14 + 12 * 17 && fewer[0] == 2 && fewer[16] == 5,
+          "fewer artifacts lower the temple's counter");
+    layout.finalBosses = 2;
+    Check(PortApWorld::SkipsRidley(layout) && PortApWorld::TempleOps(layout).size() > fewer.size(),
+          "without Meta Ridley the temple skips the fight");
+    PortJson::Value fewerData;
+    Check(PortJson::Parse(R"({"required_artifacts":5,"final_bosses":2})", fewerData, offset,
+                          &reason),
+          "the temple fixture parses");
+    PortApWorld::Parse(fewerData, reread);
+    Check(reread.requiredArtifacts == 5 && reread.finalBosses == 2,
+          "slot_data carries the temple's rules");
+
+    // Doors: nothing changes without a mapping.
+    const uint32_t kArboretum = 0x18AB6106u;
+    Check(PortApWorld::Doors(PortApWorld::Layout(), kArboretum).empty(),
+          "a seed without door mappings changes no door");
+    PortJson::Value doorData;
+    Check(PortJson::Parse(R"({"door_color_randomization":1,"door_color_mapping":{
+        "Chozo Ruins":{"area":"Chozo Ruins","type_mapping":{"Blue":"Ice Beam","Wave Beam":"Bomb"}},
+        "Tallon Overworld":{"area":"Tallon Overworld","type_mapping":{"Blue":"Power Beam Only"}}}})",
+                          doorData, offset, &reason),
+          "the door colour fixture parses");
+    PortApWorld::Layout colours;
+    PortApWorld::Parse(doorData, colours);
+    Check(colours.hasDoorColors && colours.doorColorRandomization && !colours.hasShields &&
+              colours.doorColors["Chozo Ruins"]["Blue"] == "Ice Beam",
+          "slot_data carries the door colours");
+    Check(PortJson::Parse(PortApWorld::Text(colours), saved, offset, &reason),
+          "the saved door colours are JSON");
+    PortApWorld::Parse(saved, reread);
+    Check(reread == colours, "the saved door colours read back the same");
+    // Main Plaza: five blue doors take the area's colour, and the missile door
+    // stays a plain door under its shield.
+    std::vector< PortApWorld::DoorChange > doors = PortApWorld::Doors(colours, 0xD5CDB809u);
+    Check(doors.size() == 6 && doors[0].doorId == 0x0002001Bu && doors[0].type == "Ice Beam" &&
+              doors[0].shield.empty() && doors[0].pair >= 0 && doors[0].forces[0] != 0,
+          "a blue door takes its area's colour");
+    Check(doors.size() == 6 && doors[2].dock == 2 && doors[2].type == "Blue" &&
+              doors[2].shield == "Missile",
+          "a door under a blast shield stays blue");
+    doors = PortApWorld::Doors(colours, 0xB2701146u);
+    Check(doors.size() == 5 && doors[0].type == "Power Beam Only",
+          "each area has its own colours");
+
+    Check(PortJson::Parse(R"({"blast_shield_mapping":{"Chozo Ruins":{"area":"Chozo Ruins",
+        "type_mapping":{"Arboretum":{"0":"Power Bomb","1":"Disabled"}}}}})",
+                          doorData, offset, &reason),
+          "the blast shield fixture parses");
+    PortApWorld::Layout shielded;
+    PortApWorld::Parse(doorData, shielded);
+    Check(shielded.hasShields && !shielded.hasDoorColors && !shielded.doorColorRandomization &&
+              shielded.shields["Chozo Ruins"]["Arboretum"][1] == "Disabled",
+          "slot_data carries the blast shields");
+    Check(PortJson::Parse(PortApWorld::Text(shielded), saved, offset, &reason),
+          "the saved blast shields are JSON");
+    PortApWorld::Parse(saved, reread);
+    Check(reread == shielded, "the saved blast shields read back the same");
+    doors = PortApWorld::Doors(shielded, kArboretum);
+    Check(doors.size() == 3 && doors[0].type == "Blue" && doors[0].shield == "Power Bomb",
+          "a seed's blast shield sits on a blue door");
+    Check(doors.size() == 3 && doors[1].type == "Disabled" && doors[1].shield.empty(),
+          "a locked door is a disabled door without a shield");
+    Check(doors.size() == 3 && doors[2].type == "Blue" && doors[2].shield == "None",
+          "the disc's blast shields go when the seed has its own");
+    // The other side of the Power Bomb door gets the shield too.
+    bool mirrored = false;
+    for (const PortApWorld::DoorChange& other : PortApWorld::Doors(shielded, 0x3D238FCDu))
+      mirrored = mirrored || (other.pair == doors[0].index && other.shield == "Power Bomb");
+    Check(mirrored, "a blast shield is on both sides of its door");
+
+    // The script patch for a recoloured door: both of its forces and shields
+    // are rewritten, and nothing is when the room isn't the disc's.
+    doors = PortApWorld::Doors(colours, 0xD5CDB809u);
+    std::vector< PortSkipCutscenes::ScriptObject > objects;
+    auto object = [&](uint32_t id, uint8_t type, size_t size) {
+      PortSkipCutscenes::ScriptObject o;
+      o.type = type;
+      o.id = id;
+      o.props.assign(4 + 2 + size, 0);
+      o.props[4] = 'x';
+      objects.push_back(o);
+    };
+    int forceCount = 0, actorCount = 0;
+    if (!doors.empty()) {
+      for (int k = 0; k < 2; ++k) {
+        if (doors[0].forces[k] != 0)
+          object(doors[0].forces[k], 0x1A, 180), ++forceCount;
+        if (doors[0].shieldActors[k] != 0)
+          object(doors[0].shieldActors[k], 0x00, 300), ++actorCount;
+      }
+      doors.resize(1);
+    }
+    std::vector< uint8_t > doorOps = PortApWorld::DoorOps(doors, objects, nullptr);
+    // An edit is 9 bytes of header and 4 a run: 116 + 12 for a force, 4 for a shield.
+    Check(forceCount > 0 && actorCount > 0 &&
+              doorOps.size() == size_t(forceCount) * (9 + 4 + 116 + 4 + 12) +
+                                    size_t(actorCount) * (9 + 4 + 4),
+          "a recoloured door rewrites its forces and shields");
+    // Ice Beam: the second weapon opens it, the other beams bounce off.
+    Check(doorOps.size() > 32 && doorOps[0] == 2 && doorOps[9 + 4 + 4 + 3] == 2 &&
+              doorOps[9 + 4 + 8 + 3] == 1 && doorOps[9 + 4 + 12 + 3] == 2,
+          "an ice door takes only the Ice Beam");
+    if (!objects.empty())
+      objects[0].props.resize(40);
+    Check(PortApWorld::DoorOps(doors, objects, nullptr).empty(),
+          "a door whose objects aren't the disc's is left alone");
+
+    // A blast shield: its objects are pushed, its trigger reported, and once
+    // broken it is gone from both sides.
+    doors = PortApWorld::Doors(shielded, kArboretum);
+    objects.clear();
+    std::vector< PortApWorld::PlacedShield > placed;
+    if (doors.size() == 3) {
+      doors.resize(1);
+      for (int k = 0; k < 2; ++k) {
+        if (doors[0].forces[k] != 0)
+          object(doors[0].forces[k], 0x1A, 180);
+        if (doors[0].shieldActors[k] != 0)
+          object(doors[0].shieldActors[k], 0x00, 300);
+      }
+      object(doors[0].doorId, 0x03, 127 + 4 + 44);
+    }
+    int scans = 0;
+    doorOps = PortApWorld::DoorOps(
+        doors, objects,
+        [&](const std::string& text) {
+          scans += text.find("Bendezium") != std::string::npos;
+          return 0xD00D0002u;
+        },
+        &placed);
+    Check(doors.size() == 1 && doors[0].shieldBit == 0 && placed.size() == 1 &&
+              placed[0].bit == 0 && (placed[0].trigger & 0xFFFF) == 0x7001 &&
+              (placed[0].trigger >> 16) == (doors[0].doorId >> 16) && scans == 1,
+          "a blast shield is placed over its door and its trigger reported");
+    // The disc's own missile shield on that door makes way for the seed's,
+    // and serves when the seed asks for a missile shield there.
+    std::vector< PortSkipCutscenes::ScriptObject > disc = objects;
+    {
+      PortSkipCutscenes::ScriptObject o;
+      o.type = 0x00;
+      o.id = 0x00027F00;
+      o.props.assign(6 + 300, 0);
+      o.props[4] = 'x';
+      o.props[6 + 196] = 0xEF, o.props[6 + 197] = 0xDF, o.props[6 + 198] = 0xFB,
+      o.props[6 + 199] = 0x8C;
+      disc.push_back(o);
+    }
+    placed.clear();
+    const std::vector< uint8_t > replaced = PortApWorld::DoorOps(doors, disc, nullptr, &placed);
+    const uint8_t removal[5] = {6, 0x00, 0x02, 0x7F, 0x00};
+    Check(placed.size() == 1 && doors.size() == 1 && doors[0].replacesShield &&
+              std::search(replaced.begin(), replaced.end(), removal, removal + 5) !=
+                  replaced.end(),
+          "the disc's missile shield makes way for the seed's");
+    if (!doors.empty()) {
+      std::vector< PortApWorld::DoorChange > missile = doors;
+      missile[0].shield = "Missile";
+      missile[0].replacesShield = false;
+      placed.clear();
+      const std::vector< uint8_t > kept = PortApWorld::DoorOps(missile, disc, nullptr, &placed);
+      Check(placed.empty() &&
+                std::search(kept.begin(), kept.end(), removal, removal + 5) == kept.end(),
+            "the disc's missile shield serves where the seed wants one");
+    }
+    {
+      // The smaller options, over stand-ins for the disc's objects.
+      const auto object = [](uint8_t type, uint32_t id, size_t rest) {
+        PortSkipCutscenes::ScriptObject o;
+        o.type = type;
+        o.id = id;
+        o.props.assign(6 + rest, 0);
+        o.props[4] = 'x';
+        return o;
+      };
+      PortApWorld::Layout options;
+      const std::vector< PortSkipCutscenes::ScriptObject > totem = {object(0x15, 0x0024008C, 1)};
+      Check(PortApWorld::RoomOps(options, 0xC8309DF6, totem).empty() &&
+                PortApWorld::Layers(options).size() == 2,
+            "a seed without the options leaves the rooms alone");
+      options.removeHiveMecha = true;
+      options.backwardsLowerMines = true;
+      options.flaahgraPowerBombs = true;
+      PortApWorld::Layout copy;
+      PortJson::Value text;
+      size_t textOffset = 0;
+      const char* textReason = nullptr;
+      if (PortJson::Parse(PortApWorld::Text(options), text, textOffset, &textReason))
+        PortApWorld::Parse(text, copy);
+      Check(copy == options, "the options survive the layout's text");
+      const std::vector< uint8_t > mecha = PortApWorld::RoomOps(options, 0xC8309DF6, totem);
+      const std::vector< PortApWorld::LayerChange > layers = PortApWorld::Layers(options);
+      Check(mecha.size() > 8 && mecha[0] == 5 && mecha[2] == 0x05 && layers.size() == 3 &&
+                layers[0].mrea == 0xC8309DF6 && layers[0].layer == 1 && !layers[0].active,
+            "no Hive Mecha: a timer ends the fight and its layer is off");
+      Check(PortApWorld::RoomOps(options, 0xC8309DF6, {object(0x15, 0x0024008C, 0)}).empty(),
+            "a Hive Totem that isn't the disc's is left alone");
+      const std::vector< uint8_t > stone =
+          PortApWorld::RoomOps(options, 0x18AB6106, {object(0x1A, 0x001300D7, 180)});
+      const uint8_t wanted[] = {2, 0x00, 0x13, 0x00, 0xD7, 0, 0, 0, 1, 0, 56, 0, 4, 0, 0, 0, 1};
+      Check(stone == std::vector< uint8_t >(wanted, wanted + sizeof(wanted)),
+            "Flaahgra power bombs: the sandstone takes power bomb damage");
+      const std::vector< uint8_t > pins = PortApWorld::RoomOps(
+          options, 0xED6DE73B,
+          {object(0x08, 0x00160075, 352), object(0x00, 0x00160001, 354),
+           object(0x08, 0x00160076, 352)});
+      const uint8_t gone[] = {6, 0x00, 0x16, 0x00, 0x75, 6, 0x00, 0x16, 0x00, 0x76};
+      Check(pins == std::vector< uint8_t >(gone, gone + sizeof(gone)),
+            "backwards Lower Mines: the access hall's platforms are removed");
+      const std::vector< uint8_t > field =
+          PortApWorld::RoomOps(options, 0xC50AF17A, {object(0x00, 0x04100086, 354)});
+      Check(field.size() == 14 && field[0] == 2 && field[9] == 0x01 && field[10] == 0x45 &&
+                field[13] == 1,
+            "backwards Lower Mines: Elite Control's force field lets shots through");
+
+      // What every seed changes.
+      const PortApWorld::Layout plain;
+      const std::vector< PortApWorld::LayerChange > elite = PortApWorld::Layers(plain);
+      Check(elite.size() == 2 && elite[0].mrea == 0x8A97BB54 && elite[0].layer == 1 &&
+                elite[0].active && elite[0].whileLayer == 5 && elite[1].layer == 5 &&
+                !elite[1].active && elite[1].whileLayer == -1,
+            "the Phazon Elite is there once, without Central Dynamo");
+      const std::vector< uint8_t > dynamo = PortApWorld::RoomOps(
+          plain, 0xFEA372E2, {object(0x3A, 0x001B0522, 70), object(0x3A, 0x001B0525, 70)});
+      const uint8_t switches[] = {6, 0x00, 0x1B, 0x05, 0x25, 6, 0x00, 0x1B, 0x05, 0x22};
+      Check(dynamo == std::vector< uint8_t >(switches, switches + sizeof(switches)),
+            "Central Dynamo no longer switches the Phazon Elite's layers");
+      const std::vector< uint8_t > hydra =
+          PortApWorld::RoomOps(plain, 0x43E4CC25, {object(0x00, 0x0C190332, 354)});
+      Check(hydra.size() == 14 && hydra[0] == 2 && hydra[10] == 0x45 && hydra[13] == 1,
+            "Research Lab Hydra's force field lets a scan through");
+      const std::vector< uint8_t > vent =
+          PortApWorld::RoomOps(plain, 0xAFD4E038, {object(0x15, 0x0015006F, 1)});
+      Check(vent.size() > 20 && vent[0] == 5 && vent[1] == 0 && vent[2] == 0x04 && vent[8] == 1,
+            "the frigate's unpowered door gets a trigger behind it");
+      Check(PortApWorld::RoomOps(plain, 0xAFD4E038, {object(0x15, 0x0015006F, 1),
+                                                      object(0x04, 0x00156FF0, 63)})
+                .empty(),
+            "a room that has the trigger already is left alone");
+      const std::vector< uint8_t > quarry = PortApWorld::RoomOps(
+          plain, 0x643D038F, {object(0x00, 0x100201DA, 354), object(0x3A, 0x000202B5, 70)});
+      Check(quarry.size() > 30 && quarry[0] == 5 && quarry[1] == 4 && quarry[2] == 0x04 &&
+                quarry[8] == 2,
+            "Main Quarry's barrier gets a trigger behind it, in the barrier's layer");
+      const std::vector< PortSkipCutscenes::ScriptObject > plaza = {
+          object(0x03, 0x00020060, 217), object(0x1A, 0x00020016, 180),
+          object(0x04, 0x00020017, 63),  object(0x00, 0x00020018, 354),
+          object(0x05, 0x00020019, 11),  object(0x42, 0x000202F4, 37),
+          object(0x04, 0x000202B8, 63),  object(0x15, 0x000202FD, 1)};
+      const std::vector< uint8_t > twoWay = PortApWorld::RoomOps(plain, 0xD5CDB809, plaza);
+      const std::vector< uint8_t > shieldId = {0x00, 0x00, 0x02, 0x00, 0x04};
+      Check(twoWay.size() > 700 && twoWay[0] == 5 && twoWay[2] == 0x1A &&
+                std::search(twoWay.begin(), twoWay.end(), shieldId.begin(), shieldId.end()) !=
+                    twoWay.end(),
+            "Main Plaza's one-way door gets a shield and its triggers");
+      std::vector< PortSkipCutscenes::ScriptObject > taken = plaza;
+      taken.push_back(object(0x15, 0x00020004, 1));
+      Check(PortApWorld::RoomOps(plain, 0xD5CDB809, taken).empty(),
+            "a Main Plaza that isn't the disc's is left alone");
+
+      // The softlock fixes.
+      std::vector< PortSkipCutscenes::ScriptObject > tower = {object(0x04, 0x001D015B, 63),
+                                                               object(0x02, 0x041D006E, 61)};
+      tower[1].layer = 1;
+      const uint8_t moved[] = {6, 0x04, 0x1D, 0x00, 0x6E, 7, 1, 0x00, 0x1D, 0x01, 0x5B};
+      Check(PortApWorld::RoomOps(plain, 0xDE161372, tower) ==
+                std::vector< uint8_t >(moved, moved + sizeof(moved)),
+            "Sun Tower's layer trigger moves to a layer of its own");
+      tower[0].layer = 1;
+      Check(PortApWorld::RoomOps(plain, 0xDE161372, tower).empty(),
+            "a Sun Tower already changed is left alone");
+      const std::vector< uint8_t > flaahgra =
+          PortApWorld::RoomOps(plain, 0x9A0A03EB, {object(0x15, 0x042500D4, 1)});
+      const std::vector< uint8_t > towerArea = {0xCF, 0x4C, 0x7A, 0xA5, 0, 0, 0, 1};
+      Check(flaahgra.size() > 80 && flaahgra[0] == 5 && flaahgra[1] == 1 && flaahgra[2] == 0x3A &&
+                flaahgra[flaahgra.size() - 17] == 4 &&
+                std::search(flaahgra.begin(), flaahgra.end(), towerArea.begin(),
+                            towerArea.end()) != flaahgra.end(),
+            "Flaahgra's death switches the Sun Tower trigger on");
+      const std::vector< uint8_t > station =
+          PortApWorld::RoomOps(plain, 0x956F1552, {object(0x04, 0x0407033F, 63)});
+      Check(station.size() == 3 * 17 && station[0] == 2 && station[10] == 12 &&
+                station[13] == 0x42 && station[14] == 0x48 && station[17 + 10] == 16 &&
+                station[34 + 10] == 20,
+            "the Security Station's alert trigger fills the room");
+      std::vector< PortSkipCutscenes::ScriptObject > quarters = {
+          object(0x11, 0x041A04C5, 234), object(0x86, 0x141A0126, 793),
+          object(0x15, 0x141A0328, 1), object(0x08, 0x001A03D9, 300)};
+      quarters[1].connections.push_back({14, 13, 0x141A0328});
+      const std::vector< uint8_t > omega = PortApWorld::RoomOps(plain, 0x3953C353, quarters);
+      Check(omega.size() == 3 * 17 && omega[0] == 4 && omega[17] == 4 && omega[34] == 3 &&
+                omega[35] == 0x14,
+            "the Elite Quarters item unlocks the room, the Omega Pirate no longer does");
+      Check(PortApWorld::RoomOps(plain, 0x49175472, {object(0x3A, 0x0035013A, 70)}).size() == 5,
+            "Gravity Chamber keeps its stalactite");
+    }
+    std::vector< PortSkipCutscenes::ScriptObject > hatch = objects;
+    if (!hatch.empty()) {
+      std::vector< uint8_t >& props = hatch.back().props;
+      props[6 + 36] = 0xF5, props[6 + 37] = 0x7D, props[6 + 38] = 0xD4, props[6 + 39] = 0x84;
+    }
+    placed.clear();
+    PortApWorld::DoorOps(doors, hatch, nullptr, &placed);
+    Check(placed.empty(), "a morph ball door gets no blast shield");
+    const uint32_t brokenShields[4] = {1, 0, 0, 0};
+    doors = PortApWorld::Doors(shielded, kArboretum, brokenShields);
+    bool gone = doors.size() == 3 && doors[0].shield.empty() && doors[0].type == "Blue" &&
+                doors[0].shieldBit == 0 && doors[1].shieldBit < 0 && doors[2].shieldBit < 0;
+    for (const PortApWorld::DoorChange& other :
+         PortApWorld::Doors(shielded, 0x3D238FCDu, brokenShields))
+      gone = gone && other.shield != "Power Bomb";
+    Check(gone, "a broken blast shield is gone from both sides of its door");
+
+    // A locked door says so when scanned.
+    doors = PortApWorld::Doors(shielded, kArboretum);
+    objects.clear();
+    std::string scanned;
+    if (doors.size() == 3) {
+      doors.erase(doors.begin());
+      doors.resize(1);
+      doors[0].forces[0] = doors[0].forces[1] = 0;
+      doors[0].shieldActors[0] = doors[0].shieldActors[1] = 0;
+      object(doors[0].doorId, 0x03, 127 + 4 + 44);
+      PortSkipCutscenes::ScriptObject& door = objects[0];
+      door.props[3] = 14;
+      door.props[6 + 52 + 3] = 14;
+      door.props[6 + 123 + 3] = 1;
+    }
+    doorOps = PortApWorld::DoorOps(doors, objects, [&](const std::string& text) {
+      scanned = text;
+      return 0xD00D0001u;
+    });
+    Check(scanned == "This door cannot be opened." && doorOps.size() == 9 + 4 + 4 &&
+              doorOps[9 + 1] == 127 && doorOps[9 + 4] == 0xD0 && doorOps[9 + 7] == 0x01,
+          "a locked door gets its scan");
+
+    // The map shows a door's new colour, and a shield as a shield.
+    std::vector< PortApWorld::MapDoor > mapDoors = PortApWorld::MapDoors(colours, 0xFC184334u);
+    Check(mapDoors.size() == 6 && mapDoors[0].doorId == 0x0002001Bu && mapDoors[0].type == 2 &&
+              mapDoors[2].type == 1,
+          "the map follows the door colours");
+    Check(PortApWorld::MapDoors(PortApWorld::Layout(), 0xFC184334u).empty() &&
+              PortApWorld::MapDoors(colours, 0x12345678u).empty(),
+          "a map without changed doors is left alone");
+    Check(PortApWorld::IsDoorDependency(0x59649E9Du) && !PortApWorld::IsDoorDependency(0x12345678u),
+          "the door shields can be loaded from another world");
+  }
+
+  // The tracker's logic through a retail layout is the pack's own: the door
+  // table and the pack agree on every lock and missile shield.
+  {
+    PortApLogic::Options plain;
+    plain.trickDifficulty = 2;
+    PortApLogic::Options filled = plain;
+    PortApWorld::FillLogic(PortApWorld::Layout(), filled);
+    Check(!filled.doors.empty(), "the logic is given the doors");
+    bool same = true;
+    PortApLogic::Items items;
+    for (int item = 0; item <= 45; ++item) {
+      items[PortAp::MetroidPrime::kItemBase + item] = 20;
+      same = same && PortApLogic::Evaluate(filled, items) == PortApLogic::Evaluate(plain, items);
+    }
+    for (int item = 0; item <= 45; ++item) {
+      PortApLogic::Items without = items;
+      without.erase(PortAp::MetroidPrime::kItemBase + item);
+      same = same && PortApLogic::Evaluate(filled, without) == PortApLogic::Evaluate(plain, without);
+    }
+    Check(same, "a retail layout leaves the tracker's logic as the pack has it");
+
+    PortApWorld::Layout layout;
+    layout.startRoom = "Arboretum";
+    layout.removeHiveMecha = true;
+    layout.hasShields = true;
+    layout.shields["Tallon Overworld"]["Landing Site"][3] = "Flamethrower";
+    layout.hasDoorColors = true;
+    layout.doorColors["Chozo Ruins"]["Wave Beam"] = "Ice Beam";
+    PortApWorld::FillLogic(layout, filled);
+    const PortApLogic::Options::Door there = filled.doors["Tallon Overworld|Landing Site|Alcove"];
+    const PortApLogic::Options::Door back = filled.doors["Tallon Overworld|Alcove|Landing Site"];
+    Check(there.shield == "Flamethrower" && there.lock == "Plasma Beam" && back == there,
+          "a blast shield reaches the logic from both sides of its door");
+    Check(filled.startRoom == "Arboretum" && filled.removeHiveMecha && !filled.backwardsLowerMines &&
+              filled.doorColors["Chozo Ruins"]["Wave Beam"] == "Ice Beam",
+          "the layout's options reach the logic");
+    bool recoloured = false, shielded = false;
+    for (const auto& door : filled.doors) {
+      if (door.first.compare(0, 12, "Chozo Ruins|") == 0)
+        recoloured = recoloured || door.second.lock == "Wave Beam";
+      else if (door.first.compare(0, 17, "Tallon Overworld|") == 0 && door.first.find("Alcove") == std::string::npos)
+        shielded = shielded || !door.second.shield.empty();
+    }
+    Check(!recoloured, "no Chozo Ruins door keeps a recoloured lock");
+    Check(!shielded, "a seed with blast shields has only its own");
   }
 
   std::filesystem::remove_all(testDir);

@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <cstring>
+#include <utility>
 
 // The op stream, per room (all big-endian; tools/gen_skippable_cutscenes.py
 // writes it and holds the Python twin of ApplyOps):
@@ -319,6 +320,27 @@ int ApplyOps(const uint8_t* scly, size_t size, const uint8_t* ops, size_t opsSiz
     return -1;
   Write(version, layers, out);
   return misses;
+}
+
+bool ScanObjects(const uint8_t* scly, size_t size, std::vector< ScriptObject >& out) {
+  uint32_t version = 0;
+  std::vector< Layer > layers;
+  out.clear();
+  if (!Parse(scly, size, version, layers))
+    return false;
+  for (size_t i = 0; i < layers.size(); ++i) {
+    for (Object& o : layers[i].objects) {
+      ScriptObject object;
+      object.layer = static_cast< int >(i);
+      object.type = o.type;
+      object.id = o.id;
+      for (const Conn& c : o.conns)
+        object.connections.push_back({c.state, c.msg, c.target});
+      object.props.swap(o.props);
+      out.push_back(std::move(object));
+    }
+  }
+  return true;
 }
 
 } // namespace PortSkipCutscenes

@@ -23,6 +23,7 @@
 #include <charconv>
 #include <chrono>
 #include <condition_variable>
+#include <cstdlib>
 #include <cstring>
 #include <deque>
 #include <filesystem>
@@ -42,7 +43,33 @@ namespace aurora::texture {
 namespace {
 constexpr Module Log{"aurora::texture"};
 
-constexpr uint64_t kReplacementCacheBudgetBytes = 4294967296; // 4GB
+// Phones and tablets share their RAM with the GPU, and a Remastered import's maps are 2048 (four times the
+// memory of 1024 for a difference a phone screen barely shows), so there they load at most 1024 and keep less
+// cached. MP_TEXTURE_MAX_DIM (0 = no limit) and MP_TEXTURE_CACHE_MB override either.
+#ifdef __ANDROID__
+constexpr uint32_t kDefaultReplacementMaxDim = 1024;
+constexpr uint64_t kDefaultReplacementCacheMB = 1024;
+#else
+constexpr uint32_t kDefaultReplacementMaxDim = 0;
+constexpr uint64_t kDefaultReplacementCacheMB = 4096;
+#endif
+
+uint32_t replacement_max_dim() noexcept {
+  static const uint32_t value = [] {
+    const char* env = std::getenv("MP_TEXTURE_MAX_DIM");
+    return env != nullptr ? static_cast<uint32_t>(std::strtoul(env, nullptr, 10)) : kDefaultReplacementMaxDim;
+  }();
+  return value;
+}
+
+uint64_t replacement_cache_budget() noexcept {
+  static const uint64_t value = [] {
+    const char* env = std::getenv("MP_TEXTURE_CACHE_MB");
+    const uint64_t mb = env != nullptr ? std::strtoull(env, nullptr, 10) : kDefaultReplacementCacheMB;
+    return std::max<uint64_t>(mb, 64) << 20;
+  }();
+  return value;
+}
 constexpr uint64_t kReplacementWildcardTextureHash = kWildcardTextureHash;
 constexpr uint64_t kReplacementWildcardTlutHash = kWildcardTlutHash;
 
@@ -787,6 +814,26 @@ std::optional<gfx::dds::MipTail> load_thumbnail(const EntryLoadSnapshot& entry) 
   return gfx::dds::parse_dds_mip_tail({bytes.data(), bytes.size()}, gx::texture::ReplacementThumbnailDim);
 }
 
+// A full load, from the first mip that fits replacement_max_dim() when one is set.
+std::optional<gfx::ConvertedTexture> load_full_replacement(const EntryLoadSnapshot& entry) noexcept {
+  if (const uint32_t maxDim = replacement_max_dim(); maxDim != 0 && is_dds_entry(entry)) {
+    std::optional<gfx::dds::MipTail> tail;
+    if (entry.kind == EntryKind::File) {
+      tail = gfx::dds::load_dds_mip_tail(entry.path, maxDim);
+    } else if (entry.kind == EntryKind::Virtual) {
+      std::vector<uint8_t> bytes;
+      if (guarded_virtual_read(entry.virtualReadState, entry.source, entry.virtualPath.c_str(), bytes)) {
+        tail = gfx::dds::parse_dds_mip_tail({bytes.data(), bytes.size()}, maxDim);
+      }
+    }
+    if (tail.has_value()) {
+      return std::move(tail->texture);
+    }
+    // No mip fits (a chain cut short): the whole texture, as without a limit.
+  }
+  return entry.kind == EntryKind::File ? load_file_replacement(entry) : load_virtual_replacement(entry);
+}
+
 void worker_main(std::stop_token token) {
   std::stop_callback notifyOnStop{token, [] { s_jobCv.notify_all(); }};
   while (true) {
@@ -817,10 +864,8 @@ void worker_main(std::stop_token token) {
         texture = std::move(thumbnail->texture);
         thumbnailIncludesBase = thumbnail->includesBase;
       }
-    } else if (job.entry.kind == EntryKind::File) {
-      texture = load_file_replacement(job.entry);
-    } else if (job.entry.kind == EntryKind::Virtual) {
-      texture = load_virtual_replacement(job.entry);
+    } else if (job.entry.kind == EntryKind::File || job.entry.kind == EntryKind::Virtual) {
+      texture = load_full_replacement(job.entry);
     }
 
     if (job.tier == Tier::Thumbnail && texture.has_value() && !is_unsupported_texture_format(texture->format) &&
@@ -1054,7 +1099,7 @@ void touch_cached_replacement(decltype(s_cacheByKey)::iterator it) noexcept {
 }
 
 void evict_replacement_cache_if_needed() noexcept {
-  while (s_replacementCacheBytes > kReplacementCacheBudgetBytes && !s_replacementLru.empty()) {
+  while (s_replacementCacheBytes > replacement_cache_budget() && !s_replacementLru.empty()) {
     const auto key = s_replacementLru.back();
     const auto cache = s_cacheByKey.find(key);
     const uint64_t id = cache == s_cacheByKey.end() ? 0 : cache->second.id;
@@ -1083,6 +1128,14 @@ void cache_replacement_locked(const ReplacementKey& key, uint64_t id, gfx::Textu
                             });
   s_replacementCacheBytes += replacementBytes;
   evict_replacement_cache_if_needed();
+  // One line per new 128 MiB high-water mark, so a log shows how much replacement texture
+  // memory a session reached (a phone's GPU memory is its RAM).
+  static uint64_t s_loggedStep = 0;
+  if (const uint64_t step = s_replacementCacheBytes >> 27; step > s_loggedStep) {
+    s_loggedStep = step;
+    Log.info("texture_replacement: cache {} MiB of {} MiB ({} textures)", s_replacementCacheBytes >> 20,
+             replacement_cache_budget() >> 20, s_cacheByKey.size());
+  }
 }
 
 const ReplacementEntry* select_entry(const std::vector<ReplacementEntry>& entries) noexcept {
@@ -1147,8 +1200,7 @@ gfx::TextureHandle load_entry_handle(const ReplacementKey& key, const Replacemen
   gfx::TextureHandle handle;
   if (entry.kind == EntryKind::File || entry.kind == EntryKind::Virtual) {
     const auto snapshot = snapshot_entry(key, entry);
-    const auto replacement =
-        entry.kind == EntryKind::File ? load_file_replacement(snapshot) : load_virtual_replacement(snapshot);
+    const auto replacement = load_full_replacement(snapshot);
     if (!replacement.has_value()) {
       s_failedIds.insert(entry.id);
       return {};

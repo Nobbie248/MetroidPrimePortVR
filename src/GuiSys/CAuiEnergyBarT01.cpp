@@ -1,4 +1,5 @@
 #include "GuiSys/CAuiEnergyBarT01.hpp"
+#include "GuiSys/CGuiFrame.hpp"
 #include "GuiSys/CGuiSys.hpp"
 #include "GuiSys/CGuiWidget.hpp"
 #include "GuiSys/CGuiWidgetDrawParms.hpp"
@@ -9,6 +10,8 @@
 #include "Kyoto/Streams/CInputStream.hpp"
 #include "rstl/math.hpp"
 #include "rstl/pair.hpp"
+
+#include "port_hud_bars.h"
 
 #include <cstdio>
 #include <cstdlib>
@@ -45,7 +48,9 @@ CAuiEnergyBarT01::CAuiEnergyBarT01(const CGuiWidgetParms& parms, IObjectStore* s
 , mSetEnergy(0.f)
 , mFilledEnergy(0.f)
 , mShadowEnergy(0.f)
-, mShadowDrainDelayTimer(0.f) {
+, mShadowDrainDelayTimer(0.f)
+, mPortBar(nullptr)
+, mPortBarLooked(false) {
   if (CGuiSys::GetGlobalGuiSys()->GetUsageMode() != CGuiSys::kUM_Two) {
     mTexture = sp->GetObj(SObjectTag('TXTR', mTextureId));
     mTexture->Lock();
@@ -127,6 +132,69 @@ rstl::pair< CVector3f, CVector3f > CAuiEnergyBarT01::DownloadBarCoordFunc(float 
   return rstl::pair< CVector3f, CVector3f >(CVector3f(x, 0.f, -0.2f), CVector3f(x, 0.f, 0.2f));
 }
 
+const PortHudBars::Bar* CAuiEnergyBarT01::PortBar() const {
+  if (mPortBarLooked) {
+    return mPortBar;
+  }
+  mPortBarLooked = true;
+  const CGuiFrame* frame = GetParentFrame();
+  if (frame == nullptr) {
+    return nullptr;
+  }
+  const std::shared_ptr< const PortHudBars::Bars > bars = PortHudBars::ForFrame(frame->GetId());
+  if (!bars) {
+    return nullptr;
+  }
+  for (const PortHudBars::Bar& bar : *bars) {
+    const rstl::string name(bar.name.c_str());
+    if (GetParentFrame()->WidgetIdDB().FindWidgetID(name) == GetWidgetID()) {
+      mPortBars = bars;
+      mPortBar = &bar;
+      break;
+    }
+  }
+  return mPortBar;
+}
+
+void CAuiEnergyBarT01::PortDrawBar(const PortHudBars::Bar& bar, const float from,
+                                   const float to, const CColor& color) const {
+  // CGraphics's stream holds 240 vertices and, as the game laid its buffers out, positions run
+  // into the texture coordinates after 160. A mod's strip is longer than that, so it is drawn as
+  // several short strips, each starting on the station the last one ended on.
+  static const int skStationsPerStrip = 48;
+  int inStrip = 0;
+  const auto put = [](const PortHudBars::Station& station) {
+    CGraphics::StreamTexcoord(station.uvA[0], station.uvA[1]);
+    CGraphics::StreamVertex(CVector3f(station.a[0], station.a[1], station.a[2]));
+    CGraphics::StreamTexcoord(station.uvB[0], station.uvB[1]);
+    CGraphics::StreamVertex(CVector3f(station.b[0], station.b[1], station.b[2]));
+  };
+  PortHudBars::Station prev = PortHudBars::Station();
+  const auto emit = [&](const PortHudBars::Station& station) {
+    if (inStrip == skStationsPerStrip) {
+      CGraphics::StreamEnd();
+      CGraphics::StreamBegin(kP_TriangleStrip);
+      CGraphics::StreamColor(color);
+      put(prev);
+      inStrip = 1;
+    }
+    put(station);
+    prev = station;
+    ++inStrip;
+  };
+  size_t first = 0;
+  size_t last = 0;
+  PortHudBars::Inside(bar, from, to, first, last);
+  CGraphics::StreamBegin(kP_TriangleStrip);
+  CGraphics::StreamColor(color);
+  emit(PortHudBars::Sample(bar, from));
+  for (size_t i = first; i < last; ++i) {
+    emit(bar.stations[i]);
+  }
+  emit(PortHudBars::Sample(bar, to));
+  CGraphics::StreamEnd();
+}
+
 void CAuiEnergyBarT01::Draw(const CGuiWidgetDrawParms& parms) const {
   static bool sMissing = false;
   const auto logMissing = [](const char* reason) {
@@ -140,8 +208,9 @@ void CAuiEnergyBarT01::Draw(const CGuiWidgetDrawParms& parms) const {
     logMissing("no texture token");
     return;
   }
-  if (!mTexture->IsLoaded() || !mCoordFunc) {
-    logMissing(mCoordFunc ? "texture not loaded" : "no coord func");
+  const PortHudBars::Bar* portBar = PortBar();
+  if (!mTexture->IsLoaded() || (!mCoordFunc && !portBar)) {
+    logMissing(mCoordFunc || portBar ? "texture not loaded" : "no coord func");
     return;
   };
   if (!mTexture->GetObject()) {
@@ -156,7 +225,9 @@ void CAuiEnergyBarT01::Draw(const CGuiWidgetDrawParms& parms) const {
   CGraphics::SetDepthWriteMode(true, kE_LEqual, false);
 
   CGraphics::SetAmbientColor(CColor::White());
-  CGraphics::SetBlendMode(kBM_Blend, kBF_SrcAlpha, kBF_One, kLO_Clear);
+  // A mod's bar is drawn the way its frame asks; the game's own is always additive.
+  const bool portAlpha = portBar && GetDrawFlags() == kGMDF_Alpha;
+  CGraphics::SetBlendMode(kBM_Blend, kBF_SrcAlpha, portAlpha ? kBF_InvSrcAlpha : kBF_One, kLO_Clear);
 
   const float dVar9 = mMaxEnergy > 0.f ? mFilledEnergy / mMaxEnergy : 0.f;
   const float dVar8 = mMaxEnergy > 0.f ? mShadowEnergy / mMaxEnergy : 0.f;
@@ -177,6 +248,10 @@ void CAuiEnergyBarT01::Draw(const CGuiWidgetDrawParms& parms) const {
     CGraphics::SetTevOp(kTS_Stage0, CGraphics::kEnvModulate);
     CGraphics::SetTevOp(kTS_Stage1, CGraphics::kEnvPassthru);
     tex->Load(GX_TEXMAP0, CTexture::kCM_Repeat);
+    if (portBar) {
+      PortDrawBar(*portBar, dVar6, dVar7, useColor);
+      continue;
+    }
     CGraphics::StreamBegin(kP_TriangleStrip);
     CGraphics::StreamColor(useColor);
     rstl::pair< CVector3f, CVector3f > coord = mCoordFunc(dVar6);

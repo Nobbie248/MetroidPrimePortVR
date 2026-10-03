@@ -13,6 +13,7 @@
 #include "Kyoto/MemoryCopy.hpp"
 #include "Kyoto/Basics/CBasics.hpp"
 #include "port_log.h"
+#include "port_paths.h"
 
 #include <aurora/card.h>
 #include <filesystem>
@@ -246,25 +247,24 @@ void CMemoryCardSys::Initialize() {
     // somewhere unexpected is otherwise unanswerable from a black screen, and on
     // Android this line is the one that says where.
     const char* base = nullptr;
-    // Only SDL_GetPrefPath allocates, and only it has to be freed; the internal
-    // storage path is owned by SDL.
-    char* ownedBase = nullptr;
 #if defined(__ANDROID__)
-    // The executable lives inside the read-only APK, so the app's own storage is
-    // the only writable place. SDL_GetPrefPath normally creates it; when it
-    // cannot answer, the internal storage root is that same directory reached
-    // another way, and is much better than falling back to the working
-    // directory.
-    ownedBase = SDL_GetPrefPath(nullptr, "Metroid Prime");
-    base = ownedBase;
+    // The executable lives inside the read-only APK, so the card goes in the
+    // data folder: app storage, or the shared folder the player moved it to
+    // (port_paths.h). When neither can be found, the internal storage root is
+    // app storage reached another way, and is much better than falling back to
+    // the working directory.
+    static const std::string sDataFolder = PortPaths::UserFolder();
+    base = sDataFolder.empty() ? nullptr : sDataFolder.c_str();
     if (base == nullptr) {
       base = SDL_GetAndroidInternalStoragePath();
       if (base != nullptr) {
-        PortLog::Write("memory card: SDL_GetPrefPath gave nothing, using internal storage\n");
+        PortLog::Write("memory card: no data folder, using internal storage\n");
       }
     }
 #else
-    base = SDL_GetBasePath();
+    // The executable's folder, or the user folder when that one is read-only.
+    const std::string cardFolder = PortPaths::CardFolder();
+    base = cardFolder.empty() ? nullptr : cardFolder.c_str();
 #endif
     if (base == nullptr) {
       // Deliberately leaving mIsInitialized false so a later call retries rather
@@ -276,7 +276,6 @@ void CMemoryCardSys::Initialize() {
     CARDSetBasePath(base, 2);
     sDefaultCardBase = base;
     sCardBase = base;
-    SDL_free(ownedBase);
     PortLog::Write("memory card: storing under %s\n", base);
     // Aurora's CARDInit takes the game id and maker code.
     CARDInit("GM8E", "01");

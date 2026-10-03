@@ -150,6 +150,19 @@ void TestGrid() {
   v3.resize(v3.size() - 4);
   Check(PortRoomEnv::Parse(std::vector<uint8_t>(v3), file, error) && file.exposure[0] == 0.f && file.exposure[1] == 0.f,
         "exposure: a backwards range is none");
+
+  // Version 4 follows the range with the exposure bias and the curve's contrast.
+  std::vector<uint8_t> v4 = v3;
+  v4[4] = 4;
+  Check(!PortRoomEnv::Parse(std::vector<uint8_t>(v4), file, error), "tone: cut short");
+  PutFloat(v4, 1.5f);
+  PutFloat(v4, 0.4f);
+  Check(PortRoomEnv::Parse(std::vector<uint8_t>(v4), file, error) && file.exposureBias == 1.5f && file.contrast == 0.4f,
+        "tone: bias and contrast");
+  v4.resize(v4.size() - 4);
+  PutFloat(v4, 7.f);
+  Check(PortRoomEnv::Parse(std::vector<uint8_t>(v4), file, error) && file.contrast == 0.f,
+        "tone: a contrast out of range is none");
   Check(PortRoomEnv::Parse(std::vector<uint8_t>(good), file, error), "grid: parse once more");
 
   PortRoomEnv::Ambient a;
@@ -201,7 +214,7 @@ void TestParse() {
     Check(!PortRoomEnv::Parse(std::vector<uint8_t>(good.begin(), good.begin() + length), file, error), "parse: cut short");
   }
   std::vector<uint8_t> bad = good;
-  bad[4] = 4;
+  bad[4] = 5;
   Check(!PortRoomEnv::Parse(std::vector<uint8_t>(bad), file, error), "parse: version");
   bad = good;
   bad[32 + 88] = 2;

@@ -29,6 +29,18 @@ static const int kPowerUpMax[] = {
     1, 1, 1, 14, 1,   0, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1,
 };
 
+#ifdef TARGET_PC
+// Port: what a pickup may raise a capacity to. An Archipelago seed lifts the
+// missile and power bomb limits; the save keeps the disc's field widths, so
+// kPowerUpMax still sizes those.
+static int sPortPowerUpLimit[] = {
+    1, 1, 1, 1,  250, 1, 1, 8, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1,
+    1, 1, 1, 14, 1,   0, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1,
+};
+#else
+#define sPortPowerUpLimit kPowerUpMax
+#endif
+
 static const int kMissileCosts[] = {
     5, 10, 10, 10, 1,
 };
@@ -44,8 +56,9 @@ static const char* kVisorNames[] = {
     "ThermalVisor",
 };
 
-static const float kEnergyTankCapacity = 100.f;
-static const float kBaseHealthCapacity = 99.f;
+// Port: not constants, an Archipelago seed may set a tank's capacity.
+static float kEnergyTankCapacity = 100.f;
+static float kBaseHealthCapacity = 99.f;
 
 static const float kDefaultKnockbackResistance = 50.f;
 static const float kMaxVisorTransitionFactor = 0.2f;
@@ -151,8 +164,14 @@ void CPlayerState::PutTo(COutputStream& stream) {
   for (int i = 0; i < x24_powerups.capacity(); ++i) {
     if (0 < kPowerUpMax[i]) {
       int bitCount = GetBitCount(kPowerUpMax[i]);
+#ifdef TARGET_PC
+      // More than the field holds is kept in the Archipelago trailer.
+      stream.WriteBits(rstl::min_val(powup[i].x0_amount, kPowerUpMax[i]), bitCount);
+      stream.WriteBits(rstl::min_val(powup[i].x4_capacity, kPowerUpMax[i]), bitCount);
+#else
       stream.WriteBits(powup[i].x0_amount, bitCount);
       stream.WriteBits(powup[i].x4_capacity, bitCount);
+#endif
     }
   }
 
@@ -181,7 +200,7 @@ void CPlayerState::InitializePowerUp(CPlayerState::EItemType type, int capacity)
     return;
 
   CPowerUp& pup = x24_powerups[uint(type)];
-  pup.x4_capacity = CMath::Clamp(0, capacity + pup.x4_capacity, kPowerUpMax[uint(type)]);
+  pup.x4_capacity = CMath::Clamp(0, capacity + pup.x4_capacity, sPortPowerUpLimit[uint(type)]);
   pup.x0_amount = rstl::min_val(pup.x0_amount, pup.x4_capacity);
   if (type >= kIT_PowerSuit && type <= kIT_PhazonSuit) {
     if (HasPowerUp(kIT_PhazonSuit))
@@ -376,6 +395,24 @@ bool CPlayerState::GetIsVisorTransitioning() const {
 float CPlayerState::GetBaseHealthCapacity() { return kBaseHealthCapacity; }
 
 float CPlayerState::GetEnergyTankCapacity() { return kEnergyTankCapacity; }
+
+void CPlayerState::PortSetEnergyTankCapacity(float capacity) {
+  kEnergyTankCapacity = capacity;
+  kBaseHealthCapacity = capacity - 1.f;
+}
+
+#ifdef TARGET_PC
+void CPlayerState::PortSetAmmoLimits(int missiles, int powerBombs) {
+  sPortPowerUpLimit[kIT_Missiles] = missiles;
+  sPortPowerUpLimit[kIT_PowerBombs] = powerBombs;
+}
+
+void CPlayerState::PortRestoreAmmo(EItemType type, int amount, int capacity) {
+  CPowerUp& pup = x24_powerups[uint(type)];
+  pup.x4_capacity = capacity;
+  pup.x0_amount = rstl::min_val(amount, capacity);
+}
+#endif
 
 void CPlayerState::InitializeScanTimes() {
   if (x170_scanTimes.size())

@@ -2046,6 +2046,16 @@ void CElementGen::RenderParticlesIndirectTexture() {
   };
   CGX::SetVtxDescv(skIndVtxDescList);
 
+#ifdef TARGET_PC
+  // Retail copies the screen behind every particle. Here each copy ends the render pass (and
+  // resolves the whole frame under MSAA), so a visor full of rain drops cost dozens of passes a
+  // frame. Copy the viewport once, when the first particle on screen needs it, and give each
+  // particle its own part of that copy. Particles of one system no longer refract each other.
+  bool portCopied = false;
+  int portLeft, portTop, portWidth, portHeight;
+  CGraphics::GetViewport(portLeft, portTop, portWidth, portHeight);
+#endif
+
   CParticleListItem* sortIt = sortItems;
   for (int i = 0; i < particleCount; ++i) {
     CParticle* particle = SORT ? &x30_particles[sortIt->x0_partIdx] : &x30_particles[i];
@@ -2098,6 +2108,32 @@ void CElementGen::RenderParticlesIndirectTexture() {
 
     if (clipRect.IsValid()) {
       void* dest = CGraphics::GetDolphinSpareBuffer();
+#ifdef TARGET_PC
+      if (!portCopied) {
+        GXSetTexCopySrc(static_cast< u16 >(portLeft), static_cast< u16 >(portTop),
+                        static_cast< u16 >(portWidth), static_cast< u16 >(portHeight));
+        GXSetTexCopyDst(static_cast< u16 >(portWidth), static_cast< u16 >(portHeight),
+                        GX_TF_RGB565, GX_FALSE);
+        const bool useVideoFilter = CGraphics::GetUseVideoFilter();
+        CGraphics::SetUseVideoFilter(false);
+        GXCopyTex(dest, GX_FALSE);
+        CGraphics::SetUseVideoFilter(useVideoFilter);
+        GXPixModeSync();
+        CGraphics::LoadDolphinSpareTexture(portWidth, portHeight, GX_TF_RGB565, NULL,
+                                           CGraphics::kSpareBufferTexMapID);
+        portCopied = true;
+      }
+      // From the particle's own rectangle to the same texels in the viewport copy.
+      const float uScale = static_cast< float >(width) / static_cast< float >(portWidth);
+      const float uBase = static_cast< float >(clipRect.GetX() - portLeft) / static_cast< float >(portWidth);
+      const float vScale = static_cast< float >(height) / static_cast< float >(portHeight);
+      const float vBase = static_cast< float >(clipRect.GetY() - portTop) / static_cast< float >(portHeight);
+      minU = uBase + minU * uScale;
+      maxU = uBase + maxU * uScale;
+      minV = vBase + minV * vScale;
+      maxV = vBase + maxV * vScale;
+      {
+#else
       GXSetTexCopySrc(static_cast< u16 >(clipRect.GetX()), static_cast< u16 >(clipRect.GetY()),
                       static_cast< u16 >(clipRect.GetWidth()), static_cast< u16 >(height));
       GXSetTexCopyDst(static_cast< u16 >(width), static_cast< u16 >(height), GX_TF_RGB565,
@@ -2115,6 +2151,7 @@ void CElementGen::RenderParticlesIndirectTexture() {
         CGraphics::LoadDolphinSpareTexture(width, height, GX_TF_RGB565, NULL,
                                            CGraphics::kSpareBufferTexMapID);
 
+#endif
         uint color = particle->x34_color.GetColor_u32();
         CGX::Begin(GX_QUADS, GX_VTXFMT0, 4);
 

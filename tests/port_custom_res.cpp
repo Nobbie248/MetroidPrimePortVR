@@ -91,6 +91,51 @@ int main() {
     Check(!SetAncsModel(cut, 0xDEAF0005, 1), "an ANCS cut inside the name is refused");
   }
   {
+    // One CMPR block: red and blue, four-colour mode, every index once.
+    std::vector<uint8_t> txtr;
+    Put32(txtr, 10);
+    Put32(txtr, 0x00040004);
+    Put32(txtr, 1);
+    const uint8_t block[8] = {0xF8, 0x00, 0x00, 0x1F, 0x1B, 0x1B, 0x1B, 0x1B};
+    txtr.insert(txtr.end(), block, block + 8);
+    const float same[3][3] = {{1, 0, 0}, {0, 1, 0}, {0, 0, 1}};
+    std::vector<uint8_t> kept = txtr;
+    Check(TintTxtr(kept, same) && kept == txtr, "an identity tint changes nothing");
+    const float swapped[3][3] = {{0, 0, 1}, {0, 1, 0}, {1, 0, 0}};
+    std::vector<uint8_t> tinted = txtr;
+    Check(TintTxtr(tinted, swapped) && Get32(tinted, 12) == 0xF800001F &&
+              Get32(tinted, 16) == 0x4E4E4E4E,
+          "a tint that reverses a block's colours keeps its mode and remaps the indices");
+    const float black[3][3] = {};
+    Check(TintTxtr(tinted, black) && Get32(tinted, 12) == 0 && Get32(tinted, 16) == 0,
+          "a block tinted to one colour stays opaque");
+    txtr[3] = 6;
+    Check(!TintTxtr(txtr, same), "only CMPR textures are tinted");
+
+    const DiscReader disc = [&](uint32_t id, std::vector<uint8_t>& out) {
+      if (id == 0xEFDFFB8C) { // the missile blast shield
+        out = MakeCmdl(4);
+        return true;
+      }
+      if (id == 0x5B97098E || id == 0x5C7B215C || id == 0x6E09EA6B || id == 0xFA0C2AE8) {
+        out = kept;
+        return true;
+      }
+      return false;
+    };
+    const uint32_t cmdl = ShieldCmdl(kShieldWavebuster);
+    const Resource* shield = Find(cmdl, disc);
+    bool textures = shield != nullptr && shield->type == kCMDL;
+    for (uint32_t i = 0; textures && i < 4; ++i) {
+      const Resource* part = Find(cmdl - 7 + i, disc);
+      textures = Get32(shield->data, 64 + 4 + 4 * i) == cmdl - 7 + i && part != nullptr &&
+                 part->type == 0x54585452 && part->data.size() == kept.size();
+    }
+    Check(textures, "a blast shield is the missile one with its four textures tinted");
+    Check(Find(cmdl - 3, disc) == nullptr && Find(kShieldEnd, disc) == nullptr,
+          "ids between and past the shields' are nothing");
+  }
+  {
     int reads = 0;
     const DiscReader disc = [&](uint32_t id, std::vector<uint8_t>& out) {
       ++reads;
@@ -124,7 +169,11 @@ int main() {
     Check(Find(kThermalCmdl, disc) == nullptr && Find(kThermalCmdl, disc) == nullptr &&
               reads == readsBefore + 1,
           "a missing disc source fails once and stays failed");
-    Check(Find(0xDEAF0100, disc) == nullptr && Find(0x12345678, disc) == nullptr,
+    const Resource* holorim = Find(kDoorPowerHolorimTxtr, disc);
+    Check(holorim != nullptr && holorim->type == 0x54585452 && !holorim->data.empty() &&
+              Find(kDoorBombColorTxtr, disc) != nullptr,
+          "the door shield textures build");
+    Check(Find(0xDEAF0F00, disc) == nullptr && Find(0x12345678, disc) == nullptr,
           "unknown and non-custom ids have no resource");
 
     // Scan text: a SCAN and STRG pair per distinct text.

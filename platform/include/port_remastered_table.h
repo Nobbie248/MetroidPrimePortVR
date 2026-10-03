@@ -25,6 +25,13 @@ struct TableEntry {
   uint16_t skinCount;
   int16_t options;      // into the option sets, -1 for the defaults
   bool pbr;
+  // A second look of `retail` (a suit's ball, a beam's gun), written under ids
+  // of its own. `key` >= 0: the look for that suit, found by the game under
+  // PortModelVariant::Id(id, key) - of `retail` itself for a static model, of
+  // `ancs` (a copy of it binding the new model) for a character's. `key` -1 and
+  // `ancs` set: `ancs` is replaced in place by such a copy. 0 and -1: neither.
+  uint32_t ancs;
+  int8_t key;
 };
 
 const TableEntry* Table(size_t& count);

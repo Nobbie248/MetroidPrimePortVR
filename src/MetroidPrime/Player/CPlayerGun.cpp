@@ -1077,6 +1077,17 @@ void CPlayerGun::ProcessInput(const CFinalInput& input, CStateManager& mgr) {
     if (!IsWeaponStateSet(0x10)) {
       HandleWeaponChange(input, mgr);
     }
+#ifdef TARGET_PC
+    // Port: a randomized start may not own the beam in hand (or any beam).
+    if (!x835_25_inPhazonBeam && !cPlayerState->HasPowerUp(mBeamArr[x310_currentBeam])) {
+      if (!IsWeaponStateSet(0x8) && !IsWeaponStateSet(0x10)) {
+        PortSwitchToOwnedBeam(mgr);
+      }
+      x2f4_fireButtonStates =
+          ControlMapper::GetDigitalInput(ControlMapper::kC_MissileOrPowerBomb, input) ? 2 : 0;
+      break;
+    }
+#endif
     // fallthrough
   case CPlayer::kMS_Morphed:
     x2f4_fireButtonStates =
@@ -1086,6 +1097,33 @@ void CPlayerGun::ProcessInput(const CFinalInput& input, CStateManager& mgr) {
     break;
   }
 }
+
+#ifdef TARGET_PC
+// Port: the beam change HandleBeamChange starts, without the input.
+void CPlayerGun::PortSwitchToOwnedBeam(CStateManager& mgr) {
+  const CPlayerState& playerState = *mgr.GetPlayerState();
+  int beam = -1;
+  for (int i = 0; i < 4 && beam < 0; ++i) {
+    if (playerState.HasPowerUp(mBeamArr[i])) {
+      beam = i;
+    }
+  }
+  if (beam < 0 || beam == x310_currentBeam) {
+    return;
+  }
+  x314_nextBeam = static_cast< CPlayerState::EBeamId >(beam);
+  SetStateFlags(0);
+  EnableWeaponState(0x8);
+  PlayAnim(NWeaponTypes::kGAT_FromBeam, false);
+  if (x833_31_inFreeLook || x744_auxWeapon->IsComboFxActive(mgr) || x832_26_comboFiring) {
+    x832_30_requestReturnToDefault = true;
+    x740_grappleArm->EnterIdle(mgr);
+  }
+  x72c_currentBeam->EnableSecondaryFx(CGunWeapon::kSFT_None);
+  x338_nextState = kNS_ChangeWeapon;
+  x2e4_invalidSfx.Clear();
+}
+#endif
 
 void CPlayerGun::ProcessChargeState(int releasedStates, int pressedStates, CStateManager& mgr,
                                     float dt) {

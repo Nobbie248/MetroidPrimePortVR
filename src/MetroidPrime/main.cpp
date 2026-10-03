@@ -11,6 +11,7 @@
 #include "port_debug.h"
 #include "port_log.h"
 #include "port_disc.h"
+#include "port_mods.h"
 #include "port_textures.h"
 #include "port_prompts.h"
 // PortVr: the headset paces the loop and reads the game mode from here.
@@ -49,6 +50,7 @@
 
 // Port: drives the streamed-audio AI DMA callback (see platform/ai_dma.cpp).
 extern "C" void AIPortPoll(void);
+#include "port_console.h"
 #ifdef MP_ENABLE_SMOKE_DRIVER
 #include "port_smoke.h"
 extern bool PortSmokeFrame(unsigned frame);
@@ -627,6 +629,11 @@ void CGameGlobalObjects::AddPaksAndFactories() {
   CGraphics::SetModelMatrix(CTransform4f::Identity());
   factory.GetResLoader().AddPakFileAsync(rstl::string_l("aram:Tweaks"), false, false);
   factory.GetResLoader().AddPakFileAsync(rstl::string_l("NoARAM"), false, false);
+  // Mod resources that did not fit in NoARAM.pak (2 GiB file limit).
+  for (int i = 0; i < PortMods::ExtraPakCount(); ++i) {
+    factory.GetResLoader().AddPakFileAsync(rstl::string(PortMods::ExtraPakName(i).c_str()), false,
+                                           false);
+  }
   factory.GetResLoader().AddPakFileAsync(rstl::string_l("AudioGrp"), false, false);
   factory.GetResLoader().AddPakFileAsync(rstl::string_l("aram:MiscData"), false, false);
 
@@ -882,6 +889,10 @@ int CMain::RsMain(int argc, const char* const* argv) {
       }
 #ifdef MP_ENABLE_SMOKE_DRIVER
       if (PortSmokeFrame(s_frameLog)) {
+        break;
+      }
+#else
+      if (PortConsoleFrame(s_frameLog)) {
         break;
       }
 #endif

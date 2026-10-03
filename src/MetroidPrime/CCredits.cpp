@@ -53,8 +53,14 @@ bool CMoviePlayer::DrawVideo() const {
   const int height = CGraphics::GetViewport().mHeight;
   const uint movieWidth = GetWidth();
   const uint movieHeight = GetHeight();
+#ifdef TARGET_PC
+  int xMargin;
+  int yMargin;
+  PortGetMargins(width, height, xMargin, yMargin);
+#else
   const int xMargin = (movieWidth - width) / 2;
   const int yMargin = (movieHeight - height) / 2;
+#endif
   const int xmin = left - xMargin;
   const int xmax = left + width + xMargin;
   const int ymin = top - yMargin;

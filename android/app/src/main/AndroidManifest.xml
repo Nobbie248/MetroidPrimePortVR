@@ -1,15 +1,24 @@
 <?xml version="1.0" encoding="utf-8"?>
-<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+<manifest xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:tools="http://schemas.android.com/tools">
     <!-- SDL's Android haptics call Vibrator.cancel() unconditionally, which
          throws without this and poisons the next JNI call. -->
     <uses-permission android:name="android.permission.VIBRATE" />
     <!-- The Archipelago client opens a WebSocket to the server. -->
     <uses-permission android:name="android.permission.INTERNET" />
+    <!-- Keeping the data in shared storage (F1 > Extras > Data folder). The
+         game reads it with plain file calls, which on Android 11+ need all
+         files access; Android 9-10 use the old storage permission. -->
+    <uses-permission android:name="android.permission.MANAGE_EXTERNAL_STORAGE"
+        tools:ignore="ScopedStorage" />
+    <uses-permission android:name="android.permission.WRITE_EXTERNAL_STORAGE"
+        android:maxSdkVersion="29" />
     <application
         android:allowBackup="false"
         android:hasFragileUserData="true"
         android:icon="@mipmap/ic_launcher"
         android:label="@string/app_name"
+        android:requestLegacyExternalStorage="true"
         android:theme="@style/AppTheme">
         <activity
             android:name="org.metroidprime.port.MetroidPrimeActivity"
@@ -24,5 +33,12 @@
                 <category android:name="android.intent.category.LAUNCHER" />
             </intent-filter>
         </activity>
+        <!-- Restarts the game after a data folder move; its own process so it
+             outlives the one it ends. -->
+        <activity
+            android:name="org.metroidprime.port.RestartActivity"
+            android:exported="false"
+            android:process=":restart"
+            android:theme="@android:style/Theme.Translucent.NoTitleBar" />
     </application>
 </manifest>

@@ -16,6 +16,10 @@
 #include <rstl/math.hpp>
 #include <string.h>
 
+#ifdef TARGET_PC
+#include "port_debug.h"
+#endif
+
 #include "dolphin/gx/GXGeometry.h"
 #include "dolphin/gx/GXTev.h"
 #include "dolphin/gx/GXTexture.h"
@@ -317,8 +321,17 @@ CMoviePlayer::~CMoviePlayer() {
 }
 
 void CMoviePlayer::InitializeTextures() {
+#ifdef TARGET_PC
+  // The decoder writes whole 8x4 texture tiles, which a size the disc never
+  // uses (900 lines: 450 of chroma) does not divide into.
+  const uint chromaWidth = (x6c_videoInfo.mXSize + 1) / 2;
+  const uint chromaHeight = (x6c_videoInfo.mYSize + 1) / 2;
+  const uint ySize = ((x6c_videoInfo.mXSize + 7) & ~7) * ((x6c_videoInfo.mYSize + 3) & ~3);
+  const uint uvSize = ((chromaWidth + 7) & ~7) * ((chromaHeight + 3) & ~3);
+#else
   const uint ySize = OSRoundUp32B(x6c_videoInfo.mXSize * x6c_videoInfo.mYSize);
   const uint uvSize = OSRoundUp32B(x6c_videoInfo.mXSize * x6c_videoInfo.mYSize / 4);
+#endif
   const uint audioSize = x28_header.mAudioMaxSamples * 4;
   for (int i = 0; i < x80_textures.capacity(); ++i) {
     void* y = rs_new uchar[ySize];
@@ -643,6 +656,32 @@ void CMoviePlayer::VerifyCallbackStatus() {
 uint CMoviePlayer::GetWidth() const { return x6c_videoInfo.mXSize; }
 
 uint CMoviePlayer::GetHeight() const { return x6c_videoInfo.mYSize; }
+
+#ifdef TARGET_PC
+void CMoviePlayer::PortGetMargins(int vpWidth, int vpHeight, int& xMargin, int& yMargin) const {
+  const int width = static_cast< int >(x6c_videoInfo.mXSize);
+  const int height = static_cast< int >(x6c_videoInfo.mYSize);
+  if ((width == 640 && height == 480) || width <= 0 || height <= 0 || vpWidth <= 0 || vpHeight <= 0) {
+    xMargin = (width - vpWidth) / 2;
+    yMargin = (height - vpHeight) / 2;
+    return;
+  }
+  // The 4:3 mode shows its 640x448 at 4:3; the wider ones have square pixels.
+  const float view = PortDebug::AspectMode() == PortDebug::kAspect_4_3
+                         ? 4.f / 3.f
+                         : static_cast< float >(vpWidth) / static_cast< float >(vpHeight);
+  const float movie = static_cast< float >(width) / static_cast< float >(height);
+  int drawnWidth = vpWidth;
+  int drawnHeight = vpHeight;
+  if (movie > view) {
+    drawnHeight = static_cast< int >(static_cast< float >(vpHeight) * view / movie + 0.5f);
+  } else {
+    drawnWidth = static_cast< int >(static_cast< float >(vpWidth) * movie / view + 0.5f);
+  }
+  xMargin = (drawnWidth - vpWidth) / 2;
+  yMargin = (drawnHeight - vpHeight) / 2;
+}
+#endif
 
 void CMoviePlayer::SetAudioEnabled(bool enabled) { sAudioEnabled = enabled; }
 

@@ -502,7 +502,7 @@ void CMapWorld::DrawAreas(const CMapWorldDrawParms& parms, int selArea,
 
 #ifdef TARGET_PC
 // Port: a white dot for each pickup not yet collected (PortMapPickups), in the
-// rooms this pass drew. Map objects sort after everything else, so drawing the
+// rooms this pass drew; tracker colours in an Archipelago game. Map objects sort after everything else, so drawing the
 // dots last keeps retail's order. A pickup counts as collected once its memory
 // relay is in the world's mailbox, which is what keeps it gone after a reload.
 void CMapWorld::DrawPortPickups(const CMapWorldDrawParms& parms,
@@ -516,7 +516,7 @@ void CMapWorld::DrawPortPickups(const CMapWorldDrawParms& parms,
   const CTransform4f billboard(parms.GetCameraTransform().BuildMatrix3f() *
                                    CMatrix3f::Scale(parms.GetObjectScale()),
                                CVector3f::Zero());
-  const CColor color = CColor(0xffffffff).WithAlphaOf(parms.GetAlpha());
+  const CColor white = CColor(0xffffffff).WithAlphaOf(parms.GetAlpha());
   static const int kSegments = 12;
   static const float kRadius = 1.3f;
   static const float kRimRadius = 1.7f;
@@ -524,9 +524,26 @@ void CMapWorld::DrawPortPickups(const CMapWorldDrawParms& parms,
   bool setUp = false;
   size_t count = 0;
   const PortMapPickups::Dot* dots = PortMapPickups::Dots(count);
+  // An Archipelago game colours the dots like a tracker, and keeps the
+  // collected ones as grey dots.
+  static const uint kTrackerColors[] = {0xffffffff, 0x40e060ff, 0xffd830ff,
+                                        0x4090ffff, 0xf04040ff, 0x808080ff};
+  const unsigned char* tracker = nullptr;
+  if (!PortMapPickups::Colors(tracker)) {
+    tracker = nullptr;
+  }
   for (size_t i = 0; i < count; ++i) {
     const PortMapPickups::Dot& dot = dots[i];
-    if (dot.world != worldId || mailbox.HasMsg(TEditorId(dot.relay))) {
+    if (dot.world != worldId) {
+      continue;
+    }
+    CColor color = white;
+    if (tracker != nullptr) {
+      const bool collected =
+          tracker[i] == PortMapPickups::kC_Grey || mailbox.HasMsg(TEditorId(dot.relay));
+      color = CColor(kTrackerColors[collected ? PortMapPickups::kC_Grey : tracker[i]])
+                  .WithAlphaOf(parms.GetAlpha());
+    } else if (mailbox.HasMsg(TEditorId(dot.relay))) {
       continue;
     }
     const int areaIdx = world.IGetAreaId(dot.area).Value();

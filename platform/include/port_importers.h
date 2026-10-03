@@ -1,6 +1,6 @@
 #pragma once
 
-// Mod importers: programs the user puts in <pref>/importers that build a mod
+// Mod importers: programs the user puts in <user folder>/importers that build a mod
 // from files of their own (another release of the game, a model pack), so the
 // port can start one and show how it is getting on instead of the user running
 // it by hand. The port ships none and knows nothing about what one reads.
@@ -31,7 +31,7 @@ struct State {
 
 inline constexpr size_t kMaxLines = 200;
 
-// The importers folder, created if missing. Empty if there is no pref folder.
+// The importers folder, created if missing. Empty if there is no user folder.
 std::string Folder();
 // The importers in it, sorted by name.
 std::vector<std::string> List();

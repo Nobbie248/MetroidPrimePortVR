@@ -45,6 +45,8 @@ public:
   CGuiWidgetIdDB& WidgetIdDB() { return x18_db; }
 
   CGuiSys& GetGuiSys() const { return x8_guiSys; }
+  // Port: the FRME this frame was read from.
+  uint GetId() const { return x0_id; }
 
   void EnableLights(uint mask) const;
   void DisableLights() const;

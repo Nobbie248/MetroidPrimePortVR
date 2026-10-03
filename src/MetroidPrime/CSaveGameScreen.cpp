@@ -210,8 +210,23 @@ void CSaveGameScreen::SetUIText() {
 
   const rstl::wstring empty = rstl::wstring_l(L"");
   const rstl::wstring messageA = msgA == -1 ? empty : rstl::wstring_l(strings.GetString(msgA));
+#ifdef TARGET_PC
+  rstl::wstring message =
+      messageA + (msgB == -1 ? empty : rstl::wstring_l(strings.GetString(msgB)));
+  // Port: an Archipelago seed's save prompt says how to warp to the start room
+  // (randomprime's patch_memorycard_strg, with its L and R button images).
+  uint32_t startWorld = 0;
+  uint32_t startArea = 0;
+  if (x10_uiType == kUIT_SaveReady && x0_saveCtx == kSC_InGame &&
+      PortAp::WarpToStart(startWorld, startArea)) {
+    message = message + rstl::wstring_l(L"\nHold &image=SI,0.70,0.68,46434ED3; + "
+                                        L"&image=SI,0.70,0.68,08A2E4B9; while choosing No "
+                                        L"to warp to starting room.");
+  }
+#else
   const rstl::wstring message =
       messageA + (msgB == -1 ? empty : rstl::wstring_l(strings.GetString(msgB)));
+#endif
   x54_textpane_message->TextSupport().SetText(message);
   x5c_textpane_choice0->TextSupport().SetText(
       opt0 == -1 ? empty : rstl::wstring_l(strings.GetString(opt0)));
@@ -452,9 +467,14 @@ void CSaveGameScreen::StartGame(int idx) {
   x6c_cardDriver->BuildNewFileSlot(idx);
   if (newGame) {
 #ifdef TARGET_PC
-    // Port: an Archipelago seed starts at the Landing Site, not the frigate.
-    if (const uint32_t world = PortAp::NewGameWorld())
+    // Port: an Archipelago seed starts in its own room, not on the frigate.
+    uint32_t world, area;
+    if (PortAp::NewGameStart(world, area)) {
       gpGameState->SetCurrentWorldId(CAssetId(world));
+      CWorldState& worldState = gpGameState->CurrentWorldState();
+      worldState.SetAreaId(TAreaId(0));
+      worldState.SetDesiredAreaAssetId(area != 0 ? static_cast< CAssetId >(area) : kInvalidAssetId);
+    }
 #endif
     x6c_cardDriver->StartFileCreateTransactional();
   } else {

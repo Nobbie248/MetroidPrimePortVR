@@ -69,6 +69,8 @@ void set_source_replacement(aurora::texture::TextureSourceKey key, gfx::TextureH
 } // namespace aurora::gx
 
 namespace aurora::gfx {
+void TextureRef::count_live(int sign) noexcept {}
+
 uint64_t calc_texture_size(wgpu::TextureFormat format, uint32_t width, uint32_t height, uint32_t mips) noexcept {
   uint64_t total = 0;
   for (uint32_t mip = 0; mip < mips; ++mip) {

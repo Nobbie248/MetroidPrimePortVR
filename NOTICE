@@ -40,7 +40,10 @@ travels with any build that contains it.
 | Button prompt icons | Kenney CC0 | `tools/prompt_icons/README.md` |
 | Skippable cutscene room patches (`platform/port_skip_cutscenes_data.inc`), generated from randomprime's output | MIT, © randomprime contributors | https://github.com/randovania/randomprime/blob/master/LICENSE |
 | Archipelago pickup room patches (`platform/port_ap_pickups_data.inc`), generated from randomprime's `pickup_meta.rs.in` | MIT, © randomprime contributors | https://github.com/randovania/randomprime/blob/master/LICENSE |
-| Custom pickup textures and models (Nothing, Phazon Suit, Zoomer, Cog; `platform/port_custom_assets_data.inc`), embedded from randomprime's `extra_assets` | MIT, © randomprime contributors | https://github.com/randovania/randomprime/blob/master/LICENSE |
+| Archipelago room and elevator table (`platform/port_ap_world_data.inc`), generated from randomprime's `pickup_meta.rs.in` and `elevators.rs` | MIT, © randomprime contributors | https://github.com/randovania/randomprime/blob/master/LICENSE |
+| Archipelago door table (in `platform/port_ap_world_data.inc`), generated from the Metroid Prime apworld's room data | MIT, © 2024 Electro1512 | https://github.com/UltiNaruto/MetroidAPrime/blob/main/LICENSE.md |
+| Archipelago logic rules (`platform/port_ap_logic_data.inc`), generated from the Metroid Prime AP PopTracker pack (v1.2.0, `838d820`) | MIT, © 2024 lil David | https://github.com/lilDavid/MetroidPrimeAP-PoptrackerPack/blob/main/LICENSE |
+| Custom pickup and door shield textures and models (Nothing, Phazon Suit, Zoomer, Cog; Power Beam and Bomb doors; `platform/port_custom_assets_data.inc`), embedded from randomprime's `extra_assets` | MIT, © randomprime contributors | https://github.com/randovania/randomprime/blob/master/LICENSE |
 
 The notices are also collected into what is actually shipped: `dist/licenses/` on
 Windows, `usr/share/licenses/metroid-prime-port/` in the AppImage, and `assets/`

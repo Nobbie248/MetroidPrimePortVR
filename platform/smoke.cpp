@@ -3,6 +3,7 @@
 #include "port_debug.h"
 #include "port_mouse.h"
 #include "port_smoke.h"
+#include "port_console.h"
 #include "MetroidPrime/CStateManager.hpp"
 #include "MetroidPrime/CWorld.hpp"
 #include "MetroidPrime/CGameArea.hpp"

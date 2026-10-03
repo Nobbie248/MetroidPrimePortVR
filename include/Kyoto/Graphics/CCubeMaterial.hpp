@@ -46,12 +46,19 @@ public:
   // Port: whether a kStateFlag_PortPBR material may use the PBR path for this
   // draw. The black, shadow-map, thermal and blended paths keep the TEV.
   static bool PortPBRAllowed(const CModelFlags& flags);
+  // Port: whether a glass material's screen stage (map 7) is drawn: the projected shadow
+  // takes map 7, and the thermal visor draws only the first stage.
+  static bool PortScreenCopyUsed();
   // Port: the PBR reflection probe. The weight is 1 once CStateManager has filled all six
   // faces, and the draw count tells it whether anything would reflect the probe.
   static float sPortPBRProbeWeight;
   // 0 off, 1 on, 2 mirror, 3 window; -1 takes it from MP_PBR_PROBE on first use.
   static int sPortPBRProbeMode;
   static uint sPortPBRDraws;
+  // Port: a draw that keeps PBR under the thermal visor, as the fluid planes keep their own
+  // shader there (port_room_liquid.cpp); additive is the hot pass's blend.
+  enum EPortPBRThermal { kPT_None, kPT_Cold, kPT_Additive };
+  static EPortPBRThermal sPortPBRThermal;
 #endif
   uint GetTextureCount() const {
     return CBasics::SwapBytes(*reinterpret_cast< const uint* >(GetData() + 4));

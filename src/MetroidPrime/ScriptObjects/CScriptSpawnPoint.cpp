@@ -25,6 +25,13 @@ CScriptSpawnPoint::~CScriptSpawnPoint() {}
 const CTransform4f& CScriptSpawnPoint::GetTransform() const { return x34_xf; }
 
 int CScriptSpawnPoint::GetPowerup(const CPlayerState::EItemType& type) const {
+#ifdef TARGET_PC
+  // Port: an Archipelago seed hands out the starting items itself (randomprime
+  // rewrites the start room's spawn points the same way).
+  if (PortAp::SeedGivesStartItems()) {
+    return type == CPlayerState::kIT_CombatVisor || type == CPlayerState::kIT_PowerSuit ? 1 : 0;
+  }
+#endif
   if (CPlayerState::kIT_Max <= type || type < 0) {
     return x64_itemCounts.front();
   }

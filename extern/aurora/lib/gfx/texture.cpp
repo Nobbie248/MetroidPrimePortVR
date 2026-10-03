@@ -4,11 +4,13 @@
 #include "../internal.hpp"
 #include "../webgpu/gpu.hpp"
 #include "aurora/aurora.h"
+#include "aurora/gfx.h"
 #include "texture.hpp"
 #include "texture_convert.hpp"
 #include "../gx/gx_fmt.hpp"
 
 #include <algorithm>
+#include <atomic>
 #include <cstdint>
 #include <memory>
 #include <utility>
@@ -29,6 +31,9 @@ wgpu::Extent3D physical_size(wgpu::Extent3D size, TextureFormatInfo info) {
   const uint32_t height = ((size.height + info.blockHeight - 1) / info.blockHeight) * info.blockHeight;
   return {.width = width, .height = height, .depthOrArrayLayers = size.depthOrArrayLayers};
 }
+
+std::atomic<int64_t> s_liveCount[2];
+std::atomic<int64_t> s_liveBytes[2];
 
 bool setup_swizzle(wgpu::TextureComponentSwizzleDescriptor& swizzle, u32 format) noexcept {
   if (!webgpu::g_textureComponentSwizzleSupported) {
@@ -153,6 +158,16 @@ TextureHandle new_static_texture_2d(uint32_t width, uint32_t height, uint32_t mi
     Log.warn("new_static_texture_2d[{}]: texture used {} bytes, but given {} bytes", label, offset, data.size());
   }
   return handle;
+}
+
+void TextureRef::count_live(int sign) noexcept {
+  const int kind = attachmentTextureView ? 1 : 0;
+  const uint64_t bytes = format == wgpu::TextureFormat::Undefined
+                             ? 0
+                             : calc_texture_size(format, size.width, size.height, mipCount) *
+                                   std::max<uint32_t>(size.depthOrArrayLayers, 1);
+  s_liveCount[kind] += sign;
+  s_liveBytes[kind] += sign * static_cast<int64_t>(bytes);
 }
 
 TextureHandle new_dynamic_texture_2d(uint32_t width, uint32_t height, uint32_t mips, u32 gxFormat,
@@ -341,3 +356,11 @@ wgpu::SamplerDescriptor TextureBind::get_descriptor() const noexcept {
   };
 }
 } // namespace aurora::gfx
+
+void aurora_get_texture_stats(AuroraTextureStats* out) {
+  using namespace aurora::gfx;
+  for (int kind = 0; kind < 2; ++kind) {
+    out->count[kind] = static_cast<uint32_t>(std::max<int64_t>(s_liveCount[kind].load(), 0));
+    out->bytes[kind] = static_cast<uint64_t>(std::max<int64_t>(s_liveBytes[kind].load(), 0));
+  }
+}

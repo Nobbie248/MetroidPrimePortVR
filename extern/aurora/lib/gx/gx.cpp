@@ -21,6 +21,8 @@
 #include <cfloat>
 #include <cmath>
 #include <mutex>
+#include <algorithm>
+#include <cstdlib>
 #include <utility>
 
 static aurora::Module Log("aurora::gx");
@@ -376,6 +378,7 @@ void populate_pipeline_config(PipelineConfig& config, GXPrimitive primitive, GXV
   config.shaderConfig.fogType = g_gxState.fog.type;
   config.shaderConfig.fogRangeEnabled = g_gxState.fog.rangeEnabled;
   config.shaderConfig.pbr = g_gxState.pbr;
+  config.shaderConfig.sdf = g_gxState.sdf;
   u8 vtxOffset = 0;
   for (int i = GX_VA_PNMTXIDX; i <= GX_VA_TEX7; ++i) {
     const auto attr = static_cast<GXAttr>(i);
@@ -501,7 +504,16 @@ GXBindGroups build_bind_groups(const ShaderInfo& info) noexcept {
     samplerEntry.binding = i * 2 + 1;
     if (tex && (info.sampledTextures[i] || info.sampledIndTextures[i])) {
       textureEntry.textureView = tex.ref->sampleTextureView.Get();
-      samplerEntry.sampler = gfx::sampler_ref(tex.get_descriptor()).Get();
+      auto samplerDescriptor = tex.get_descriptor();
+      // A mod's native maps under PBR tile many times over a floor. Anisotropic filtering keeps
+      // them sharp across the view and averages them along it, so each screen column shows the
+      // mean of one line through the repeated tile: a fan of streaks towards the horizon that
+      // slides as the camera turns. Seen from 4x up, in every map, so they all take the limit.
+      static const int pbrAniso = getenv("MP_PBR_ANISO") ? std::clamp(atoi(getenv("MP_PBR_ANISO")), 1, 16) : 2;
+      if (g_gxState.pbr && tex.ref->isReplacement && samplerDescriptor.maxAnisotropy > pbrAniso) {
+        samplerDescriptor.maxAnisotropy = pbrAniso;
+      }
+      samplerEntry.sampler = gfx::sampler_ref(samplerDescriptor).Get();
     } else {
       textureEntry.textureView = sEmptyTextureView.Get();
       samplerEntry.sampler = sEmptySampler.Get();

@@ -5,7 +5,7 @@ Usage: gen_custom_pickup_assets.py <randomprime>/extra_assets platform/port_cust
 
 The port builds the Nothing, Zoomer, Cog, Phazon Suit and visor pickups from
 these files plus disc models (platform/port_custom_res.cpp), as randomprime's
-custom_assets.rs does.
+custom_assets.rs does, and the door shields of Archipelago's door types.
 """
 import sys
 
@@ -15,6 +15,10 @@ FILES = [
     ('kPhazonSuitTxtr2Data', 'phazon_suit_texure_2.txtr'),
     ('kZoomerCmdlData', 'zoomer.CMDL'),
     ('kCogCmdlData', 'cog.CMDL'),
+    ('kDoorPowerHolorimData', 'power_beam_holorim.TXTR'),
+    ('kDoorBombHolorimData', 'morph_ball_bombs_holorim.TXTR'),
+    ('kDoorBombPatternData', 'orange.txtr'),
+    ('kDoorBombColorData', 'testbnew.txtr'),
 ]
 
 

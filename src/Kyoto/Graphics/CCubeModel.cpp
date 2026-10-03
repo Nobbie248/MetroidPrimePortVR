@@ -12,6 +12,7 @@
 #ifdef TARGET_PC
 #include <dolphin/gx/GXExtra.h>
 #include "port_room_env.h"
+#include <vector>
 #endif
 
 static bool sDrawingOccluders = false;
@@ -166,9 +167,13 @@ CCubeMaterial CCubeModel::GetMaterialByIndex(const int idx) const {
 // (emissive multiplier rgb, backlight weight rgb) and the tag 'PBRM', or eight (the same,
 // then the height blend threshold and the shading mode) and 'PBR2', or thirteen (the same,
 // then a second layer's edge width and the scale and offset of each layer's height) and
-// 'PBR3'. A material without one gets the neutral values.
-void CCubeModel::PortSetPBRMaterial(const int idx) const {
-  f32 values[13] = {1.f, 1.f, 1.f, 0.f, 0.f, 0.f, 0.f, 0.f, 0.f, 0.f, 0.f, 0.f, 0.f};
+// 'PBR3', or nineteen (the same, then the kind of a special surface, its strength and four
+// parameters; see GXSetPBRMaterial) and 'PBR4'. A material without one gets the neutral
+// values.
+int CCubeModel::PortReadPBRMaterial(const int idx, f32 values[19]) const {
+  for (int i = 0; i < 19; ++i) {
+    values[i] = i < 3 ? 1.f : 0.f;
+  }
   const uchar* table = static_cast< const uchar* >(x0_instance.GetMaterialPointer()) +
                        (x1c_textures->size() + 1) * 4;
   const uint count = CBasics::SwapBytes(*reinterpret_cast< const uint* >(table));
@@ -177,7 +182,9 @@ void CCubeModel::PortSetPBRMaterial(const int idx) const {
   const uint end = GetMaterialOffset(table, idx + 1);
   const uchar* materialEnd = table + count * 4 + end;
   int floats = 0;
-  if (end >= begin + 56 && memcmp(materialEnd - 4, "PBR3", 4) == 0) {
+  if (end >= begin + 80 && memcmp(materialEnd - 4, "PBR4", 4) == 0) {
+    floats = 19;
+  } else if (end >= begin + 56 && memcmp(materialEnd - 4, "PBR3", 4) == 0) {
     floats = 13;
   } else if (end >= begin + 36 && memcmp(materialEnd - 4, "PBR2", 4) == 0) {
     floats = 8;
@@ -191,7 +198,60 @@ void CCubeModel::PortSetPBRMaterial(const int idx) const {
     bits = CBasics::SwapBytes(bits);
     memcpy(&values[i], &bits, 4);
   }
-  GXSetPBRMaterial(values, values + 3, values[6], values[7], values + 8);
+  return floats;
+}
+
+uint CCubeModel::PortMaterialCount() const {
+  const uchar* table = static_cast< const uchar* >(x0_instance.GetMaterialPointer()) +
+                       (x1c_textures->size() + 1) * 4;
+  return CBasics::SwapBytes(*reinterpret_cast< const uint* >(table));
+}
+
+// Values a debugging session puts in place of a record's (the console's `roomgeo mat`).
+namespace {
+struct SPortPBROverride {
+  const CCubeModel* model;
+  int material;
+  int field;
+  f32 value;
+};
+std::vector< SPortPBROverride > sPortPBROverrides;
+} // namespace
+
+void CCubeModel::PortOverridePBR(const CCubeModel* model, const int material, const int field,
+                                 const f32 value) {
+  if (model == nullptr || field < 0 || field >= 19) {
+    return;
+  }
+  for (SPortPBROverride& entry : sPortPBROverrides) {
+    if (entry.model == model && entry.material == material && entry.field == field) {
+      entry.value = value;
+      return;
+    }
+  }
+  const SPortPBROverride entry = {model, material, field, value};
+  sPortPBROverrides.push_back(entry);
+}
+
+void CCubeModel::PortClearPBROverrides() { sPortPBROverrides.clear(); }
+
+void CCubeModel::PortSetPBRMaterial(const int idx) const {
+  f32 values[19];
+  PortReadPBRMaterial(idx, values);
+  for (const SPortPBROverride& entry : sPortPBROverrides) {
+    if (entry.model == this && entry.material == idx) {
+      values[entry.field] = entry.value;
+    }
+  }
+  // A liquid's surface (kinds 5 and 6) moves: its first parameter is a rate, and the
+  // shader gets the phase. So does falling water (kind 7); glass (8) does not move.
+  if (values[13] > 4.5f && values[13] < 7.5f) {
+    values[15] *= CGraphics::GetSecondsMod900();
+  }
+  // World up as the shader sees it: view space is right, up, -forward.
+  const CTransform4f& view = CGraphics::GetViewMatrix();
+  const f32 up[3] = {view.Get20(), view.Get22(), -view.Get21()};
+  GXSetPBRMaterial(values, values + 3, values[6], values[7], values + 8, values + 13, up);
 }
 #endif
 
@@ -201,12 +261,27 @@ void CCubeModel::DrawSurface(const CCubeSurface& surface, const CModelFlags& mod
     return;
   }
 
-  material.SetCurrent(modelFlags, surface, *this);
 #ifdef TARGET_PC
+  // Port: an alpha blend at full, untinted alpha draws as opaque, so a PBR material takes it
+  // (the arm cannon is always drawn alpha blended for its fade). The PBR shader's alpha is
+  // the base map's, which a blend would show through; TEV materials keep the retail path.
+  const CModelFlags opaqueFlags(CModelFlags::kT_Opaque, static_cast< uchar >(modelFlags.GetShaderSet()),
+                                static_cast< CModelFlags::EFlags >(modelFlags.GetOtherFlags()),
+                                modelFlags.GetColorRef());
+  const bool solidBlend = modelFlags.GetTrans() == CModelFlags::kT_Blend &&
+                          modelFlags.GetColorRef() == CColor::White() &&
+                          material.IsFlagSet(kStateFlag_PortPBR) &&
+                          CCubeMaterial::PortPBRAllowed(opaqueFlags);
+  const CModelFlags& drawFlags = solidBlend ? opaqueFlags : modelFlags;
+  material.SetCurrent(drawFlags, surface, *this);
   // Port: PBR mod materials. The fallback TEV set above stays valid for the
   // paths PortPBRAllowed rejects.
   const bool pbr =
-      material.IsFlagSet(kStateFlag_PortPBR) && CCubeMaterial::PortPBRAllowed(modelFlags);
+      material.IsFlagSet(kStateFlag_PortPBR) && CCubeMaterial::PortPBRAllowed(drawFlags);
+#else
+  material.SetCurrent(modelFlags, surface, *this);
+#endif
+#ifdef TARGET_PC
   if (pbr) {
     // The probe is in world space with Y and Z swapped (world Z-up to cube Y-up), and the
     // shader's reflection vector is in view space: right, up, -forward.
@@ -279,9 +354,35 @@ void CCubeModel::DrawSurface(const CCubeSurface& surface, const CModelFlags& mod
     } else {
       GXSetPBRVolume(0, nullptr);
     }
+    // The frame's tone curve, when rooms are exposed as Remastered exposes them.
+    f32 tone[3][4];
+    GXSetPBRTone(PortRoomEnv::Tone(tone) ? tone : nullptr);
     PortSetPBRMaterial(surface.GetMaterialIndex());
+    // Glass (kind 8) sees what is behind it: the screen so far, copied into map 7 as the
+    // refracting particles copy it (CElementGen).
+    f32 record[19];
+    PortReadPBRMaterial(surface.GetMaterialIndex(), record);
+    if (record[13] > 7.5f && record[13] < 8.5f && CCubeMaterial::PortScreenCopyUsed()) {
+      int portLeft, portTop, portWidth, portHeight;
+      CGraphics::GetViewport(portLeft, portTop, portWidth, portHeight);
+      GXSetTexCopySrc(static_cast< u16 >(portLeft), static_cast< u16 >(portTop), static_cast< u16 >(portWidth),
+                      static_cast< u16 >(portHeight));
+      GXSetTexCopyDst(static_cast< u16 >(portWidth), static_cast< u16 >(portHeight), GX_TF_RGB565, GX_FALSE);
+      const bool useVideoFilter = CGraphics::GetUseVideoFilter();
+      CGraphics::SetUseVideoFilter(false);
+      GXCopyTex(CGraphics::GetDolphinSpareBuffer(), GX_FALSE);
+      CGraphics::SetUseVideoFilter(useVideoFilter);
+      GXPixModeSync();
+      CGraphics::LoadDolphinSpareTexture(portWidth, portHeight, GX_TF_RGB565, nullptr,
+                                         CGraphics::kSpareBufferTexMapID);
+    }
     GXSetPBR(GX_TRUE);
     ++CCubeMaterial::sPortPBRDraws;
+  }
+  if (CCubeMaterial::sPortPBRThermal == CCubeMaterial::kPT_Additive) {
+    // As CFluidPlaneCPU::RenderSetup in the thermal visor's hot pass (a TEV fallback too).
+    CGX::SetBlendMode(GX_BM_BLEND, GX_BL_ONE, GX_BL_ONE, GX_LO_CLEAR);
+    CGX::SetZMode(true, GX_LEQUAL, false);
   }
 #endif
   surface.CallDisplayList();

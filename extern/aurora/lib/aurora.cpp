@@ -313,24 +313,43 @@ const AuroraEvent* update() noexcept {
   return window::poll_events();
 }
 
+#ifdef AURORA_ENABLE_GX
+// Returns false (after dropping the surface where needed) when no frame can be drawn
+// because the surface is changing or gone.
+static bool service_surface(const char* caller) noexcept {
+  // Android keeps the native window across surfaceChanged. Releasing the surface here
+  // would rebuild it on that same window while the old swapchain is still connected,
+  // which fails with VK_ERROR_NATIVE_WINDOW_IN_USE_KHR (a lost device). Skip the frame.
+  if (window::is_surface_changing()) {
+    return false;
+  }
+  const bool invalidated = window::consume_surface_invalidated();
+  if (!window::is_presentable() || (invalidated && webgpu::surface_window_changed())) {
+    static int sNotPresentable = 0;
+    if (sNotPresentable++ < 3) {
+      Log.warn("{}: not presentable - surfaceReady={} backgrounded={} invalidated={}", caller,
+               window::is_surface_ready(), window::is_backgrounded(), invalidated);
+    }
+    webgpu::release_surface();
+    return false;
+  }
+  return true;
+}
+#endif
+
+void release_lost_surface() noexcept {
+#ifdef AURORA_ENABLE_GX
+  if (g_surface) {
+    service_surface("release_lost_surface");
+  }
+#endif
+}
+
 bool begin_frame(uint64_t contentTag) noexcept {
   ZoneScoped;
 #ifdef AURORA_ENABLE_GX
   {
-    // Android keeps the native window across surfaceChanged. Releasing the surface here
-    // would rebuild it on that same window while the old swapchain is still connected,
-    // which fails with VK_ERROR_NATIVE_WINDOW_IN_USE_KHR (a lost device). Skip the frame.
-    if (window::is_surface_changing()) {
-      return false;
-    }
-    const bool invalidated = window::consume_surface_invalidated();
-    if (!window::is_presentable() || (invalidated && webgpu::surface_window_changed())) {
-      static int sNotPresentable = 0;
-      if (sNotPresentable++ < 3) {
-        Log.warn("begin_frame: not presentable - surfaceReady={} backgrounded={} invalidated={}",
-                 window::is_surface_ready(), window::is_backgrounded(), invalidated);
-      }
-      webgpu::release_surface();
+    if (!service_surface("begin_frame")) {
       return false;
     }
     if (window::is_paused()) {
@@ -584,6 +603,7 @@ void aurora_shutdown() {
 const AuroraEvent* aurora_update() { return aurora::update(); }
 bool aurora_begin_frame() { return aurora::begin_frame(AURORA_STEREO_CONTENT_TAG_UNKNOWN); }
 bool aurora_begin_frame_tagged(uint64_t contentTag) { return aurora::begin_frame(contentTag); }
+void aurora_release_lost_surface() { aurora::release_lost_surface(); }
 void aurora_end_frame() { aurora::end_frame(AURORA_STEREO_CONTENT_TAG_UNKNOWN); }
 void aurora_end_frame_tagged(uint64_t contentTag) { aurora::end_frame(contentTag); }
 void aurora_end_frame_ex(uint64_t contentTag, void* imguiFrame) {

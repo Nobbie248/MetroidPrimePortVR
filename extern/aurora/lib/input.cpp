@@ -289,6 +289,45 @@ void apply_port_preferences() noexcept {
     }
   }
 }
+
+// The port's Android touch overlay is an SDL virtual gamepad, attached on the first touch. Once it
+// holds player 1, a real pad connected later gets player 2, which a single-player game never reads.
+// Keep player 1 for a real pad when one is connected, and hand it back to the virtual pad when the
+// last real one leaves. An explicitly configured first port is left alone.
+void prefer_real_controller_on_first_port() noexcept {
+  ensure_port_preferences_loaded();
+  if (g_portPreferences[0].state != PortPreferenceState::Unset) {
+    return;
+  }
+
+  GameController* first = nullptr;
+  GameController* real = nullptr;
+  GameController* virt = nullptr;
+  for (auto& [instance, controller] : g_GameControllers) {
+    if (SDL_GetGamepadPlayerIndex(controller.m_controller) == 0) {
+      first = &controller;
+    } else if (!SDL_IsJoystickVirtual(instance)) {
+      real = real != nullptr ? real : &controller;
+    } else {
+      virt = virt != nullptr ? virt : &controller;
+    }
+  }
+
+  // A real pad on port 0 stays, and a virtual pad only takes port 0 when it is empty
+  const bool firstIsReal = first != nullptr && !SDL_IsJoystickVirtual(first->m_index);
+  GameController* wanted = real != nullptr ? real : virt;
+  if (wanted == nullptr || firstIsReal || (first != nullptr && wanted == virt)) {
+    return;
+  }
+  const int32_t freed = SDL_GetGamepadPlayerIndex(wanted->m_controller);
+  if (first != nullptr) {
+    SDL_SetGamepadPlayerIndex(first->m_controller, freed);
+  }
+  SDL_SetGamepadPlayerIndex(wanted->m_controller, 0);
+  Log.info("Controller '{}' moved to port 0", SDL_GetGamepadName(wanted->m_controller) != nullptr
+                                                  ? SDL_GetGamepadName(wanted->m_controller)
+                                                  : "unknown");
+}
 } // namespace
 
 GameController* get_controller_for_player(uint32_t player) noexcept {
@@ -351,11 +390,12 @@ SDL_JoystickID add_controller(SDL_JoystickID which) noexcept {
     controller.m_hasRumble = SDL_GetBooleanProperty(props, SDL_PROP_GAMEPAD_CAP_RUMBLE_BOOLEAN, true);
     controller.m_hasRgbLed = SDL_GetBooleanProperty(props, SDL_PROP_GAMEPAD_CAP_RGB_LED_BOOLEAN, false);
     SDL_JoystickID instance = SDL_GetJoystickID(SDL_GetGamepadJoystick(ctrl));
-    Log.info("Added controller '{}' (instance {}, vid {:04x}, pid {:04x}, type {})",
-             SDL_GetGamepadName(ctrl) != nullptr ? SDL_GetGamepadName(ctrl) : "unknown", instance, controller.m_vid,
-             controller.m_pid, static_cast<int>(SDL_GetGamepadType(ctrl)));
     g_GameControllers[instance] = controller;
     apply_port_preferences();
+    prefer_real_controller_on_first_port();
+    Log.info("Added controller '{}' (instance {}, vid {:04x}, pid {:04x}, type {}, port {})",
+             SDL_GetGamepadName(ctrl) != nullptr ? SDL_GetGamepadName(ctrl) : "unknown", instance, controller.m_vid,
+             controller.m_pid, static_cast<int>(SDL_GetGamepadType(ctrl)), SDL_GetGamepadPlayerIndex(ctrl));
     return instance;
   }
 
@@ -371,6 +411,7 @@ void remove_controller(Uint32 instance) noexcept {
     SDL_CloseGamepad(it->second.m_controller);
     g_GameControllers.erase(it);
     apply_port_preferences();
+    prefer_real_controller_on_first_port();
   }
 }
 

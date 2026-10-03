@@ -1,8 +1,10 @@
 #include "port_apclient.h"
 #include "port_log.h"
+#include "port_paths.h"
 
 #include "port_ap_metroidprime.h"
 #include "port_ap_protocol.h"
+#include "port_custom_res.h"
 #include "port_randomizer.h"
 #include "port_skip_cutscenes.h"
 #include "port_ws.h"
@@ -52,16 +54,8 @@ bool EnvEnabled(const char* name) {
 }
 
 std::string UserDirectory() {
-  if (const char* env = std::getenv("MP_USER_PATH")) {
-    if (env[0] != '\0')
-      return env;
-  }
-  if (char* pref = SDL_GetPrefPath(nullptr, "Metroid Prime")) {
-    std::string dir(pref);
-    SDL_free(pref);
-    return dir;
-  }
-  return ".";
+  const std::string& dir = PortPaths::UserFolder();
+  return dir.empty() ? std::string(".") : dir;
 }
 
 std::string ConfigPath() {
@@ -262,6 +256,14 @@ struct Runtime {
   // Held for the whole of a restart (Connect/Disconnect), so two in a row run
   // one after the other.
   std::mutex restartMutex;
+  // The last logic evaluation and what it was made from; it only changes with
+  // an item or the seed's options, and the map asks every frame.
+  bool logicValid = false;
+  PortApLogic::Options logicOptions;
+  bool logicHasWorld = false;
+  PortApWorld::Layout logicWorld;
+  PortApLogic::Items logicItems;
+  std::vector<PortApLogic::Level> logicLevels;
   bool enabled = false;
   bool connected = false;
   std::string stateLabel = "off";
@@ -355,6 +357,8 @@ int CheckedBit(const MetroidPrime::Location* location) {
 
 void ClearChecked(CGameState::ApProgress& progress) {
   for (uint& word : progress.checked)
+    word = 0;
+  for (uint& word : progress.shields)
     word = 0;
 }
 
@@ -453,9 +457,26 @@ void ApplyBuiltinWorld(Runtime& runtime, CStateManager& mgr, CPlayerState& playe
   namespace Prime = MetroidPrime;
   bool unlimitedMissiles = false;
   bool unlimitedPowerBombs = false;
+  PortApWorld::Layout layout;
   {
     std::lock_guard<std::mutex> lock(runtime.mutex);
-    if (!runtime.config.builtin || runtime.session == nullptr)
+    const bool builtin = runtime.config.builtin && runtime.session != nullptr;
+    if (builtin && runtime.session->GetState().hasWorld)
+      layout = runtime.session->GetState().world;
+    // The world's item limits (its Config.py; not in slot data) hold in a
+    // seed's game, the disc's anywhere else.
+    const bool seedGame = builtin && runtime.session->GetState().hasWorld;
+    CPlayerState::PortSetAmmoLimits(seedGame ? 999 : 250, seedGame ? 99 : 8);
+    // The seed's tank capacity; a game outside Archipelago has the disc's.
+    const float capacity = static_cast<float>(layout.etankCapacity);
+    if (CPlayerState::GetEnergyTankCapacity() != capacity) {
+      // Full health stays full under the new capacity.
+      const bool full = player.GetHealthInfo().GetHP() >= player.CalculateHealth();
+      CPlayerState::PortSetEnergyTankCapacity(capacity);
+      if (full)
+        player.HealthInfo()->SetHP(player.CalculateHealth());
+    }
+    if (!builtin)
       return;
     unlimitedMissiles =
         runtime.session->ReceivedCount(Prime::kItemBase + Prime::kUnlimitedMissiles) > 0;
@@ -484,6 +505,20 @@ void ApplyBuiltinWorld(Runtime& runtime, CStateManager& mgr, CPlayerState& playe
   const CWorld* world = mgr.GetWorld();
   if (world != nullptr && world->IGetWorldAssetId() == Prime::kTallonWorld)
     temple = world->IGetAreaId(Prime::kArtifactTempleArea);
+  // The layers the seed keeps on or off.
+  for (const PortApWorld::LayerChange& change : PortApWorld::Layers(layout)) {
+    CScriptLayerManager* state = gpGameState->StateForWorld(change.mlvl).GetLayerState().GetPtr();
+    TAreaId area(change.area);
+    if (world != nullptr && world->IGetWorldAssetId() == change.mlvl)
+      area = world->IGetAreaId(change.mrea);
+    if (state == nullptr || area.Value() < 0 ||
+        static_cast<size_t>(area.Value()) >= state->GetAreaLayers().size())
+      continue;
+    if (change.whileLayer >= 0 && !state->IsLayerActive(area, TLayerId(change.whileLayer)))
+      continue;
+    if (state->IsLayerActive(area, TLayerId(change.layer)) != change.active)
+      state->SetLayerActive(area, TLayerId(change.layer), change.active);
+  }
   if (layers == nullptr || temple.Value() < 0 ||
       static_cast<size_t>(temple.Value()) >= layers->GetAreaLayers().size())
     return;
@@ -719,6 +754,10 @@ void WorkerLoop(Runtime& runtime) {
               const std::map<int64_t, int64_t> oldProgressive =
                   runtime.session->GetState().progressive;
               const std::string oldSeed = runtime.session->GetState().seed;
+              const bool oldHasLogic = runtime.session->GetState().hasLogic;
+              const PortApLogic::Options oldLogic = runtime.session->GetState().logic;
+              const bool oldHasWorld = runtime.session->GetState().hasWorld;
+              const PortApWorld::Layout oldWorld = runtime.session->GetState().world;
               const std::string oldError = runtime.session->LastError();
               const std::string oldResetReason = runtime.session->ResetReason();
               runtime.session->HandlePacket(command, outgoing, newGrants);
@@ -733,7 +772,9 @@ void WorkerLoop(Runtime& runtime) {
               }
               const Protocol::State& state = runtime.session->GetState();
               if (state.nextItemIndex != oldIndex || state.checkedLocations != oldChecks ||
-                  state.progressive != oldProgressive || state.seed != oldSeed)
+                  state.progressive != oldProgressive || state.seed != oldSeed ||
+                  state.hasLogic != oldHasLogic || state.logic != oldLogic ||
+                  state.hasWorld != oldHasWorld || state.world != oldWorld)
                 runtime.MarkStateDirtyLocked();
               runtime.grants.insert(runtime.grants.end(), newGrants.begin(), newGrants.end());
               runtime.lastMessage = runtime.session->LastMessage();
@@ -1497,6 +1538,19 @@ bool BuiltinRules() {
   return gpGameState != nullptr && IsApGame(gpGameState->PortApProgress());
 }
 
+// The layout of the seed in play, once its slot_data has been seen (in this
+// session or an earlier one).
+bool SeedLayout(PortApWorld::Layout& out) {
+  EnsureLoaded();
+  Runtime& runtime = GetRuntime();
+  std::lock_guard<std::mutex> lock(runtime.mutex);
+  if (!runtime.enabled || runtime.session == nullptr || !runtime.session->GetConfig().builtin ||
+      !runtime.session->GetState().hasWorld)
+    return false;
+  out = runtime.session->GetState().world;
+  return true;
+}
+
 } // namespace
 
 bool OwnsPickup(uint32_t world, uint32_t area, uint32_t entity) {
@@ -1608,11 +1662,259 @@ bool ArtifactHint(int itemType, std::string& out) {
   }
 }
 
-uint32_t NewGameWorld() {
+bool NewGameStart(uint32_t& world, uint32_t& area) {
   try {
-    return BuiltinEnabled() ? MetroidPrime::kTallonWorld : 0;
+    if (!BuiltinEnabled())
+      return false;
+    world = MetroidPrime::kTallonWorld;
+    area = 0;
+    PortApWorld::Layout layout;
+    if (SeedLayout(layout)) {
+      PortApWorld::Place place;
+      if (PortApWorld::StartRoom(layout, place)) {
+        world = place.mlvl;
+        area = place.mrea;
+      }
+    }
+    return true;
   } catch (...) {
-    return 0;
+    return false;
+  }
+}
+
+bool WarpToStart(uint32_t& world, uint32_t& area) {
+  try {
+    PortApWorld::Layout layout;
+    if (!SeedLayout(layout))
+      return false;
+    // A start room the tables don't have is the Landing Site, as for a new game.
+    PortApWorld::Place place;
+    place.mlvl = MetroidPrime::kTallonWorld;
+    PortApWorld::StartRoom(layout, place);
+    world = place.mlvl;
+    area = place.mrea;
+    return true;
+  } catch (...) {
+    return false;
+  }
+}
+
+bool SeedStrings(uint32_t strg, std::vector< std::string >& out) {
+  try {
+    PortApWorld::Layout layout;
+    return SeedLayout(layout) && PortApWorld::Strings(layout, strg, out);
+  } catch (...) {
+    return false;
+  }
+}
+
+bool SuitDamageReduction(int mode, bool varia, bool gravity, bool phazon, float& out) {
+  try {
+    PortApWorld::Layout layout;
+    if (!SeedLayout(layout))
+      return false;
+    const float reduction = PortApWorld::SuitDamageReduction(mode, varia, gravity, phazon);
+    if (reduction < 0.f)
+      return false;
+    out = reduction;
+    return true;
+  } catch (...) {
+    return false;
+  }
+}
+
+bool SeedResultsLine(std::string& out) {
+  try {
+    EnsureLoaded();
+    Runtime& runtime = GetRuntime();
+    std::lock_guard<std::mutex> lock(runtime.mutex);
+    if (!runtime.enabled || runtime.session == nullptr || !runtime.session->GetConfig().builtin ||
+        !runtime.session->GetState().hasWorld || runtime.session->GetState().seed.empty())
+      return false;
+    out = "Archipelago | " + runtime.session->GetState().seed + " | " +
+          runtime.session->GetConfig().slot;
+    return true;
+  } catch (...) {
+    return false;
+  }
+}
+
+bool SeedGivesStartItems() {
+  try {
+    PortApWorld::Layout layout;
+    return SeedLayout(layout);
+  } catch (...) {
+    return false;
+  }
+}
+
+bool TeleporterDestination(uint32_t world, uint32_t editorId, uint32_t& destWorld,
+                           uint32_t& destArea) {
+  try {
+    PortApWorld::Layout layout;
+    if (!SeedLayout(layout))
+      return false;
+    PortApWorld::Place retail, place;
+    retail.mlvl = destWorld;
+    retail.mrea = destArea;
+    if (!PortApWorld::TeleporterDestination(layout, world, editorId, retail, place))
+      return false;
+    destWorld = place.mlvl;
+    destArea = place.mrea;
+    return true;
+  } catch (...) {
+    return false;
+  }
+}
+
+bool TempleOps(std::vector< uint8_t >& ops) {
+  try {
+    PortApWorld::Layout layout;
+    if (!SeedLayout(layout))
+      return false;
+    ops = PortApWorld::TempleOps(layout);
+    return !ops.empty();
+  } catch (...) {
+    return false;
+  }
+}
+
+// The blast shields placed in each loaded room, watched by Poll. Rooms are
+// patched on the loading thread.
+std::mutex& PlacedShieldsMutex() {
+  static std::mutex mutex;
+  return mutex;
+}
+std::map< uint32_t, std::vector< PortApWorld::PlacedShield > >& PlacedShields() {
+  static std::map< uint32_t, std::vector< PortApWorld::PlacedShield > > shields;
+  return shields;
+}
+
+// The shields this game has broken, null outside a game.
+const uint32_t* BrokenShields(uint32_t (&copy)[4]) {
+  if (gpGameState == nullptr)
+    return nullptr;
+  for (int i = 0; i < 4; ++i)
+    copy[i] = gpGameState->PortApProgress().shields[i];
+  return copy;
+}
+
+// A shield whose trigger went inactive was broken (or its door was opened
+// from behind): remember it, so the room comes back without it.
+void WatchShields(CStateManager& mgr, CGameState::ApProgress& progress) {
+  std::lock_guard< std::mutex > lock(PlacedShieldsMutex());
+  std::vector< int > broken;
+  for (auto& room : PlacedShields()) {
+    auto& shields = room.second;
+    for (size_t i = 0; i < shields.size();) {
+      const TUniqueId uid = mgr.GetIdForScript(TEditorId(shields[i].trigger));
+      const CEntity* entity = uid == kInvalidUniqueId ? nullptr : mgr.GetObjectById(uid);
+      // The id is one DoorOps made up, so whatever answers to it is the trigger.
+      if (entity == nullptr || entity->GetActive()) {
+        ++i;
+        continue;
+      }
+      const int bit = shields[i].bit;
+      if (bit >= 0 && bit < PortApWorld::kShieldBits)
+        progress.shields[bit / 32] |= 1u << (bit % 32);
+      shields.erase(shields.begin() + i);
+      broken.push_back(bit);
+    }
+  }
+  // The same doorway's shield in the room behind it goes too, quietly: its
+  // relay does the unlocking, with the sound, music and shake switched off.
+  for (auto& room : PlacedShields()) {
+    auto& shields = room.second;
+    for (size_t i = 0; i < shields.size();) {
+      if (std::find(broken.begin(), broken.end(), shields[i].bit) == broken.end()) {
+        ++i;
+        continue;
+      }
+      const uint32_t trigger = shields[i].trigger;
+      auto send = [&](uint32_t id, EScriptObjectMessage msg) {
+        const TUniqueId uid = mgr.GetIdForScript(TEditorId(id));
+        if (uid != kInvalidUniqueId)
+          mgr.SendScriptMsgAlways(uid, kInvalidUniqueId, msg);
+      };
+      for (uint32_t id = trigger + 3; id <= trigger + 5; ++id)
+        send(id, kSM_Deactivate);
+      send(trigger + 2, kSM_SetToZero);
+      shields.erase(shields.begin() + i);
+    }
+  }
+}
+
+bool RoomOps(uint32_t mrea, const uint8_t* scly, size_t size, std::vector< uint8_t >& ops) {
+  try {
+    PortApWorld::Layout layout;
+    if (!SeedLayout(layout))
+      return false;
+    std::vector< PortSkipCutscenes::ScriptObject > objects;
+    if (!PortSkipCutscenes::ScanObjects(scly, size, objects))
+      return false;
+    ops = PortApWorld::RoomOps(layout, mrea, objects);
+    return !ops.empty();
+  } catch (...) {
+    return false;
+  }
+}
+
+bool DoorOps(uint32_t mrea, const uint8_t* scly, size_t size, std::vector< uint8_t >& ops) {
+  try {
+    {
+      std::lock_guard< std::mutex > lock(PlacedShieldsMutex());
+      PlacedShields().erase(mrea);
+    }
+    PortApWorld::Layout layout;
+    if (!SeedLayout(layout))
+      return false;
+    uint32_t broken[4];
+    const std::vector< PortApWorld::DoorChange > doors =
+        PortApWorld::Doors(layout, mrea, BrokenShields(broken));
+    std::vector< PortSkipCutscenes::ScriptObject > objects;
+    if (doors.empty() || !PortSkipCutscenes::ScanObjects(scly, size, objects))
+      return false;
+    std::vector< PortApWorld::PlacedShield > placed;
+    ops = PortApWorld::DoorOps(
+        doors, objects,
+        [](const std::string& text) {
+          // One scan per text: the key only has to tell the door types apart.
+          return PortCustomRes::TextScan(0xD0020000ull << 32 | std::hash< std::string >()(text),
+                                         text);
+        },
+        &placed);
+    if (!placed.empty()) {
+      std::lock_guard< std::mutex > lock(PlacedShieldsMutex());
+      PlacedShields()[mrea] = std::move(placed);
+    }
+    return !ops.empty();
+  } catch (...) {
+    return false;
+  }
+}
+
+bool MapDoors(uint32_t mapa, std::vector< std::pair< uint32_t, int > >& doors) {
+  try {
+    doors.clear();
+    PortApWorld::Layout layout;
+    if (!SeedLayout(layout))
+      return false;
+    uint32_t broken[4];
+    for (const PortApWorld::MapDoor& door :
+         PortApWorld::MapDoors(layout, mapa, BrokenShields(broken)))
+      doors.emplace_back(door.doorId, door.type);
+    return !doors.empty();
+  } catch (...) {
+    return false;
+  }
+}
+
+int RequiredArtifacts() {
+  try {
+    PortApWorld::Layout layout;
+    return SeedLayout(layout) ? layout.requiredArtifacts : 12;
+  } catch (...) {
+    return 12;
   }
 }
 
@@ -1673,6 +1975,85 @@ int SpringBallRule() {
   }
 }
 
+bool Logic(LogicState& out) {
+  try {
+    Runtime& runtime = GetRuntime();
+    size_t count = 0;
+    const MetroidPrime::Location* locations = MetroidPrime::Locations(count);
+    {
+      std::lock_guard<std::mutex> lock(runtime.mutex);
+      if (!runtime.enabled || !runtime.config.builtin || runtime.session == nullptr)
+        return false;
+      const Protocol::State& state = runtime.session->GetState();
+      if (!state.hasLogic)
+        return false;
+      if (!runtime.logicValid || runtime.logicOptions != state.logic ||
+          runtime.logicHasWorld != state.hasWorld || runtime.logicWorld != state.world ||
+          runtime.logicItems != state.progressive) {
+        runtime.logicOptions = state.logic;
+        runtime.logicHasWorld = state.hasWorld;
+        runtime.logicWorld = state.world;
+        runtime.logicItems = state.progressive;
+        PortApLogic::Options options = state.logic;
+        if (state.hasWorld)
+          PortApWorld::FillLogic(state.world, options);
+        runtime.logicLevels = PortApLogic::Evaluate(options, state.progressive);
+        runtime.logicValid = true;
+      }
+      out.levels = runtime.logicLevels;
+      out.checked.assign(count, false);
+      for (size_t i = 0; i < count; ++i) {
+        out.checked[i] = std::find(state.checkedLocations.begin(), state.checkedLocations.end(),
+                                   locations[i].id) != state.checkedLocations.end();
+      }
+    }
+    // Checks made while disconnected are only in the save so far.
+    if (gpGameState != nullptr && gpGameState->PortApProgress().reconciled) {
+      const CGameState::ApProgress& progress = gpGameState->PortApProgress();
+      for (size_t i = 0; i < count && i < 128; ++i) {
+        if (((progress.checked[i / 32] >> (i % 32)) & 1) != 0)
+          out.checked[i] = true;
+      }
+    }
+    return out.levels.size() == count;
+  } catch (...) {
+    return false;
+  }
+}
+
+std::string LogicText() {
+  try {
+    LogicState state;
+    if (!Logic(state))
+      return "logic: no Archipelago seed options yet\n";
+    static const char* const kNames[] = {"out of logic", "inspect", "sequence break", "in logic"};
+    size_t count = 0;
+    const PortApLogic::Check* checks = PortApLogic::Checks(count);
+    int totals[4] = {};
+    int checked = 0;
+    std::string lines;
+    for (size_t i = 0; i < count; ++i) {
+      if (state.checked[i]) {
+        ++checked;
+        continue;
+      }
+      ++totals[static_cast<int>(state.levels[i])];
+      if (state.levels[i] == PortApLogic::Level::None)
+        continue;
+      lines += std::string("check ") + kNames[static_cast<int>(state.levels[i])] + ": " +
+               checks[i].area + " / " + checks[i].room +
+               (checks[i].section[0] != 0 ? std::string(" / ") + checks[i].section : std::string()) +
+               "\n";
+    }
+    return "logic: " + std::to_string(totals[3]) + " in logic, " + std::to_string(totals[2]) +
+           " sequence break, " + std::to_string(totals[1]) + " inspect, " +
+           std::to_string(totals[0]) + " out of logic, " + std::to_string(checked) + " checked\n" +
+           lines;
+  } catch (...) {
+    return std::string();
+  }
+}
+
 void OnInventoryReset() {
   try {
     if (gpGameState == nullptr)
@@ -1720,6 +2101,7 @@ void Poll(CStateManager& mgr) {
         player->HealthInfo()->SetHP(player->CalculateHealth());
     }
     ApplyBuiltinWorld(runtime, mgr, *player);
+    WatchShields(mgr, progress);
 
     // DeathLink, inbound. A bounce the server sent is applied by clearing the
     // alive flag, which is what the world's own client does and what drives

@@ -66,11 +66,27 @@ void CGuiCamera::Draw(const CGuiWidgetDrawParms& parms) const {
   // current render aspect instead so UI keeps its proportions; 4:3 is left
   // exactly as authored.
   float renderAspect = 0.f;
-  if (xb9_aspectMatch && PortDebug::AspectMode() != PortDebug::kAspect_4_3) {
+  // A mod frame authored for a wider screen (Remastered's are 16:9) is fitted
+  // to 4:3 as well: its width is kept by widening the vertical view instead of
+  // being squeezed into the narrower viewport.
+  bool fitWidth = false;
+  if (xb9_aspectMatch) {
     const float vw = static_cast< float >(CGraphics::GetViewportWidth());
     const float vh = static_cast< float >(CGraphics::GetViewportHeight());
     if (vw > 0.f && vh > 0.f) {
       renderAspect = vw / vh;
+    }
+    if (PortDebug::AspectMode() == PortDebug::kAspect_4_3) {
+      const float authored =
+          xb8_projection == kProjection_Perspective
+              ? mCameraParms.perspective.aspect
+              : (mCameraParms.orthographic.right - mCameraParms.orthographic.left) /
+                    (mCameraParms.orthographic.top - mCameraParms.orthographic.bottom);
+      if (renderAspect > 0.f && authored > renderAspect * 1.1f) {
+        fitWidth = !PortDebug::HudWide();
+      } else {
+        renderAspect = 0.f;
+      }
     }
   }
 
@@ -89,16 +105,26 @@ void CGuiCamera::Draw(const CGuiWidgetDrawParms& parms) const {
       mSpread = renderAspect / authored;
       mSpreadAboutEye = true;
     }
+    float fov = mCameraParms.perspective.fov;
+    if (fitWidth) {
+      constexpr float kDegToRad = 3.14159265f / 180.f;
+      fov = 2.f * std::atan(std::tan(0.5f * fov * kDegToRad) * authored / renderAspect) / kDegToRad;
+    }
     mCenterX = 0.f;
     mCenterZ = 0.f;
-    CGraphics::SetPerspective(mCameraParms.perspective.fov, aspect,
-                              mCameraParms.perspective.znear, mCameraParms.perspective.zfar);
+    CGraphics::SetPerspective(fov, aspect, mCameraParms.perspective.znear,
+                              mCameraParms.perspective.zfar);
   } else {
     float left = mCameraParms.orthographic.left;
     float right = mCameraParms.orthographic.right;
-    const float top = mCameraParms.orthographic.top;
-    const float bottom = mCameraParms.orthographic.bottom;
-    if (renderAspect > 0.f) {
+    float top = mCameraParms.orthographic.top;
+    float bottom = mCameraParms.orthographic.bottom;
+    if (fitWidth) {
+      const float middle = 0.5f * (top + bottom);
+      const float halfHeight = 0.5f * (right - left) / renderAspect;
+      top = middle + halfHeight;
+      bottom = middle - halfHeight;
+    } else if (renderAspect > 0.f) {
       const float center = 0.5f * (left + right);
       const float halfWidth = 0.5f * (top - bottom) * renderAspect;
       left = center - halfWidth;

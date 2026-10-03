@@ -22,6 +22,8 @@ public:
     strcpy(xc_name, name);
   }
 
+  const char* GetName() const { return xc_name; }
+
 private:
   bool x0_;
   bool x1_;
@@ -136,6 +138,9 @@ public:
   int GetBaseLine() const;
   int GetLineMargin();
   bool IsFinishedLoading();
+
+  // The typeface this font was made from ("Deface14B_O").
+  const char* PortGetName() const { return x30_fontInfo.valid() ? x30_fontInfo->GetName() : ""; }
 
 private:
   bool x0_initialized;

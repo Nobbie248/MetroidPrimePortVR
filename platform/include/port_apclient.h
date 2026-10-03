@@ -1,5 +1,7 @@
 #ifndef METROID_PRIME_PORT_PORT_APCLIENT_H
 #define METROID_PRIME_PORT_PORT_APCLIENT_H
+#include "port_ap_logic.h"
+
 #include <cstdint>
 #include <string>
 #include <vector>
@@ -105,6 +107,19 @@ bool SendChat(const std::string& text, std::string& error);
 // Seed name from the server's RoomInfo, or "" before it arrives.
 const char* SeedName();
 
+// The tracker's view of the seed: for each location (indexed as
+// PortApLogic::Checks and MetroidPrime::Locations) whether it is in logic with
+// the items received so far, and whether it has been checked. False when there
+// is nothing to say: no session on the built-in tables, or the seed's options
+// have never been received. Works offline once they have. Game thread.
+struct LogicState {
+  std::vector< PortApLogic::Level > levels;
+  std::vector< bool > checked;
+};
+bool Logic(LogicState& out);
+// The same as text for the console: the reachable checks, one per line.
+std::string LogicText();
+
 // Queues the configured location id for `locationKey` (the randomizer's
 // "world:area:entity" key). No-op when unconfigured, unmapped, or already sent.
 void QueueCheck(const char* locationKey);
@@ -141,10 +156,64 @@ bool ArtifactHint(int itemType, std::string& out);
 // replays them. No-op when AP is off.
 void OnInventoryReset();
 
-// The world a new game starts in, or 0 for the retail start. With the built-in
-// tables this is Tallon Overworld (its first area is the Landing Site): the
-// seeds the port supports skip the frigate.
-uint32_t NewGameWorld();
+// Where a new game starts: false for the retail start. With the built-in
+// tables it is the seed's starting room, or the Landing Site until the seed's
+// layout is known (seeds skip the frigate). `area` is 0 for the world's first.
+bool NewGameStart(uint32_t& world, uint32_t& area);
+
+// Where declining a save station with L and R held leads: the seed's starting
+// room, as every randomprime seed of the apworld allows (`area` is 0 for the
+// world's first). False without a seed layout.
+bool WarpToStart(uint32_t& world, uint32_t& area);
+
+// The strings the seed gives the string table `strg` in place of the disc's
+// (UTF-8): elevator texts and the temple's objective. False for any other
+// table, and without a seed layout.
+bool SeedStrings(uint32_t strg, std::vector< std::string >& out);
+
+// The share of damage the suits take off in the seed in play, under the
+// staggered suit damage mode the player set (0 default, 1 progressive,
+// 2 additive: the server doesn't say which the seed was made with). False
+// without a seed layout or in the default mode: the game's own rule.
+bool SuitDamageReduction(int mode, bool varia, bool gravity, bool phazon, float& out);
+
+// The line naming the seed and the slot that the completion screen shows above
+// "Percentage Complete" (randomprime's resultsString). False without a seed
+// layout.
+bool SeedResultsLine(std::string& out);
+
+// The seed's layout is known, so the server hands out everything Samus starts
+// with (the starting beam, the Scan Visor unless shuffled, the start room's
+// loadout) and a spawn point gives only the Combat Visor and Power Suit.
+bool SeedGivesStartItems();
+
+// Where the seed leads the world teleporter `editorId` of `world`: rewrites
+// the destination and returns true for a shuffled elevator, and for the
+// Artifact Temple's portal when the seed has no Metroid Prime fight.
+bool TeleporterDestination(uint32_t world, uint32_t editorId, uint32_t& destWorld,
+                           uint32_t& destArea);
+
+// The seed's changes to the Artifact Temple's script (fewer artifacts needed,
+// no Meta Ridley fight) as an op list for PortSkipCutscenes::ApplyOps. False
+// when the temple is the retail one.
+bool TempleOps(std::vector< uint8_t >& ops);
+
+// What the seed's smaller options change in a room's script (no Hive Mecha,
+// backwards Lower Mines, Flaahgra power bombs), as an op list for
+// PortSkipCutscenes::ApplyOps over its script `scly`. False for no change.
+bool RoomOps(uint32_t mrea, const uint8_t* scly, size_t size, std::vector< uint8_t >& ops);
+
+// The seed's door types (colours, locked doors) for a room, as an op list for
+// PortSkipCutscenes::ApplyOps over its script `scly`. False for no change.
+bool DoorOps(uint32_t mrea, const uint8_t* scly, size_t size, std::vector< uint8_t >& ops);
+
+// The doors of a map area whose icon the seed changes: editor id and the
+// door colour (0 blue, 1 shield, 2 ice, 3 wave, 4 plasma). False for none.
+bool MapDoors(uint32_t mapa, std::vector< std::pair< uint32_t, int > >& doors);
+
+// How many artifacts open the Artifact Temple: the seed's required_artifacts,
+// 12 otherwise.
+int RequiredArtifacts();
 
 // The connected seed wants heat to hurt through every suit but the Varia Suit
 // (the AP world's non_varia_heat_damage, on by default). False when AP is off.

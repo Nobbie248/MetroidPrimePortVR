@@ -73,6 +73,13 @@ public:
   float GetPlayedSeconds() const;
   uint GetWidth() const;
   uint GetHeight() const;
+#ifdef TARGET_PC
+  // Half the difference between the drawn picture and a viewport of this size,
+  // per axis (negative: bars). The disc's movies are drawn at their pixel size,
+  // as on the console; a mod's movie in another size fills the view instead,
+  // keeping its shape.
+  void PortGetMargins(int vpWidth, int vpHeight, int& xMargin, int& yMargin) const;
+#endif
   bool CanDrawVideo() const { return xac_indexLoad.null(); }
   bool PumpIndexLoad();
   void Rewind();

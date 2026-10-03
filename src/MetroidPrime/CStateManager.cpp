@@ -2,6 +2,7 @@
 #include "MetroidPrime/CStateManager.hpp"
 #include "port_apclient.h"
 #include "port_debug.h"
+#include "port_freecam.h"
 #ifdef TARGET_PC
 #include "MetroidPrime/Enemies/CAi.hpp"
 #include "vr/vr_view.h"
@@ -12,9 +13,11 @@
 #include "port_log.h"
 #include "port_room_env.h"
 #include "port_room_geo.h"
+#include "port_room_liquid.h"
 #include "port_savestate.h"
 #include "port_skip_cutscenes.h"
 #include "port_viewmodel.h"
+#include "port_console.h"
 #ifdef MP_ENABLE_SMOKE_DRIVER
 #include "port_smoke.h"
 #endif
@@ -252,10 +255,13 @@ void PortArtifactTemple(CStateManager& mgr) {
   CEntity* trigger = PortTempleObject(mgr, 0x50100470); // Trigger - Progress Cinema
   if (trigger == nullptr || trigger->GetUniqueId() == sPortTempleArmed)
     return;
+  int held = 0;
   for (int item = CPlayerState::kIT_Truth; item <= CPlayerState::kIT_Newborn; ++item) {
-    if (!state.HasPowerUp(static_cast< CPlayerState::EItemType >(item)))
-      return;
+    if (state.HasPowerUp(static_cast< CPlayerState::EItemType >(item)))
+      ++held;
   }
+  if (held < PortAp::RequiredArtifacts())
+    return;
   sPortTempleArmed = trigger->GetUniqueId();
   mgr.DeliverScriptMsg(trigger, kInvalidUniqueId, kSM_Activate);
 }
@@ -441,6 +447,7 @@ CStateManager::CStateManager(const rstl::ncrc_ptr< CScriptMailbox >& mailbox,
 , xf94_30_fullThreat(false)
 
 {
+  PortRoomGeo::ResetScriptState();
   x808_objectLists[0] = rs_new CObjectList(kOL_All);
   x808_objectLists[1] = rs_new CActorList();
   x808_objectLists[2] = rs_new CPhysicsActorList();
@@ -1070,9 +1077,24 @@ void CStateManager::InitializeState(unsigned int mlvlId, TAreaId aid, unsigned i
   }
 
   allList = x808_objectLists[kOL_All].get();
+#ifdef TARGET_PC
+  // Port: a randomized start room may have no spawn point marked as the first
+  // one; any active one will do then.
+  bool portAnySpawn = true;
+  for (int i = allList->GetFirstObjectIndex(); i != -1; i = allList->GetNextObjectIndex(i)) {
+    const CScriptSpawnPoint* const spawnPoint = TCastToConstPtr< CScriptSpawnPoint >((*allList)[i]);
+    if (spawnPoint != nullptr && spawnPoint->GetActive() && spawnPoint->FirstSpawn()) {
+      portAnySpawn = false;
+      break;
+    }
+  }
+#else
+  const bool portAnySpawn = false;
+#endif
   for (int i = allList->GetFirstObjectIndex(); i != -1; i = allList->GetNextObjectIndex(i)) {
     CScriptSpawnPoint* const spawnPoint = TCastToPtr< CScriptSpawnPoint >((*allList)[i]);
-    if (spawnPoint != nullptr && spawnPoint->GetActive() && spawnPoint->FirstSpawn()) {
+    if (spawnPoint != nullptr && spawnPoint->GetActive() &&
+        (spawnPoint->FirstSpawn() || portAnySpawn)) {
       const CVector3f pos = spawnPoint->GetTransform().GetTranslation();
       CVector3f lookDir = spawnPoint->GetTransform().GetForward();
       lookDir.SetZ(0.f);
@@ -1309,6 +1331,14 @@ void CStateManager::Update(float dt) {
   if (GetWantsToQuit()) return;
 
 #ifdef TARGET_PC
+  // The debug free camera can hold the simulation still. The console keeps running.
+  if (PortFreeCam::Frozen()) {
+    PortConsoleTick(*this);
+    return;
+  }
+#endif
+
+#ifdef TARGET_PC
   // Port: record the pre-tick transforms that presented frames blend from
   // (CActor::PortPresentedView).
   if (PortDebug::ActorInterpolation()) {
@@ -1350,8 +1380,8 @@ void CStateManager::Update(float dt) {
   PortSmokeDash(*this);
   PortSmokeWater(*this);
   PortSmokeMouseBeforeUpdate(*this);
-  PortConsoleTick(*this);
 #endif
+  PortConsoleTick(*this);
 
   PortDebug::SetStateManager(this);
   PortDebug::ConsumeWorldSweepRequest(*this);
@@ -1585,6 +1615,12 @@ void CStateManager::ProcessInput(const CFinalInput& input) {
     if (x84c_player->GetDisableInput()) {
       disableInput = true;
     }
+#ifdef TARGET_PC
+    // The debug free camera flies on the pad; the player stands still meanwhile.
+    if (PortFreeCam::Input(input)) {
+      disableInput = true;
+    }
+#endif
 
     if (disableInput) {
       xb54_finalInput = skDefaultInput;
@@ -1602,6 +1638,11 @@ void CStateManager::ProcessInput(const CFinalInput& input) {
     }
   }
 
+#ifdef TARGET_PC
+  if (PortFreeCam::Active()) {
+    return;
+  }
+#endif
   x870_cameraManager->ProcessInput(input, *this);
 }
 
@@ -1742,6 +1783,14 @@ bool CStateManager::ApplyLocalDamage(const CVector3f& pos, const CVector3f& dir,
       const float phazonReduction = gpTweakPlayer->GetPhazonDamageReduction();
       damageReduction = CMath::Max< float >(damageReduction, phazonReduction);
     }
+#ifdef TARGET_PC
+    // An Archipelago seed may count the suits instead (staggered_suit_damage).
+    PortAp::SuitDamageReduction(PortDebug::ApSuitDamage(),
+                                x8b8_playerState->HasPowerUp(CPlayerState::kIT_VariaSuit),
+                                x8b8_playerState->HasPowerUp(CPlayerState::kIT_GravitySuit),
+                                x8b8_playerState->HasPowerUp(CPlayerState::kIT_PhazonSuit),
+                                damageReduction);
+#endif
 
     useDamage = -(damageReduction * useDamage - useDamage);
   }
@@ -2428,7 +2477,8 @@ void CStateManager::PreRender() {
   BuildDynamicLightListForWorld();
 
   const CGameCamera& curCam = x870_cameraManager->GetCurrentCamera(*this);
-  const CTransform4f curCamXf = x870_cameraManager->GetCurrentCameraTransform(*this);
+  const CTransform4f curCamXf =
+      PortFreeCam::View(x870_cameraManager->GetCurrentCameraTransform(*this));
   CFrustumPlanes frustum(curCamXf, 0.017453292f * curCam.GetFov(), curCam.GetAspectRatio(),
                          curCam.GetNearClipDistance(), false, 100.f);
 #ifdef TARGET_PC
@@ -2469,7 +2519,8 @@ void CStateManager::PreRender() {
 
 CFrustumPlanes CStateManager::SetupViewForDraw(const CViewport& viewport) const {
   const CGameCamera& cam = x870_cameraManager->GetCurrentCamera(*this);
-  const CTransform4f camXf = x870_cameraManager->GetCurrentCameraTransform(*this);
+  const CTransform4f camXf =
+      PortFreeCam::View(x870_cameraManager->GetCurrentCameraTransform(*this));
   gpRender->SetWorldViewpoint(camXf);
 
   const CVector3f playerPos = x84c_player->GetTranslation();
@@ -2620,7 +2671,11 @@ void CStateManager::PortCaptureProbeFace() const {
     }
   }
   PortRoomEnv::SetLoadedAreas(mreas, mreaCount);
+  if (x8cc_nextAreaId != kInvalidAreaId) {
+    PortRoomEnv::SetViewArea(x850_world->GetArea(x8cc_nextAreaId)->GetAreaAssetId());
+  }
   PortRoomGeo::SetLoadedAreas(mreas, mreaCount);
+  PortRoomLiquid::SetLoadedAreas(mreas, mreaCount);
   static uint lastDraws = 0;
   static int face = 0;
   static int filled = 0;
@@ -2650,7 +2705,8 @@ void CStateManager::PortCaptureProbeFace() const {
   };
   const int kSize = 128;
   const CGameCamera& cam = x870_cameraManager->GetCurrentCamera(*this);
-  const CVector3f pos = x870_cameraManager->GetCurrentCameraTransform(*this).GetTranslation();
+  const CVector3f pos =
+      PortFreeCam::View(x870_cameraManager->GetCurrentCameraTransform(*this)).GetTranslation();
   const CVector3f fwd(kFaces[face][0], kFaces[face][1], kFaces[face][2]);
   const CVector3f up(kFaces[face][3], kFaces[face][4], kFaces[face][5]);
   const CVector3f right = CVector3f::Cross(fwd, up);
@@ -2969,7 +3025,7 @@ void CStateManager::DrawWorld() const {
     }
 #endif
 #ifdef TARGET_PC
-    if (!PortViewModel::Active())
+    if (!PortViewModel::Active() && !PortFreeCam::Active())
 #endif
     x84c_player->RenderGun(*this, x870_cameraManager->GetGlobalCameraTranslation(*this));
 #ifdef TARGET_PC

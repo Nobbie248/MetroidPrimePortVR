@@ -260,6 +260,11 @@ uint32_t aurora_get_frame_worker_native_thread_id(void);
 // Absolute schedule for the next sealed frame on steady_clock (retained replay only).
 void aurora_set_present_schedule(uint64_t baseNanos, uint64_t intervalNanos);
 void aurora_report_producer_paced(bool paced);
+// Drops the swapchain if the window's surface went away, without starting a frame.
+// For a main thread that waits outside the frame loop (a file dialog, a long copy):
+// Android's surfaceDestroyed waits for this, and a swapchain left on a destroyed
+// window can lose the device. Cheap when nothing changed.
+void aurora_release_lost_surface();
 
 void aurora_set_log_level(AuroraLogLevel level);
 void aurora_set_pause_on_focus_lost(bool value);

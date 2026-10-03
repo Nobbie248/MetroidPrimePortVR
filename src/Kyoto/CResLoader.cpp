@@ -6,6 +6,7 @@
 
 #ifdef TARGET_PC
 #include "Kyoto/CDvdRequest.hpp"
+#include "port_ap_world.h"
 #include "port_custom_res.h"
 #include "port_mods.h"
 #include "port_skip_cutscenes.h"
@@ -134,7 +135,9 @@ bool PortReadDisc(uint id, std::vector< uint8_t >& out, uint* type = nullptr) {
 
 const PortCustomRes::Resource* CResLoader::PortCustomResource(const CAssetId asset) {
   const bool custom = PortCustomRes::IsCustomId(asset);
-  if ((!custom && !PortSkipCutscenes::IsPickupDependency(asset)) || PortPakResourceExists(asset))
+  if ((!custom && !PortSkipCutscenes::IsPickupDependency(asset) &&
+       !PortApWorld::IsDoorDependency(asset)) ||
+      PortPakResourceExists(asset))
     return nullptr;
   if (custom) {
     // Sources come from a loaded PAK when one has them, else from the disc.
@@ -152,7 +155,7 @@ const PortCustomRes::Resource* CResLoader::PortCustomResource(const CAssetId ass
     });
   }
 
-  // A pickup model's texture, skin or animation from another world's PAK
+  // A pickup model's texture, skin or animation, or a door type's shield, from another world's PAK
   // (randomprime copies these into the room's PAK instead). Kept for the run;
   // a later load of that PAK is found first.
   static std::mutex sMutex;
@@ -327,6 +330,23 @@ void CResLoader::PortReopenPaks(void (*between)()) {
       }
     }
     *paks[i].slot = rstl::auto_ptr< CPakFile >(pak);
+  }
+  // A reload can spill mod resources into more extra PAKs than before.
+  for (int i = 0; i < PortMods::ExtraPakCount(); ++i) {
+    const rstl::string name(PortMods::ExtraPakName(i).c_str());
+    const rstl::string file(name + ".pak");
+    bool open = false;
+    for (size_t j = 0; j < paks.size() && !open; ++j) {
+      open = CStringExtras::CompareCaseInsensitive(paks[j].name, file) == 0;
+    }
+    if (!open) {
+      AddPakFileAsync(name, false, false);
+    }
+  }
+  while (!AreAllPaksLoaded()) {
+    AsyncIdlePakLoading();
+    ARQPoll();
+    OSYieldThread();
   }
 }
 #endif

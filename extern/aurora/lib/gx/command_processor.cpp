@@ -782,6 +782,12 @@ void handle_aurora(ByteReader& reader) noexcept {
       g_gxState.pbr = pbr;
       g_gxState.dirty |= DirtyPipeline;
     }
+  } else if (subCmd == GX_AURORA_SET_SDF) {
+    const u8 sdf = reader.read<u8>();
+    if (g_gxState.sdf != sdf) {
+      g_gxState.sdf = sdf;
+      g_gxState.dirty |= DirtyPipeline;
+    }
   } else if (subCmd == GX_AURORA_COPY_PROBE_FACE) {
     copy_probe_face(reader.read<u8>());
   } else if (subCmd == GX_AURORA_SET_PBR_PROBE) {
@@ -871,9 +877,23 @@ void handle_aurora(ByteReader& reader) noexcept {
       g_gxState.pbrVolumeRows = rows;
       g_gxState.dirty |= DirtyUniform;
     }
+  } else if (subCmd == GX_AURORA_SET_PBR_TONE) {
+    std::array<Vec4<float>, 3> rows;
+    for (Vec4<float>& v : rows) {
+      const f32 x = reader.read<f32>();
+      const f32 y = reader.read<f32>();
+      const f32 z = reader.read<f32>();
+      const f32 w = reader.read<f32>();
+      v = {x, y, z, w};
+    }
+    if (g_gxState.pbrTone != rows) {
+      g_gxState.pbrTone = rows;
+      g_gxState.dirty |= DirtyUniform;
+    }
   } else if (subCmd == GX_AURORA_SET_PBR_MATERIAL) {
     for (Vec4<float>* v :
-         {&g_gxState.pbrEmissive, &g_gxState.pbrBacklight, &g_gxState.pbrLayer, &g_gxState.pbrLayerHeight}) {
+         {&g_gxState.pbrEmissive, &g_gxState.pbrBacklight, &g_gxState.pbrLayer, &g_gxState.pbrLayerHeight,
+          &g_gxState.pbrParam, &g_gxState.pbrUp}) {
       const f32 x = reader.read<f32>();
       const f32 y = reader.read<f32>();
       const f32 z = reader.read<f32>();

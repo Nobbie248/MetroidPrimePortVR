@@ -1,6 +1,6 @@
 #pragma once
 
-// Reads a Metroid Prime Remastered model resource (a "CMDL" or "SMDL" RFRM form,
+// Reads a Metroid Prime Remastered model resource (a "CMDL", "SMDL" or "WMDL" RFRM form,
 // as retrotool extracts them) and hands back the decoded geometry and materials in
 // memory. It parses; it converts to nothing and writes nothing.
 //
@@ -125,6 +125,10 @@ struct ModelVertexBuffer {
   std::vector<float> normals;         // xyz per vertex
   std::vector<float> tangents;        // xyzw per vertex (TANGENT)
   std::vector<std::vector<float>> uvs;  // one entry per TEXCOORD_n, uv per vertex
+  // The zw of each TEXCOORD_n, empty when its format holds two components. The
+  // shaders take two texcoords from each attribute: a material's texcoord c is
+  // TEXCOORD_(c/2).xy when c is even and its zw when c is odd.
+  std::vector<std::vector<float>> uvsZw;
   std::vector<float> colors;          // rgba per vertex
   std::vector<uint16_t> joints;       // four per vertex, skinned models only
   std::vector<float> weights;         // four per vertex, skinned models only
@@ -161,7 +165,7 @@ struct ModelLod {
 
 // A parsed model.
 struct Model {
-  uint32_t form = 0;  // 'CMDL' or 'SMDL'
+  uint32_t form = 0;  // 'CMDL', 'SMDL' or 'WMDL'
   uint32_t readerVersion = 0;
   uint32_t writerVersion = 0;
   bool skinned = false;  // the file carried an SKHD chunk, so it is a skinned model

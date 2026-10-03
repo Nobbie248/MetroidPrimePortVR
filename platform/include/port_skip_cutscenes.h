@@ -51,4 +51,20 @@ bool PickupPlacementFor(uint32_t model, PickupPlacement& out);
 int ApplyOps(const uint8_t* scly, size_t size, const uint8_t* ops, size_t opsSize,
              std::vector< uint8_t >& out);
 
+// One script object of a SCLY section, for patches that depend on what the
+// room holds. `props` is the property block as on the disc: the count, the
+// NUL-terminated name, then the properties.
+struct ScriptObject {
+  int layer = 0;
+  uint8_t type = 0;
+  uint32_t id = 0;
+  struct Connection {
+    uint32_t state, message, target;
+  };
+  std::vector< Connection > connections;
+  std::vector< uint8_t > props;
+};
+// Every object of a SCLY section, in order. False when it doesn't parse.
+bool ScanObjects(const uint8_t* scly, size_t size, std::vector< ScriptObject >& out);
+
 } // namespace PortSkipCutscenes

@@ -8,12 +8,73 @@
 #include <cstring>
 #include <map>
 
+#include <cstdlib>
+#include <sstream>
+
+#if !defined(_WIN32)
+#include <unistd.h>
+#endif
+
 #if defined(MP_HAVE_OPENSSL)
 #include <openssl/crypto.h>
 #include <openssl/evp.h>
 #endif
 
 namespace PortRemastered {
+
+bool SourceFile::Open(const std::string& path) {
+  Close();
+#if !defined(_WIN32)
+  if (path.rfind("fd:", 0) == 0) {
+    char* end = nullptr;
+    const long fd = std::strtol(path.c_str() + 3, &end, 10);
+    if (end == path.c_str() + 3 || *end != '\0' || fd < 0) {
+      return false;
+    }
+    m_fd = dup(int(fd));
+    return m_fd >= 0;
+  }
+#endif
+  m_stream.open(path, std::ios::binary);
+  return bool(m_stream);
+}
+
+void SourceFile::Close() {
+#if !defined(_WIN32)
+  if (m_fd >= 0) {
+    close(m_fd);
+    m_fd = -1;
+  }
+#endif
+  m_stream.close();
+  m_stream.clear();
+}
+
+size_t SourceFile::ReadSome(uint64_t offset, void* out, size_t size) {
+#if !defined(_WIN32)
+  if (m_fd >= 0) {
+    // pread leaves the position alone, which the duplicate shares with the caller's.
+    size_t done = 0;
+    while (done < size) {
+      const ssize_t got = pread(m_fd, static_cast<char*>(out) + done, size - done, off_t(offset + done));
+      if (got <= 0) {
+        break;
+      }
+      done += size_t(got);
+    }
+    return done;
+  }
+#endif
+  m_stream.clear();
+  m_stream.seekg(std::streamoff(offset), std::ios::beg);
+  if (!m_stream) {
+    return 0;
+  }
+  m_stream.read(static_cast<char*>(out), std::streamsize(size));
+  return size_t(m_stream.gcount());
+}
+
+bool SourceFile::ReadAt(uint64_t offset, void* out, size_t size) { return ReadSome(offset, out, size) == size; }
 
 #if defined(MP_HAVE_OPENSSL)
 namespace {
@@ -46,16 +107,6 @@ int HexDigit(char c) {
   return -1;
 }
 
-bool ReadAt(std::ifstream& f, uint64_t offset, void* out, size_t size) {
-  f.clear();
-  f.seekg(std::streamoff(offset), std::ios::beg);
-  if (!f) {
-    return false;
-  }
-  f.read(static_cast<char*>(out), std::streamsize(size));
-  return size_t(f.gcount()) == size;
-}
-
 // Wipes key material when the scope ends, so no exit path forgets to.
 struct Wipe {
   void* data;
@@ -78,11 +129,18 @@ struct KeySet {
 };
 
 bool LoadKeys(const std::string& path, KeySet& keys, std::string& error) {
-  std::ifstream f(path);
-  if (!f) {
-    error = "cannot open key file";
-    return false;
+  // A key file is a few KB of text; one that isn't is not read past this.
+  std::string text(1 << 20, '\0');
+  {
+    SourceFile file;
+    if (!file.Open(path)) {
+      error = "cannot open key file";
+      return false;
+    }
+    text.resize(file.ReadSome(0, text.data(), text.size()));
   }
+  Wipe wipe{text.data(), text.size()};
+  std::istringstream f(text);
   std::string line;
   while (std::getline(f, line)) {
     size_t eq = line.find('=');
@@ -195,8 +253,7 @@ Nsp::~Nsp() { Close(); }
 
 void Nsp::Close() {
   OPENSSL_cleanse(m_contentKey, sizeof(m_contentKey));
-  m_file.close();
-  m_file.clear();
+  m_file.Close();
   m_files.clear();
   m_scratch.clear();
   m_open = false;
@@ -209,15 +266,14 @@ bool Nsp::Open(const std::string& nspPath, const std::string& keysPath, std::str
   if (!LoadKeys(keysPath, keys, error)) {
     return false;
   }
-  m_file.open(nspPath, std::ios::binary);
-  if (!m_file) {
+  if (!m_file.Open(nspPath)) {
     error = "cannot open " + nspPath;
     return false;
   }
 
   // --- PFS0: the .nsp container ---------------------------------------------
   uint8_t pfsHeader[16];
-  if (!ReadAt(m_file, 0, pfsHeader, sizeof(pfsHeader)) || std::memcmp(pfsHeader, "PFS0", 4) != 0) {
+  if (!m_file.ReadAt(0, pfsHeader, sizeof(pfsHeader)) || std::memcmp(pfsHeader, "PFS0", 4) != 0) {
     error = "not an .nsp (no PFS0 header)";
     return false;
   }
@@ -229,7 +285,7 @@ bool Nsp::Open(const std::string& nspPath, const std::string& keysPath, std::str
   }
   size_t tableSize = size_t(numFiles) * 24 + stringSize;
   std::vector<uint8_t> table(tableSize);
-  if (!ReadAt(m_file, 16, table.data(), tableSize)) {
+  if (!m_file.ReadAt(16, table.data(), tableSize)) {
     error = "truncated PFS0 table";
     return false;
   }
@@ -282,7 +338,7 @@ bool Nsp::Open(const std::string& nspPath, const std::string& keysPath, std::str
 
   // --- Ticket -----------------------------------------------------------------
   uint8_t tik[0x2C0];
-  if (ticket->size < sizeof(tik) || !ReadAt(m_file, ticket->offset, tik, sizeof(tik))) {
+  if (ticket->size < sizeof(tik) || !m_file.ReadAt(ticket->offset, tik, sizeof(tik))) {
     error = "truncated ticket";
     return false;
   }
@@ -299,7 +355,7 @@ bool Nsp::Open(const std::string& nspPath, const std::string& keysPath, std::str
 
   // --- NCA header ----------------------------------------------------------------
   std::vector<uint8_t> hdr(kNcaHeaderSize);
-  if (!ReadAt(m_file, nca->offset, hdr.data(), kNcaHeaderSize)) {
+  if (!m_file.ReadAt(nca->offset, hdr.data(), kNcaHeaderSize)) {
     error = "cannot read the NCA header";
     return false;
   }
@@ -509,7 +565,7 @@ bool Nsp::ReadSection(uint64_t offset, void* out, size_t size, std::string& erro
     size_t take = std::min(size, kChunk - head);
     // CTR is a stream cipher, so only the start has to sit on a 16-byte boundary.
     m_scratch.resize(head + take);
-    if (!ReadAt(m_file, m_sectionBase + aligned, m_scratch.data(), head + take)) {
+    if (!m_file.ReadAt(m_sectionBase + aligned, m_scratch.data(), head + take)) {
       error = "short read from the .nsp";
       return false;
     }

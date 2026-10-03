@@ -9,6 +9,32 @@ set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_POSITION_INDEPENDENT_CODE ON)
 set(CMAKE_COLOR_DIAGNOSTICS ON)
+
+# Build speed, used only when the tools are installed. ccache makes recompiling
+# unchanged sources nearly free (stashing or setting edits aside rewrites mtimes)
+# and lets a fresh build directory fill from the cache: base_dir rewrites paths
+# under the source tree to relative ones and hash_dir=false drops the build
+# directory from the hash, so sibling build/<name> directories share entries.
+# The sloppiness lets SDL3's precompiled-header sources be cached at all.
+# mold cuts the link of the 230 MB RelWithDebInfo binary.
+option(MP_USE_CCACHE "Compile through ccache when it is installed" ON)
+option(MP_USE_MOLD "Link with mold when it is installed (Linux hosts)" ON)
+if(MP_USE_CCACHE AND NOT CMAKE_CXX_COMPILER_LAUNCHER AND NOT MSVC)
+    find_program(MP_CCACHE ccache)
+    if(MP_CCACHE)
+        set(_mp_ccache "${MP_CCACHE}" "base_dir=${CMAKE_SOURCE_DIR}" "hash_dir=false"
+            "sloppiness=pch_defines,time_macros")
+        set(CMAKE_C_COMPILER_LAUNCHER ${_mp_ccache})
+        set(CMAKE_CXX_COMPILER_LAUNCHER ${_mp_ccache})
+    endif()
+endif()
+if(MP_USE_MOLD AND CMAKE_SYSTEM_NAME STREQUAL "Linux" AND NOT CMAKE_LINKER_TYPE)
+    find_program(MP_MOLD mold)
+    if(MP_MOLD)
+        set(CMAKE_LINKER_TYPE MOLD)
+    endif()
+endif()
+
 include(CTest)
 option(MP_BUILD_TESTS "Build native-port regression tests" ON)
 option(MP_ENABLE_SMOKE_DRIVER "Enable the opt-in real-disc lifecycle test driver" OFF)
@@ -166,6 +192,8 @@ set(MP_PORT_SOURCES
     platform/port_randomizer.cpp
     platform/port_ap_metroidprime.cpp
     platform/port_ap_protocol.cpp
+    platform/port_ap_logic.cpp
+    platform/port_ap_world.cpp
     platform/port_apclient.cpp
     platform/port_json.cpp
     platform/port_discord.cpp
@@ -173,11 +201,15 @@ set(MP_PORT_SOURCES
     platform/port_tracker.cpp
     platform/port_map_pickups.cpp
     platform/port_viewmodel.cpp
+    platform/port_freecam.cpp
+    platform/port_console.cpp
+    platform/port_log_file.cpp
     platform/port_savestate.cpp
     platform/port_savestate_format.cpp
     platform/port_skip_cutscenes.cpp
     platform/port_skip_cutscenes_ops.cpp
     platform/port_gci.cpp
+    platform/port_data_folder.cpp
     platform/port_mods.cpp
     platform/port_mods_pak.cpp
     platform/port_importers.cpp
@@ -185,24 +217,43 @@ set(MP_PORT_SOURCES
     platform/port_remastered_nsp.cpp
     platform/port_remastered_pak.cpp
     platform/port_remastered_txtr.cpp
+    platform/port_hd_font.cpp
+    platform/port_hd_font_file.cpp
+    platform/port_hud_bars.cpp
+    platform/port_hud_bars_file.cpp
+    platform/port_remastered_font.cpp
+    platform/port_remastered_hud.cpp
+    platform/port_remastered_map.cpp
+    platform/port_remastered_movie.cpp
     platform/port_room_env.cpp
     platform/port_room_env_file.cpp
     platform/port_room_geo.cpp
     platform/port_room_geo_file.cpp
+    platform/port_room_liquid.cpp
     platform/port_remastered_cmdl.cpp
     platform/port_remastered_image.cpp
     platform/port_remastered_table.cpp
     platform/port_remastered_convert.cpp
     platform/port_remastered_import.cpp
     platform/port_remastered_room.cpp
+    platform/port_remastered_text.cpp
     platform/port_custom_res.cpp
     platform/port_hints.cpp
     platform/port_ws.cpp
     platform/touch_pad.cpp
     platform/glibc_compat.c
     platform/ai_dma.cpp)
+# The movie import's decoder: a separate ffmpeg program on the desktop. Android
+# has none to start, so its own decoder (MediaCodec) and the port's JPEG encoder
+# do the same job there.
+if(ANDROID)
+    list(APPEND MP_PORT_SOURCES platform/port_remastered_mediacodec.cpp platform/port_remastered_jpeg.cpp)
+else()
+    list(APPEND MP_PORT_SOURCES platform/port_remastered_ffmpeg.cpp)
+endif()
 if(ANDROID)
     add_library(metroid_prime_port SHARED ${MP_PORT_SOURCES})
+    target_link_libraries(metroid_prime_port PRIVATE mediandk)
     target_link_options(metroid_prime_port PRIVATE "-Wl,-u,SDL_main")
 else()
     add_executable(metroid_prime_port ${MP_PORT_SOURCES})
@@ -290,7 +341,7 @@ add_custom_command(TARGET metroid_prime_port POST_BUILD
         "$<TARGET_FILE_DIR:metroid_prime_port>/textures"
     COMMENT "Copying texture replacements next to the executable")
 if(MP_ENABLE_SMOKE_DRIVER)
-    target_sources(metroid_prime_port PRIVATE platform/smoke.cpp platform/port_console.cpp)
+    target_sources(metroid_prime_port PRIVATE platform/smoke.cpp)
     target_compile_definitions(mp_game PRIVATE MP_ENABLE_SMOKE_DRIVER)
 endif()
 # aurora_core (webgpu/gpu.cpp) and aurora_gx reference each other; group them so
@@ -385,12 +436,21 @@ if(MP_BUILD_TESTS)
         tests/port_apclient.cpp
         platform/port_ap_metroidprime.cpp
         platform/port_ap_protocol.cpp
+        platform/port_ap_logic.cpp
+        platform/port_ap_world.cpp
         platform/port_json.cpp
         platform/port_randomizer.cpp)
     target_include_directories(port_apclient_tests PRIVATE
         platform/include extern/aurora/include include)
     target_compile_definitions(port_apclient_tests PRIVATE TARGET_PC VERSION=0)
     target_link_libraries(port_apclient_tests PRIVATE ${AURORA_SDL3_TARGET})
+    add_executable(port_ap_logic_tests
+        tests/port_ap_logic.cpp
+        platform/port_ap_logic.cpp
+        platform/port_ap_metroidprime.cpp)
+    target_include_directories(port_ap_logic_tests PRIVATE
+        platform/include extern/aurora/include include)
+    target_compile_definitions(port_ap_logic_tests PRIVATE TARGET_PC VERSION=0)
     add_executable(port_musyx_tests tests/port_musyx.c)
     target_link_libraries(port_musyx_tests PRIVATE musyx)
     add_executable(port_disc_tests tests/port_disc.cpp platform/disc.cpp)
@@ -427,6 +487,18 @@ if(MP_BUILD_TESTS)
     target_include_directories(port_mods_tests PRIVATE platform/include)
     add_executable(port_room_env_tests tests/port_room_env.cpp platform/port_room_env_file.cpp)
     target_include_directories(port_room_env_tests PRIVATE platform/include)
+    add_executable(port_room_geo_tests tests/port_room_geo.cpp platform/port_room_geo_file.cpp)
+    target_include_directories(port_room_geo_tests PRIVATE platform/include)
+    add_executable(port_hd_font_tests tests/port_hd_font.cpp platform/port_hd_font_file.cpp platform/port_remastered_font.cpp)
+    target_include_directories(port_hd_font_tests PRIVATE platform/include)
+    add_executable(port_remastered_text_tests tests/port_remastered_text.cpp platform/port_remastered_text.cpp)
+    target_include_directories(port_remastered_text_tests PRIVATE platform/include)
+    add_executable(port_hud_bars_tests tests/port_hud_bars.cpp platform/port_hud_bars_file.cpp)
+    target_include_directories(port_hud_bars_tests PRIVATE platform/include)
+    add_executable(port_remastered_hud_tests tests/port_remastered_hud.cpp platform/port_remastered_hud.cpp platform/port_hud_bars_file.cpp platform/port_remastered_image.cpp platform/port_remastered_pak.cpp)
+    target_include_directories(port_remastered_hud_tests PRIVATE platform/include)
+    add_executable(port_remastered_movie_tests tests/port_remastered_movie.cpp platform/port_remastered_movie.cpp platform/port_remastered_jpeg.cpp)
+    target_include_directories(port_remastered_movie_tests PRIVATE platform/include)
     add_executable(port_importers_tests tests/port_importers.cpp platform/port_importers_lines.cpp)
     target_include_directories(port_importers_tests PRIVATE platform/include)
     add_executable(port_custom_res_tests tests/port_custom_res.cpp platform/port_custom_res.cpp)
@@ -435,6 +507,17 @@ if(MP_BUILD_TESTS)
     target_include_directories(port_hold_toggle_tests PRIVATE platform/include)
     add_executable(port_tick_pair_tests tests/port_tick_pair.cpp)
     target_include_directories(port_tick_pair_tests PRIVATE platform/include)
+    add_executable(port_input_map_tests tests/port_input_map.cpp)
+    target_include_directories(port_input_map_tests PRIVATE platform/include)
+    add_test(NAME port_input_map_tests COMMAND port_input_map_tests)
+    set_tests_properties(port_input_map_tests PROPERTIES TIMEOUT 15 LABELS port)
+    aurora_copy_runtime_dlls(port_input_map_tests)
+    add_executable(port_data_folder_tests tests/port_data_folder.cpp platform/port_data_folder.cpp)
+    target_include_directories(port_data_folder_tests PRIVATE platform/include)
+    target_link_libraries(port_data_folder_tests PRIVATE ${AURORA_SDL3_TARGET})
+    add_test(NAME port_data_folder_tests COMMAND port_data_folder_tests "${CMAKE_CURRENT_BINARY_DIR}/data-folder-test")
+    set_tests_properties(port_data_folder_tests PROPERTIES TIMEOUT 15 LABELS port)
+    aurora_copy_runtime_dlls(port_data_folder_tests)
     add_executable(port_discord_tests tests/port_discord.cpp platform/port_json.cpp)
     target_include_directories(port_discord_tests PRIVATE platform/include)
     target_compile_definitions(port_discord_tests PRIVATE TARGET_PC)
@@ -460,7 +543,7 @@ if(MP_BUILD_TESTS)
     add_test(NAME port_gci_tests COMMAND port_gci_tests)
     set_tests_properties(port_gci_tests PROPERTIES TIMEOUT 15 LABELS port)
     aurora_copy_runtime_dlls(port_gci_tests)
-    foreach(test IN ITEMS port_buffer_tests port_ai_tests port_randomizer_tests port_apclient_tests port_musyx_tests port_disc_tests port_mouse_tests port_touch_pad_tests port_json_tests port_ws_tests port_mods_tests port_room_env_tests port_importers_tests port_custom_res_tests port_hold_toggle_tests port_tick_pair_tests port_livesplit_tests port_discord_tests port_savestate_tests port_timing_tests port_audio_math_tests port_vr_stereo_tests)
+    foreach(test IN ITEMS port_buffer_tests port_ai_tests port_randomizer_tests port_apclient_tests port_ap_logic_tests port_musyx_tests port_disc_tests port_mouse_tests port_touch_pad_tests port_json_tests port_ws_tests port_mods_tests port_room_env_tests port_room_geo_tests port_hd_font_tests port_hud_bars_tests port_remastered_hud_tests port_remastered_movie_tests port_remastered_text_tests port_importers_tests port_custom_res_tests port_hold_toggle_tests port_tick_pair_tests port_livesplit_tests port_discord_tests port_savestate_tests port_timing_tests port_audio_math_tests port_vr_stereo_tests)
         add_test(NAME ${test} COMMAND ${test})
         set_tests_properties(${test} PROPERTIES TIMEOUT 15 LABELS port)
         aurora_copy_runtime_dlls(${test})

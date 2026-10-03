@@ -48,6 +48,7 @@
 #include <math.h>
 
 #include "port_debug.h"
+#include "port_map_icons.h"
 
 static const char* const skFRME_MapScreen = "FRME_MapScreen";
 
@@ -212,6 +213,18 @@ CAutoMapper::CAutoMapper(const CStateManager& stateMgr)
   x8_mapu.Lock();
   x30_miniMapSamus.Lock();
   x3c_hintBeacon.Lock();
+
+  const CAssetId compassShell = static_cast< CAssetId >(PortMapIcons::kCompassShell);
+  const CAssetId compassNeedle = static_cast< CAssetId >(PortMapIcons::kCompassNeedle);
+  if (gpResourceFactory->GetResourceTypeById(compassShell) == 'CMDL' &&
+      gpResourceFactory->GetResourceTypeById(compassNeedle) == 'CMDL') {
+    x330_compassShell =
+        rs_new TCachedToken< CModel >(gpSimplePool->GetObj(SObjectTag('CMDL', compassShell)));
+    x334_compassNeedle =
+        rs_new TCachedToken< CModel >(gpSimplePool->GetObj(SObjectTag('CMDL', compassNeedle)));
+    x330_compassShell->Lock();
+    x334_compassNeedle->Lock();
+  }
 
   x48_mapIcons.push_back(
       gpSimplePool->GetObj(SObjectTag('TXTR', gpTweakPlayerRes->x4_saveStationIcon)));
@@ -1277,8 +1290,54 @@ void CAutoMapper::Draw(const CStateManager& mgr, const CTransform4f& xf, float a
 
     CGraphics::SetDepthRange(0.f, 0.f);
     x2c_frmeInitialized->Draw(CGuiWidgetDrawParms(drawAlpha, CVector3f::Zero()));
+    // The disc's legend sits where Remastered's compass does, so the compass
+    // shows as the legend slides away (Y).
+    if (!IsInMapperState(kAMS_MiniMap))
+      DrawCompass(drawAlpha * x318_leftPanePos);
     CGraphics::SetDepthRange(0.f, 1.f / 512.f);
   }
+}
+
+// Remastered's compass (UpdateCompass in its executable): in a 16x9 screen it sits
+// at (-6.4, 2.25) at 0.8 scale, the disc tilted with the map camera's pitch and the
+// needle turned by the whole camera, so it points the map's north. Additive at half
+// the frame's alpha, no depth, both faces. The minimap has none.
+void CAutoMapper::DrawCompass(float alpha) const {
+  if (x330_compassShell.null() || x334_compassNeedle.null() || alpha <= 0.f)
+    return;
+  if (!x330_compassShell->TryCache() || !x334_compassNeedle->TryCache())
+    return;
+
+  const CGraphics::CProjectionState savedProj = CGraphics::GetProjectionState();
+  const CTransform4f savedView = CGraphics::GetViewMatrix();
+  const CTransform4f savedModel = CGraphics::GetModelMatrix();
+
+  const float aspect = static_cast< float >(CGraphics::GetViewportWidth()) /
+                       static_cast< float >(CGraphics::GetViewportHeight());
+  CGraphics::SetOrtho(-4.5f * aspect, 4.5f * aspect, 4.5f, -4.5f, -10.f, 10.f);
+  CGraphics::SetViewPointMatrix(CTransform4f::Identity());
+  CGraphics::SetCullMode(kCM_None);
+
+  const CEulerAngles eulers = CEulerAngles::FromQuaternion(xa8_renderState0.x8_camOrientation);
+  const CTransform4f place =
+      CTransform4f::Translate(-6.4f * rstl::min_val(1.f, aspect / (16.f / 9.f)), 0.f, 2.25f);
+  const CTransform4f scale = CTransform4f::Scale(0.8f);
+  const CTransform4f camRot(
+      xa8_renderState0.x8_camOrientation.BuildTransform4f(CVector3f::Zero()).BuildMatrix3f()
+          .GetTranspose(),
+      CVector3f::Zero());
+  const CModelFlags flags =
+      CModelFlags::Additive(CColor(1.f, 1.f, 1.f, 0.5f * alpha)).DepthCompareUpdate(false, false);
+
+  CGraphics::SetModelMatrix(place * CTransform4f::RotateX(CRelAngle(-eulers.GetX())) * scale);
+  x330_compassShell->GetObject()->Draw(flags);
+  CGraphics::SetModelMatrix(place * camRot * scale);
+  x334_compassNeedle->GetObject()->Draw(flags);
+
+  CGraphics::SetCullMode(kCM_Front);
+  CGraphics::SetProjectionState(savedProj);
+  CGraphics::SetViewPointMatrix(savedView);
+  CGraphics::SetModelMatrix(savedModel);
 }
 
 CAssetId CAutoMapper::GetAreaHintDescriptionString(CAssetId mreaId) {

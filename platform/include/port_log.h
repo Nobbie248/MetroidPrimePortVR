@@ -5,6 +5,8 @@
 
 #if defined(__ANDROID__)
 #include <android/log.h>
+
+#include "port_log_file.h"
 #endif
 
 // The port's own diagnostics: build id, chosen disc, randomizer and
@@ -25,6 +27,7 @@ inline void Write(const char* format, ...) {
     return;
 #if defined(__ANDROID__)
   __android_log_write(ANDROID_LOG_INFO, "metroidprime", buffer);
+  PortLogFile::Write("metroidprime", buffer);
 #else
   std::fputs(buffer, stderr);
 #endif

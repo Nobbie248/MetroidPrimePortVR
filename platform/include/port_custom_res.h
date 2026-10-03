@@ -29,7 +29,35 @@ enum : uint32_t {
   kXrayAncs = 0xDEAF000E,
   kCombatCmdl = 0xDEAF000F,
   kCombatAncs = 0xDEAF0010,
+  // Door shields and their textures for Archipelago's door types (ids of
+  // the port's own: no seed names them).
+  kDoorPowerHolorimTxtr = 0xDEAF0100,
+  kDoorBombHolorimTxtr = 0xDEAF0101,
+  kDoorBombPatternTxtr = 0xDEAF0102,
+  kDoorBombColorTxtr = 0xDEAF0103,
+  kDoorPowerCmdl = 0xDEAF0110, // each followed by its vertical twin
+  kDoorBombCmdl = 0xDEAF0112,
+  kDoorMissileCmdl = 0xDEAF0114,
+  kDoorDisabledCmdl = 0xDEAF0116,
+  kDoorPlasmaVerticalCmdl = 0xDEAF0118,
+  // Blast shields, eight ids per kind (ShieldKind): the missile shield's
+  // glow border, glow trim, body and moving glow recoloured, and at + 7 its
+  // model wearing them.
+  kShieldBase = 0xDEAF0120,
+  kShieldEnd = kShieldBase + 8 * 7,
 };
+// The blast shields the disc has no model for, in kShieldBase order.
+enum ShieldKind {
+  kShieldBomb,
+  kShieldCharge,
+  kShieldFlamethrower,
+  kShieldIceSpreader,
+  kShieldWavebuster,
+  kShieldPowerBomb,
+  kShieldSuperMissile,
+  kShieldKinds
+};
+constexpr uint32_t ShieldCmdl(int kind) { return kShieldBase + 8 * uint32_t(kind) + 7; }
 
 inline bool IsCustomId(uint32_t id) { return (id & 0xFFFF0000u) == 0xDEAF0000u; }
 
@@ -68,5 +96,9 @@ std::u16string Utf16(const std::string& text);
 // when the layout isn't what randomprime's recipe expects.
 bool SetCmdlTexture(std::vector<uint8_t>& cmdl, uint32_t index, uint32_t texture);
 bool SetAncsModel(std::vector<uint8_t>& ancs, uint32_t expectedModel, uint32_t model);
+// Recolours a CMPR texture, every mip: each block's two colours go through
+// `matrix` (out = matrix * rgb, row per output channel), and the block keeps
+// its mode when that changes their order. False for another format.
+bool TintTxtr(std::vector<uint8_t>& txtr, const float matrix[3][3]);
 
 } // namespace PortCustomRes

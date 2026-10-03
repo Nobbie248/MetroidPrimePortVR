@@ -105,6 +105,14 @@ public:
   CCubeMaterial GetMaterialByIndex(const int idx) const;
 #ifdef TARGET_PC
   void PortSetPBRMaterial(const int idx) const;
+  // The material's record (see the definition) with the neutral values where it has
+  // none; returns how many floats the record holds, 0 without one.
+  int PortReadPBRMaterial(const int idx, float values[19]) const;
+  uint PortMaterialCount() const;
+  // Debugging: draws a model's material with values[field] replaced, until cleared. The
+  // caller must clear before the model goes.
+  static void PortOverridePBR(const CCubeModel* model, int material, int field, float value);
+  static void PortClearPBROverrides();
 #endif
   void SetStaticArraysCurrent() const;
   void SetArraysCurrent() const;

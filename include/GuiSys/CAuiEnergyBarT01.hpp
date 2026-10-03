@@ -8,6 +8,12 @@
 #include <Kyoto/TToken.hpp>
 #include <rstl/optional_object.hpp>
 
+#include <memory>
+
+namespace PortHudBars {
+struct Bar;
+}
+
 class IObjectStore;
 class CAuiEnergyBarT01 : public CGuiWidget {
 public:
@@ -46,6 +52,11 @@ public:
   static rstl::pair< CVector3f, CVector3f > DownloadBarCoordFunc(float t);
 
 private:
+  // Port: the strip a mod gives this bar in place of mCoordFunc, if any (port_hud_bars.h).
+  const PortHudBars::Bar* PortBar() const;
+  void PortDrawBar(const PortHudBars::Bar& bar, float from, float to,
+                   const CColor& color) const;
+
   CAssetId mTextureId;                                        // 0xb8
   rstl::optional_object< TCachedToken< CTexture > > mTexture; // 0xbc
   CColor mEmptyColor;                                         // 0xcc
@@ -63,6 +74,10 @@ private:
   float mFilledEnergy;                                        // 0xf8
   float mShadowEnergy;                                        // 0xfc
   float mShadowDrainDelayTimer;                               // 0x100
+  // Port: holds the frame's bars, so a mod reload leaves mPortBar valid until the frame goes.
+  mutable std::shared_ptr< const void > mPortBars;
+  mutable const PortHudBars::Bar* mPortBar;
+  mutable bool mPortBarLooked;
 };
 
 #endif // _CAUIENERGYBART01

@@ -1,4 +1,5 @@
 #include "MetroidPrime/CEntity.hpp"
+#include "port_room_geo.h"
 
 rstl::vector< SConnection > CEntity::NullConnectionList;
 
@@ -44,6 +45,8 @@ void CEntity::AcceptScriptMsg(EScriptObjectMessage msg, TUniqueId uid, CStateMan
 
 void CEntity::SendScriptMsgs(EScriptObjectState state, CStateManager& mgr,
                              EScriptObjectMessage skipMsg) {
+  // Remastered scenery a mod draws in place of the room's own shows and hides on states.
+  PortRoomGeo::OnScriptState(mgr, GetEditorId().value, state);
   rstl::vector< SConnection >::const_iterator it = x20_conns.begin();
   for (; it != x20_conns.end(); ++it) {
     if (it->x0_state == state && it->x4_msg != skipMsg) {

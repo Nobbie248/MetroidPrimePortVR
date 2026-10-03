@@ -40,6 +40,7 @@
 #include "Kyoto/Math/CMath.hpp"
 #include "port_apclient.h"
 #include "port_debug.h"
+#include "port_model_variant.h"
 #include "Kyoto/Math/CPlane.hpp"
 #include "Kyoto/Math/CRelAngle.hpp"
 #include "Kyoto/Math/CTransform4f.hpp"
@@ -431,6 +432,7 @@ namespace {
 // Time left before the next Spring Ball: randomprime's 40 frames. Seconds, as
 // the port's tick rate varies. There is one morph ball, so a static will do.
 float sSpringBallCooldown = 0.f;
+bool sSpringShiftHeld = true;
 
 bool SpringBallUnlocked(const CStateManager& mgr) {
   const bool bombs = mgr.GetPlayerState()->HasPowerUp(CPlayerState::kIT_MorphBallBombs);
@@ -451,10 +453,18 @@ void CMorphBall::ComputeBallMovement(const CFinalInput& input, CStateManager& mg
   // Twin stick consumes the C-stick, so its raw right stick counts too, but not
   // in the frozen-controls calls, whose blank input has no time. (It is the
   // clamped pad value over 127, so full tilt reads about 0.46.) A gyro flick,
-  // when that option is on, counts as well.
+  // when that option is on, counts as well. So does pressing the beam shift
+  // (beams don't change in morph ball), as the same button, X, does in
+  // Remastered's Dual Sticks layout. Jump stays the Boost Ball's alone.
+  bool shiftSpring = false;
+  if (input.Time() > 0.f) {
+    const bool shiftHeld = PortDebug::BeamShiftHeld();
+    shiftSpring = shiftHeld && !sSpringShiftHeld;
+    sSpringShiftHeld = shiftHeld;
+  }
   if (sSpringBallCooldown > 0.f) {
     sSpringBallCooldown -= dt;
-  } else if ((input.ARAUp() > 0.f ||
+  } else if ((input.ARAUp() > 0.f || shiftSpring ||
               (input.Time() > 0.f && (PortDebug::TwinStickRightY() > 0.25f ||
                                       PortDebug::SpringBallFlickPending()))) &&
              x0_player.GetPlayerMovementState() == NPlayer::kMS_OnGround &&
@@ -1401,6 +1411,8 @@ void CMorphBall::EnterMorphBallState(CStateManager& mgr) {
   x2c_tireLeanAngle = 0.f;
 #ifdef TARGET_PC
   sSpringBallCooldown = 0.f;
+  // A shift still held from before needs a fresh press.
+  sSpringShiftHeld = true;
 #endif
 }
 
@@ -2674,14 +2686,29 @@ void CMorphBall::LoadMorphBallModel(CStateManager& mgr) {
     x4_loadedModelId = loadModelId;
     if (spiderBall) {
       x58_ballModel =
-          GetMorphBallModel(rstl::string_l(skSpiderBallCharacter[modelIdx].x0_name), xc_radius);
+          GetMorphBallModel(rstl::string_l(skSpiderBallCharacter[modelIdx].x0_name), xc_radius
+#ifdef TARGET_PC
+                            ,
+                            modelIdx
+#endif
+          );
       x5c_ballModelShader = skSpiderBallCharacter[modelIdx].x4_shader;
       x68_lowPolyBallModel =
-          GetMorphBallModel(rstl::string_l(skSpiderBallLowPoly[modelIdx].x0_name), xc_radius);
+          GetMorphBallModel(rstl::string_l(skSpiderBallLowPoly[modelIdx].x0_name), xc_radius
+#ifdef TARGET_PC
+                            ,
+                            modelIdx
+#endif
+          );
       x6c_lowPolyBallModelShader = skSpiderBallLowPoly[modelIdx].x4_shader;
       if (skSpiderBallGlass[modelIdx].x0_name != nullptr) {
         x60_spiderBallGlassModel =
-            GetMorphBallModel(rstl::string_l(skSpiderBallGlass[modelIdx].x0_name), xc_radius);
+            GetMorphBallModel(rstl::string_l(skSpiderBallGlass[modelIdx].x0_name), xc_radius
+#ifdef TARGET_PC
+                            ,
+                            modelIdx
+#endif
+          );
         x64_spiderBallGlassModelShader = skSpiderBallGlass[modelIdx].x4_shader;
       } else {
         x60_spiderBallGlassModel = nullptr;
@@ -2690,10 +2717,20 @@ void CMorphBall::LoadMorphBallModel(CStateManager& mgr) {
       x8_ballGlowColorIdx = skSpiderBallGlowColorIdx[modelIdx];
     } else {
       x58_ballModel =
-          GetMorphBallModel(rstl::string_l(skBallCharacter[modelIdx].x0_name), xc_radius);
+          GetMorphBallModel(rstl::string_l(skBallCharacter[modelIdx].x0_name), xc_radius
+#ifdef TARGET_PC
+                            ,
+                            modelIdx
+#endif
+          );
       x5c_ballModelShader = skBallCharacter[modelIdx].x4_shader;
       x68_lowPolyBallModel =
-          GetMorphBallModel(rstl::string_l(skBallLowPoly[modelIdx].x0_name), xc_radius);
+          GetMorphBallModel(rstl::string_l(skBallLowPoly[modelIdx].x0_name), xc_radius
+#ifdef TARGET_PC
+                            ,
+                            modelIdx
+#endif
+          );
       x6c_lowPolyBallModelShader = skBallLowPoly[modelIdx].x4_shader;
       x8_ballGlowColorIdx = skBallGlowColorIdx[modelIdx];
     }
@@ -2703,11 +2740,24 @@ void CMorphBall::LoadMorphBallModel(CStateManager& mgr) {
   }
 }
 
+#ifdef TARGET_PC
+CAssetId CMorphBall::PortSuitVariant(CAssetId id, FourCC type, int suit) {
+  const CAssetId variant = PortModelVariant::Id(id, suit);
+  return gpResourceFactory->GetResourceTypeById(variant) == type ? variant : id;
+}
+
+CModelData* CMorphBall::GetMorphBallModel(const rstl::string& name, float radius, int suit) {
+#else
 CModelData* CMorphBall::GetMorphBallModel(const rstl::string& name, float radius) {
+#endif
   const SObjectTag* tag = gpResourceFactory->GetResourceIdByName(name.data());
 
   // Keep a copy of the resolved resource ID while allocating the model.
+#ifdef TARGET_PC
+  const CAssetId& id = PortSuitVariant(tag->GetId(), tag->GetType(), suit);
+#else
   const CAssetId& id = CAssetId(tag->GetId());
+#endif
   const FourCC& type = tag->GetType();
   const FourCC* const typePtr = &type;
 

@@ -11,6 +11,9 @@
 #include <dolphin/gx/GXVert.h>
 #include <limits.h>
 #include <string.h>
+#ifdef TARGET_PC
+#include "port_hd_font.h"
+#endif
 
 #if VERSION < VERSION_GM8P_00 || VERSION == VERSION_GM8E_02
 
@@ -154,6 +157,10 @@ void CTextRenderBuffer::Render(const CColor& color, float time) const {
   // garbage token and faults in CObjectReference::AddReference.
   x4e_queuedFont = -1;
   x4f_queuedPalette = -1;
+#ifdef TARGET_PC
+  // Whether the active font is being drawn from a mod's distance field.
+  bool hdFont = false;
+#endif
   CMemoryInStream in(x34_bytecode.data(), x44_blobSize, CMemoryInStream::kOS_NotOwned);
   while (in.GetReadPosition() < x44_blobSize) {
     switch (static_cast< ECmd >(in.Get< uchar >())) {
@@ -161,7 +168,15 @@ void CTextRenderBuffer::Render(const CColor& color, float time) const {
       if (x4e_queuedFont >= 0 && x4e_queuedFont < static_cast< int >(x4_fonts.size())) {
         TToken< CRasterFont > font = x4_fonts[x4e_queuedFont];
         if (font.IsLoaded()) {
+#ifdef TARGET_PC
+          if (hdFont) {
+            PortHdFont::End();
+          }
+#endif
           font->SetupRenderState();
+#ifdef TARGET_PC
+          hdFont = PortHdFont::Begin(**font);
+#endif
           x4e_queuedFont = -1;
         }
       }
@@ -177,6 +192,25 @@ void CTextRenderBuffer::Render(const CColor& color, float time) const {
         TToken< CRasterFont > font = x4_fonts[x4c_activeFont];
         if (font.IsLoaded() && font->HasGlyph(chr)) {
           const CGlyph* glyph = font->GetGlyph(chr);
+#ifdef TARGET_PC
+          if (hdFont) {
+            const CGraphicsPalette* const palette =
+                x4d_activePalette >= 0 && x4d_activePalette < static_cast< int >(x50_palettes.size())
+                    ? x50_palettes[x4d_activePalette].get()
+                    : nullptr;
+            if (PortHdFont::DrawGlyph(**font, palette, chr, x, y,
+                                      CColor::Modulate(CColor(chrColor), color).GetGXColor())) {
+              break;
+            }
+            // The distance field lacks this one: the disc's glyphs from here on.
+            PortHdFont::End();
+            hdFont = false;
+            font->SetupRenderState();
+            if (palette != nullptr) {
+              palette->Load();
+            }
+          }
+#endif
           CGX::SetTevKColor(GX_KCOLOR0, CColor::Modulate(CColor(chrColor), color).GetGXColor());
           CGX::Begin(GX_TRIANGLESTRIP, GX_VTXFMT0, 4);
           GXPosition3f32(x, 0.f, y);
@@ -201,6 +235,12 @@ void CTextRenderBuffer::Render(const CColor& color, float time) const {
       TToken< CTexture > texture =
           image.GetImages()[static_cast< int >(time * image.GetFps()) % image.GetImages().size()];
       if (texture.IsLoaded()) {
+#ifdef TARGET_PC
+        if (hdFont) {
+          PortHdFont::End();
+          hdFont = false;
+        }
+#endif
         texture->Load(GX_TEXMAP0, CTexture::kCM_Clamp);
         short width = image.GetMonoWidth();
         short height = image.GetMonoHeight();
@@ -244,6 +284,11 @@ void CTextRenderBuffer::Render(const CColor& color, float time) const {
       break;
     }
   }
+#ifdef TARGET_PC
+  if (hdFont) {
+    PortHdFont::End();
+  }
+#endif
 }
 
 #endif

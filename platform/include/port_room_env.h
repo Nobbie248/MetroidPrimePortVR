@@ -13,7 +13,7 @@
 // ambient colour.
 //
 // The file is little endian:
-//   'MPEV', u32 version (1 to 3), f32 tonemap[4], u32 probes, u32 cubes
+//   'MPEV', u32 version (1 to 4), f32 tonemap[4], u32 probes, u32 cubes
 //   probe: f32 worldToBox[12], f32 worldToCube[9], s32 layer, u32 cube, f32 scale, f32 blend
 //   cube:  u32 size, u32 mips, u32 signed, u32 bytes, then BC6H blocks, every face of
 //          mip 0, then of mip 1 and so on
@@ -26,7 +26,13 @@
 //          (inside a wall).
 // Version 3 goes on:
 //   f32 exposure[2], the lowest and highest exposure value the room's auto exposure may
-//          settle on (0, 0: no limits)
+//          settle on (0, 0: the room has no auto exposure)
+// Version 4 goes on:
+//   f32 bias, what the room's auto exposure adds to the exposure value it measures
+//   f32 contrast, of the tonemap (0 to 1)
+// The tonemap is Remastered's: the exposure value without auto exposure, the radiance
+// that comes out as middle grey once exposed, and how far the curve's toe and shoulder
+// are pulled in.
 // The cubes are stored normalised; a probe's scale times its cube is the radiance, in the
 // same units as the grid's points.
 namespace PortRoomEnv {
@@ -60,7 +66,9 @@ struct Grid {
 
 struct File {
   float tonemap[4] = {};
-  float exposure[2] = {}; // EV range; both 0 when the room sets none
+  float exposure[2] = {}; // EV range; both 0 when the room has no auto exposure
+  float exposureBias = 0.f;
+  float contrast = 0.f;
   std::vector<Probe> probes;
   std::vector<Cube> cubes;
   std::vector<Grid> grids;
@@ -137,17 +145,44 @@ void SetVolumeHint(uint32_t mrea, const float centre[3]);
 void ClearVolumeHint();
 // Whether a model announced for this area would get a volume.
 bool HasVolume(uint32_t mrea);
+// MP_ROOM_ENV_VOLUME, the console's `roomenv volume`.
+void SetVolumesEnabled(bool on);
+bool VolumesEnabled();
+// What the baked ambient is multiplied by; 0 leaves the game's own ambient
+// (MP_ROOM_ENV_AMBIENT, the console's `roomenv ambient`).
+void SetAmbientScale(float scale);
+float AmbientScale();
+// What volume-lit surfaces show, for debugging: 0 the shaded surface, 1 the volume's
+// texture coordinates, 2 the baked light alone (MP_ROOM_ENV_VOLUME_SHOW, the console's
+// `roomenv show`).
+void SetVolumeView(int view);
+int VolumeView();
 // Forgets everything (the mods folder changed).
 void Reset();
 // 0 off, 1 on; the console's `roomenv`.
 void SetEnabled(bool enabled);
 bool Enabled();
-// Whether cubes and ambient are exposed for the room as a whole, by its radiance and its
-// exposure hint (MP_ROOM_ENV_EXPOSURE=1, the console's `roomenv exposure`). Otherwise each
-// cube is exposed to middle grey and the ambient takes the game's level.
+// Whether cubes and ambient are exposed the way Remastered exposes a frame, by the
+// radiance of the room the camera is in and that room's exposure hint, and shaped by its
+// tone curve (MP_ROOM_ENV_EXPOSURE=0 turns it off, as does the console's `roomenv
+// exposure`). Otherwise each cube is exposed to middle grey and the ambient takes the
+// game's level.
 void SetRoomExposed(bool on);
 bool RoomExposed();
+// The area the camera is in: its exposure and tone curve are the frame's.
+void SetViewArea(uint32_t mrea);
+// The frame's tone curve, for GXSetPBRTone; false when rooms are not exposed or the
+// camera's room has no environment.
+bool Tone(float rows[3][4]);
+// The curve of Remastered's tonemap (NTonemap::build_tonemap_eval_params): `mid` is the
+// exposed radiance that comes out at 0.25, with the slope `contrast` sets (0 to 1: between
+// the lines from the origin through 0.25 and through 0.75 there), and `toe` and `shoulder`
+// say how soon the curve leaves that line at either end.
+void BuildTone(float mid, float contrast, float toe, float shoulder, float rows[3][4]);
 // Areas with an environment, cubes on the GPU, ambient grids.
 void Stats(int& areas, int& probes, int& cubes, int& grids);
+// What every loaded area's environment gives a model at `pos` (the console's `roomenv
+// info`): exposure and tone curve, the probe it would reflect, the baked ambient there.
+std::string Info(const float pos[3]);
 
 } // namespace PortRoomEnv

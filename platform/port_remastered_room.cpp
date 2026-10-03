@@ -10,11 +10,13 @@
 #include <cmath>
 #include <cstdio>
 #include <cstring>
+#include <functional>
 #include <map>
 #include <memory>
 #include <set>
 
 #include "port_remastered_txtr.h"
+#include "port_room_geo.h"
 
 namespace PortRemastered {
 namespace {
@@ -36,16 +38,37 @@ constexpr uint32_t kReflectionProbe = 0x27807e39;
 constexpr uint32_t kAutoExposureHint = 0x98694074;
 constexpr uint32_t kDoorMP1 = 0x564a1641;
 constexpr uint32_t kModCon = 0x451740eb;
+constexpr uint32_t kActorMP1 = 0xb6200be6;
 
 // Property ids.
 constexpr uint32_t kPropRoomId = 0x30a4d63d;
 constexpr uint32_t kPropProbeRefl = 0x020e5559;
 constexpr uint32_t kPropProbeBlend = 0x362216cf;
-constexpr uint32_t kPropTonemap[4] = {0x44a2e298, 0x34bb937d, 0x49ee7747, 0x295132dd};
+// Exposure value, middle grey, toe, shoulder, contrast (SLdrTonemap::Load).
+constexpr uint32_t kPropTonemap[5] = {0x44a2e298, 0x34bb937d, 0x49ee7747, 0x295132dd, 0x3373d845};
 constexpr uint32_t kPropHintMin = 0x682f8a1f;
 constexpr uint32_t kPropHintMax = 0x839d334c;
 constexpr uint32_t kPropHintMode = 0x590d6843;
+constexpr uint32_t kPropHintBias = 0x038f85da;
 constexpr uint32_t kPropModConMcon = 0xa8e2ba93;
+constexpr uint32_t kPropActorModel = 0xcb1c52f6;
+// Unnamed in retrotool's templates; what they mean is read off which actors carry them.
+constexpr uint32_t kPropActorAdded = 0x9a25df3b;
+constexpr uint32_t kPropActorAttached = 0x1285da4d;
+// Liquids. A WaterMP1 is the retail water object; the surface drawn for it is a render
+// volume on the same entity.
+constexpr uint32_t kWaterMP1 = 0x12db855d;
+constexpr uint32_t kWaterRenderVolume = 0x23c5dff4;
+constexpr uint32_t kLavaRenderVolume = 0xa7ee9c33;
+constexpr uint32_t kPropWaterFluid[3] = {0xce78300b, 0x18706e5c, 0x6e9e14b9};  // 0 water, 10 poison, 11 lava
+constexpr uint32_t kPropWaterModel = 0x736e5890;
+constexpr uint32_t kPropLavaModel = 0xcaf8e8c3;
+constexpr uint32_t kPropWaterLook = 0xd1e9d29d;
+constexpr uint32_t kPropWaterTint = 0xe8969fad;
+constexpr uint32_t kPropWaterNormal[2] = {0x03e33f4b, 0x90a143ef};
+constexpr uint32_t kPropWaterNormalScale[2] = {0x03e33f4b, 0xd4483c7e};
+constexpr uint32_t kPropWaterWaves[2] = {0x30fbb790, 0x0951bf3e};
+constexpr uint32_t kPropWaveAngle = 0xd1edd7b5;
 
 constexpr size_t kMaxChunks = 1u << 20;
 constexpr size_t kMaxVolumeFloats = size_t(1) << 28;
@@ -197,6 +220,11 @@ public:
     return out;
   }
   const uint8_t* Bytes(const Span& s) const { return m_d->data() + s.start; }
+  // The index of the component with this guid, -1 for none.
+  int ByGuid(const Id16& guid) const {
+    const auto it = m_byGuid.find(guid);
+    return it == m_byGuid.end() ? -1 : int(it->second);
+  }
 
   // The entity's position, rotation and scale; false when the component has no entity.
   bool Xform(const Component& c, Vec3& pos, Vec3& rot, Vec3& scale) const {
@@ -216,9 +244,20 @@ public:
     return true;
   }
 
+  // Whether the component's entity starts active (the first byte of an entity).
+  bool Active(const Component& c) const {
+    if (c.entity < 0) {
+      return false;
+    }
+    const Span& raw = m_comps[size_t(c.entity)].raw;
+    return raw.size >= 1 && Bytes(raw)[0] != 0;
+  }
+
   // The component's own top level properties. A value that is itself a
   // property list is a nested group, which is not a top level key.
   std::map<uint32_t, Span> Flat(const Component& c) const;
+  // A property inside nested groups, named by the groups' ids and then its own.
+  bool Nested(const Component& c, std::initializer_list<uint32_t> path, Span& out) const;
 
 private:
   struct Chunk {
@@ -232,6 +271,7 @@ private:
 
   const std::vector<uint8_t>* m_d = nullptr;
   std::vector<Component> m_comps;
+  std::map<Id16, size_t> m_byGuid;
 };
 
 bool Room::Chunks(size_t o, size_t end, std::vector<Chunk>& out, std::string& error) const {
@@ -284,6 +324,7 @@ bool Room::Find(size_t o, size_t end, const uint32_t* path, size_t depth, std::v
 bool Room::Parse(const std::vector<uint8_t>& data, std::string& error) {
   m_d = &data;
   m_comps.clear();
+  m_byGuid.clear();
   const std::vector<uint8_t>& d = data;
   if (d.size() < 32 || std::memcmp(d.data(), "RFRM", 4) != 0) {
     error = "not an RFRM file";
@@ -303,7 +344,7 @@ bool Room::Parse(const std::vector<uint8_t>& data, std::string& error) {
       !Find(rs, re, pLayr, 2, layers, error)) {
     return false;
   }
-  std::map<Id16, size_t> byGuid;
+  std::map<Id16, size_t>& byGuid = m_byGuid;
   for (size_t li = 0; li < layers.size(); ++li) {
     std::vector<Span> comps;
     const uint32_t pComp[] = {Tag("SRIP"), Tag("COMP")};
@@ -401,6 +442,29 @@ bool PropList(const uint8_t* b, size_t len, std::vector<Prop>* out) {
   return o == len;
 }
 
+bool Room::Nested(const Component& c, std::initializer_list<uint32_t> path, Span& out) const {
+  Span at = c.raw;
+  for (const uint32_t id : path) {
+    std::vector<Prop> props;
+    if (!PropList(Bytes(at), at.size, &props)) {
+      return false;
+    }
+    bool found = false;
+    for (const Prop& p : props) {
+      if (p.id == id) {
+        at = {at.start + p.data.start, p.data.size};
+        found = true;
+        break;
+      }
+    }
+    if (!found) {
+      return false;
+    }
+  }
+  out = at;
+  return true;
+}
+
 std::map<uint32_t, Span> Room::Flat(const Component& c) const {
   std::map<uint32_t, Span> out;
   const uint8_t* b = Bytes(c.raw);
@@ -424,10 +488,21 @@ std::map<uint32_t, Span> Room::Flat(const Component& c) const {
 // Retail world (gcres.py)
 // ---------------------------------------------------------------------------
 
+// A retail script object (SCLY), as far as matching Remastered's entities to it needs.
+struct ScriptObject {
+  uint32_t id = 0;  // editor id, layer bits included
+  uint8_t type = 0;
+  int layer = 0;    // the SCLY layer it is in
+  std::vector<uint32_t> targets;  // of its connections
+  bool hasPos = false;            // the three floats after its name, for any type
+  Vec3 pos{};
+};
+
 struct Area {
   uint32_t mrea = 0;
   Mat34 xf{};
   std::vector<Vec3> doors;
+  std::vector<ScriptObject> objects;
 };
 
 // The MLVL's areas: id and transform.
@@ -498,8 +573,8 @@ bool ReadMlvl(const std::vector<uint8_t>& d, std::vector<std::pair<uint32_t, Mat
   return true;
 }
 
-// The positions of the Door objects (type 3) of an MREA's SCLY section.
-bool ReadDoors(const std::vector<uint8_t>& m, std::vector<Vec3>& doors) {
+// The script objects of an MREA's SCLY section.
+bool ReadScly(const std::vector<uint8_t>& m, std::vector<ScriptObject>& objects) {
   if (m.size() < 100) {
     return false;
   }
@@ -544,7 +619,17 @@ bool ReadDoors(const std::vector<uint8_t>& m, std::vector<Vec3>& doors) {
       if (q + 8 > objectEnd) {
         return false;
       }
+      ScriptObject object;
+      object.id = Be32(&m[q]);
+      object.type = type;
+      object.layer = int(l);
       const uint64_t children = Be32(&m[q + 4]);
+      if (children > (objectEnd - q - 8) / 12) {
+        return false;
+      }
+      for (uint64_t k = 0; k < children; ++k) {
+        object.targets.push_back(Be32(&m[q + 8 + 12 * size_t(k) + 8]));
+      }
       q += 8 + size_t(12 * children) + 4;
       if (q > objectEnd) {
         return false;
@@ -554,17 +639,445 @@ bool ReadDoors(const std::vector<uint8_t>& m, std::vector<Vec3>& doors) {
         return false;
       }
       const size_t rest = size_t(zero - m.data()) + 1;
-      if (type == 3) {
-        if (objectEnd - rest < 12) {
-          return false;
-        }
-        doors.push_back({BeFloat(&m[rest]), BeFloat(&m[rest + 4]), BeFloat(&m[rest + 8])});
+      if (objectEnd - rest >= 12) {
+        object.hasPos = true;
+        object.pos = {BeFloat(&m[rest]), BeFloat(&m[rest + 4]), BeFloat(&m[rest + 8])};
+      } else if (type == 3) {
+        return false;
       }
+      objects.push_back(std::move(object));
       p = objectEnd;
     }
     o += Be32(&m[sizesAt + 4 * size_t(l)]);
   }
   return true;
+}
+
+// ---------------------------------------------------------------------------
+// Script links of scenery actors (build/mpr/scenery/match.py and trace.py)
+// ---------------------------------------------------------------------------
+//
+// Remastered's scripts show and hide the scenery actors it added; the port draws them as
+// room geometry, so what drives them has to be found among retail's objects. Remastered's
+// entities are matched to the area's retail objects (same type at the same place, then
+// the nearest one, then the same connection targets), and an actor's incoming
+// connections are followed back, through Remastered's own relays and timers, to a matched
+// sender. Which retail state a Remastered event is was voted on over every matched room.
+
+struct RemasteredScriptType {
+  uint32_t type;
+  uint8_t retailType;
+};
+struct RemasteredScriptEvent {
+  uint32_t type;
+  uint32_t event;
+  int state;
+};
+#include "port_remastered_script_tables.inc"
+
+constexpr uint32_t kTemplateManager = 0xd645278a;
+// Actions a connection asks of its target.
+constexpr uint32_t kActionActivate = 0xa34e100f;
+constexpr uint32_t kActionDeactivate = 0xdd169ff3;
+constexpr uint32_t kActionIncrement = 0xd5883f10;
+constexpr uint32_t kActionDecrement = 0x767a0969;
+constexpr uint32_t kActionToggleActive = 0xcdeb03ba;
+// Retail types of the Remastered objects a message passes through, and the actions that
+// make each pass it on.
+struct Pass {
+  uint8_t retailType;
+  uint32_t actions[2];
+};
+constexpr Pass kPasses[] = {
+    {0x15, {0x379d362e, 0x379d362e}},  // Relay
+    {0x05, {0xd63b8f04, 0x55193b90}},  // Timer
+    {0x13, {0x326ddb0d, 0x326ddb0d}},  // MemoryRelay
+    {0x5e, {0x144d0f29, 0x8ed2a8c7}},  // ColorModulate
+};
+constexpr double kMatchTolerance = 0.02;
+constexpr double kMatchNear = 2.0;
+
+// The retail type of a Remastered component type, -1 for one retail has no object for.
+int RetailType(uint32_t type) {
+  static const std::map<uint32_t, int> table = [] {
+    std::map<uint32_t, int> t;
+    for (const RemasteredScriptType& row : kRemasteredScriptTypes) {
+      t[row.type] = row.retailType;
+    }
+    return t;
+  }();
+  const auto it = table.find(type);
+  return it == table.end() ? -1 : it->second;
+}
+
+// The retail state a component type's event stands for, -1 when unknown.
+int RetailState(uint32_t type, uint32_t event) {
+  static const std::map<std::pair<uint32_t, uint32_t>, int> table = [] {
+    std::map<std::pair<uint32_t, uint32_t>, int> t;
+    for (const RemasteredScriptEvent& row : kRemasteredScriptEvents) {
+      t[{row.type, row.event}] = row.state;
+    }
+    return t;
+  }();
+  const auto it = table.find({type, event});
+  return it == table.end() ? -1 : it->second;
+}
+
+bool IsPass(int retailType) {
+  for (const Pass& p : kPasses) {
+    if (p.retailType == retailType) {
+      return true;
+    }
+  }
+  return false;
+}
+
+bool PassFires(int retailType, uint32_t action) {
+  for (const Pass& p : kPasses) {
+    if (p.retailType == retailType && (p.actions[0] == action || p.actions[1] == action)) {
+      return true;
+    }
+  }
+  return false;
+}
+
+struct Connection {
+  size_t sender;  // component index
+  uint32_t event;
+  uint32_t action;
+  Id16 target;  // a component's guid
+};
+
+// Every component's outgoing connections, from its id data: guid, a block that may be
+// skipped, then the list. A component whose list does not read gives none.
+std::vector<Connection> ReadConnections(const Room& room) {
+  std::vector<Connection> out;
+  const std::vector<Component>& comps = room.Components();
+  for (size_t i = 0; i < comps.size(); ++i) {
+    const uint8_t* const b = room.Bytes(comps[i].idta);
+    const size_t n = comps[i].idta.size;
+    size_t o = 16;
+    auto has = [&](size_t k) { return o <= n && n - o >= k; };
+    if (!has(8)) {
+      continue;
+    }
+    const uint32_t x = Le32(b + o), y = Le32(b + o + 4);
+    o += 8;
+    if (x == 0xffffffff) {
+      if (!has(y)) {
+        continue;
+      }
+      o += y;
+    }
+    if (!has(2)) {
+      continue;
+    }
+    const size_t count = Le16(b + o);
+    o += 2;
+    std::vector<Connection> mine;
+    bool ok = true;
+    // Two optional strings, then a fixed tail.
+    auto block = [&]() {
+      if (!has(4)) {
+        return false;
+      }
+      const uint32_t present = Le32(b + o);
+      o += 4;
+      if (present == 0) {
+        return true;
+      }
+      if (!has(2) || (o += 2, !has(Le16(b + o - 2)))) {
+        return false;
+      }
+      o += Le16(b + o - 2);
+      if (!has(4)) {
+        return false;
+      }
+      const uint32_t size = Le32(b + o);
+      o += 4;
+      if (!has(size)) {
+        return false;
+      }
+      o += size;
+      return true;
+    };
+    for (size_t k = 0; k < count && ok; ++k) {
+      if (!has(26)) {
+        ok = false;
+        break;
+      }
+      Connection c{i, Le32(b + o), Le32(b + o + 4), {}};
+      std::memcpy(c.target.data(), b + o + 8, 16);
+      o += 26;
+      ok = block() && block() && has(19);
+      o += 19;
+      mine.push_back(c);
+    }
+    if (ok) {
+      out.insert(out.end(), mine.begin(), mine.end());
+    }
+  }
+  return out;
+}
+
+double MaxAbs(const Vec3& a, const Vec3& b) {
+  return std::max({std::fabs(a[0] - b[0]), std::fabs(a[1] - b[1]), std::fabs(a[2] - b[2])});
+}
+
+// What drives the scenery actors of a room.
+struct SceneryScripts {
+  std::map<int, uint8_t> layer;  // by entity: the retail layer it is drawn on
+  std::map<int, std::vector<PortRoomGeo::Link>> links;  // by entity
+  std::map<int, size_t> unresolved;                      // by entity: connections not traced
+  size_t entities = 0, matched = 0;
+};
+
+SceneryScripts MatchScripts(const Room& room, const Area& area) {
+  SceneryScripts result;
+  const std::vector<Component>& comps = room.Components();
+  const std::vector<ScriptObject>& objects = area.objects;
+  // Entities in the order their first component comes, as that component's retail type
+  // and layer.
+  struct Ent {
+    int entity;
+    int layer;
+    int type;
+    bool hasPos;
+    Vec3 w;  // GameCube world position
+  };
+  std::vector<Ent> ents;
+  std::map<int, size_t> entIndex;
+  for (const Component& c : comps) {
+    if (c.entity < 0 || c.type == kEntity || entIndex.count(c.entity) != 0) {
+      continue;
+    }
+    Ent e{c.entity, c.layer, RetailType(c.type), false, {}};
+    Vec3 pos, rot, scale;
+    if (room.Xform(c, pos, rot, scale)) {
+      e.hasPos = true;
+      e.w = Apply(area.xf, MulR2G(pos));
+    }
+    entIndex[c.entity] = ents.size();
+    ents.push_back(e);
+  }
+  result.entities = ents.size();
+  auto valid = [](const ScriptObject& o) {
+    return o.hasPos && std::isfinite(o.pos[0]) && std::isfinite(o.pos[1]) && std::isfinite(o.pos[2]) &&
+           std::fabs(o.pos[0]) < 1e5 && std::fabs(o.pos[1]) < 1e5 && std::fabs(o.pos[2]) < 1e5;
+  };
+  std::vector<int> match(ents.size(), -1);  // object index
+  std::vector<bool> used(objects.size(), false);
+  auto take = [&](size_t k, size_t j) {
+    match[k] = int(j);
+    used[j] = true;
+  };
+  // Same type at the same place; among several, the one on the same layer.
+  for (size_t k = 0; k < ents.size(); ++k) {
+    const Ent& e = ents[k];
+    if (!e.hasPos || e.type < 0) {
+      continue;
+    }
+    std::vector<size_t> cands, same;
+    for (size_t j = 0; j < objects.size(); ++j) {
+      if (objects[j].type == e.type && !used[j] && valid(objects[j]) && MaxAbs(objects[j].pos, e.w) < kMatchTolerance) {
+        cands.push_back(j);
+        if (objects[j].layer == e.layer) {
+          same.push_back(j);
+        }
+      }
+    }
+    if (cands.size() > 1 && !same.empty()) {
+      cands = same;
+    }
+    if (cands.size() == 1) {
+      take(k, cands[0]);
+    }
+  }
+  // Moved a little (triggers resized): the mutual nearest of the same type.
+  {
+    std::vector<size_t> left;
+    for (size_t k = 0; k < ents.size(); ++k) {
+      if (match[k] < 0 && ents[k].hasPos && ents[k].type >= 0) {
+        left.push_back(k);
+      }
+    }
+    std::vector<size_t> pool;
+    for (size_t j = 0; j < objects.size(); ++j) {
+      if (!used[j] && valid(objects[j])) {
+        pool.push_back(j);
+      }
+    }
+    std::vector<bool> alive(ents.size(), false);
+    for (size_t k : left) {
+      alive[k] = true;
+    }
+    for (size_t k : left) {
+      size_t best = pool.size();
+      double bestDist = kMatchNear;
+      for (size_t i = 0; i < pool.size(); ++i) {
+        const double d = MaxAbs(objects[pool[i]].pos, ents[k].w);
+        if (objects[pool[i]].type == ents[k].type && d < bestDist) {
+          best = i;
+          bestDist = d;
+        }
+      }
+      if (best == pool.size()) {
+        continue;
+      }
+      const Vec3& p = objects[pool[best]].pos;
+      size_t back = ents.size();
+      double backDist = 0;
+      for (size_t k2 : left) {
+        const double d = MaxAbs(ents[k2].w, p);
+        if (alive[k2] && ents[k2].type == ents[k].type && (back == ents.size() || d < backDist)) {
+          back = k2;
+          backDist = d;
+        }
+      }
+      if (back == k) {
+        take(k, pool[best]);
+        pool.erase(pool.begin() + std::ptrdiff_t(best));
+        alive[k] = false;
+      }
+    }
+  }
+  // The rest by where their connections go: one retail object of the type whose targets
+  // are the matched targets.
+  const std::vector<Connection> conns = ReadConnections(room);
+  auto entityOf = [&](int comp) -> int {
+    if (comp < 0 || comps[size_t(comp)].entity < 0) {
+      return -1;
+    }
+    const auto it = entIndex.find(comps[size_t(comp)].entity);
+    return it == entIndex.end() ? -1 : int(it->second);
+  };
+  std::vector<std::vector<uint32_t>> out(ents.size());
+  for (const Connection& c : conns) {
+    const int s = entityOf(int(c.sender)), t = entityOf(room.ByGuid(c.target));
+    if (s >= 0 && t >= 0 && match[size_t(t)] >= 0) {
+      out[size_t(s)].push_back(objects[size_t(match[size_t(t)])].id);
+    }
+  }
+  for (auto& o : out) {
+    std::sort(o.begin(), o.end());
+    o.erase(std::unique(o.begin(), o.end()), o.end());
+  }
+  std::set<uint32_t> ids;
+  for (const ScriptObject& o : objects) {
+    ids.insert(o.id);
+  }
+  for (int round = 0; round < 3; ++round) {
+    std::map<std::pair<int, std::vector<uint32_t>>, std::vector<size_t>> sig;
+    for (size_t j = 0; j < objects.size(); ++j) {
+      if (used[j]) {
+        continue;
+      }
+      std::vector<uint32_t> s;
+      for (uint32_t t : objects[j].targets) {
+        if (ids.count(t) != 0) {
+          s.push_back(t);
+        }
+      }
+      std::sort(s.begin(), s.end());
+      s.erase(std::unique(s.begin(), s.end()), s.end());
+      if (!s.empty()) {
+        sig[{objects[j].type, s}].push_back(j);
+      }
+    }
+    int found = 0;
+    for (size_t k = 0; k < ents.size(); ++k) {
+      if (match[k] >= 0 || out[k].empty() || ents[k].type < 0) {
+        continue;
+      }
+      const auto it = sig.find({ents[k].type, out[k]});
+      if (it != sig.end() && it->second.size() == 1 && !used[it->second[0]]) {
+        take(k, it->second[0]);
+        ++found;
+      }
+    }
+    if (found == 0) {
+      break;
+    }
+  }
+  // A Remastered layer is drawn on the retail layer most of its matched entities are on.
+  std::map<int, std::vector<std::pair<uint8_t, int>>> votes;
+  for (size_t k = 0; k < ents.size(); ++k) {
+    if (match[k] < 0) {
+      continue;
+    }
+    ++result.matched;
+    const uint8_t layer = uint8_t(objects[size_t(match[k])].id >> 26);
+    auto& v = votes[ents[k].layer];
+    auto it = std::find_if(v.begin(), v.end(), [&](const auto& p) { return p.first == layer; });
+    if (it == v.end()) {
+      v.push_back({layer, 1});
+    } else {
+      ++it->second;
+    }
+  }
+  // Incoming connections, followed back to matched senders.
+  std::map<int, std::vector<const Connection*>> incoming;  // by target entity component
+  for (const Connection& c : conns) {
+    const int t = room.ByGuid(c.target);
+    if (t >= 0 && comps[size_t(t)].entity >= 0) {
+      incoming[comps[size_t(t)].entity].push_back(&c);
+    }
+  }
+  for (const Ent& e : ents) {
+    const auto v = votes.find(e.layer);
+    if (v != votes.end()) {
+      auto best = v->second.begin();
+      for (auto it = v->second.begin(); it != v->second.end(); ++it) {
+        if (it->second > best->second) {
+          best = it;
+        }
+      }
+      result.layer[e.entity] = best->first;
+    }
+    std::vector<PortRoomGeo::Link> links;
+    size_t bad = 0;
+    std::vector<int> seen{e.entity};
+    std::function<void(int, uint32_t, int, int)> walk = [&](int entity, uint32_t action, int depth, int via) {
+      const auto in = incoming.find(entity);
+      if (in == incoming.end()) {
+        return;
+      }
+      for (const Connection* c : in->second) {
+        const Component& sender = comps[c->sender];
+        if (sender.type == kTemplateManager || (depth > 0 && !PassFires(via, c->action))) {
+          continue;
+        }
+        const int s = entityOf(int(c->sender));
+        const int state = RetailState(sender.type, c->event);
+        const uint32_t first = depth > 0 ? action : c->action;
+        const int type = RetailType(sender.type);
+        if (s >= 0 && match[size_t(s)] >= 0 && state >= 0) {
+          const uint8_t act = first == kActionActivate || first == kActionIncrement     ? PortRoomGeo::kShow
+                              : first == kActionDeactivate || first == kActionDecrement ? PortRoomGeo::kHide
+                              : first == kActionToggleActive                            ? PortRoomGeo::kToggle
+                                                                                        : 0;
+          if (act != 0 && state < 256) {
+            links.push_back({objects[size_t(match[size_t(s)])].id, uint8_t(state), act});
+          }
+        } else if (IsPass(type) && sender.entity >= 0 && depth < 6 &&
+                   std::find(seen.begin(), seen.end(), sender.entity) == seen.end()) {
+          seen.push_back(sender.entity);
+          walk(sender.entity, first, depth + 1, type);
+          seen.pop_back();
+        } else {
+          ++bad;
+        }
+      }
+    };
+    walk(e.entity, 0, 0, -1);
+    if (!links.empty()) {
+      result.links[e.entity] = std::move(links);
+    }
+    if (bad != 0) {
+      result.unresolved[e.entity] = bad;
+    }
+  }
+  return result;
 }
 
 // ---------------------------------------------------------------------------
@@ -619,14 +1132,16 @@ private:
     const Area* area = nullptr;
   };
   bool MatchRoom(const RoomData& r, const std::map<std::string, Placement>& placed, Match& out) const;
-  void Tonemap(const RoomData& r, float out[4]) const;
-  void Exposure(const RoomData& r, float out[2]) const;
+  void Tonemap(const RoomData& r, float out[5]) const;
+  void Exposure(const RoomData& r, float out[3]) const;
   bool Grid(const RoomPak& rp, const Vec3& shift, const std::vector<Vec3>& check, std::vector<uint8_t>& out,
             std::string& note) const;
   // The room's static geometry (its ModCon components), as "<MREA id>.roomgeo".
-  void WriteGeometry(const RoomData& r, uint32_t mrea);
+  void WriteGeometry(const RoomData& r, uint32_t mrea, const Area& area);
+  // The room's liquid surfaces (its water and lava render volumes), as "<MREA id>.roomliquid".
+  void WriteLiquids(const RoomData& r, uint32_t mrea);
   std::string WriteRoom(const RoomData& r, const std::map<std::string, Placement>& placed, const Vec3& shift,
-                        const float tonemap[4], int& written, std::string& matched);
+                        const float tonemap[5], int& written, std::string& matched);
 
   const RoomPak& m_master;
   const std::vector<RoomPak>& m_rooms;
@@ -682,9 +1197,14 @@ bool Writer::LoadAreas(uint32_t mlvl, std::string& error) {
     a.mrea = mrea;
     a.xf = xf;
     std::vector<uint8_t> data;
-    if (!m_io.retail(Tag("MREA"), mrea, data) || !ReadDoors(data, a.doors)) {
+    if (!m_io.retail(Tag("MREA"), mrea, data) || !ReadScly(data, a.objects)) {
       Log("  retail area " + std::to_string(mrea) + ": doors unreadable");
-      a.doors.clear();
+      a.objects.clear();
+    }
+    for (const ScriptObject& o : a.objects) {
+      if (o.type == 3) {
+        a.doors.push_back(o.pos);
+      }
     }
     m_areas.push_back(std::move(a));
   }
@@ -787,10 +1307,10 @@ bool Writer::MatchRoom(const RoomData& r, const std::map<std::string, Placement>
 }
 
 // The first Tonemap component's values, where the room has one; `out` keeps the rest.
-void Writer::Tonemap(const RoomData& r, float out[4]) const {
+void Writer::Tonemap(const RoomData& r, float out[5]) const {
   for (const Component* c : r.room.Of(kTonemap)) {
     const auto f = r.room.Flat(*c);
-    for (int i = 0; i < 4; ++i) {
+    for (int i = 0; i < 5; ++i) {
       const auto it = f.find(kPropTonemap[i]);
       if (it != f.end() && it->second.size >= 4) {
         out[i] = LeFloat(r.room.Bytes(it->second));
@@ -800,20 +1320,22 @@ void Writer::Tonemap(const RoomData& r, float out[4]) const {
   }
 }
 
-// The range of exposure values the room's auto exposure is held to, or 0, 0. A room can
-// have several hints: the plain one for the whole room is wanted, not those with a mode
-// (they are for a state of the room, such as a cutscene) or a volume of their own.
-void Writer::Exposure(const RoomData& r, float out[2]) const {
-  out[0] = out[1] = 0.f;
+// The range of exposure values the room's auto exposure is held to and the bias it adds,
+// or 0, 0, 0 for a room without auto exposure. A room can have several hints: the plain
+// one for the whole room is wanted, not those with a mode (they are for a state of the
+// room, such as a cutscene) or a volume of their own. A value the hint leaves out is
+// SLdrAutoExposureHint's default.
+void Writer::Exposure(const RoomData& r, float out[3]) const {
+  out[0] = out[1] = out[2] = 0.f;
   int best = 0;
   for (const Component* c : r.room.Of(kAutoExposureHint)) {
     const auto f = r.room.Flat(*c);
-    const auto lo = f.find(kPropHintMin);
-    const auto hi = f.find(kPropHintMax);
-    if (lo == f.end() || hi == f.end() || lo->second.size < 4 || hi->second.size < 4) {
-      continue;
-    }
-    const float range[2] = {LeFloat(r.room.Bytes(lo->second)), LeFloat(r.room.Bytes(hi->second))};
+    const auto value = [&](uint32_t prop, float fallback) {
+      const auto it = f.find(prop);
+      return it != f.end() && it->second.size >= 4 ? LeFloat(r.room.Bytes(it->second)) : fallback;
+    };
+    const float range[2] = {value(kPropHintMin, -24.f), value(kPropHintMax, 24.f)};
+    const float bias = value(kPropHintBias, 0.f);
     if (!std::isfinite(range[0]) || !std::isfinite(range[1]) || range[1] < range[0]) {
       continue;
     }
@@ -826,6 +1348,7 @@ void Writer::Exposure(const RoomData& r, float out[2]) const {
       best = rank;
       out[0] = range[0];
       out[1] = range[1];
+      out[2] = std::isfinite(bias) ? bias : 0.f;
     }
   }
 }
@@ -1165,7 +1688,7 @@ bool ReadMcon(const std::vector<uint8_t>& d, Mcon& out) {
   return false;
 }
 
-void Writer::WriteGeometry(const RoomData& r, uint32_t mrea) {
+void Writer::WriteGeometry(const RoomData& r, uint32_t mrea, const Area& area) {
   if (!m_io.model || (m_io.wantsGeometry && !m_io.wantsGeometry(r.name))) {
     return;
   }
@@ -1173,8 +1696,7 @@ void Writer::WriteGeometry(const RoomData& r, uint32_t mrea) {
   static const int kAxis[3] = {0, 2, 1};
   static const double kSign[3] = {-1, 1, 1};
   const RoomPak home{r.name, r.pak};
-  std::vector<uint8_t> body;
-  uint32_t count = 0;
+  std::vector<PortRoomGeo::Instance> instances;
   size_t dropped = 0;
   for (const Component* c : r.room.Of(kModCon)) {
     const auto f = r.room.Flat(*c);
@@ -1210,13 +1732,208 @@ void Writer::WriteGeometry(const RoomData& r, uint32_t mrea) {
         continue;
       }
       const uint8_t* t = mcon.transforms + 48 * i;
-      PutLe32(body, ids[model]);
+      PortRoomGeo::Instance& inst = instances.emplace_back();
+      inst.model = ids[model];
       for (int row = 0; row < 3; ++row) {
         const uint8_t* from = t + 16 * kAxis[row];
         for (int col = 0; col < 3; ++col) {
-          PutFloat(body, kSign[row] * kSign[col] * double(LeFloat(from + 4 * kAxis[col])));
+          inst.transform[4 * row + col] = float(kSign[row] * kSign[col] * double(LeFloat(from + 4 * kAxis[col])));
         }
-        PutFloat(body, kSign[row] * double(LeFloat(from + 12)));
+        inst.transform[4 * row + 3] = float(kSign[row] * double(LeFloat(from + 12)));
+      }
+    }
+  }
+  // Scenery Remastered added as actors rather than as room geometry: the frame around each
+  // door, and pieces of the room itself that sit on its "RS" layer. They carry kPropActorAdded,
+  // which no actor that retail also has does. One that also has kPropActorAttached may follow
+  // another object (platforms carry them), so it is left out rather than drawn where it starts.
+  // Each is drawn on the retail layer its own layer stands for, and shown and hidden by the
+  // retail objects that drive it (MatchScripts).
+  std::map<Id16, uint32_t> actorModels;  // 0 when the model did not convert
+  size_t actors = 0, attached = 0, inactive = 0, linked = 0, unresolved = 0, gated = 0;
+  const SceneryScripts scripts = MatchScripts(r.room, area);
+  for (const Component* c : r.room.Of(kActorMP1)) {
+    const auto f = r.room.Flat(*c);
+    const auto prop = f.find(kPropActorModel);
+    Vec3 pos, rot, scale;
+    if (f.find(kPropActorAdded) == f.end() || prop == f.end() || prop->second.size != 16 ||
+        !r.room.Xform(*c, pos, rot, scale)) {
+      continue;
+    }
+    if (f.find(kPropActorAttached) != f.end()) {
+      ++attached;
+      continue;
+    }
+    // One that starts inactive waits for a script: the ships of the landing cutscene sit in
+    // the sky and on the pad, where retail's own ship already is. Without a script that can
+    // show it, it is left out.
+    const bool active = r.room.Active(*c);
+    const auto links = scripts.links.find(c->entity);
+    const bool canShow =
+        links != scripts.links.end() &&
+        std::any_of(links->second.begin(), links->second.end(), [](const PortRoomGeo::Link& l) { return l.action != PortRoomGeo::kHide; });
+    if (!active && !canShow) {
+      ++inactive;
+      continue;
+    }
+    const Id16 model = SwapUuid(r.room.Bytes(prop->second));
+    if (model == Id16{}) {
+      continue;
+    }
+    auto known = actorModels.find(model);
+    if (known == actorModels.end()) {
+      if (m_io.cancelled && m_io.cancelled()) {
+        return;
+      }
+      uint32_t id = 0;
+      known = actorModels.emplace(model, m_io.model(model, id) ? id : 0).first;
+    }
+    if (known->second == 0) {
+      ++dropped;
+      continue;
+    }
+    // Rz * Ry * Rx of the entity's angles, as retail builds an editor transform.
+    double s[3], k[3];
+    for (int i = 0; i < 3; ++i) {
+      s[i] = std::sin(rot[i] * (3.14159265358979323846 / 180.0));
+      k[i] = std::cos(rot[i] * (3.14159265358979323846 / 180.0));
+    }
+    const double m[3][3] = {
+        {k[2] * k[1], k[2] * s[1] * s[0] - s[2] * k[0], k[2] * s[1] * k[0] + s[2] * s[0]},
+        {s[2] * k[1], s[2] * s[1] * s[0] + k[2] * k[0], s[2] * s[1] * k[0] - k[2] * s[0]},
+        {-s[1], k[1] * s[0], k[1] * k[0]},
+    };
+    PortRoomGeo::Instance& inst = instances.emplace_back();
+    inst.model = known->second;
+    for (int row = 0; row < 3; ++row) {
+      for (int col = 0; col < 3; ++col) {
+        inst.transform[4 * row + col] = float(kSign[row] * kSign[col] * m[kAxis[row]][kAxis[col]] * scale[kAxis[col]]);
+      }
+      inst.transform[4 * row + 3] = float(kSign[row] * pos[kAxis[row]]);
+    }
+    inst.active = active;
+    const auto layer = scripts.layer.find(c->entity);
+    if (layer != scripts.layer.end() && layer->second != 0) {
+      // Layer 0 is always on; leaving it unset skips the lookup.
+      inst.layer = layer->second;
+      ++gated;
+    }
+    if (links != scripts.links.end()) {
+      inst.links = links->second;
+      ++linked;
+    }
+    if (scripts.unresolved.count(c->entity) != 0) {
+      ++unresolved;
+    }
+    ++actors;
+  }
+  if (instances.empty()) {
+    return;
+  }
+  const uint32_t count = uint32_t(instances.size());
+  const std::vector<uint8_t> out = PortRoomGeo::Write(instances);
+  char file[32];
+  std::snprintf(file, sizeof file, "%08X.roomgeo", mrea);
+  if (!m_io.write || !m_io.write(file, out)) {
+    Log("  " + r.name + ": could not write " + file);
+    return;
+  }
+  char line[320];
+  std::snprintf(line, sizeof line,
+                "  %s: %u instances (%zu actors, %zu attached and %zu inactive ones left out; %zu on a layer, %zu "
+                "scripted, %zu with untraced links; %zu of %zu entities matched), %zu dropped",
+                r.name.c_str(), count, actors, attached, inactive, gated, linked, unresolved, scripts.matched,
+                scripts.entities, dropped);
+  Log(line);
+}
+
+void Writer::WriteLiquids(const RoomData& r, uint32_t mrea) {
+  // Liquids are room geometry: they come with it, so a models-only import keeps the
+  // retail planes (and the small arena its mod starts with).
+  if (!m_io.liquid || (m_io.wantsGeometry && !m_io.wantsGeometry(r.name))) {
+    return;
+  }
+  static const int kAxis[3] = {0, 2, 1};
+  static const double kSign[3] = {-1, 1, 1};
+  // What each entity's retail water object is filled with.
+  std::map<int, int> fluids;
+  for (const Component* c : r.room.Of(kWaterMP1)) {
+    Span s;
+    int type = RoomLiquid::kWater;
+    if (r.room.Nested(*c, {kPropWaterFluid[0], kPropWaterFluid[1], kPropWaterFluid[2]}, s) && s.size >= 4) {
+      const uint32_t fluid = Le32(r.room.Bytes(s));
+      type = fluid == 10 ? RoomLiquid::kPoison : fluid == 11 ? RoomLiquid::kLava : RoomLiquid::kWater;
+    }
+    fluids[c->entity] = type;
+  }
+  std::vector<uint8_t> body;
+  uint32_t count = 0;
+  size_t dropped = 0;
+  for (const bool lava : {false, true}) {
+    for (const Component* c : r.room.Of(lava ? kLavaRenderVolume : kWaterRenderVolume)) {
+      const auto f = r.room.Flat(*c);
+      const auto prop = f.find(lava ? kPropLavaModel : kPropWaterModel);
+      Vec3 pos, rot, scale;
+      if (prop == f.end() || prop->second.size != 16 || !r.room.Xform(*c, pos, rot, scale)) {
+        continue;
+      }
+      RoomLiquid liquid;
+      liquid.model = SwapUuid(r.room.Bytes(prop->second));
+      if (liquid.model == Id16{}) {
+        continue;
+      }
+      const auto fluid = fluids.find(c->entity);
+      liquid.type = lava ? RoomLiquid::kLava : fluid != fluids.end() ? fluid->second : RoomLiquid::kWater;
+      if (!lava) {
+        Span s;
+        if (r.room.Nested(*c, {kPropWaterLook, kPropWaterTint}, s) && s.size >= 16) {
+          for (int i = 0; i < 4; ++i) {
+            liquid.tint[i] = LeFloat(r.room.Bytes(s) + 4 * i);
+          }
+        }
+        if (r.room.Nested(*c, {kPropWaterLook, kPropWaterNormal[0], kPropWaterNormal[1]}, s) && s.size == 16) {
+          liquid.normal = SwapUuid(r.room.Bytes(s));
+          liquid.hasNormal = liquid.normal != Id16{};
+        }
+        float perUnit = 0.08f;
+        if (r.room.Nested(*c, {kPropWaterLook, kPropWaterNormalScale[0], kPropWaterNormalScale[1]}, s) &&
+            s.size >= 4) {
+          perUnit = LeFloat(r.room.Bytes(s));
+        }
+        liquid.normalScale[0] = perUnit;
+        liquid.normalScale[1] = perUnit;
+        for (int i = 0; i < 2; ++i) {
+          if (r.room.Nested(*c, {kPropWaterWaves[i], kPropWaveAngle}, s) && s.size >= 4) {
+            liquid.waveAngle[i] = LeFloat(r.room.Bytes(s));
+          }
+        }
+      }
+      if (m_io.cancelled && m_io.cancelled()) {
+        return;
+      }
+      uint32_t id = 0;
+      if (!m_io.liquid(liquid, id)) {
+        ++dropped;
+        continue;
+      }
+      double s[3], k[3];
+      for (int i = 0; i < 3; ++i) {
+        s[i] = std::sin(rot[i] * (3.14159265358979323846 / 180.0));
+        k[i] = std::cos(rot[i] * (3.14159265358979323846 / 180.0));
+      }
+      const double m[3][3] = {
+          {k[2] * k[1], k[2] * s[1] * s[0] - s[2] * k[0], k[2] * s[1] * k[0] + s[2] * s[0]},
+          {s[2] * k[1], s[2] * s[1] * s[0] + k[2] * k[0], s[2] * s[1] * k[0] - k[2] * s[0]},
+          {-s[1], k[1] * s[0], k[1] * k[0]},
+      };
+      PutLe32(body, uint32_t(liquid.type));
+      PutLe32(body, id);
+      for (int row = 0; row < 3; ++row) {
+        for (int col = 0; col < 3; ++col) {
+          // The entity's scale is the size of the volume; the model is in units already.
+          PutFloat(body, kSign[row] * kSign[col] * m[kAxis[row]][kAxis[col]]);
+        }
+        PutFloat(body, kSign[row] * pos[kAxis[row]]);
       }
       ++count;
     }
@@ -1225,23 +1942,23 @@ void Writer::WriteGeometry(const RoomData& r, uint32_t mrea) {
     return;
   }
   std::vector<uint8_t> out;
-  PutLe32(out, 0x4752504D);  // 'MPRG'
+  PutLe32(out, 0x4C52504D);  // 'MPRL'
   PutLe32(out, 1);
   PutLe32(out, count);
   out.insert(out.end(), body.begin(), body.end());
   char file[32];
-  std::snprintf(file, sizeof file, "%08X.roomgeo", mrea);
+  std::snprintf(file, sizeof file, "%08X.roomliquid", mrea);
   if (!m_io.write || !m_io.write(file, out)) {
     Log("  " + r.name + ": could not write " + file);
     return;
   }
-  char line[96];
-  std::snprintf(line, sizeof line, "  %s: %u instances, %zu dropped", r.name.c_str(), count, dropped);
+  char line[160];
+  std::snprintf(line, sizeof line, "  %s: %u liquid surfaces, %zu dropped", r.name.c_str(), count, dropped);
   Log(line);
 }
 
 std::string Writer::WriteRoom(const RoomData& r, const std::map<std::string, Placement>& placed, const Vec3& shift,
-                              const float tonemap[4], int& written, std::string& matched) {
+                              const float tonemap[5], int& written, std::string& matched) {
   matched.clear();
   Match m;
   if (!MatchRoom(r, placed, m)) {
@@ -1252,7 +1969,8 @@ std::string Writer::WriteRoom(const RoomData& r, const std::map<std::string, Pla
     std::snprintf(head, sizeof head, "%s: no area matches (best %08X, %.1f m)", r.name.c_str(), m.mrea, m.err);
     return head;
   }
-  WriteGeometry(r, m.mrea);
+  WriteGeometry(r, m.mrea, *m.area);
+  WriteLiquids(r, m.mrea);
   const std::vector<Vec3>& gdoors = m.area->doors;
   double rot[3][3], trans[3];
   for (int i = 0; i < 3; ++i) {
@@ -1365,9 +2083,9 @@ std::string Writer::WriteRoom(const RoomData& r, const std::map<std::string, Pla
   }
 
   std::vector<uint8_t> out = {'M', 'P', 'E', 'V'};
-  PutLe32(out, 3);
-  float tone[4];
-  std::copy(tonemap, tonemap + 4, tone);
+  PutLe32(out, 4);
+  float tone[5];
+  std::copy(tonemap, tonemap + 5, tone);
   Tonemap(r, tone);
   for (int i = 0; i < 4; ++i) {
     PutFloat(out, tone[i]);
@@ -1380,10 +2098,12 @@ std::string Writer::WriteRoom(const RoomData& r, const std::map<std::string, Pla
   }
   PutLe32(out, grid.empty() ? 0 : 1);
   out.insert(out.end(), grid.begin(), grid.end());
-  float exposure[2];
+  float exposure[3];
   Exposure(r, exposure);
   PutFloat(out, exposure[0]);
   PutFloat(out, exposure[1]);
+  PutFloat(out, exposure[2]);
+  PutFloat(out, tone[4]);
   char file[32];
   std::snprintf(file, sizeof file, "%08X.roomenv", m.mrea);
   if (!m_io.write || !m_io.write(file, out)) {
@@ -1497,7 +2217,7 @@ bool Writer::Run(uint32_t mlvl, int& written, std::string& error) {
   }
 
   // A room without a Tonemap of its own takes the world's.
-  float tonemap[4] = {4.0f, 0.18f, 0.6f, 0.15f};
+  float tonemap[5] = {4.0f, 0.18f, 0.6f, 0.15f, 0.f};
   Tonemap(master, tonemap);
   std::map<std::string, std::string> seen;
   for (const auto& r : rooms) {

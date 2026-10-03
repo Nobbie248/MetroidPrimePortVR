@@ -412,7 +412,9 @@ void initialize() {
       g_bufferSizes = {
           .vertex = VertexBufferSize * scale,
           .uniform = scale > 1 ? UniformBufferSize * 2 : UniformBufferSize,
-          .index = IndexBufferSize * scale,
+          // Not scaled: the heaviest room measured drew 0.1 MiB of indices, and each
+          // scaled MiB here costs one per staging buffer plus the device copy.
+          .index = IndexBufferSize,
           .storage = StorageBufferSize * scale,
       };
       if (scale == 1 || (g_bufferSizes.vertex <= maxBinding && g_bufferSizes.storage <= maxBinding &&

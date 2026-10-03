@@ -14,6 +14,7 @@
 #include <dolphin/dvd.h>
 
 #include "port_debug.h"
+#include "port_paths.h"
 #include "port_apclient.h"
 #include "port_randomizer.h"
 #include "port_textures.h"
@@ -21,6 +22,7 @@
 #include "port_build_info.h"
 #include "crash_handler.h"
 #include "port_log.h"
+#include "port_log_file.h"
 #include "port_mods.h"
 #include "port_room_geo.h"
 #include "port_importers.h"
@@ -31,6 +33,7 @@
 #include <SDL3/SDL_filesystem.h>
 #include <SDL3/SDL_hints.h>
 #include <SDL3/SDL_iostream.h>
+#include <SDL3/SDL_properties.h>
 #include <SDL3/SDL_timer.h>
 
 #if defined(__ANDROID__)
@@ -79,8 +82,11 @@ void AndroidLogCallback(AuroraLogLevel level, const char* module, const char* me
     default:
         break;
     }
-    __android_log_print(priority, "aurora", "[%s] %.*s", module != nullptr ? module : "",
-                        static_cast< int >(len), message);
+    char line[2048];
+    std::snprintf(line, sizeof(line), "[%s] %.*s", module != nullptr ? module : "", static_cast< int >(len),
+                  message);
+    __android_log_write(priority, "aurora", line);
+    PortLogFile::Write("aurora", line);
 }
 #endif
 
@@ -103,11 +109,46 @@ bool IsDiscImage(const std::filesystem::path& path) {
     return false;
 }
 
+// How well a file next to the executable fits as the disc: plain images (.iso,
+// .gcm, NKit's .nkit.iso) start with the disc header, so the wrong game or
+// region can be skipped before it fails to boot; the compressed formats keep
+// it elsewhere and are taken on trust, after any plain image that matched.
+enum class DiscMatch { No, Maybe, Yes };
+
+DiscMatch MatchDiscImage(const std::filesystem::path& path) {
+    if (!IsDiscImage(path)) {
+        return DiscMatch::No;
+    }
+    const std::string ext = LowerExtension(path);
+    if (ext != ".iso" && ext != ".gcm") {
+        return DiscMatch::Maybe;
+    }
+    // Through SDL with a UTF-8 name: std::fopen on Windows takes the ANSI code
+    // page, which cannot name every folder a user might unpack the game into.
+    SDL_IOStream* file = SDL_IOFromFile(PortPaths::detail::ToUtf8(path).c_str(), "rb");
+    if (file == nullptr) {
+        return DiscMatch::No;
+    }
+    Uint8 header[8] = {};
+    const size_t got = SDL_ReadIO(file, header, sizeof(header));
+    SDL_CloseIO(file);
+    // Game id, maker, disc number, revision: GM8E01, disc 0, v1.00.
+    return got == sizeof(header) && std::memcmp(header, "GM8E01", 6) == 0 && header[6] == 0 && header[7] == 0
+               ? DiscMatch::Yes
+               : DiscMatch::No;
+}
+
 // Looks for a disc image next to the executable (and in its immediate
-// subdirectories) so a copied build is self-contained.
+// subdirectories) so a copied build is self-contained and starts without
+// asking. For an AppImage that is the folder the .AppImage file is in.
 std::string FindDiscNextToExecutable() {
-    const char* base = SDL_GetBasePath();
-    if (base == nullptr) {
+#if defined(__ANDROID__)
+    const char* rawBase = SDL_GetBasePath();
+    const std::string base = rawBase != nullptr ? rawBase : "";
+#else
+    const std::string base = PortPaths::detail::ExecutableFolder();
+#endif
+    if (base.empty()) {
         return {};
     }
     namespace fs = std::filesystem;
@@ -119,7 +160,7 @@ std::string FindDiscNextToExecutable() {
     // and this runs before anything that could report it, so nothing escapes.
     try {
         std::error_code ec;
-        const fs::path baseDir(base);
+        const fs::path baseDir = PortPaths::detail::FromUtf8(base);
         std::vector<fs::path> dirs{baseDir};
         for (fs::directory_iterator it(baseDir, ec), end; !ec && it != end; it.increment(ec)) {
             std::error_code entryEc;
@@ -127,13 +168,31 @@ std::string FindDiscNextToExecutable() {
                 dirs.push_back(it->path());
             }
         }
+        // Directory order is the file system's; sorted, the same image wins on
+        // every launch when there are several.
+        std::sort(dirs.begin() + 1, dirs.end());
+        std::string maybe;
         for (const fs::path& dir : dirs) {
+            std::vector<fs::path> files;
             for (fs::directory_iterator it(dir, ec), end; !ec && it != end; it.increment(ec)) {
                 std::error_code entryEc;
                 if (it->is_regular_file(entryEc) && IsDiscImage(it->path())) {
-                    return it->path().string();
+                    files.push_back(it->path());
                 }
             }
+            std::sort(files.begin(), files.end());
+            for (const fs::path& file : files) {
+                const DiscMatch match = MatchDiscImage(file);
+                if (match == DiscMatch::Yes) {
+                    return PortPaths::detail::ToUtf8(file);
+                }
+                if (match == DiscMatch::Maybe && maybe.empty()) {
+                    maybe = PortPaths::detail::ToUtf8(file);
+                }
+            }
+        }
+        if (!maybe.empty()) {
+            return maybe;
         }
     } catch (const std::exception& e) {
         PortLog::Write("metroid_prime_port: searching for a disc image failed: %s\n", e.what());
@@ -156,18 +215,27 @@ const char* ResolveDiscPath(int argc, char** argv) {
             // A URI from before the copy existed. Prefer the local copy, which
             // needs no permission grant; fall back to the URI if it is not there
             // yet, since the grant may still be live.
-            char* pref = SDL_GetPrefPath(nullptr, "Metroid Prime");
-            if (pref != nullptr) {
-                const std::string local = (std::filesystem::path(pref) / "disc.iso").string();
-                SDL_free(pref);
-                std::error_code ec;
-                static const std::string sLocal =
-                    std::filesystem::exists(local, ec) ? local : std::string();
-                if (!sLocal.empty()) {
-                    return sLocal.c_str();
-                }
+            const std::string local = PortPaths::UserFolder() + "disc.iso";
+            std::error_code ec;
+            static const std::string sLocal =
+                !PortPaths::UserFolder().empty() && std::filesystem::exists(local, ec) ? local : std::string();
+            if (!sLocal.empty()) {
+                return sLocal.c_str();
             }
             return saved;
+        }
+        // The copy made from a picked file sits in the data folder, which may
+        // have moved since (port_data_folder.h): prefer the copy in the folder
+        // in use, so deleting the old one loses nothing.
+        if (const char* name = std::strrchr(saved, '/'); name != nullptr && std::strcmp(name, "/disc.iso") == 0) {
+            const std::string moved = PortPaths::UserFolder() + "disc.iso";
+            std::error_code ec;
+            static const std::string sMoved =
+                !PortPaths::UserFolder().empty() && moved != saved && std::filesystem::exists(moved, ec) ? moved
+                                                                                                         : std::string();
+            if (!sMoved.empty()) {
+                return sMoved.c_str();
+            }
         }
 #endif
         // The error_code overload: the throwing one would end the program on a
@@ -178,7 +246,11 @@ const char* ResolveDiscPath(int argc, char** argv) {
         }
     }
     static const std::string sFound = FindDiscNextToExecutable();
-    return sFound.empty() ? nullptr : sFound.c_str();
+    if (sFound.empty()) {
+        return nullptr;
+    }
+    PortLog::Write("metroid_prime_port: using the disc image next to the executable: %s\n", sFound.c_str());
+    return sFound.c_str();
 }
 
 // aurora_dvd_open reports failure for three different reasons - the file would
@@ -218,17 +290,16 @@ void ReportDiscOpenFailure(const char* path) {
 //
 // Returns the local copy's path, or an empty string if the copy failed.
 std::string CopyDiscFromContentUri(const std::string& uri) {
-    char* pref = SDL_GetPrefPath(nullptr, "Metroid Prime");
-    if (pref == nullptr) {
-        PortLog::Write( "metroid_prime_port: no pref path to copy the disc into\n");
+    const std::string& folder = PortPaths::UserFolder();
+    if (folder.empty()) {
+        PortLog::Write( "metroid_prime_port: no data folder to copy the disc into\n");
         return {};
     }
-    const std::filesystem::path target = std::filesystem::path(pref) / "disc.iso";
+    const std::filesystem::path target = std::filesystem::path(folder) / "disc.iso";
     // Copied under another name and renamed when complete: a copy killed part
     // way (the app closed during a multi-minute copy) must not leave a
     // truncated disc.iso, which ResolveDiscPath would prefer on every launch.
-    const std::filesystem::path partial = std::filesystem::path(pref) / "disc.iso.part";
-    SDL_free(pref);
+    const std::filesystem::path partial = std::filesystem::path(folder) / "disc.iso.part";
 
     SDL_IOStream* in = SDL_IOFromFile(uri.c_str(), "rb");
     if (in == nullptr) {
@@ -268,6 +339,9 @@ std::string CopyDiscFromContentUri(const std::string& uri) {
             break;
         }
         done += static_cast<Sint64>(got);
+        // The copy takes minutes on a device, long enough for the screen to go
+        // off; as in AskForDiscImage, nothing else drops a destroyed surface.
+        aurora_release_lost_surface();
         if (total > 0) {
             const int percent = static_cast<int>(done * 100 / total);
             // Every 5% rather than every chunk: a 1.5 GB image would otherwise
@@ -334,10 +408,18 @@ std::string AskForDiscImage() {
     // from it can still be pending here.
     answered.store(false);
     chosen.clear();
-    const SDL_DialogFileFilter filters[] = {
-        {"GameCube disc image", "iso;gcm;rvz;wbfs;ciso;nkit"},
+    // Static: SDL reads the filters until the dialog closes, which can be after
+    // a timed-out wait has returned.
+    static const SDL_DialogFileFilter filters[] = {
+        {"Metroid Prime disc image (iso, gcm, rvz, wbfs, ciso, nkit)", "iso;gcm;rvz;wbfs;ciso;nkit"},
         {"All files", "*"},
     };
+    if (const char* env = std::getenv("MP_NO_DISC_DIALOG"); env != nullptr && env[0] == '1') {
+        // For scripted runs with a window, such as the packaged startup check
+        // on a build runner, where the dialog would sit open until it times out.
+        PortLog::Write( "metroid_prime_port: not asking for a disc image (MP_NO_DISC_DIALOG)\n");
+        return {};
+    }
     int windowCount = 0;
     SDL_Window** windows = SDL_GetWindows(&windowCount);
     SDL_Window* window = windows != nullptr && windowCount > 0 ? windows[0] : nullptr;
@@ -349,14 +431,24 @@ std::string AskForDiscImage() {
         return {};
     }
     PortLog::Write( "metroid_prime_port: no disc image found; asking for one\n");
-    SDL_ShowOpenFileDialog(
+    // A titled dialog: an untitled file picker on first launch does not say
+    // what it wants. (Android's picker shows no title.)
+    const SDL_PropertiesID props = SDL_CreateProperties();
+    SDL_SetPointerProperty(props, SDL_PROP_FILE_DIALOG_FILTERS_POINTER, const_cast<SDL_DialogFileFilter*>(filters));
+    SDL_SetNumberProperty(props, SDL_PROP_FILE_DIALOG_NFILTERS_NUMBER, 2);
+    SDL_SetPointerProperty(props, SDL_PROP_FILE_DIALOG_WINDOW_POINTER, window);
+    SDL_SetStringProperty(props, SDL_PROP_FILE_DIALOG_TITLE_STRING,
+                          "Select your Metroid Prime disc image (GameCube, USA, v1.00)");
+    SDL_ShowFileDialogWithProperties(
+        SDL_FILEDIALOG_OPENFILE,
         [](void*, const char* const* files, int) {
             if (files != nullptr && files[0] != nullptr) {
                 chosen = files[0];
             }
             answered.store(true);
         },
-        nullptr, window, filters, 2, nullptr, false);
+        nullptr, props);
+    SDL_DestroyProperties(props);
     // Wait for the answer, but not forever: a dialog that never calls back
     // would otherwise hang a scripted or headless run.
     const Uint64 deadline = SDL_GetTicks() + 5 * 60 * 1000;
@@ -372,6 +464,11 @@ std::string AskForDiscImage() {
             PortLog::Write( "metroid_prime_port: disc selection timed out\n");
             return {};
         }
+        // Android's picker covers the app and destroys its surface. Nothing
+        // draws a frame here, so drop the swapchain now or it stays attached to
+        // the dead window, which can lose the device (the likely cause of a
+        // crash reported on the first launch, the one that asks for the disc).
+        aurora_release_lost_surface();
         SDL_Delay(10);
     }
     if (!chosen.empty()) {
@@ -434,9 +531,11 @@ int main(int argc, char** argv) {
     // --import-remastered <image.nsp> [key file]: build the remastered-models
     // mod from the user's own copy, without starting the game. The disc comes
     // from MP_DISC or the path the game remembers.
-    if (argc >= 2 && std::strcmp(argv[1], "--import-remastered") == 0) {
+    // --import-remastered-movies does only the menu movies, into that mod.
+    const bool importMovies = argc >= 2 && std::strcmp(argv[1], "--import-remastered-movies") == 0;
+    if (importMovies || (argc >= 2 && std::strcmp(argv[1], "--import-remastered") == 0)) {
         if (argc < 3) {
-            std::fprintf(stderr, "usage: %s --import-remastered <image.nsp> [key file]\n", argv[0]);
+            std::fprintf(stderr, "usage: %s %s <image.nsp> [key file]\n", argv[0], argv[1]);
             return 2;
         }
         PortDebug::LoadDiscPath();
@@ -451,12 +550,20 @@ int main(int argc, char** argv) {
             id->diskNumber != 0 || id->gameVersion != 0) {
             std::fprintf(stderr, "unsupported disc; expected GM8E01 USA revision 0\n");
         } else {
-            result = PortRemastered::RunImportFromCommandLine(argv[2], argc >= 4 ? argv[3] : "");
+            result = PortRemastered::RunImportFromCommandLine(argv[2], argc >= 4 ? argv[3] : "", importMovies);
         }
         aurora_dvd_close();
         return result;
     }
 #endif
+    // The file log starts first so it holds everything after it, build id included.
+    {
+        const char* e = std::getenv("MP_LOG_FILE");
+        const bool logFile = e != nullptr ? e[0] != '\0' && std::strcmp(e, "0") != 0 : PortDebug::LogFile();
+        if (logFile && !PortLogFile::Start()) {
+            PortLog::Write("port: cannot write the log to %s\n", PortLogFile::Path().c_str());
+        }
+    }
     PortLog::Write( "metroid_prime_port: build %s\n", MP_BUILD_REVISION);
     PortRandomizer::EnsureLoaded();
     PortAp::EnsureLoaded();
@@ -483,7 +590,14 @@ int main(int argc, char** argv) {
     // with one installed the arena starts at kRoomGeoMem1MB and a frame's buffers at
     // kRoomGeoFrameBuffers times their size. MP_FRAME_BUFFERS=<n> sets that scale itself.
     const unsigned long kRoomGeoMem1MB = 256;
+#if defined(__ANDROID__)
+    // Every scale step costs about 13 MB in each of the six copies of a frame's
+    // buffers; at 12x a tablet's game ran at 1.3 GB and Android killed it for
+    // memory. 6x still holds the heaviest room measured (20 MiB of vertices) 1.5x.
+    const unsigned long kRoomGeoFrameBuffers = 6;
+#else
     const unsigned long kRoomGeoFrameBuffers = 12;
+#endif
     const bool roomGeometry = PortMods::HasRoomGeometry();
     uint32_t mem1Size = MEM1_DEFAULT_SIZE;
     {
@@ -503,10 +617,28 @@ int main(int argc, char** argv) {
         PortLog::Write("port: frame buffers at %ux (%s)\n", frameBufferScale,
                        std::getenv("MP_FRAME_BUFFERS") != nullptr ? "MP_FRAME_BUFFERS" : "room geometry");
     }
+    // Settings, mods, save states and the shader caches sit next to the
+    // executable when that folder can be written to (port_paths.h).
+    const std::string& userFolder = PortPaths::UserFolder();
+    const char* cacheEnv = std::getenv("MP_CACHE_PATH");
+#if defined(__ANDROID__)
+    // The shader caches stay in app storage when the data moves to shared
+    // storage: they are disposable, and SQLite is slow on the shared mount.
+    const std::string defaultCache = PortPaths::detail::PrivateFolder();
+#else
+    const std::string& defaultCache = userFolder;
+#endif
+    const std::string cacheFolder = cacheEnv != nullptr && cacheEnv[0] != '\0' ? cacheEnv : defaultCache;
+    PortLog::Write("port: user folder %s%s\n", userFolder.empty() ? "(none)" : userFolder.c_str(),
+#if defined(__ANDROID__)
+                   PortPaths::IsPortable() ? " (shared storage)" : "");
+#else
+                   PortPaths::IsPortable() ? " (next to the executable)" : "");
+#endif
     AuroraConfig config = {
         .appName = "Metroid Prime",
-        .userPath = std::getenv("MP_USER_PATH"),
-        .cachePath = std::getenv("MP_CACHE_PATH"),
+        .userPath = userFolder.empty() ? nullptr : userFolder.c_str(),
+        .cachePath = cacheFolder.empty() ? nullptr : cacheFolder.c_str(),
         .resourcesPath = resourcesPath.empty() ? nullptr : resourcesPath.c_str(),
         .desiredBackend = BACKEND_AUTO,
         .vsync = false,
@@ -529,6 +661,7 @@ int main(int argc, char** argv) {
     config.iconWidth = 64;
     config.iconHeight = 64;
 #endif
+    config.startFullscreen = PortDebug::Fullscreen();
     config.msaa = static_cast<uint32_t>(PortDebug::Msaa());
     config.maxTextureAnisotropy = static_cast<uint16_t>(PortDebug::Anisotropy());
 
@@ -557,6 +690,7 @@ int main(int argc, char** argv) {
     // the port can fix that, so whenever an X display is available ask for the X11
     // backend instead. SDL_VIDEODRIVER still wins, which is also how anyone who
     // wants Wayland opts back in.
+#if !defined(_WIN32) && !defined(__ANDROID__)
     {
         const char* requested = SDL_GetHint(SDL_HINT_VIDEO_DRIVER);
         const char* x11 = std::getenv("DISPLAY");
@@ -579,6 +713,7 @@ int main(int argc, char** argv) {
                        stderr);
         }
     }
+#endif
     // PortVr: the OpenXR instance and the adapter it wants come before Aurora
     // picks a device, so the eyes are copied on the compositor's own GPU.
     PortVr::ApplyVrEnvironmentOverrides();
@@ -612,15 +747,14 @@ int main(int argc, char** argv) {
     if (textures == nullptr || textures[0] == '\0') {
         textures = DefaultTexturesPath();
     }
-    // The user's own pack, over the built-in set. Kept in the pref folder, which
-    // updates never replace (the built-in set is read-only in an AppImage or
+    // The user's own pack, over the built-in set. Kept in the user folder, under
+    // a name updates never replace (the built-in set is read-only in an AppImage or
     // Flatpak, and re-copied on every Android launch).
     std::string userTextures;
     if (const char* env = std::getenv("MP_USER_TEXTURES"); env != nullptr && env[0] != '\0') {
         userTextures = env;
-    } else if (char* pref = SDL_GetPrefPath(nullptr, "Metroid Prime")) {
-        userTextures = std::string(pref) + "user_textures";
-        SDL_free(pref);
+    } else if (!PortPaths::UserFolder().empty()) {
+        userTextures = PortPaths::UserFolder() + "user_textures";
     }
     PortTextures::Initialize(textures, userTextures.c_str());
     // Binding-aware prompt icons, served from <textures>/bindings.
@@ -687,13 +821,11 @@ int main(int argc, char** argv) {
         aurora_shutdown();
         return 1;
     }
-#if !defined(__ANDROID__)
     // A Remastered import finished in the last session becomes the mod now,
     // before anything has a file of the old one open.
     if (PortRemastered::ApplyPendingImport()) {
         PortLog::Write("metroid_prime_port: installed the imported Remastered models\n");
     }
-#endif
     PortMods::Initialize();
 
     // Prime the window/event state so the game's first aurora_begin_frame can
@@ -727,10 +859,8 @@ int main(int argc, char** argv) {
     // Aurora's device goes.
     PortVr::OpenXRShutdownBeforeAurora();
     AIPortShutdown();
-#if !defined(__ANDROID__)
     // An import still running reads the disc.
     PortRemastered::StopImport();
-#endif
     aurora_dvd_close();
     aurora_shutdown();
     return result;

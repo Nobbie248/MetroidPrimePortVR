@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Client for the debug command console of a smoke build (MP_CONSOLE=<port>).
+"""Client for the debug command console (MP_CONSOLE=<port>, any build).
 
     mpcon.py status                      # one command
     mpcon.py 'warp chozo 492CBF4A' 'objs eyeball' shot

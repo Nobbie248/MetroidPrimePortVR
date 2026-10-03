@@ -135,6 +135,9 @@ public:
   void StartPhazonBeamTransition(bool, CStateManager&, CPlayerState&);
   void HandleWeaponChange(const CFinalInput&, CStateManager&);
   void HandleBeamChange(const CFinalInput&, CStateManager&);
+#ifdef TARGET_PC
+  void PortSwitchToOwnedBeam(CStateManager&);
+#endif
   void SetPhazonBeamMorph(bool);
   void HandlePhazonBeamChange(CStateManager&);
   void InitBeamData();

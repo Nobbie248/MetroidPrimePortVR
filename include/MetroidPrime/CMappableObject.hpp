@@ -53,6 +53,10 @@ public:
   CTransform4f AdjustTransformForType() const;
 
   EMappableObjectType GetType() const { return x0_type; }
+#ifdef TARGET_PC
+  // A randomized door's colour on the map.
+  void PortSetType(EMappableObjectType type) { x0_type = type; }
+#endif
   TEditorId GetObjId() const { return x8_objId; }
   const CTransform4f& GetTransform() const { return x10_transform; }
 

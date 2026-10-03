@@ -55,6 +55,24 @@ struct ConvertOptions {
   // Every CSKR id a character binds this model to; empty for a static model.
   // The weights are written under each one whose skeleton covers the first's.
   std::vector<uint32_t> skins;
+  // Ids the output is written under instead, for a second look of one retail
+  // model (another suit's ball, another beam's gun): the CMDL's (0 for
+  // `retail`), and one per id in `skins`, in that order (empty for the same).
+  // `retail` and `skins` are still read for the materials and the skeleton.
+  uint32_t outputModel = 0;
+  std::vector<uint32_t> outputSkins;
+  // The model is a liquid's surface (water, poison): the room, not the model, says how it
+  // looks, so every material is the port's liquid one (standalone only). The normal map's
+  // id is in a pak's byte order; the tint's alpha is the opacity seen straight on; the
+  // flow is the texcoords a second each of the two wave layers moves by.
+  bool water = false;
+  bool waterHasNormal = false;
+  ModelUuid waterNormal{};
+  double waterTint[4] = {0.1, 0.3, 0.35, 0.7};
+  double waterScale[2] = {0.08, 0.08};  // texcoords per unit of the model, along x and z
+  double waterFlow[4] = {0.02, 0.01, -0.012, 0.018};
+  double waterNormalStrength = 0.5;
+  double waterFresnel = 0.02;
   // A texture's id is hashed from a tag naming its source. These wrap the
   // Remastered texture's uuid in that tag; the test tool sets them to
   // reproduce the reference converter's ids, the game leaves them empty.

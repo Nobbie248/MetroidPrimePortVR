@@ -71,6 +71,7 @@ if (AURORA_ENABLE_GX)
             lib/dawn/BackendBinding.cpp
             lib/dawn/TracyPlatform.cpp
             lib/gfx/stereo_eyes.cpp
+            lib/gfx/stereo_shadow.cpp
             lib/stereo_host.cpp
             lib/stereo_overlay.cpp
     )

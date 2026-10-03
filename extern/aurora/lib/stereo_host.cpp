@@ -3,6 +3,7 @@
 #include "internal.hpp"
 #include "stereo_overlay.hpp"
 #include "gfx/stereo_eyes.hpp"
+#include "gfx/stereo_shadow.hpp"
 #include "webgpu/gpu.hpp"
 
 #include <aurora/gfx.h>
@@ -309,6 +310,7 @@ void shutdown() noexcept {
     target = {};
   }
   gfx::release_stereo_eye_targets();
+  gfx::stereo_shadow::shutdown();
   stereo_overlay::shutdown();
 }
 

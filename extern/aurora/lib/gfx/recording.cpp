@@ -8,6 +8,7 @@
 #include "draw_payload.hpp"
 #include "pipeline_cache.hpp"
 #include "stereo_eyes.hpp"
+#include "stereo_shadow.hpp"
 #include "stereo_uniform.hpp"
 #include "render_worker.hpp"
 #include "tex_copy_conv.hpp"
@@ -798,6 +799,7 @@ void set_scissor(const ClipRect& cmd) noexcept {
 // --- stereo replay ---
 
 void set_frame_stereo(const StereoFrameState& state) noexcept {
+  stereo_shadow::begin_frame(state.immersive);
   if (!g_recorder.active()) {
     return;
   }
@@ -910,6 +912,18 @@ void resolve_pass_into(TextureHandle texture, ClipRect rect, bool clearColor, bo
     prevPass.probeFace = probeFace;
     prevPass.probeUniformRange = push_uniform(std::array{0.f, 0.f, 1.f, 1.f});
   }
+  // Stereo replay: a copy from an EFB pass that replays per eye is also taken
+  // from each eye, into the copy's stand-ins (stereo_shadow.hpp), so effects
+  // that sample it (the thermal and X-ray visors) see each eye's own view. Set
+  // before the pass is enqueued: the frame worker may encode it at once.
+  stereo_seal_pass(current_frame_packet(), g_recorder.currentRenderPass);
+  if (probeFace < 0) {
+    if (prevPass.stereo.enabled && !gx::is_depth_format(resolveFormat)) {
+      prevPass.stereo.copyTargets = stereo_shadow::copy_targets(prevPass.resolveTarget);
+    } else {
+      stereo_shadow::invalidate(prevPass.resolveTarget.get());
+    }
+  }
   enqueue_pass(current_frame_packet(), g_recorder.currentRenderPass);
 
   // Populate new render pass from previous
@@ -968,6 +982,15 @@ void queue_palette_conv(tex_palette_conv::ConvRequest req) {
   auto& renderPass = current_render_passes()[g_recorder.currentRenderPass];
   AURORA_ASSERT(!renderPass.sealed, "Attempted to append palette conversion to sealed render pass {}",
                 g_recorder.currentRenderPass);
+  // Stereo replay: a palette read of a copy with eye stand-ins runs per eye too
+  // (DolphinXR's layered palette conversion), so the visor's coloured image
+  // stays per eye.
+  std::array<tex_palette_conv::ConvRequest, 2> eyeConvs;
+  if (!g_recorder.inOffscreen && stereo_shadow::palette_conv(req, eyeConvs)) {
+    for (uint32_t eye = 0; eye < AURORA_STEREO_EYE_COUNT; ++eye) {
+      renderPass.stereo.paletteConvs[eye].push_back(std::move(eyeConvs[eye]));
+    }
+  }
   renderPass.paletteConvs.push_back(std::move(req));
 }
 

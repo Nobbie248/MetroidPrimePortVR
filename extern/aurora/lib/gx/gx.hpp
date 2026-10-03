@@ -568,6 +568,10 @@ wgpu::RenderPipeline build_pipeline(const PipelineConfig& config, ArrayRef<wgpu:
 std::string build_shader_source(const ShaderConfig& config) noexcept;
 wgpu::ShaderModule build_shader(const ShaderConfig& config) noexcept;
 GXBindGroups build_bind_groups(const ShaderInfo& info) noexcept;
+// Stereo replay: the texture bind groups the left and right eye passes use when
+// a sampled texture has per-eye stand-ins (gfx/stereo_shadow.hpp); zero when the
+// mono bind group applies to both eyes.
+std::array<gfx::BindGroupRef, 2> build_stereo_bind_groups(const ShaderInfo& info) noexcept;
 
 u8 comp_type_size(GXAttr attr, GXCompType type) noexcept;
 u8 comp_cnt_count(GXAttr attr, GXCompCnt cnt) noexcept;

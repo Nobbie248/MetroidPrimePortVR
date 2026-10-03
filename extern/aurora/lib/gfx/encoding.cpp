@@ -5,6 +5,7 @@
 #include "clear.hpp"
 #include "depth_peek.hpp"
 #include "draw_payload.hpp"
+#include "stereo_shadow.hpp"
 #include "pipeline_cache.hpp"
 #include "probe.hpp"
 #include "tex_copy_conv.hpp"
@@ -310,6 +311,11 @@ void render(wgpu::CommandEncoder& cmd, FramePacket& frame, RenderPass& passInfo,
   for (const auto& conv : passInfo.paletteConvs) {
     tex_palette_conv::run(cmd, conv);
   }
+  for (const auto& eyeConvs : passInfo.stereo.paletteConvs) {
+    for (const auto& conv : eyeConvs) {
+      tex_palette_conv::run(cmd, conv);
+    }
+  }
   if (passInfo.discardable) {
     // This pass has no effect and can be safely discarded (e.g. an empty EFB segment between two back-to-back pass
     // breaks, or an unresolved offscreen pass).
@@ -422,6 +428,32 @@ void render(wgpu::CommandEncoder& cmd, FramePacket& frame, RenderPass& passInfo,
     }
     if (passInfo.probeFace >= 0) {
       probe::encode_mips(cmd, passInfo.probeFace, passInfo.probeUniformRange);
+    }
+  }
+
+  // Stereo replay: the same copy from each eye's image, over the same part of
+  // the view (the copy's UV transform is relative), into the eye stand-ins.
+  if (passInfo.stereo.enabled && passInfo.resolveTarget && passInfo.probeFace < 0 &&
+      passInfo.stereo.copyTargets[0] && !gx::is_depth_format(passInfo.resolveFormat)) {
+    const webgpu::gpu_prof::Zone zone{cmd, "Stereo eye copies"};
+    for (uint32_t eye = 0; eye < AURORA_STEREO_EYE_COUNT; ++eye) {
+      const auto& eyePass = passInfo.stereo.eyes[eye];
+      const auto& source = eyePass.resolveView ? eyePass.resolveView : eyePass.colorView;
+      if (!source || !passInfo.stereo.copyTargets[eye]) {
+        continue;
+      }
+      const tex_copy_conv::ConvRequest eyeReq{
+          .fmt = passInfo.resolveFormat,
+          .srcView = source,
+          .uniformRange = passInfo.resolveUniformRange,
+          .dst = passInfo.stereo.copyTargets[eye],
+          .sampleFilter = tex_copy_conv::SampleFilter::Linear,
+      };
+      if (tex_copy_conv::needs_conversion(passInfo.resolveFormat)) {
+        tex_copy_conv::run(cmd, eyeReq);
+      } else {
+        tex_copy_conv::blit(cmd, eyeReq);
+      }
     }
   }
 

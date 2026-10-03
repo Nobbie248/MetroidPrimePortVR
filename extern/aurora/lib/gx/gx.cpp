@@ -10,6 +10,7 @@
 #include "../gfx/probe.hpp"
 #include "../gfx/recording.hpp"
 #include "../gfx/resource_cache.hpp"
+#include "../gfx/stereo_shadow.hpp"
 #include "../gfx/texture.hpp"
 #include "gx_fmt.hpp"
 
@@ -478,14 +479,11 @@ void populate_pipeline_config(PipelineConfig& config, GXPrimitive primitive, GXV
   };
 }
 
-GXBindGroups build_bind_groups(const ShaderInfo& info) noexcept {
-  ZoneScoped;
-
-  if (!info.sampledTextures.any() && !info.sampledIndTextures.any()) {
-    // Don't bother re-binding anything
-    return {};
-  }
-
+namespace {
+// The GX texture bind group of the textures `info` samples, each texture's view
+// chosen by `view_for` (the mono view, or a stereo eye's stand-in).
+template <typename ViewFor>
+gfx::BindGroupRef build_texture_bind_group(const ShaderInfo& info, const ViewFor& view_for) noexcept {
   // Using C WGPU types instead of C++ wrappers to avoid destructor overhead
   std::array<WGPUBindGroupEntry, MaxTextures * 2 + 2 + gfx::probe::VolumeTextures> textureEntries{};
   textureEntries[MaxTextures * 2].binding = MaxTextures * 2;
@@ -503,7 +501,7 @@ GXBindGroups build_bind_groups(const ShaderInfo& info) noexcept {
     textureEntry.binding = i * 2;
     samplerEntry.binding = i * 2 + 1;
     if (tex && (info.sampledTextures[i] || info.sampledIndTextures[i])) {
-      textureEntry.textureView = tex.ref->sampleTextureView.Get();
+      textureEntry.textureView = view_for(tex);
       auto samplerDescriptor = tex.get_descriptor();
       // A mod's native maps under PBR tile many times over a floor. Anisotropic filtering keeps
       // them sharp across the view and averages them along it, so each screen column shows the
@@ -525,9 +523,47 @@ GXBindGroups build_bind_groups(const ShaderInfo& info) noexcept {
       .entryCount = textureEntries.size(),
       .entries = textureEntries.data(),
   };
+  return gfx::bind_group_ref(textureBindGroupDescriptor);
+}
+} // namespace
+
+GXBindGroups build_bind_groups(const ShaderInfo& info) noexcept {
+  ZoneScoped;
+
+  if (!info.sampledTextures.any() && !info.sampledIndTextures.any()) {
+    // Don't bother re-binding anything
+    return {};
+  }
   return {
-      .textureBindGroup = gfx::bind_group_ref(textureBindGroupDescriptor),
+      .textureBindGroup =
+          build_texture_bind_group(info, [](const gfx::TextureBind& tex) { return tex.ref->sampleTextureView.Get(); }),
   };
+}
+
+std::array<gfx::BindGroupRef, 2> build_stereo_bind_groups(const ShaderInfo& info) noexcept {
+  if (!gfx::stereo_shadow::active() || (!info.sampledTextures.any() && !info.sampledIndTextures.any())) {
+    return {};
+  }
+  bool shadowed = false;
+  for (u32 i = 0; i < MaxTextures && !shadowed; ++i) {
+    const auto& tex = g_gxState.textures[i];
+    shadowed = tex && (info.sampledTextures[i] || info.sampledIndTextures[i]) &&
+               gfx::stereo_shadow::eye_texture(tex.ref.get(), 0) != nullptr;
+  }
+  if (!shadowed) {
+    return {};
+  }
+  ZoneScoped;
+  std::array<gfx::BindGroupRef, 2> groups{};
+  for (uint32_t eye = 0; eye < 2; ++eye) {
+    groups[eye] = build_texture_bind_group(info, [eye](const gfx::TextureBind& tex) {
+      if (const gfx::TextureRef* stand_in = gfx::stereo_shadow::eye_texture(tex.ref.get(), eye)) {
+        return stand_in->sampleTextureView.Get();
+      }
+      return tex.ref->sampleTextureView.Get();
+    });
+  }
+  return groups;
 }
 
 void initialize() noexcept {

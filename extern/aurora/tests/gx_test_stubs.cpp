@@ -7,6 +7,7 @@
 #include "gfx/resources.hpp"
 #include "gfx/depth_peek.hpp"
 #include "gfx/recording.hpp"
+#include "gfx/stereo_shadow.hpp"
 #include "gfx/tex_copy_conv.hpp"
 #include "gfx/tex_palette_conv.hpp"
 #include "gfx/texture.hpp"
@@ -127,7 +128,18 @@ gfx::Range build_uniform(const ShaderInfo& info, std::array<uint32_t, 2>& stereo
   return {.size = 1};
 }
 void resolve_sampled_textures(const ShaderInfo& info) noexcept {}
+std::array<gfx::BindGroupRef, 2> build_stereo_bind_groups(const ShaderInfo& info) noexcept { return {}; }
 } // namespace aurora::gx
+
+// --- Stereo replay stubs (the FIFO never runs immersive here) ---
+namespace aurora::gfx {
+void set_stereo_draw_route(uint8_t route) noexcept {}
+uint8_t stereo_draw_route() noexcept { return 0; }
+namespace stereo_shadow {
+bool active() noexcept { return false; }
+uint64_t epoch() noexcept { return 0; }
+} // namespace stereo_shadow
+} // namespace aurora::gfx
 
 // --- Buffer push stubs ---
 namespace aurora::gfx {

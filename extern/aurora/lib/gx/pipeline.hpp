@@ -22,6 +22,9 @@ struct DrawData {
   // in the left and right eye passes, staged along with the mono uniform.
   // UINT32_MAX leaves the draw out of that eye.
   std::array<uint32_t, 2> stereoUniformOffset{UINT32_MAX, UINT32_MAX};
+  // ... and the texture bind groups, when the draw samples an EFB copy taken
+  // per eye; zero binds the mono group.
+  std::array<gfx::BindGroupRef, 2> stereoTextureBindGroup{};
 };
 
 constexpr uint32_t GXPipelineConfigVersion = 14;

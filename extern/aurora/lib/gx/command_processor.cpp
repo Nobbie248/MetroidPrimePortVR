@@ -3,6 +3,7 @@
 #include "../gfx/depth_peek.hpp"
 #include "../gfx/probe.hpp"
 #include "../gfx/recording.hpp"
+#include "../gfx/stereo_shadow.hpp"
 #include "../internal.hpp"
 #include "dolphin/gd/GDGeometry.h"
 #include "dolphin/gx/GXAurora.h"
@@ -139,6 +140,8 @@ struct DrawCache {
   bool hasPipeline = false;
   gfx::Range uniformRange{};
   std::array<uint32_t, 2> stereoUniformOffsets{UINT32_MAX, UINT32_MAX};
+  std::array<gfx::BindGroupRef, 2> stereoBindGroups{};
+  uint64_t stereoEpoch = 0;
   gfx::Range fogRange{};
   FogRangeLutKey fogRangeKey{};
   bool hasFogRange = false;
@@ -431,6 +434,16 @@ static void push_gx_draw(GXPrimitive prim, GXVtxFmt fmt, u16 vtxCount, gfx::Rang
       state.dirty |= DirtyUniform;
     }
   }
+  // Stereo replay: eye bind groups for draws that sample a per-eye EFB copy.
+  if (gfx::stereo_shadow::active()) {
+    const uint64_t stereoEpoch = gfx::stereo_shadow::epoch();
+    if (!bindGroupsValid || cache.stereoEpoch != stereoEpoch) {
+      cache.stereoBindGroups = build_stereo_bind_groups(cache.shaderInfo);
+      cache.stereoEpoch = stereoEpoch;
+    }
+  } else {
+    cache.stereoBindGroups = {};
+  }
 
   const bool uniformValid = (state.dirty & DirtyUniform) == 0 && cache.uniformRange.size != 0;
   if (!uniformValid) {
@@ -470,6 +483,7 @@ static void push_gx_draw(GXPrimitive prim, GXVtxFmt fmt, u16 vtxCount, gfx::Rang
       .bindGroups = cache.bindGroups,
       .dstAlpha = state.dstAlpha,
       .stereoUniformOffset = cache.stereoUniformOffsets,
+      .stereoTextureBindGroup = cache.stereoBindGroups,
   });
 }
 
@@ -915,6 +929,8 @@ void clear_draw_cache() noexcept {
   sDrawCache.bindGeneration = 0;
   sDrawCache.uniformRange = {};
   sDrawCache.stereoUniformOffsets = {UINT32_MAX, UINT32_MAX};
+  sDrawCache.stereoBindGroups = {};
+  sDrawCache.stereoEpoch = 0;
   sDrawCache.fogRange = {};
   sDrawCache.hasFogRange = false;
 }

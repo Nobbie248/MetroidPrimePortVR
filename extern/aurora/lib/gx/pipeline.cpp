@@ -58,8 +58,10 @@ void render_eye(const DrawData& data, const wgpu::RenderPassEncoder& pass, uint3
   pass.SetImmediates(0, &data.immediateData, sizeof(data.immediateData));
   const std::array offsets{uniformOffset};
   pass.SetBindGroup(1, resources.uniformBindGroup, offsets.size(), offsets.data());
-  if (data.bindGroups.textureBindGroup) {
-    pass.SetBindGroup(2, gfx::find_bind_group(data.bindGroups.textureBindGroup));
+  const gfx::BindGroupRef textureBindGroup =
+      data.stereoTextureBindGroup[eye] ? data.stereoTextureBindGroup[eye] : data.bindGroups.textureBindGroup;
+  if (textureBindGroup) {
+    pass.SetBindGroup(2, gfx::find_bind_group(textureBindGroup));
   }
   pass.SetIndexBuffer(resources.indexBuffer, wgpu::IndexFormat::Uint16, data.idxRange.offset, data.idxRange.size);
   if (data.dstAlpha != UINT32_MAX) {

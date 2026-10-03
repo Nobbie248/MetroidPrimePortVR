@@ -16,6 +16,9 @@
 // staged. The recorder keeps a copy in the FramePacket; the frame worker reads
 // that copy, never the host's globals.
 
+#include "tex_palette_conv.hpp"
+#include "types.hpp"
+
 #include <aurora/aurora.h>
 #include <aurora/gfx.h>
 #include <aurora/math.hpp>
@@ -23,6 +26,7 @@
 
 #include <array>
 #include <cstdint>
+#include <vector>
 
 namespace aurora::gfx {
 
@@ -80,6 +84,10 @@ struct StereoEyePass {
 struct StereoPassReplay {
   bool enabled = false;
   std::array<StereoEyePass, AURORA_STEREO_EYE_COUNT> eyes{};
+  // This pass's EFB copy, taken again from each eye (stereo_shadow.hpp).
+  std::array<TextureHandle, AURORA_STEREO_EYE_COUNT> copyTargets{};
+  // Palette conversions of eye copies, run with the pass's own conversions.
+  std::array<std::vector<tex_palette_conv::ConvRequest>, AURORA_STEREO_EYE_COUNT> paletteConvs{};
 };
 
 } // namespace detail

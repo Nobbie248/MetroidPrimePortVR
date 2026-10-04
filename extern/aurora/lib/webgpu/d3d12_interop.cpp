@@ -17,6 +17,7 @@
 #include <algorithm>
 #include <array>
 #include <chrono>
+#include <condition_variable>
 #include <cstdint>
 #include <limits>
 #include <memory>
@@ -264,11 +265,18 @@ public:
     m_frameToken = token;
     m_targetCount = targetCount;
     m_framePending = true;
+    m_targetsSet.notify_all();
     return true;
   }
 
   bool Encode(wgpu::CommandEncoder& encoder, const stereo::SinkFrame& frame) noexcept {
-    std::lock_guard lock(m_mutex);
+    std::unique_lock lock(m_mutex);
+    if (!m_framePending && !m_encoded) {
+      // Pipelined pacing sets a packet's targets once the previous packet's eyes were
+      // submitted, which can be moments before its own encode reaches this point.
+      m_targetsSet.wait_for(lock, std::chrono::milliseconds(20),
+                            [&] { return m_framePending && m_frameToken == frame.frameToken; });
+    }
     if (!m_framePending || m_encoded || frame.frameToken != m_frameToken) {
       return false;
     }
@@ -679,6 +687,7 @@ private:
   }
 
   std::mutex m_mutex;
+  std::condition_variable m_targetsSet;
   ComPtr<ID3D12Device> m_device;
   ComPtr<ID3D12CommandQueue> m_queue;
   ComPtr<ID3D12Fence> m_fence;

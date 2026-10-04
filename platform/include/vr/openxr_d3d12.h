@@ -98,6 +98,15 @@ public:
     OpenXRBeginStatus BeginFrameForPacket(const OpenXRBackendFrame& packet, OpenXRBackendFrame& frame);
     OpenXRSubmissionStatus CopyRenderedEyes(const OpenXRBackendFrame& frame);
     OpenXRBeginStatus KeepAliveCycle();
+    // Pipelined pacing (openxr_integration.cpp PipelinedCycle): a packet's poses first,
+    // located `periods_ahead` display periods past the last compositor frame, its images
+    // and Aurora targets later (ArmPacket), once the pending packet's eyes were submitted.
+    // It then queues behind that packet on the other swapchain pair and becomes the
+    // pending one when that packet's compositor frame ends. PreparePacket is both at once.
+    OpenXRBeginStatus LocatePacket(const OpenXRPresentation& presentation, OpenXRBackendFrame& packet,
+                                   uint32_t periods_ahead);
+    OpenXRBeginStatus ArmPacket(OpenXRBackendFrame& packet);
+    bool SupportsPipelining() const;
 
     // Call on the XR owner thread after Aurora's worker is idle and before
     // aurora_shutdown(). Safe to repeat. False means a submitted D3D12 command

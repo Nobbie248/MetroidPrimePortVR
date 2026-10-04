@@ -167,6 +167,7 @@ void TestDefaultsMatchGame() {
       {"vr_immersive_replay", FormatBool(s.immersive_replay)},
       {"vr_multiview", FormatBool(s.multiview)},
       {"vr_direct_present", FormatBool(s.direct_present)},
+      {"vr_pipelined_rendering", FormatBool(s.pipelined_rendering)},
       {"vr_remove_cinematic_bars", FormatBool(s.remove_cinematic_bars)},
       {"vr_sky_at_infinity", FormatBool(s.sky_at_infinity)},
       {"vr_space_warp", FormatBool(s.space_warp)},

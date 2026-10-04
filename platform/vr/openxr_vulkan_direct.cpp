@@ -1367,6 +1367,12 @@ OpenXRSubmissionStatus OpenXRVulkanDirectBackend::CopyRenderedEyes(const OpenXRB
     return m_impl->CopyRenderedEyes(frame);
 }
 OpenXRBeginStatus OpenXRVulkanDirectBackend::KeepAliveCycle() { return m_impl->KeepAliveCycle(); }
+OpenXRBeginStatus OpenXRVulkanDirectBackend::LocatePacket(const OpenXRPresentation& presentation,
+                                                          OpenXRBackendFrame& packet, uint32_t) {
+    return m_impl->PreparePacket(presentation, packet);
+}
+OpenXRBeginStatus OpenXRVulkanDirectBackend::ArmPacket(OpenXRBackendFrame&) { return OpenXRBeginStatus::Ready; }
+bool OpenXRVulkanDirectBackend::SupportsPipelining() const { return false; }
 bool OpenXRVulkanDirectBackend::Shutdown() { return m_impl->Shutdown(); }
 bool OpenXRVulkanDirectBackend::IsBound() const { return m_impl->IsBound(); }
 bool OpenXRVulkanDirectBackend::PanelLayerAvailable() const { return m_impl->PanelLayerAvailable(); }
@@ -1450,6 +1456,14 @@ OpenXRSubmissionStatus OpenXRQuestVulkanBackend::CopyRenderedEyes(const OpenXRBa
 OpenXRBeginStatus OpenXRQuestVulkanBackend::KeepAliveCycle() {
     return PG_QUEST_BACKEND_CALL(KeepAliveCycle(), OpenXRBeginStatus::Error);
 }
+OpenXRBeginStatus OpenXRQuestVulkanBackend::LocatePacket(const OpenXRPresentation& presentation,
+                                                         OpenXRBackendFrame& packet, uint32_t periods_ahead) {
+    return PG_QUEST_BACKEND_CALL(LocatePacket(presentation, packet, periods_ahead), OpenXRBeginStatus::Error);
+}
+OpenXRBeginStatus OpenXRQuestVulkanBackend::ArmPacket(OpenXRBackendFrame& packet) {
+    return PG_QUEST_BACKEND_CALL(ArmPacket(packet), OpenXRBeginStatus::Error);
+}
+bool OpenXRQuestVulkanBackend::SupportsPipelining() const { return PG_QUEST_BACKEND_CALL(SupportsPipelining(), false); }
 bool OpenXRQuestVulkanBackend::Shutdown() { return PG_QUEST_BACKEND_CALL(Shutdown(), true); }
 bool OpenXRQuestVulkanBackend::IsBound() const { return PG_QUEST_BACKEND_CALL(IsBound(), false); }
 bool OpenXRQuestVulkanBackend::PanelLayerAvailable() const {

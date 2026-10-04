@@ -134,7 +134,8 @@ public:
         {
             std::lock_guard lock(submission_mutex_);
             shutting_down_ = false;
-            submission_unsafe_ = false;
+            awaiting_token_ = 0;
+            submission_results_ = {};
         }
         requirements_ = {
             requirements.adapterLuid.LowPart,
@@ -307,11 +308,18 @@ public:
             return OpenXRD3D12BeginStatus::Ready;
         }
 
-        return PrepareTargets(frame);
+        const auto armed = PrepareTargets(frame, eye_swapchains_, panel_swapchain_);
+        if (armed == OpenXRD3D12BeginStatus::Ready) {
+            active_packet_serial_ = frame.xr_frame.serial;
+        }
+        return armed;
     }
 
-    // Both pacing paths retain ownership until completion or cancellation.
-    OpenXRD3D12BeginStatus PrepareTargets(OpenXRD3D12Frame& frame) {
+    // Both pacing paths retain ownership until completion or cancellation. `pair` and
+    // `panel_swapchain` are the swapchains the frame's images come from: the writable
+    // ones, or the retained ones for a packet queued behind the pending packet.
+    OpenXRD3D12BeginStatus PrepareTargets(OpenXRD3D12Frame& frame, std::array<EyeSwapchain, kOpenXREyeCount>& pair,
+                                          EyeSwapchain& panel_swapchain) {
         const uint32_t target_count =
             frame.presentation.mode == OpenXRD3D12FrameMode::VirtualScreen ? 1u : kOpenXREyeCount;
         if (target_count == 1) {
@@ -322,9 +330,9 @@ public:
         std::array<AuroraD3D12StereoTarget, kOpenXREyeCount> targets{};
         const diagnostics::Stopwatch acquire_timer;
         for (uint32_t eye = 0; eye < target_count; ++eye) {
-            auto& swapchain = eye_swapchains_[eye];
+            auto& swapchain = pair[eye];
             if (!AcquireSwapchain(swapchain)) {
-                ReleaseAcquiredSwapchains();
+                ReleaseAcquired(pair, panel_swapchain);
                 EndActiveFrameWithoutLayers(frame.xr_frame);
                 return OpenXRD3D12BeginStatus::Error;
             }
@@ -340,15 +348,15 @@ public:
         const bool panel = frame.presentation.panel.requested && EnsurePanelSwapchains();
         frame.presentation.panel.requested = panel;
         if (panel) {
-            if (!AcquireSwapchain(panel_swapchain_)) {
-                ReleaseAcquiredSwapchains();
+            if (!AcquireSwapchain(panel_swapchain)) {
+                ReleaseAcquired(pair, panel_swapchain);
                 EndActiveFrameWithoutLayers(frame.xr_frame);
                 return OpenXRD3D12BeginStatus::Error;
             }
             panel_target = {
-                panel_swapchain_.images[panel_swapchain_.acquired_index].texture,
-                panel_swapchain_.width,
-                panel_swapchain_.height,
+                panel_swapchain.images[panel_swapchain.acquired_index].texture,
+                panel_swapchain.width,
+                panel_swapchain.height,
                 static_cast<int64_t>(swapchain_format_),
             };
         }
@@ -357,10 +365,7 @@ public:
         {
             std::lock_guard lock(submission_mutex_);
             awaiting_token_ = frame.xr_frame.serial;
-            submitted_token_ = 0;
-            submission_arrived_ = false;
-            submission_success_ = false;
-            submission_unsafe_ = false;
+            ForgetResultLocked(frame.xr_frame.serial);
         }
         if (!diagnostics::Measure(diagnostics::Stage::SetTargets, [&] {
             return aurora_d3d12_set_stereo_targets_with_panel(frame.xr_frame.serial, targets.data(), target_count,
@@ -370,7 +375,7 @@ public:
                 std::lock_guard lock(submission_mutex_);
                 awaiting_token_ = 0;
             }
-            ReleaseAcquiredSwapchains();
+            ReleaseAcquired(pair, panel_swapchain);
             Fail("Aurora rejected the acquired OpenXR D3D12 swapchain target");
             EndActiveFrameWithoutLayers(frame.xr_frame);
             return OpenXRD3D12BeginStatus::Error;
@@ -383,10 +388,23 @@ public:
     // images is independent of the compositor cycle; keep them acquired while
     // Aurora owns them, and never expose them through the retained pair early.
     OpenXRBeginStatus PreparePacket(const OpenXRPresentation& presentation, OpenXRBackendFrame& packet) {
+        if (pending_packet_serial_ != 0) {
+            Fail("PreparePacket called with a packet pending");
+            return OpenXRBeginStatus::Error;
+        }
+        const auto located = LocatePacket(presentation, packet, 2);
+        if (located != OpenXRBeginStatus::Ready || !packet.xr_frame.should_render || !packet.xr_frame.views_valid) {
+            return located;
+        }
+        return ArmPacket(packet);
+    }
+
+    OpenXRBeginStatus LocatePacket(const OpenXRPresentation& presentation, OpenXRBackendFrame& packet,
+                                   uint32_t periods_ahead) {
         packet = {};
         packet.presentation = presentation;
-        if (!bound_ || runtime_ == nullptr || frame_active_ || pending_packet_serial_ != 0) {
-            Fail("PreparePacket called before binding or with work pending");
+        if (!bound_ || runtime_ == nullptr || frame_active_ || queued_packet_serial_ != 0) {
+            Fail("LocatePacket called before binding, with a frame active or a packet already queued");
             return OpenXRBeginStatus::Error;
         }
         if (runtime_->ShouldExit()) return OpenXRBeginStatus::ExitRequested;
@@ -395,14 +413,18 @@ public:
             const auto status = KeepAliveCycle();
             if (status != OpenXRBeginStatus::Ready) return status;
         }
-        if (!ResizeWritablePair()) return OpenXRBeginStatus::Error;
+        // A new size waits for a moment without a pending packet (its pair is in use).
+        if (pending_packet_serial_ == 0 && !ResizeWritablePair()) return OpenXRBeginStatus::Error;
+        // The pair this packet will be armed on: the writable one, or the retained one
+        // behind a pending packet.
+        const auto& pair = pending_packet_serial_ != 0 ? retained_swapchains_ : eye_swapchains_;
         packet.xr_frame.serial = next_packet_serial_++;
-        packet.xr_frame.predicted_display_time = last_display_time_ + 2 * last_display_period_;
+        packet.xr_frame.predicted_display_time = last_display_time_ + periods_ahead * last_display_period_;
         packet.xr_frame.predicted_display_period = last_display_period_;
         packet.xr_frame.should_render = last_should_render_;
         for (uint32_t eye = 0; eye < kOpenXREyeCount; ++eye) {
-            packet.render_width[eye] = eye_swapchains_[eye].width;
-            packet.render_height[eye] = eye_swapchains_[eye].height;
+            packet.render_width[eye] = pair[eye].width;
+            packet.render_height[eye] = pair[eye].height;
         }
         if (!packet.xr_frame.should_render) return OpenXRBeginStatus::Ready;
         if (!runtime_->LocateViewsAt(packet.xr_frame.predicted_display_time, packet.xr_frame)) {
@@ -412,28 +434,55 @@ public:
         if (!packet.xr_frame.views_valid) return OpenXRBeginStatus::Ready;
         render_session_serial_ = runtime_->SessionRunSerial();
         render_space_serial_ = runtime_->LastReferenceSpaceChange().serial;
-        const auto status = PrepareTargets(packet);
-        if (status == OpenXRBeginStatus::Ready) pending_packet_serial_ = packet.xr_frame.serial;
+        return OpenXRBeginStatus::Ready;
+    }
+
+    OpenXRBeginStatus ArmPacket(OpenXRBackendFrame& packet) {
+        if (!bound_ || runtime_ == nullptr || frame_active_ || queued_packet_serial_ != 0) {
+            Fail("ArmPacket called before binding, with a frame active or a packet already queued");
+            return OpenXRBeginStatus::Error;
+        }
+        if (!packet.xr_frame.should_render || !packet.xr_frame.views_valid) return OpenXRBeginStatus::Ready;
+        const bool behind = pending_packet_serial_ != 0;
+        if (behind) {
+            // Aurora takes one packet's targets at a time: the pending packet's eyes must be submitted.
+            std::lock_guard lock(submission_mutex_);
+            if (FindResultLocked(pending_packet_serial_) == nullptr) {
+                Fail("ArmPacket called before the pending packet's eyes were submitted");
+                return OpenXRBeginStatus::Error;
+            }
+        }
+        const auto status = behind ? PrepareTargets(packet, retained_swapchains_, retained_panel_swapchain_)
+                                   : PrepareTargets(packet, eye_swapchains_, panel_swapchain_);
+        if (status == OpenXRBeginStatus::Ready) {
+            (behind ? queued_packet_serial_ : pending_packet_serial_) = packet.xr_frame.serial;
+        }
         return status;
     }
 
+    bool SupportsPipelining() const { return true; }
+
     bool TryCancelPendingPacket(OpenXRBackendFrame& packet) {
-        if (frame_active_ || pending_packet_serial_ == 0 ||
-            packet.xr_frame.serial != pending_packet_serial_ || !packet.expects_gpu_submission ||
-            !aurora_d3d12_cancel_stereo_targets(packet.xr_frame.serial)) return false;
+        const uint64_t serial = packet.xr_frame.serial;
+        const bool queued = queued_packet_serial_ != 0 && serial == queued_packet_serial_;
+        const bool pending = !queued && pending_packet_serial_ != 0 && serial == pending_packet_serial_;
+        if ((!queued && !pending) || frame_active_ || !packet.expects_gpu_submission ||
+            !aurora_d3d12_cancel_stereo_targets(serial)) return false;
         {
             std::lock_guard lock(submission_mutex_);
-            awaiting_token_ = submitted_token_ = 0;
-            submission_arrived_ = submission_success_ = submission_unsafe_ = false;
+            if (awaiting_token_ == serial) awaiting_token_ = 0;
+            ForgetResultLocked(serial);
         }
         packet.expects_gpu_submission = false;
-        pending_packet_serial_ = 0;
+        uint64_t& slot = queued ? queued_packet_serial_ : pending_packet_serial_;
+        slot = 0;
         const diagnostics::Stopwatch release_timer;
-        const bool released = ReleaseAcquiredSwapchains();
+        const bool released = queued ? ReleaseAcquired(retained_swapchains_, retained_panel_swapchain_)
+                                     : ReleaseAcquiredSwapchains();
         diagnostics::OnSwapchainRelease(release_timer);
         // A release error is fatal; keep it visible to the next prepare rather
         // than letting it register new targets over still-acquired images.
-        if (!released) pending_packet_serial_ = packet.xr_frame.serial;
+        if (!released) slot = serial;
         return true; // Encoding was canceled; a release error blocks the next prepare.
     }
 
@@ -491,26 +540,34 @@ public:
             // Completion was already confirmed. A stopped session must not
             // strand a packet and block preparation after the next READY event.
             if (status == OpenXRBeginStatus::SessionNotRunning) {
-                const bool released = ReleaseAcquiredSwapchains();
+                bool released = ReleaseAcquiredSwapchains();
+                if (queued_packet_serial_ != 0) {
+                    // Aurora may still be drawing the queued packet's eyes: its images are
+                    // only released once that was withdrawn.
+                    if (aurora_d3d12_cancel_stereo_targets(queued_packet_serial_)) {
+                        released = ReleaseAcquired(retained_swapchains_, retained_panel_swapchain_) && released;
+                    } else {
+                        AbandonAcquired(retained_swapchains_, retained_panel_swapchain_);
+                    }
+                }
                 pending_packet_serial_ = 0;
+                queued_packet_serial_ = 0;
                 std::lock_guard lock(submission_mutex_);
-                awaiting_token_ = submitted_token_ = 0;
-                submission_arrived_ = submission_success_ = submission_unsafe_ = false;
+                awaiting_token_ = 0;
+                submission_results_ = {};
                 if (!released) return OpenXRBeginStatus::Error;
             }
             return status;
         }
         frame = packet;
-        // Use the current compositor token/time but the original render poses.
+        // Use the current compositor token/time but the original render poses; the
+        // packet's own serial stays the name of its submission (active_packet_serial_).
         frame.xr_frame.serial = active_frame_.serial;
         frame.xr_frame.predicted_display_time = active_frame_.predicted_display_time;
         frame.xr_frame.predicted_display_period = active_frame_.predicted_display_period;
         frame.xr_frame.should_render = active_frame_.should_render;
         active_frame_serial_ = frame.xr_frame.serial;
-        {
-            std::lock_guard lock(submission_mutex_);
-            awaiting_token_ = submitted_token_ = frame.xr_frame.serial;
-        }
+        active_packet_serial_ = packet.xr_frame.serial;
         pending_packet_serial_ = 0;
         return OpenXRBeginStatus::Ready;
     }
@@ -531,10 +588,8 @@ public:
             return OpenXRD3D12SubmissionStatus::Success;
         }
         std::unique_lock lock(submission_mutex_);
-        const auto ready = [&] {
-            return shutting_down_ ||
-                   (submission_arrived_ && submitted_token_ == frame.xr_frame.serial);
-        };
+        const uint64_t token = SubmissionToken(frame);
+        const auto ready = [&] { return shutting_down_ || FindResultLocked(token) != nullptr; };
         if (timeout_ms == std::numeric_limits<uint32_t>::max()) {
             submission_cv_.wait(lock, ready);
         } else if (!submission_cv_.wait_for(lock, std::chrono::milliseconds(timeout_ms), ready)) {
@@ -543,8 +598,16 @@ public:
         if (shutting_down_) {
             return OpenXRD3D12SubmissionStatus::ShuttingDown;
         }
-        return submission_success_ ? OpenXRD3D12SubmissionStatus::Success
-                                   : OpenXRD3D12SubmissionStatus::Failed;
+        return FindResultLocked(token)->success ? OpenXRD3D12SubmissionStatus::Success
+                                                : OpenXRD3D12SubmissionStatus::Failed;
+    }
+
+    // The token Aurora reports a frame's submission under: its packet's serial for the
+    // active compositor frame of a packet, the frame's own serial otherwise.
+    uint64_t SubmissionToken(const OpenXRD3D12Frame& frame) const noexcept {
+        return frame_active_ && frame.xr_frame.serial == active_frame_serial_ && active_packet_serial_ != 0
+                   ? active_packet_serial_
+                   : frame.xr_frame.serial;
     }
 
     bool TryCancelPendingFrame(OpenXRD3D12Frame& frame) {
@@ -559,11 +622,8 @@ public:
         // A successful bridge cancellation is serialized against Encode and
         // never generates a callback, so this token has no GPU ownership.
         std::lock_guard lock(submission_mutex_);
-        awaiting_token_ = 0;
-        submitted_token_ = 0;
-        submission_arrived_ = false;
-        submission_success_ = false;
-        submission_unsafe_ = false;
+        if (awaiting_token_ == frame.xr_frame.serial) awaiting_token_ = 0;
+        ForgetResultLocked(frame.xr_frame.serial);
         frame.expects_gpu_submission = false;
         return true;
     }
@@ -577,9 +637,8 @@ public:
         bool submission_unsafe = false;
         {
             std::lock_guard lock(submission_mutex_);
-            submission_unsafe = submission_arrived_ &&
-                                submitted_token_ == frame.xr_frame.serial &&
-                                submission_unsafe_;
+            const SubmissionResult* result = FindResultLocked(SubmissionToken(frame));
+            submission_unsafe = result != nullptr && result->unsafe;
         }
         if (submission_unsafe) {
             AbandonAcquiredSwapchains();
@@ -601,19 +660,26 @@ public:
             diagnostics::OnLayerRejected(diagnostics::ClassifyRejectedLayer(
                 release_ok, frame.xr_frame.should_render, frame.xr_frame.views_valid));
         }
-        if (can_submit) {
+        // A packet queued behind this frame's holds the other pair's images: that pair
+        // becomes the writable one whether or not this frame's layer is shown.
+        const bool queued = queued_packet_serial_ != 0;
+        if (can_submit || queued) {
             // xrEndFrame references the MOST RECENTLY RELEASED image of a
             // swapchain, not an explicit image index. Keep the displayed pair
             // separate from the pair Aurora can write or cancel next.
             std::swap(eye_swapchains_, retained_swapchains_);
-            if (frame.presentation.panel.requested) {
+            if (frame.presentation.panel.requested || queued) {
                 std::swap(panel_swapchain_, retained_panel_swapchain_);
             }
+        }
+        if (can_submit) {
             retained_panel_valid_ = frame.presentation.panel.requested;
             retained_frame_ = frame;
             retained_session_serial_ = render_session_serial_;
             retained_space_serial_ = render_space_serial_;
             have_retained_frame_ = true;
+        } else if (queued) {
+            retained_panel_valid_ = false;
         }
         const bool end_ok = EndRetainedFrame(can_submit);
 
@@ -623,10 +689,13 @@ public:
         frame.expects_gpu_submission = false;
         {
             std::lock_guard lock(submission_mutex_);
-            awaiting_token_ = 0;
-            submission_arrived_ = false;
-            submission_success_ = false;
-            submission_unsafe_ = false;
+            if (awaiting_token_ == active_packet_serial_) awaiting_token_ = 0;
+            ForgetResultLocked(active_packet_serial_);
+        }
+        active_packet_serial_ = 0;
+        if (queued) {
+            pending_packet_serial_ = queued_packet_serial_;
+            queued_packet_serial_ = 0;
         }
         return release_ok && end_ok;
     }
@@ -774,6 +843,9 @@ public:
         // releasable after an earlier submission failure.
         AllowAcquiredSwapchainsAfterGpuDrain();
         ReleaseAcquiredSwapchains();
+        ReleaseAcquired(retained_swapchains_, retained_panel_swapchain_);
+        queued_packet_serial_ = 0;
+        active_packet_serial_ = 0;
         if (frame_active_ && runtime_ != nullptr) {
             // Shutdown is required to run on the XR owner thread after Aurora's
             // worker is idle, so it is safe to close an abandoned frame here.
@@ -986,12 +1058,22 @@ private:
         return true;
     }
 
-    bool ReleaseAcquiredSwapchains() {
+    bool ReleaseAcquiredSwapchains() { return ReleaseAcquired(eye_swapchains_, panel_swapchain_); }
+
+    bool ReleaseAcquired(std::array<EyeSwapchain, kOpenXREyeCount>& pair, EyeSwapchain& panel_swapchain) {
         bool success = true;
-        for (auto& swapchain : eye_swapchains_) {
+        for (auto& swapchain : pair) {
             success = ReleaseSwapchain(swapchain) && success;
         }
-        return ReleaseSwapchain(panel_swapchain_) && success;
+        return ReleaseSwapchain(panel_swapchain) && success;
+    }
+
+    void AbandonAcquired(std::array<EyeSwapchain, kOpenXREyeCount>& pair, EyeSwapchain& panel_swapchain) noexcept {
+        for (auto* swapchain : {&pair[0], &pair[1], &panel_swapchain}) {
+            if (swapchain->acquired) {
+                swapchain->release_forbidden = true;
+            }
+        }
     }
 
     bool ReleaseSwapchain(EyeSwapchain& swapchain) {
@@ -1023,15 +1105,13 @@ private:
     }
 
     void AbandonAcquiredSwapchains() noexcept {
-        for (auto* swapchain : {&eye_swapchains_[0], &eye_swapchains_[1], &panel_swapchain_}) {
-            if (swapchain->acquired) {
-                swapchain->release_forbidden = true;
-            }
-        }
+        AbandonAcquired(eye_swapchains_, panel_swapchain_);
+        AbandonAcquired(retained_swapchains_, retained_panel_swapchain_);
     }
 
     void AllowAcquiredSwapchainsAfterGpuDrain() noexcept {
-        for (auto* swapchain : {&eye_swapchains_[0], &eye_swapchains_[1], &panel_swapchain_}) {
+        for (auto* swapchain : {&eye_swapchains_[0], &eye_swapchains_[1], &panel_swapchain_, &retained_swapchains_[0],
+                                &retained_swapchains_[1], &retained_panel_swapchain_}) {
             if (swapchain->acquired) {
                 swapchain->release_forbidden = false;
             }
@@ -1121,12 +1201,34 @@ private:
             if (token != self->awaiting_token_) {
                 return;
             }
-            self->submitted_token_ = token;
-            self->submission_success_ = success;
-            self->submission_arrived_ = true;
-            self->submission_unsafe_ = !success;
+            self->awaiting_token_ = 0;
+            self->submission_results_[1] = self->submission_results_[0];
+            self->submission_results_[0] = {token, success, !success};
         }
         self->submission_cv_.notify_all();
+    }
+
+    // The results of the last two submissions, by token (under submission_mutex_): a
+    // pipelined packet's may arrive while the previous packet's is still awaited.
+    struct SubmissionResult {
+        uint64_t token = 0;
+        bool success = false;
+        bool unsafe = false;
+    };
+    const SubmissionResult* FindResultLocked(uint64_t token) const noexcept {
+        for (const auto& result : submission_results_) {
+            if (token != 0 && result.token == token) {
+                return &result;
+            }
+        }
+        return nullptr;
+    }
+    void ForgetResultLocked(uint64_t token) noexcept {
+        for (auto& result : submission_results_) {
+            if (token != 0 && result.token == token) {
+                result = {};
+            }
+        }
     }
 
     bool Fail(std::string message) {
@@ -1181,13 +1283,15 @@ private:
     std::mutex submission_mutex_;
     std::condition_variable submission_cv_;
     uint64_t awaiting_token_ = 0;
-    uint64_t submitted_token_ = 0;
-    bool submission_arrived_ = false;
-    bool submission_success_ = false;
-    bool submission_unsafe_ = false;
+    std::array<SubmissionResult, 2> submission_results_{};
     bool shutting_down_ = false;
 
+    // The packet whose eyes Aurora renders or rendered next, and the one armed behind
+    // it on the other swapchain pair (ArmPacket), promoted when the first's compositor
+    // frame ends; the packet serial of the active compositor frame.
     uint64_t pending_packet_serial_ = 0;
+    uint64_t queued_packet_serial_ = 0;
+    uint64_t active_packet_serial_ = 0;
     uint64_t next_packet_serial_ = 1ull << 40;
     uint64_t timing_session_serial_ = 0;
     XrTime last_display_time_ = 0;
@@ -1255,6 +1359,12 @@ OpenXRSubmissionStatus OpenXRD3D12Backend::CopyRenderedEyes(const OpenXRBackendF
     return m_impl->CopyRenderedEyes(frame);
 }
 OpenXRBeginStatus OpenXRD3D12Backend::KeepAliveCycle() { return m_impl->KeepAliveCycle(); }
+OpenXRBeginStatus OpenXRD3D12Backend::LocatePacket(const OpenXRPresentation& presentation, OpenXRBackendFrame& packet,
+                                                   uint32_t periods_ahead) {
+    return m_impl->LocatePacket(presentation, packet, periods_ahead);
+}
+OpenXRBeginStatus OpenXRD3D12Backend::ArmPacket(OpenXRBackendFrame& packet) { return m_impl->ArmPacket(packet); }
+bool OpenXRD3D12Backend::SupportsPipelining() const { return m_impl->SupportsPipelining(); }
 
 bool OpenXRD3D12Backend::Shutdown() { return m_impl->Shutdown(); }
 

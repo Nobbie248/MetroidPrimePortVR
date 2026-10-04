@@ -162,6 +162,7 @@ const Field kFields[] = {
     VR_BOOL(immersive_replay),
     VR_BOOL(multiview),
     VR_BOOL(direct_present),
+    VR_BOOL(pipelined_rendering),
     Field{"vr_performance_level",
           [](PortVrSettings& s, const std::string& v) {
               const std::string name = Lower(v);

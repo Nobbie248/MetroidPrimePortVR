@@ -75,6 +75,12 @@ public:
     // active: keeps the runtime fed while the eyes are still being rendered and learns the
     // display timing the next packet is located for.
     OpenXRBeginStatus KeepAliveCycle();
+    // Pipelined pacing (openxr_d3d12.h): not supported yet, LocatePacket prepares the
+    // packet whole and ArmPacket is a no-op.
+    OpenXRBeginStatus LocatePacket(const OpenXRPresentation& presentation, OpenXRBackendFrame& packet,
+                                   uint32_t periods_ahead);
+    OpenXRBeginStatus ArmPacket(OpenXRBackendFrame& packet);
+    bool SupportsPipelining() const;
 
     // Drains this backend's own queue before tearing down. Returns false only
     // when the private device could not be waited on, in which case the caller

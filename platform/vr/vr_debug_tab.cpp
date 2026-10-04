@@ -102,6 +102,7 @@ void DrawVrDebugTab() {
   ImGui::SeparatorText("Headset");
   changed |= ImGui::Checkbox("Enable the headset (takes effect at the next start)", &s.enabled);
   changed |= ImGui::Checkbox("Immersive replay", &s.immersive_replay);
+  changed |= ImGui::Checkbox("Pipelined rendering (more throughput, one frame of latency)", &s.pipelined_rendering);
   {
     // In MirrorView's order: Normal, Both, Left, Right, None.
     static constexpr const char* kWindowViews[] = {"the flat image", "both eyes", "left eye", "right eye",

@@ -2316,6 +2316,12 @@ OpenXRSubmissionStatus OpenXRVulkanBackend::CopyRenderedEyes(const OpenXRBackend
     return m_impl->CopyRenderedEyes(frame);
 }
 OpenXRBeginStatus OpenXRVulkanBackend::KeepAliveCycle() { return m_impl->KeepAliveCycle(); }
+OpenXRBeginStatus OpenXRVulkanBackend::LocatePacket(const OpenXRPresentation& presentation, OpenXRBackendFrame& packet,
+                                                    uint32_t) {
+    return m_impl->PreparePacket(presentation, packet);
+}
+OpenXRBeginStatus OpenXRVulkanBackend::ArmPacket(OpenXRBackendFrame&) { return OpenXRBeginStatus::Ready; }
+bool OpenXRVulkanBackend::SupportsPipelining() const { return false; }
 
 bool OpenXRVulkanBackend::TryCancelPendingFrame(OpenXRBackendFrame& frame) {
     return m_impl->TryCancelPendingFrame(frame);

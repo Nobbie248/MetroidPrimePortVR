@@ -57,6 +57,12 @@ public:
     OpenXRBeginStatus BeginFrameForPacket(const OpenXRBackendFrame& packet, OpenXRBackendFrame& frame);
     OpenXRSubmissionStatus CopyRenderedEyes(const OpenXRBackendFrame& frame);
     OpenXRBeginStatus KeepAliveCycle();
+    // Pipelined pacing (openxr_d3d12.h): not supported yet, LocatePacket prepares the
+    // packet whole and ArmPacket is a no-op.
+    OpenXRBeginStatus LocatePacket(const OpenXRPresentation& presentation, OpenXRBackendFrame& packet,
+                                   uint32_t periods_ahead);
+    OpenXRBeginStatus ArmPacket(OpenXRBackendFrame& packet);
+    bool SupportsPipelining() const;
 
     // Call on the XR owner thread after Aurora's worker is idle and before aurora_shutdown().
     // False means Dawn's queue could not be drained: the caller retains the backend and runtime.
@@ -102,6 +108,12 @@ public:
     OpenXRBeginStatus BeginFrameForPacket(const OpenXRBackendFrame& packet, OpenXRBackendFrame& frame);
     OpenXRSubmissionStatus CopyRenderedEyes(const OpenXRBackendFrame& frame);
     OpenXRBeginStatus KeepAliveCycle();
+    // Pipelined pacing (openxr_d3d12.h): not supported yet, LocatePacket prepares the
+    // packet whole and ArmPacket is a no-op.
+    OpenXRBeginStatus LocatePacket(const OpenXRPresentation& presentation, OpenXRBackendFrame& packet,
+                                   uint32_t periods_ahead);
+    OpenXRBeginStatus ArmPacket(OpenXRBackendFrame& packet);
+    bool SupportsPipelining() const;
     bool Shutdown();
 
     bool IsBound() const;

@@ -28,6 +28,7 @@
 #include <cstring>
 #include <memory>
 #include <mutex>
+#include <optional>
 #include <sstream>
 #include <string>
 #include <thread>
@@ -872,6 +873,11 @@ private:
         }
         diagnostics::NotePacketConsumed();
         *output = frame->frame;
+        {
+            std::lock_guard pickup(self->pickup_mutex_);
+            self->picked_up_token_ = frame->frame.frameToken;
+        }
+        self->pickup_cv_.notify_all();
         return true;
     }
 
@@ -1036,13 +1042,31 @@ private:
             // game frame. Interpolation keeps the frame-first order below: it renders for the
             // frame's own predicted display time.
             const bool render_first = !aurora_get_stereo_frame_interpolation();
-            if (last_pacing_mode != static_cast<int>(render_first)) {
-                last_pacing_mode = static_cast<int>(render_first);
+            // Pipelined render-first pacing (vr_pipelined_rendering, PipelinedCycle), on a
+            // backend that supports it. A new render scale (the eyes are rebuilt with no packet
+            // pending), the setting going off or a switch to frame-first pacing first drains
+            // the packet in flight with one plain cycle.
+            const float scale = render_scale_.load(std::memory_order_relaxed);
+            const bool pipelined = render_first && GetVrSettings().pipelined_rendering &&
+                                   backend_->SupportsPipelining() && scale == pipelined_scale_;
+            pipelined_scale_ = scale;
+            const int pacing_mode = !render_first ? 0 : pipelined ? 2 : 1;
+            if (last_pacing_mode != pacing_mode) {
+                last_pacing_mode = pacing_mode;
                 PORTVR_LOG() << "OpenXR " << kGraphicsBackendName << " pacing: "
-                    << (render_first ? "render-first" : "frame-first (VR interpolation)") << std::endl;
+                    << (pacing_mode == 0 ? "frame-first (VR interpolation)"
+                        : pacing_mode == 2 ? "render-first, pipelined" : "render-first") << std::endl;
             }
             // A new scale rebuilds the eyes as the backend next prepares them.
-            backend_->SetRenderScale(render_scale_.load(std::memory_order_relaxed));
+            backend_->SetRenderScale(scale);
+            if (pipelined || pipelined_packet_) {
+                // With a packet in flight and the mode changed, this cycle only finishes it.
+                if (!PipelinedCycle(presentation, policy, immersive, consecutive_skips,
+                                    immersive_submission_logged, pipelined)) {
+                    fatal = true;
+                }
+                continue;
+            }
             if (render_first) {
                 if (!RenderFirstCycle(presentation, policy, immersive, consecutive_skips,
                                       immersive_submission_logged)) {
@@ -1396,6 +1420,221 @@ private:
             PORTVR_LOG() << "[vr] first immersive packet consumed and submitted as "
                                       "an OpenXR projection layer"
                                    << std::endl;
+        }
+        return true;
+    }
+
+
+    // The packet's poses to the game: its screens and pointer, its input, its frame request.
+    void PublishPacket(OpenXRBackendFrame& packet, const PrimeVRPolicySnapshot& policy, bool immersive) {
+        NoteEyeSize(packet);
+        // The head pose this packet was located with places the screens and aims the pointer.
+        ServiceRecenterRequest();
+        UpdateVirtualScreenPose(packet);
+        const OpenXRPointerScreen panel_screen = SettingsPanelScreen(packet, policy, immersive);
+        PlacePanelLayer(packet, panel_screen);
+        if (input_ != nullptr) {
+            const diagnostics::ScopedStage input_timer(diagnostics::Stage::InputSync);
+            input_->Sync(packet.xr_frame.predicted_display_time, PointerScreen(packet, policy, immersive),
+                         panel_screen);
+        }
+        {
+            const diagnostics::ScopedStage publish_timer(diagnostics::Stage::Publish);
+            std::lock_guard lock(published_mutex_);
+            BuildPublishedFrame(packet, immersive, policy);
+            PublishFrameRequest(packet, immersive, policy);
+            diagnostics::OnPacketPublished();
+            published_.store(&published_frame_, std::memory_order_release);
+        }
+        aurora_notify_stereo_frame();
+    }
+
+    // Whether the game picked up the packet `token` (ProvideStereoFrame) within `timeout_ms`.
+    bool WaitForPickup(uint64_t token, uint32_t timeout_ms) {
+        std::unique_lock lock(pickup_mutex_);
+        pickup_cv_.wait_for(lock, std::chrono::milliseconds(timeout_ms),
+                            [&] { return picked_up_token_ >= token || stop_.load(std::memory_order_acquire); });
+        return picked_up_token_ >= token;
+    }
+
+    // Render-first pacing with one packet of overlap (vr_pipelined_rendering): the next
+    // packet's poses are located and published as soon as the game has picked this one
+    // up, so the game records N+1 while Aurora encodes N; N+1 gets its images once N's
+    // eyes are submitted, before N's compositor frame. One frame of latency more, hidden
+    // in part by locating N+1 one display period further ahead. `continue_pipeline` false
+    // ends the pipeline after this packet (a drain). Returns false on a fatal failure.
+    bool PipelinedCycle(OpenXRPresentation presentation, const PrimeVRPolicySnapshot& policy, bool immersive,
+                        uint32_t& consecutive_skips, bool& immersive_submission_logged, bool continue_pipeline) {
+        if (!pipelined_packet_) {
+            // The pipeline's first packet, prepared whole.
+            OpenXRBackendFrame packet{};
+            const OpenXRBeginStatus prepared = backend_->PreparePacket(presentation, packet);
+            if (prepared == OpenXRBeginStatus::SessionNotRunning) {
+                PrimeVRPolicySetSessionActive(false);
+                return true;
+            }
+            if (prepared == OpenXRBeginStatus::ExitRequested) {
+                OnRuntimeExitRequested();
+                return false;
+            }
+            if (prepared == OpenXRBeginStatus::Error) {
+                SetError(backend_->LastError());
+                return false;
+            }
+            if (!packet.expects_gpu_submission) {
+                // Nothing to render (no rendering requested or no tracking): keep the compositor fed.
+                NoteEyeSize(packet);
+                return KeepAlive();
+            }
+            PublishPacket(packet, policy, immersive);
+            pipelined_packet_ = packet;
+            return true;
+        }
+        OpenXRBackendFrame packet = *pipelined_packet_;
+        pipelined_packet_.reset();
+
+        // The next packet, once the game has this one: located a period further ahead and
+        // published, not yet armed (Aurora holds one packet's targets at a time).
+        std::optional<OpenXRBackendFrame> next;
+        if (continue_pipeline && WaitForPickup(packet.xr_frame.serial, kPickupWaitMs)) {
+            OpenXRBackendFrame candidate{};
+            const OpenXRBeginStatus located = backend_->LocatePacket(presentation, candidate, 3);
+            if (located == OpenXRBeginStatus::ExitRequested) {
+                OnRuntimeExitRequested();
+                return false;
+            }
+            if (located == OpenXRBeginStatus::Error) {
+                SetError(backend_->LastError());
+                return false;
+            }
+            // A stopped session or nothing to render ends the pipeline with this packet.
+            if (located == OpenXRBeginStatus::Ready && candidate.xr_frame.should_render &&
+                candidate.xr_frame.views_valid) {
+                PublishPacket(candidate, policy, immersive);
+                next = candidate;
+            }
+        }
+        // Whatever ends this cycle early takes the next packet's request back with it; eyes
+        // the game already renders for it find no targets and are dropped once.
+        const auto drop_next = [&] {
+            if (next) {
+                diagnostics::Measure(diagnostics::Stage::Withdraw, [&] { WithdrawPublishedFrame(); });
+                next.reset();
+            }
+        };
+
+        // This packet's eyes: as RenderFirstCycle, a 50 ms stall repeats the retained layer and
+        // withdraws the packet.
+        OpenXRSubmissionStatus submission = OpenXRSubmissionStatus::Timeout;
+        bool canceled_before_encode = false;
+        const auto cancel_after = std::chrono::steady_clock::now() + std::chrono::milliseconds(50);
+        while (!stop_.load(std::memory_order_acquire) && submission == OpenXRSubmissionStatus::Timeout) {
+            submission = diagnostics::Measure(diagnostics::Stage::SubmissionWait, [&] {
+                return backend_->WaitForSubmission(packet, 50);
+            });
+            if (submission == OpenXRSubmissionStatus::Timeout) {
+                if (std::chrono::steady_clock::now() >= cancel_after) {
+                    drop_next();
+                    diagnostics::Measure(diagnostics::Stage::Withdraw, [&] { WithdrawPublishedFrame(); });
+                    canceled_before_encode = diagnostics::Measure(diagnostics::Stage::Cancel, [&] {
+                        return backend_->TryCancelPendingPacket(packet);
+                    });
+                    if (canceled_before_encode) {
+                        diagnostics::OnPacketCanceled();
+                        break;
+                    }
+                }
+                diagnostics::OnKeepaliveRepeat();
+                if (!KeepAlive()) {
+                    return false;
+                }
+            }
+        }
+        if (stop_.load(std::memory_order_acquire) || submission == OpenXRSubmissionStatus::ShuttingDown) {
+            return true;
+        }
+        if (canceled_before_encode) {
+            return KeepAlive();
+        }
+        if (submission != OpenXRSubmissionStatus::Success) {
+            drop_next();
+            diagnostics::OnSubmission(false);
+            if (submission == OpenXRSubmissionStatus::Failed) {
+                SetError(std::string("Aurora's ") + kGraphicsBackendName + " stereo copy failed" + kFallbackNote);
+                return false;
+            }
+            ++consecutive_skips;
+            if (consecutive_skips == 1 || consecutive_skips % 60 == 0) {
+                PORTVR_LOG() << "OpenXR: eye copy skipped (" << consecutive_skips
+                             << " in a row): " << backend_->LastError() << std::endl;
+            }
+            if (consecutive_skips >= kMaxConsecutiveSkips) {
+                SetError(std::string("Aurora's ") + kGraphicsBackendName + " stereo copy keeps failing" +
+                         kFallbackNote);
+                return false;
+            }
+            return KeepAlive();
+        }
+
+        // The next packet's images and targets, before this packet's compositor frame.
+        if (next) {
+            const OpenXRBeginStatus armed = backend_->ArmPacket(*next);
+            if (armed != OpenXRBeginStatus::Ready) {
+                if (armed == OpenXRBeginStatus::Error) {
+                    PORTVR_LOG() << "OpenXR: pipelined packet not armed: " << backend_->LastError() << std::endl;
+                }
+                drop_next();
+            }
+        }
+
+        // This packet's compositor frame: begin, confirm the copy, end (which promotes the next).
+        OpenXRBackendFrame frame{};
+        const OpenXRBeginStatus begin = backend_->BeginFrameForPacket(packet, frame);
+        if (begin == OpenXRBeginStatus::SessionNotRunning) {
+            PrimeVRPolicySetSessionActive(false);
+            drop_next();
+            return true;
+        }
+        if (begin == OpenXRBeginStatus::ExitRequested) {
+            OnRuntimeExitRequested();
+            return false;
+        }
+        if (begin == OpenXRBeginStatus::Error) {
+            SetError(backend_->LastError());
+            return false;
+        }
+        UpdateFrameTiming(frame.xr_frame);
+        if (diagnostics::Enabled()) {
+            NoteFrameDiagnostics(frame, immersive);
+        }
+        const OpenXRSubmissionStatus copy =
+            frame.expects_gpu_submission ? backend_->CopyRenderedEyes(frame) : OpenXRSubmissionStatus::Skipped;
+        const bool submit = copy == OpenXRSubmissionStatus::Success;
+        diagnostics::OnSubmission(submit);
+        if (!backend_->FinishFrame(frame, submit)) {
+            SetError(backend_->LastError());
+            return false;
+        }
+        pipelined_packet_ = next;
+        if (copy == OpenXRSubmissionStatus::Failed) {
+            SetError(std::string("Aurora's ") + kGraphicsBackendName + " stereo copy failed" + kFallbackNote);
+            return false;
+        }
+        if (!submit) {
+            ++consecutive_skips;
+            if (consecutive_skips == 1 || consecutive_skips % 60 == 0) {
+                PORTVR_LOG() << "OpenXR: eye copy skipped (" << consecutive_skips
+                             << " in a row): " << backend_->LastError() << std::endl;
+            }
+            return consecutive_skips < kMaxConsecutiveSkips;
+        }
+        consecutive_skips = 0;
+        ++timing_submissions_;
+        if (immersive && !immersive_submission_logged) {
+            immersive_submission_logged = true;
+            PORTVR_LOG() << "[vr] first immersive packet consumed and submitted as "
+                            "an OpenXR projection layer"
+                         << std::endl;
         }
         return true;
     }
@@ -1835,6 +2074,14 @@ private:
     uint64_t request_serial_ = 0;
     std::atomic<float> lean_back_degrees_{GetVrSettings().lean_back_degrees};
     std::atomic<float> render_scale_{GetVrSettings().render_scale};
+    // Pipelined pacing (PipelinedCycle): the packet in flight, the scale it runs at, and the
+    // game's pickup of the latest packet (ProvideStereoFrame), which the cycle waits for.
+    std::optional<OpenXRBackendFrame> pipelined_packet_;
+    float pipelined_scale_ = -1.0f;
+    std::mutex pickup_mutex_;
+    std::condition_variable pickup_cv_;
+    uint64_t picked_up_token_ = 0;
+    static constexpr uint32_t kPickupWaitMs = 50;
     std::atomic<float> display_refresh_rate_{GetVrSettings().display_refresh_rate};
     // Pacing thread only: the rate last asked for (-1 forces a request), and
     // whether the runtime accepted one this session.

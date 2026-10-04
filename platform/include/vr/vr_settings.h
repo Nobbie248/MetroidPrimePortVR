@@ -45,6 +45,9 @@ struct PortVrSettings {
     // its swapchain images (PrimedGun's patched Dawn); off shares them with a second device
     // through AHardwareBuffers. Taken when the headset starts.
     bool direct_present = true;
+    // Render-first pacing with one packet of overlap: the game records the next frame
+    // while Aurora encodes this one, for more throughput at one frame of latency.
+    bool pipelined_rendering = false;
     std::string performance_level = "boost"; // XR_EXT_performance_settings
     // XR_FB_display_refresh_rate (Quest, Virtual Desktop): the headset's display rate
     // in Hz, the nearest one it offers; 0 leaves the runtime's own (72 Hz on a Quest).

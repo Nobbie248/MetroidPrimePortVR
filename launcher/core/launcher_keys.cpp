@@ -33,6 +33,7 @@ constexpr KeyInfo kKeys[] = {
     {"vr_immersive_replay", K::Bool, "1"},
     {"vr_multiview", K::Bool, "1"},
     {"vr_direct_present", K::Bool, "1"},
+    {"vr_pipelined_rendering", K::Bool, "0"},
     {"vr_remove_cinematic_bars", K::Bool, "1"},
     {"vr_sky_at_infinity", K::Bool, "1"},
     {"vr_space_warp", K::Bool, "1"},

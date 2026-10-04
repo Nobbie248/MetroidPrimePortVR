@@ -319,7 +319,7 @@ void CPlayerVisor::DrawScanEffect(const CStateManager& mgr,
   // stretched over a pane, and its frame). The headset lays it on the plane in
   // front of the head that CInGameGuiManager::Draw sets, and takes the copy
   // from each eye through that plane, so the window points where the head does
-  // and magnifies each eye's own view.
+  // and magnifies each eye's own view (or, with vr_scan_zoom off, shows it as is).
   AuroraSetStereoDrawRoute(AURORA_STEREO_ROUTE_HEAD_LOCKED_2D);
 #endif
   const bool indicatorsDrawn = DrawScanObjectIndicators(mgr);
@@ -352,10 +352,28 @@ void CPlayerVisor::DrawScanEffect(const CStateManager& mgr,
                         (1.f - transFactor);
   const float vpW = 169.218f * x48_interpWindowDims.GetX();
   const float vpH = 152.218f * x48_interpWindowDims.GetY();
+#ifdef TARGET_PC
+  // PortVr: the copy is vpW by vpH (the pane's own size) over the divisor, and
+  // the pane stretches it back: the divisor is the zoom. With the headset's
+  // zoom off (vr_scan_zoom), the copy is the pane's size, so each eye's copy
+  // through the head-locked plane is exactly the view behind the pane. It is
+  // rounded to the nearest pixel, not up to the GameCube's 4-pixel tiles,
+  // which would still zoom it by a percent or two.
+  const bool portVrNoZoom = PortVr::VrScanWindowNoZoom();
+  const int width =
+      portVrNoZoom
+          ? CMath::Clamp(skPixelsPerTileDimension16Bit, CCast::ToInt(vpW + 0.5f), vpWidth)
+          : CMath::Clamp(skPixelsPerTileDimension16Bit, round_up_to_tile(vpW / divisor), vpWidth);
+  const int height =
+      portVrNoZoom
+          ? CMath::Clamp(skPixelsPerTileDimension16Bit, CCast::ToInt(vpH + 0.5f), vpHeight)
+          : CMath::Clamp(skPixelsPerTileDimension16Bit, round_up_to_tile(vpH / divisor), vpHeight);
+#else
   const int width =
       CMath::Clamp(skPixelsPerTileDimension16Bit, round_up_to_tile(vpW / divisor), vpWidth);
   const int height =
       CMath::Clamp(skPixelsPerTileDimension16Bit, round_up_to_tile(vpH / divisor), vpHeight);
+#endif
   GXSetTexCopySrc(vpLeft + (vpWidth - width) / 2, vpTop + (vpHeight - height) / 2, width, height);
   void* const buffer = CGraphics::GetDolphinSpareBuffer();
   GXSetTexCopyDst(width, height, GX_TF_RGB565, GX_FALSE);

@@ -120,6 +120,8 @@ void DrawVrDebugTab() {
   }
 
   ImGui::SeparatorText("Scan visor");
+  changed |= ImGui::Checkbox("Scan window zoom", &s.scan_zoom);
+  ImGui::TextWrapped("Off, the scan window shows the view behind it unmagnified, keeping its frame.");
   changed |= ImGui::Checkbox("Look to scan", &s.patch_gun_ray_target);
   ImGui::TextWrapped("The scan target and the scan icons follow where the head looks, and a scan lock keeps the "
                      "body's facing (PrimedGun's gun ray / scan target hook).");

@@ -57,6 +57,9 @@ bool VrSkyAtInfinity() noexcept;
 // The headset is running and the settings turn the space warp off
 // (CStateManager::DrawSpaceWarp draws nothing).
 bool VrHideSpaceWarp() noexcept;
+// Immersive and the settings turn the scan window's zoom off: the window's
+// copy is the pane's own size (CPlayerVisor::DrawScanEffect).
+bool VrScanWindowNoZoom() noexcept;
 // The beam wheel's hover, for the HUD's beam menu (CHudVisorBeamMenu): the
 // beam the aim ray points at while the weapon hand's B holds the wheel open
 // (vr_pad.cpp), as CPlayerState::EBeamId (0 Power, 1 Ice, 2 Wave, 3 Plasma),

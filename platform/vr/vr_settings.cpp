@@ -209,6 +209,7 @@ const Field kFields[] = {
     VR_BOOL(remove_cinematic_bars),
     VR_BOOL(sky_at_infinity),
     VR_BOOL(space_warp),
+    VR_BOOL(scan_zoom),
     VR_BOOL(beam_wheel_hud_highlight),
     VR_FLOAT(frustum_culling_degrees, 70.0f, 175.0f),
     VR_FLOAT(metroid_hud_distance, 0.1f, 3.0f),

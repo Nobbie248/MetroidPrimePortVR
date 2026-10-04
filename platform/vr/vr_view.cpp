@@ -167,6 +167,8 @@ bool VrSkyAtInfinity() noexcept { return OpenXRIsRunning() && GetVrSettings().sk
 
 bool VrHideSpaceWarp() noexcept { return OpenXRIsRunning() && !GetVrSettings().space_warp; }
 
+bool VrScanWindowNoZoom() noexcept { return ImmersiveNow() && !GetVrSettings().scan_zoom; }
+
 int VrBeamWheelHoverBeam() noexcept {
     if (!GetVrSettings().beam_wheel_hud_highlight) {
         return -1;

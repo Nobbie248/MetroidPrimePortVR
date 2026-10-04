@@ -55,6 +55,8 @@ void BuildPortConfigTab(TabContext& ctx, QTabWidget* tabs) {
             QObject::tr("Draws the sky with the head's rotation only, so planets and stars look far away."));
   ctx.Check(layout, QObject::tr("Space warp"), "vr_space_warp",
             QObject::tr("The distortion around charged shots (also Flickerbats, Chozo Ghosts and Metroid Prime)."));
+  ctx.Check(layout, QObject::tr("Scan window zoom"), "vr_scan_zoom",
+            QObject::tr("Off, the scan visor's window shows the view behind it unmagnified, keeping its frame."));
   ctx.Float(layout, QObject::tr("Virtual screen distance"), "vr_screen_distance_meters")
       ->setToolTip(QObject::tr("Metres; menus and cutscenes hang on this screen."));
   ctx.Float(layout, QObject::tr("Virtual screen width"), "vr_screen_width_meters")

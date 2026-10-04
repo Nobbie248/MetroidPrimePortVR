@@ -4,6 +4,7 @@
 #include "../gfx/resources.hpp"
 #include "../gfx/pipeline_cache.hpp"
 #include "../gfx/resource_cache.hpp"
+#include "../webgpu/gpu.hpp"
 
 #include "gx_fmt.hpp"
 #include "shader_info.hpp"
@@ -14,6 +15,11 @@ namespace aurora::gx {
 
 wgpu::RenderPipeline create_pipeline(const PipelineConfig& config) {
   ZoneScoped;
+  if (config.shaderConfig.multiview && !webgpu::g_multiviewSupported) {
+    // A multiview config from the pipeline cache on a device without the feature
+    // (gfx/stereo_multiview.hpp): its shader would not compile. Never bound.
+    return {};
+  }
   const auto shader = build_shader(config.shaderConfig);
   const auto label =
       fmt::format("GX Pipeline {:x} shader {:x}", xxh3_hash(config, static_cast<HashType>(gfx::ShaderType::GX)),
@@ -28,8 +34,7 @@ void render(const DrawData& data, const wgpu::RenderPassEncoder& pass) {
 
   const auto& resources = gfx::detail::resources();
   pass.SetImmediates(0, &data.immediateData, sizeof(data.immediateData));
-  const std::array offsets{data.uniformRange.offset};
-  pass.SetBindGroup(1, resources.uniformBindGroup, offsets.size(), offsets.data());
+  gfx::bind_gx_uniform(pass, resources.uniformBindGroup, data.uniformRange.offset);
   if (data.bindGroups.textureBindGroup) {
     pass.SetBindGroup(2, gfx::find_bind_group(data.bindGroups.textureBindGroup));
   }
@@ -56,12 +61,41 @@ void render_eye(const DrawData& data, const wgpu::RenderPassEncoder& pass, uint3
 
   const auto& resources = gfx::detail::resources();
   pass.SetImmediates(0, &data.immediateData, sizeof(data.immediateData));
-  const std::array offsets{uniformOffset};
-  pass.SetBindGroup(1, resources.uniformBindGroup, offsets.size(), offsets.data());
+  gfx::bind_gx_uniform(pass, resources.uniformBindGroup, uniformOffset);
   const gfx::BindGroupRef textureBindGroup =
       data.stereoTextureBindGroup[eye] ? data.stereoTextureBindGroup[eye] : data.bindGroups.textureBindGroup;
   if (textureBindGroup) {
     pass.SetBindGroup(2, gfx::find_bind_group(textureBindGroup));
+  }
+  pass.SetIndexBuffer(resources.indexBuffer, wgpu::IndexFormat::Uint16, data.idxRange.offset, data.idxRange.size);
+  if (data.dstAlpha != UINT32_MAX) {
+    const wgpu::Color color{0.f, 0.f, 0.f, data.dstAlpha / 255.f};
+    pass.SetBlendConstant(&color);
+  }
+  if (data.indexCount == 0) {
+    pass.Draw(data.vtxCount, data.instanceCount);
+  } else {
+    pass.DrawIndexed(data.indexCount, data.instanceCount);
+  }
+}
+
+void render_multiview(const DrawData& data, const wgpu::RenderPassEncoder& pass) {
+  const uint32_t uniformOffset = data.stereoUniformOffset[0];
+  if (uniformOffset == UINT32_MAX || data.multiviewPipeline == gfx::PipelineRef{}) {
+    return;
+  }
+  if (!gfx::bind_pipeline(data.multiviewPipeline, pass)) {
+    return;
+  }
+
+  const auto& resources = gfx::detail::resources();
+  pass.SetImmediates(0, &data.immediateData, sizeof(data.immediateData));
+  // The mono uniform and the eye clip matrices after it (MultiviewClip), or the
+  // pair of eye copies from this offset (MultiviewFull; the mono uniform as
+  // element 0 when the eye mask is 0).
+  gfx::bind_gx_uniform(pass, resources.multiviewUniformBindGroup, uniformOffset);
+  if (data.stereoTextureBindGroup[0]) {
+    pass.SetBindGroup(2, gfx::find_bind_group(data.stereoTextureBindGroup[0]));
   }
   pass.SetIndexBuffer(resources.indexBuffer, wgpu::IndexFormat::Uint16, data.idxRange.offset, data.idxRange.size);
   if (data.dstAlpha != UINT32_MAX) {

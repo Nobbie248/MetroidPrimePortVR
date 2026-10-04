@@ -11,6 +11,7 @@
 #include <dolphin/gx/GXEnum.h>
 
 #include <absl/container/flat_hash_set.h>
+#include <cctype>
 #include <mutex>
 #include <string_view>
 #include <utility>
@@ -1450,6 +1451,149 @@ auto pbr_func(const ShaderConfig& config, const ShaderInfo& info, std::string& v
 absl::flat_hash_set<gfx::ShaderRef> s_seenShaders;
 } // namespace
 
+namespace {
+// Stereo replay under Vulkan multiview (gfx/stereo_multiview.hpp): the shader runs
+// for both views of a two-layer eye pass. Its GX textures are 2D arrays sampled at
+// layer min(view, layers - 1), so an EFB copy taken per eye shows each eye its own
+// layer and every other texture its one layer. Its uniform, bound at the draw's
+// stereo offset (`uniformSize` is the GX uniform's size and so the stride of what
+// stage_stereo_uniforms pushes after it):
+//  - MultiviewClip: the mono uniform, then each eye's clip matrix and the eyes'
+//    render size. Everything but the clip position is computed once, in the game
+//    camera's view space (lighting comes out the same there: the eye poses are
+//    rigid), so only the position depends on the view and Adreno shares the rest
+//    between the views.
+//  - MultiviewFull: a pair of full eye uniforms, element `view & imm.eye_mask` (eye
+//    mask 0 when both eyes share one), for a draw whose texture matrix differs per
+//    eye. A uniform indexed by the view is slower on Adreno (it stays out of the
+//    constant registers, and the views share no work), so it is the exception.
+std::string to_multiview_source(std::string source, uint32_t uniformSize, MultiviewMode mode) {
+  bool complete = true;
+  const auto replace_once = [&](std::string_view from, std::string_view to) {
+    const size_t pos = source.find(from);
+    if (pos == std::string::npos) {
+      complete = false;
+      return;
+    }
+    source.replace(pos, from.size(), to);
+  };
+  // GX texture samples go through helpers that add the layer (textures named tex0..tex7).
+  for (size_t pos = 0; (pos = source.find("textureSample", pos)) != std::string::npos;) {
+    size_t end = pos + std::string_view{"textureSample"}.size();
+    for (const std::string_view suffix : {"Bias"sv, "Grad"sv, "Level"sv}) {
+      if (source.compare(end, suffix.size(), suffix) == 0) {
+        end += suffix.size();
+        break;
+      }
+    }
+    const bool gxTexture = source.compare(end, 4, "(tex") == 0 && end + 4 < source.size() &&
+                           source[end + 4] >= '0' && source[end + 4] <= '7' &&
+                           (end + 5 >= source.size() || !(std::isalnum(static_cast<unsigned char>(source[end + 5])) ||
+                                                          source[end + 5] == '_'));
+    if (gxTexture) {
+      source.replace(pos, std::string_view{"texture"}.size(), "mv"); // textureSample* -> mvSample*
+      pos += 2;
+    } else {
+      pos = end;
+    }
+  }
+  for (size_t pos = 0; (pos = source.find("texture_2d<f32>", pos)) != std::string::npos;) {
+    source.replace(pos, std::string_view{"texture_2d<f32>"}.size(), "texture_2d_array<f32>");
+  }
+  replace_once("    _pad: u32,", "    eye_mask: u32,");
+  replace_once("fn vs_main(\n    @builtin(vertex_index) vidx: u32",
+               "fn vs_main(\n    @builtin(view_index) mv_view_in: u32,\n    @builtin(vertex_index) vidx: u32");
+  constexpr std::string_view fragmentEntry = "fn fs_main(in: VertexOutput) -> @location(0) vec4f {";
+  constexpr std::string_view fragmentEntryView =
+      "fn fs_main(in: VertexOutput, @builtin(view_index) mv_view_in: u32) -> @location(0) vec4f {\n"
+      "    mv_view = mv_view_in;";
+  if (mode == MultiviewClip) {
+    replace_once("var<uniform> ubuf: Uniform;", "var<uniform> ubuf_mv: UniformMV;");
+    constexpr std::string_view bodyStart = "    var out: VertexOutput;";
+    constexpr std::string_view bodyEnd = "\n    return out;\n}";
+    const size_t start = source.find(bodyStart);
+    const size_t end = start != std::string::npos ? source.find(bodyEnd, start) : std::string::npos;
+    if (end == std::string::npos) {
+      complete = false;
+    } else {
+      const size_t bodyBegin = start + bodyStart.size();
+      std::string body = source.substr(bodyBegin, end - bodyBegin);
+      const auto replace_all = [&body](std::string_view from, std::string_view to) {
+        for (size_t pos = 0; (pos = body.find(from, pos)) != std::string::npos; pos += to.size()) {
+          body.replace(pos, from.size(), to);
+        }
+      };
+      // The clip position per view: points and lines expand around theirs too.
+      for (const std::string_view position : {"mv_pos"sv, "mv_pos_a"sv, "mv_pos_b"sv}) {
+        replace_all(fmt::format("vec4f({}, 1.0) * ubuf.proj", position),
+                    fmt::format("select(vec4f({0}, 1.0) * ubuf_mv.eye_clip0, vec4f({0}, 1.0) * ubuf_mv.eye_clip1, "
+                                "mv_eye1)",
+                                position));
+      }
+      replace_all("ubuf.render_viewport_size", "ubuf_mv.eye_render.xy");
+      if (body.find("ubuf.proj") != std::string::npos) {
+        complete = false;
+      }
+      source.replace(bodyBegin, end - bodyBegin,
+                     "\n    mv_view = mv_view_in;\n    let ubuf = &ubuf_mv.u;\n    let mv_eye1 = mv_view_in != 0u;" +
+                         body);
+    }
+    replace_once(fragmentEntry, std::string{fragmentEntryView} + "\n    let ubuf = &ubuf_mv.u;");
+  } else {
+    replace_once("var<uniform> ubuf: Uniform;", "var<uniform> ubuf_eyes: array<UniformEye, 2>;");
+    replace_once("    var out: VertexOutput;", "    var out: VertexOutput;\n    mv_view = mv_view_in;\n"
+                                               "    let ubuf = &ubuf_eyes[mv_view_in & imm.eye_mask].u;");
+    // The fragment shader reads only what both eye copies share (the eyes have one
+    // size), so the first; the PBR lighting's view-space lights differ per eye.
+    const size_t fragmentStart = source.find("fn fs_main(");
+    const bool fragmentReadsLights =
+        fragmentStart != std::string::npos && source.find("ubuf.lights", fragmentStart) != std::string::npos;
+    replace_once(fragmentEntry, std::string{fragmentEntryView} +
+                                    (fragmentReadsLights ? "\n    let ubuf = &ubuf_eyes[mv_view_in & imm.eye_mask].u;"
+                                                         : "\n    let ubuf = &ubuf_eyes[0].u;"));
+  }
+  if (!complete) {
+    Log.error("Multiview shader rewrite missed an anchor; the generated shader changed shape");
+  }
+  return fmt::format(R"""(enable chromium_experimental_multiview;
+{0}
+struct UniformEye {{
+    @size({1}) u: Uniform,
+}};
+
+struct UniformMV {{
+    @size({1}) u: Uniform,
+    eye_clip0: mat4x4f,
+    eye_clip1: mat4x4f,
+    eye_render: vec4f,
+}};
+
+var<private> mv_view: u32;
+
+fn mv_layer(t: texture_2d_array<f32>) -> u32 {{
+    return min(mv_view, textureNumLayers(t) - 1u);
+}}
+
+fn mvSample(t: texture_2d_array<f32>, s: sampler, uv: vec2f) -> vec4f {{
+    return textureSample(t, s, uv, mv_layer(t));
+}}
+
+fn mvSampleBias(t: texture_2d_array<f32>, s: sampler, uv: vec2f, bias: f32) -> vec4f {{
+    return textureSampleBias(t, s, uv, mv_layer(t), bias);
+}}
+
+fn mvSampleGrad(t: texture_2d_array<f32>, s: sampler, uv: vec2f, ddx: vec2f, ddy: vec2f) -> vec4f {{
+    return textureSampleGrad(t, s, uv, mv_layer(t), ddx, ddy);
+}}
+
+fn mvSampleLevel(t: texture_2d_array<f32>, s: sampler, uv: vec2f, level: f32) -> vec4f {{
+    return textureSampleLevel(t, s, uv, mv_layer(t), level);
+}}
+)""",
+                     source, uniformSize);
+}
+} // namespace
+
 std::string build_shader_source(const ShaderConfig& config) noexcept {
   ZoneScoped;
   const auto hash = xxh3_hash(config);
@@ -2627,6 +2771,9 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4f {{{6}{5}
     Log.info("Generated shader (hash {:x}): {}", hash, shaderSource);
   }
 
+  if (config.multiview != MultiviewNone) {
+    return to_multiview_source(shaderSource, info.uniformSize, static_cast<MultiviewMode>(config.multiview));
+  }
   return shaderSource;
 }
 

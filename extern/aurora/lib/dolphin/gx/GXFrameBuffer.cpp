@@ -82,10 +82,11 @@ void copy_tex(const void* dest, GXBool clear) noexcept {
       // should the copy have a specific alpha value but the EFB remains untouched?
     }
     // Overwrite alpha before resolving
+    const auto alphaConfig = gfx::clear::make_pipeline_config(gfx::get_render_target_layout(), false, true, false);
     gfx::push_draw_command(gfx::clear::DrawData{
-        .pipeline =
-            gfx::pipeline_ref(gfx::clear::make_pipeline_config(gfx::get_render_target_layout(), false, true, false)),
+        .pipeline = gfx::pipeline_ref(alphaConfig),
         .color = wgpu::Color{0.f, 0.f, 0.f, g_gxState.dstAlpha / 255.f},
+        .multiviewPipeline = gfx::clear_multiview_pipeline_ref(alphaConfig),
     });
   }
   const auto clearColor = clear && g_gxState.colorUpdate;

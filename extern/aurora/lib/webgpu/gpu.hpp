@@ -56,6 +56,8 @@ extern bool g_hasCoreFeatures;
 extern bool g_bcTexturesSupported;
 extern bool g_astcTexturesSupported;
 extern bool g_textureComponentSwizzleSupported;
+// The device has PrimedGun's Vulkan multiview (quest/dawn patches, gfx/stereo_multiview.hpp).
+extern bool g_multiviewSupported;
 
 bool initialize(AuroraBackend backend, bool allowCpu);
 void shutdown();

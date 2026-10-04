@@ -37,8 +37,9 @@ struct EyeSize {
   uint32_t height = 0;
 };
 
-// Frame begin: whether this frame replays per eye.
-void begin_frame(bool immersive) noexcept;
+// Frame begin: whether this frame replays per eye, and whether through multiview
+// (stereo_multiview.hpp), whose stand-ins are the two layers of one texture.
+void begin_frame(bool immersive, bool multiview = false) noexcept;
 bool active() noexcept;
 // Changes whenever a stand-in is created, becomes valid or stops being valid,
 // so cached per-eye bind groups know to rebuild.
@@ -59,6 +60,9 @@ bool palette_conv(const tex_palette_conv::ConvRequest& mono,
                   std::array<tex_palette_conv::ConvRequest, 2>& eyes) noexcept;
 // The eye's stand-in for `mono`, or null when it has none valid.
 const TextureRef* eye_texture(const TextureRef* mono, uint32_t eye) noexcept;
+// Multiview: the 2D array view of both eyes' stand-ins for `mono` (layer = eye), or
+// null when it has none valid.
+WGPUTextureView layered_view(const TextureRef* mono) noexcept;
 
 void shutdown() noexcept;
 

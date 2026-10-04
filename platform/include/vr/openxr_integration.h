@@ -44,6 +44,14 @@ bool OpenXRIsRunning() noexcept;
 void OpenXRApplyControllerState() noexcept;
 std::string OpenXRLastError();
 
+// True where the headset is the only display there is (the Quest build): there VR
+// failing to start ends the game instead of falling back to a desktop window.
+bool OpenXRHeadsetIsOnlyDisplay() noexcept;
+
+// On the Quest, ends the app (the launcher then shows error; empty for a plain
+// exit). A no-op everywhere else.
+void OpenXRRequestAppQuit(const std::string& error);
+
 // Recenters on where the player is now: it moves the immersive view's origin
 // and re-places the anchored virtual screen upright in front of them. Position
 // only: the forward direction and the horizon come from the OpenXR reference
@@ -68,6 +76,11 @@ void OpenXRSetPassthrough(bool enabled) noexcept;
 // The headset's eye resolution, as a scale of the size the OpenXR runtime
 // recommends (clamped to kVrRenderScaleMin..Max). Callable from any thread.
 void OpenXRSetRenderScale(float scale) noexcept;
+
+// The headset's display refresh rate in Hz (XR_FB_display_refresh_rate): the
+// nearest rate the runtime offers is requested at each session start and again
+// when this changes; 0 leaves the runtime's own. Callable from any thread.
+void OpenXRSetDisplayRefreshRate(float hz) noexcept;
 
 // The left eye's image size: width x height is what the headset is shown now,
 // scaled_width x scaled_height what `scale` gives on this headset. All zero
@@ -118,6 +131,11 @@ struct OpenXRFrameRequest {
 // copies it into `request` and returns true; false on timeout or when VR is not
 // running (the caller then paces itself as on the desktop).
 bool OpenXRWaitForFrameRequest(OpenXRFrameRequest& request, uint32_t timeout_ms) noexcept;
+// How long the game loop should wait for the next request: while the session runs
+// the pacing thread publishes one per headset frame and gives a packet 50 ms, so
+// the loop waits as long and never draws a frame no packet asked for; otherwise
+// (session idle, headset off) about a 60 Hz frame, to keep the game turning.
+uint32_t OpenXRFrameRequestTimeoutMs() noexcept;
 // The newest request without waiting; false before any was published.
 bool OpenXRLatestFrameRequest(OpenXRFrameRequest& request) noexcept;
 

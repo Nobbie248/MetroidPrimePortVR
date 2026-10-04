@@ -3,6 +3,7 @@
 
 #ifdef AURORA_ENABLE_GX
 #include "gfx/resources.hpp"
+#include "gfx/depth_peek.hpp"
 #include "gfx/frame.hpp"
 #include "gfx/recording.hpp"
 #include "gfx/render_worker.hpp"
@@ -389,6 +390,18 @@ void end_frame(uint64_t contentTag) noexcept {
   gx::fifo::drain();
   gx::fifo::end_frame();
   gx::texture::end_frame();
+  // On a standalone headset nothing shows the mono image of an immersive frame's
+  // final pass (no EFB copy follows it, the window is not presented), so only its
+  // eyes are rendered. Anything that would read it keeps it: a screenshot, a depth
+  // snapshot, or a frame the sink would show as mono (stereo_host::encode).
+  const bool headsetOwnsDisplay = stereo_host::headset_owns_display();
+  {
+    const auto stereo = gfx::recorded_stereo_state();
+    gfx::set_final_pass_mono_unneeded(headsetOwnsDisplay && stereo.active && stereo.immersive &&
+                                      stereo.contentTag == contentTag &&
+                                      !g_screenshotRequested.load(std::memory_order_acquire) &&
+                                      !gfx::depth_peek::snapshot_wanted());
+  }
   gfx::finish();
   auto imguiDrawData = imgui::freeze();
   const uint32_t logicalFrame = gfx::current_frame();
@@ -410,7 +423,7 @@ void end_frame(uint64_t contentTag) noexcept {
 
   const auto stereoState = gfx::recorded_stereo_state();
   gfx::end_frame([rmlBindGroup = std::move(rmlBindGroup), rmlOverlay, viewport, contentTag, logicalFrame, stereoState,
-                  imguiDrawData = std::move(imguiDrawData)](
+                  headsetOwnsDisplay, imguiDrawData = std::move(imguiDrawData)](
                      wgpu::CommandEncoder& encoder, std::vector<gfx::AfterSubmitCallback> afterSubmitCallbacks) {
     if (g_screenshotRequested.exchange(false, std::memory_order_acq_rel)) {
       record_screenshot(encoder, afterSubmitCallbacks);
@@ -421,7 +434,8 @@ void end_frame(uint64_t contentTag) noexcept {
     bool acquireAttempted = false;
     {
       window::SurfaceLock surfaceLock;
-      if (window::is_presentable() && g_surface) {
+      // The headset is the only display: nobody sees the window (stereo_host.hpp).
+      if (!headsetOwnsDisplay && window::is_presentable() && g_surface) {
         ZoneScopedN("Acquire texture");
         wgpu::SurfaceTexture surfaceTexture;
         g_surface.GetCurrentTexture(&surfaceTexture);
@@ -492,7 +506,7 @@ void end_frame(uint64_t contentTag) noexcept {
         imgui::render(pass, imguiDrawData);
         pass.End();
       }
-    } else {
+    } else if (!headsetOwnsDisplay) {
       Log.info("Skipping present; window not presentable");
     }
     // The headset's eyes, whether or not the window could be presented.

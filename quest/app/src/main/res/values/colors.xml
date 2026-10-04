@@ -1,0 +1,5 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!-- PrimedGun's launcher background (primedgun_colors.xml in PrimedGun's Android app). -->
+    <color name="primedgun_background">#101215</color>
+</resources>

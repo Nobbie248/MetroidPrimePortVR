@@ -1,0 +1,11 @@
+/.gradle/
+/.kotlin/
+/local.properties
+/**/build/
+/**/.cxx/
+# Release signing identity: a private key and the properties that name it.
+/keystore.properties
+*.jks
+*.keystore
+# Run-Quest.ps1 captures.
+/.runs/

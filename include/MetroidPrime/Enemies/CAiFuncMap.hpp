@@ -21,8 +21,14 @@ enum EStateMsg {
 // register while the caller reads a 24-byte temporary it never wrote: every
 // AI state function came back as stack garbage, and a Seedling's "Start" state
 // crashed in CStateMachineState::SetState. CAi has a single inheritance chain
-// (CPhysicsActor, CActor, CEntity), so pin that model for every unit.
+// (CPhysicsActor, CActor, CEntity), so pin that model for every unit. Only the
+// MSVC ABI has the keyword (and the problem): Android and Linux use the
+// Itanium ABI, whose member pointers are always two words.
+#if defined(_MSC_VER)
 class __single_inheritance CAi;
+#else
+class CAi;
+#endif
 #else
 class CAi;
 #endif

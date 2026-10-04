@@ -151,6 +151,37 @@ inline void compose_stereo_uniform(uint8_t* uniform, const StereoUniformLayout& 
   std::memcpy(uniform, renderSize, sizeof(renderSize));
 }
 
+// Multiview (stereo_multiview.hpp): the one matrix that takes a draw's mono
+// view-space position (its unchanged position matrices applied) to an eye's clip
+// space, i.e. what compose_stereo_uniform spreads over the projection and the
+// position matrices: the eye's composed projection, after the eye pose, after
+// the head-locked scales. Rows of the column-vector matrix, as Aurora stores
+// them (the shader computes vec4 * mat).
+inline Mat4x4<float> compose_eye_clip(const Mat4x4<float>& eyeProjection, const Mat3x4<float>& viewFromCenter,
+                                      float positionScaleXY, float positionScaleZ) noexcept {
+  // The pose with the scales applied on its right (columns), as a 4x4.
+  const float scales[3] = {positionScaleXY, positionScaleXY, positionScaleZ};
+  float pose[4][4] = {};
+  for (size_t row = 0; row < 3; ++row) {
+    const auto& values = *(&viewFromCenter.m0 + row);
+    for (size_t column = 0; column < 3; ++column) {
+      pose[row][column] = values[column] * scales[column];
+    }
+    pose[row][3] = values[3];
+  }
+  pose[3][3] = 1.0f;
+  Mat4x4<float> out{};
+  for (size_t row = 0; row < 4; ++row) {
+    const auto& projectionRow = *(&eyeProjection.m0 + row);
+    auto& dst = *(&out.m0 + row);
+    for (size_t column = 0; column < 4; ++column) {
+      dst[column] = projectionRow[0] * pose[0][column] + projectionRow[1] * pose[1][column] +
+                    projectionRow[2] * pose[2][column] + projectionRow[3] * pose[3][column];
+    }
+  }
+  return out;
+}
+
 // AuroraSetStereoScreenTexMtx: after compose_stereo_uniform, derives texture
 // matrix `texSlot` again from the eye's composed projection and position
 // matrix `pnSlot` (stereo_replay::screen_tex_mtx), so a draw that samples the

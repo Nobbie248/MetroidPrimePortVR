@@ -23,9 +23,16 @@ constexpr KeyInfo kKeys[] = {
     {"vr_enabled", K::Bool, "1"},
     {"vr_controller_mode", K::Choice, "primedgun", 0, 0, 0, true, true, "primedgun,gamepad,none"},
     {"vr_mirror_view", K::Choice, "normal", 0, 0, 0, false, true, "normal,both,left,right,none"},
+#if defined(__ANDROID__)
+    // The Quest's default eye size (platform/include/vr/vr_settings.h).
+    {"vr_render_scale", K::Float, "0.85", 0.25f, 2.0f, 0.05f},
+#else
     {"vr_render_scale", K::Float, "1", 0.25f, 2.0f, 0.05f},
+#endif
     {"vr_world_scale", K::Float, "1.5", 0.5f, 4.0f, 0.05f},
     {"vr_immersive_replay", K::Bool, "1"},
+    {"vr_multiview", K::Bool, "1"},
+    {"vr_direct_present", K::Bool, "1"},
     {"vr_remove_cinematic_bars", K::Bool, "1"},
     {"vr_sky_at_infinity", K::Bool, "1"},
     {"vr_space_warp", K::Bool, "1"},
@@ -33,6 +40,12 @@ constexpr KeyInfo kKeys[] = {
     {"vr_screen_distance_meters", K::Float, "1.5", 0.5f, 5.0f, 0.05f},
     {"vr_screen_width_meters", K::Float, "2", 0.5f, 5.0f, 0.05f},
     {"vr_lean_back_degrees", K::Float, "0", -45.0f, 45.0f, 1.0f},
+    // Headset keys the Quest launcher shows (passthrough and the levels are standalone only).
+    {"vr_passthrough", K::Bool, "1"},
+    {"vr_performance_level", K::Choice, "boost", 0, 0, 0, true, true,
+     "default,boost,sustained_high,sustained_low,power_savings"},
+    {"vr_display_refresh_rate", K::Float, "0", 0.0f, 120.0f, 1.0f},
+    {"vr_diagnostics_logging", K::Bool, "0"},
     // Controller
     {"vr_use_right_hand", K::Bool, "1"},
     {"vr_vr_menu_hold_left_stick", K::Bool, "0", 0, 0, 0, false},
@@ -77,8 +90,9 @@ constexpr KeyInfo kKeys[] = {
     {"vr_metroid_hud_offset_left", K::Float, "0", 0.0f, 1.0f, 0.01f, false},
     {"vr_metroid_hud_offset_right", K::Float, "0", 0.0f, 1.0f, 0.01f, false},
     {"vr_gun_targeting_enabled", K::Bool, "1", 0, 0, 0, false},
-    {"vr_gun_targeting_distance", K::Float, "60", 10.0f, 120.0f, 1.0f, false},
-    {"vr_gun_targeting_radius", K::Float, "4", 0.5f, 8.0f, 0.1f, false},
+    // Look to scan reads both (platform/vr/vr_look_scan.cpp).
+    {"vr_gun_targeting_distance", K::Float, "60", 10.0f, 120.0f, 1.0f},
+    {"vr_gun_targeting_radius", K::Float, "4", 0.5f, 8.0f, 0.1f},
     {"vr_offset_x", K::Float, "0", -2.0f, 2.0f, 0.01f},
     {"vr_offset_y", K::Float, "0", -2.0f, 2.0f, 0.01f},
     {"vr_offset_z", K::Float, "0", -2.0f, 2.0f, 0.01f},

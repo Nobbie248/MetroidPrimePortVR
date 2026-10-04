@@ -16,6 +16,9 @@ void encode_frame_snapshot(const wgpu::CommandEncoder& cmd, const wgpu::TextureV
                            wgpu::Extent3D sourceSize, uint32_t msaaSamples) noexcept;
 void after_submit() noexcept;
 
+// Whether a frame depth snapshot is wanted (the final pass's mono depth is then read).
+bool snapshot_wanted() noexcept;
+
 namespace testing {
 void reset() noexcept;
 bool snapshot_requested() noexcept;

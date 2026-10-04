@@ -13,6 +13,9 @@ struct DrawData {
   PipelineRef pipeline;
   wgpu::Color color;
   float depth = 0.f;
+  // The same clear in a multiview eye pass (stereo_multiview.hpp); zero outside a
+  // multiview frame (recording.hpp clear_multiview_pipeline_ref).
+  PipelineRef multiviewPipeline{};
 };
 
 constexpr uint32_t ClearPipelineConfigVersion = 4;
@@ -26,7 +29,10 @@ struct PipelineConfig {
   bool clearColor = true;
   bool clearAlpha = true;
   bool clearDepth = true;
-  std::array<uint8_t, 5> _pad{};
+  // Both views of a multiview eye pass (stereo_multiview.hpp); from the padding, so
+  // other configs keep their bytes.
+  bool multiview = false;
+  std::array<uint8_t, 4> _pad{};
 };
 static_assert(std::has_unique_object_representations_v<PipelineConfig>);
 
@@ -34,4 +40,6 @@ PipelineConfig make_pipeline_config(const RenderTargetLayout& layout, bool clear
                                     bool clearDepth) noexcept;
 wgpu::RenderPipeline create_pipeline(const PipelineConfig& config);
 void render(const DrawData& data, const wgpu::RenderPassEncoder& pass, const wgpu::Extent3D& targetSize);
+// The clear in a multiview eye pass, both eyes at once.
+void render_multiview(const DrawData& data, const wgpu::RenderPassEncoder& pass, const wgpu::Extent3D& targetSize);
 } // namespace aurora::gfx::clear

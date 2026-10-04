@@ -3,6 +3,7 @@
 #include "vr/vr_settings.h"
 
 #include "port_debug.h"
+#include "vr/openxr_integration.h"
 #include "vr/prime_vr_policy.h"
 
 #include <aurora/gfx.h>
@@ -156,6 +157,8 @@ const Field kFields[] = {
     VR_BOOL(passthrough),
     VR_BOOL(diagnostics_logging),
     VR_BOOL(immersive_replay),
+    VR_BOOL(multiview),
+    VR_BOOL(direct_present),
     Field{"vr_performance_level",
           [](PortVrSettings& s, const std::string& v) {
               const std::string name = Lower(v);
@@ -165,6 +168,7 @@ const Field kFields[] = {
               }
           },
           [](const PortVrSettings& s, std::ostream& o) { o << s.performance_level; }},
+    VR_FLOAT(display_refresh_rate, 0.0f, 144.0f),
     VR_FLOAT(screen_distance_meters, 0.25f, 10.0f),
     VR_FLOAT(screen_width_meters, 0.25f, 10.0f),
     VR_BOOL(cinematic_screen_enabled),
@@ -261,6 +265,7 @@ void SetVrSettings(const PortVrSettings& settings) noexcept {
 void PushVrSettingsToAurora() noexcept {
     const PortVrSettings settings = GetVrSettings();
     aurora_set_stereo_immersive_replay(settings.immersive_replay);
+    aurora_set_stereo_multiview(settings.multiview);
     // The presentation policy's half of the same settings; whether the headset
     // is enabled stays whatever the session set.
     PrimeVRPolicyConfig policy = PrimeVRPolicyGetSnapshot().config;
@@ -274,6 +279,8 @@ void PushVrSettingsToAurora() noexcept {
     // PrimedGun's HUD distance and size: in the native build both are factors
     // of the HUD frame's authored distance and size (0.75 each by default).
     aurora_set_stereo_head_locked(settings.metroid_hud_size, settings.metroid_hud_distance);
+    // The pacing thread asks the runtime again when this changes.
+    OpenXRSetDisplayRefreshRate(settings.display_refresh_rate);
 }
 
 void ResetVrCalibrationOffsets() noexcept {

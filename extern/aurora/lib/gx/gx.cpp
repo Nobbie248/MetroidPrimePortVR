@@ -10,6 +10,7 @@
 #include "../gfx/probe.hpp"
 #include "../gfx/recording.hpp"
 #include "../gfx/resource_cache.hpp"
+#include "../gfx/stereo_multiview.hpp"
 #include "../gfx/stereo_shadow.hpp"
 #include "../gfx/texture.hpp"
 #include "gx_fmt.hpp"
@@ -34,17 +35,22 @@ using webgpu::g_graphicsConfig;
 
 GXState g_gxState{};
 wgpu::BindGroup g_emptyTextureBindGroup;
+wgpu::BindGroup g_emptyMultiviewTextureBindGroup;
 
 namespace {
 wgpu::Sampler sEmptySampler;
 wgpu::Texture sEmptyTexture;
 wgpu::TextureView sEmptyTextureView;
+wgpu::TextureView sEmptyArrayTextureView;
 std::mutex sBindGroupLayoutMutex;
 absl::flat_hash_map<u32, wgpu::BindGroupLayout> sUniformBindGroupLayouts;
 absl::flat_hash_map<u32, std::pair<wgpu::BindGroupLayout, wgpu::BindGroupLayout>> sTextureBindGroupLayouts;
 wgpu::BindGroupLayout sTextureBindGroupLayout;
 wgpu::BindGroupLayout sSamplerBindGroupLayout;
 wgpu::PipelineLayout sPipelineLayout;
+// Multiview stereo replay (gfx/stereo_multiview.hpp): the GX textures as 2D arrays.
+wgpu::BindGroupLayout sMultiviewTextureBindGroupLayout;
+wgpu::PipelineLayout sMultiviewPipelineLayout;
 
 std::atomic<int> sPendingViewportPolicy{-1};
 // Last GXSetDrawSync token whose FIFO command has been processed.
@@ -350,9 +356,10 @@ wgpu::RenderPipeline build_pipeline(const PipelineConfig& config, ArrayRef<wgpu:
       .targetCount = colorTargets.size(),
       .targets = colorTargets.data(),
   };
-  const wgpu::RenderPipelineDescriptor descriptor{
+  const bool multiview = config.shaderConfig.multiview != 0;
+  wgpu::RenderPipelineDescriptor descriptor{
       .label = label,
-      .layout = sPipelineLayout,
+      .layout = multiview ? sMultiviewPipelineLayout : sPipelineLayout,
       .vertex =
           {
               .module = shader,
@@ -368,6 +375,18 @@ wgpu::RenderPipeline build_pipeline(const PipelineConfig& config, ArrayRef<wgpu:
           },
       .fragment = &fragmentState,
   };
+#if defined(WGPU_DAWN_RENDER_PIPELINE_MULTIVIEW_INIT)
+  // Both views of a multiview eye pass (gfx/stereo_multiview.hpp).
+  wgpu::DawnRenderPipelineMultiview multiviewState{};
+  multiviewState.viewMask = gfx::stereo_multiview::kViewMask;
+  if (multiview) {
+    descriptor.nextInChain = &multiviewState;
+  }
+#endif
+  if (multiview && !sMultiviewPipelineLayout) {
+    // A cached multiview config on a device without the feature (pipeline_cache prewarm).
+    return {};
+  }
   return g_device.CreateRenderPipeline(&descriptor);
 }
 
@@ -481,9 +500,11 @@ void populate_pipeline_config(PipelineConfig& config, GXPrimitive primitive, GXV
 
 namespace {
 // The GX texture bind group of the textures `info` samples, each texture's view
-// chosen by `view_for` (the mono view, or a stereo eye's stand-in).
+// chosen by `view_for` (the mono view, or a stereo eye's stand-in). A multiview
+// bind group (gfx/stereo_multiview.hpp) binds 2D array views in its own layout.
 template <typename ViewFor>
-gfx::BindGroupRef build_texture_bind_group(const ShaderInfo& info, const ViewFor& view_for) noexcept {
+gfx::BindGroupRef build_texture_bind_group(const ShaderInfo& info, const ViewFor& view_for,
+                                           bool multiview = false) noexcept {
   // Using C WGPU types instead of C++ wrappers to avoid destructor overhead
   std::array<WGPUBindGroupEntry, MaxTextures * 2 + 2 + gfx::probe::VolumeTextures> textureEntries{};
   textureEntries[MaxTextures * 2].binding = MaxTextures * 2;
@@ -513,19 +534,37 @@ gfx::BindGroupRef build_texture_bind_group(const ShaderInfo& info, const ViewFor
       }
       samplerEntry.sampler = gfx::sampler_ref(samplerDescriptor).Get();
     } else {
-      textureEntry.textureView = sEmptyTextureView.Get();
+      textureEntry.textureView = multiview ? sEmptyArrayTextureView.Get() : sEmptyTextureView.Get();
       samplerEntry.sampler = sEmptySampler.Get();
     }
   }
   const WGPUBindGroupDescriptor textureBindGroupDescriptor{
-      .label = {"GX Texture Bind Group", WGPU_STRLEN},
-      .layout = sTextureBindGroupLayout.Get(),
+      .label = {multiview ? "GX Multiview Texture Bind Group" : "GX Texture Bind Group", WGPU_STRLEN},
+      .layout = multiview ? sMultiviewTextureBindGroupLayout.Get() : sTextureBindGroupLayout.Get(),
       .entryCount = textureEntries.size(),
       .entries = textureEntries.data(),
   };
   return gfx::bind_group_ref(textureBindGroupDescriptor);
 }
 } // namespace
+
+gfx::BindGroupRef build_multiview_bind_group(const ShaderInfo& info) noexcept {
+  if (!sMultiviewTextureBindGroupLayout || (!info.sampledTextures.any() && !info.sampledIndTextures.any())) {
+    return {};
+  }
+  ZoneScoped;
+  // An EFB copy taken per eye binds its two-layer stand-in, any other texture its
+  // own single layer.
+  return build_texture_bind_group(
+      info,
+      [](const gfx::TextureBind& tex) {
+        if (const WGPUTextureView layered = gfx::stereo_shadow::layered_view(tex.ref.get())) {
+          return layered;
+        }
+        return gfx::array_texture_view(*tex.ref).Get();
+      },
+      true);
+}
 
 GXBindGroups build_bind_groups(const ShaderInfo& info) noexcept {
   ZoneScoped;
@@ -681,12 +720,91 @@ void initialize() noexcept {
     };
     sPipelineLayout = g_device.CreatePipelineLayout(&desc);
   }
+  if (webgpu::g_multiviewSupported) {
+    // The multiview layout: the same bindings, the GX textures as 2D arrays.
+    std::array<wgpu::BindGroupLayoutEntry, MaxTextures * 2 + 2 + gfx::probe::VolumeTextures> textureEntries;
+    textureEntries[MaxTextures * 2] = {
+        .binding = MaxTextures * 2,
+        .visibility = wgpu::ShaderStage::Fragment,
+        .texture = {.sampleType = wgpu::TextureSampleType::Float, .viewDimension = wgpu::TextureViewDimension::Cube},
+    };
+    textureEntries[MaxTextures * 2 + 1] = {
+        .binding = MaxTextures * 2 + 1,
+        .visibility = wgpu::ShaderStage::Fragment,
+        .sampler = {.type = wgpu::SamplerBindingType::Filtering},
+    };
+    for (u32 i = 0; i < gfx::probe::VolumeTextures; ++i) {
+      textureEntries[MaxTextures * 2 + 2 + i] = {
+          .binding = MaxTextures * 2 + 2 + i,
+          .visibility = wgpu::ShaderStage::Fragment,
+          .texture = {.sampleType = wgpu::TextureSampleType::Float, .viewDimension = wgpu::TextureViewDimension::e3D},
+      };
+    }
+    for (u32 i = 0; i < MaxTextures; ++i) {
+      textureEntries[i * 2] = {
+          .binding = i * 2,
+          .visibility = wgpu::ShaderStage::Fragment,
+          .texture = {.sampleType = wgpu::TextureSampleType::Float,
+                      .viewDimension = wgpu::TextureViewDimension::e2DArray},
+      };
+      textureEntries[i * 2 + 1] = {
+          .binding = i * 2 + 1,
+          .visibility = wgpu::ShaderStage::Fragment,
+          .sampler = {.type = wgpu::SamplerBindingType::Filtering},
+      };
+    }
+    const wgpu::BindGroupLayoutDescriptor layoutDescriptor{
+        .label = "GX Multiview Texture Bind Group Layout",
+        .entryCount = textureEntries.size(),
+        .entries = textureEntries.data(),
+    };
+    sMultiviewTextureBindGroupLayout = g_device.CreateBindGroupLayout(&layoutDescriptor);
+    const wgpu::TextureViewDescriptor arrayViewDescriptor{
+        .label = "Empty texture array view",
+        .dimension = wgpu::TextureViewDimension::e2DArray,
+    };
+    sEmptyArrayTextureView = sEmptyTexture.CreateView(&arrayViewDescriptor);
+    std::array<wgpu::BindGroupEntry, MaxTextures * 2 + 2 + gfx::probe::VolumeTextures> entries;
+    entries[MaxTextures * 2] = {.binding = MaxTextures * 2, .textureView = gfx::probe::cube_view()};
+    entries[MaxTextures * 2 + 1] = {.binding = MaxTextures * 2 + 1, .sampler = gfx::probe::sampler()};
+    for (u32 i = 0; i < gfx::probe::VolumeTextures; ++i) {
+      entries[MaxTextures * 2 + 2 + i] = {.binding = MaxTextures * 2 + 2 + i,
+                                          .textureView = gfx::probe::volume_view(0, i)};
+    }
+    for (u32 i = 0; i < MaxTextures; ++i) {
+      entries[i * 2] = {.binding = i * 2, .textureView = sEmptyArrayTextureView};
+      entries[i * 2 + 1] = {.binding = i * 2 + 1, .sampler = sEmptySampler};
+    }
+    const wgpu::BindGroupDescriptor emptyDescriptor{
+        .label = "GX Empty Multiview Texture Bind Group",
+        .layout = sMultiviewTextureBindGroupLayout,
+        .entryCount = entries.size(),
+        .entries = entries.data(),
+    };
+    g_emptyMultiviewTextureBindGroup = g_device.CreateBindGroup(&emptyDescriptor);
+    const std::array layouts{
+        gfx::detail::resources().staticBindGroupLayout,
+        gfx::detail::resources().uniformBindGroupLayout,
+        sMultiviewTextureBindGroupLayout,
+    };
+    const wgpu::PipelineLayoutDescriptor desc{
+        .label = "GX Multiview Pipeline Layout",
+        .bindGroupLayoutCount = layouts.size(),
+        .bindGroupLayouts = layouts.data(),
+        .immediateSize = sizeof(DrawImmediateData),
+    };
+    sMultiviewPipelineLayout = g_device.CreatePipelineLayout(&desc);
+  }
 }
 
 void shutdown() noexcept {
   // TODO we should probably store this all in g_state.gx instead
   sSamplerBindGroupLayout = {};
   sTextureBindGroupLayout = {};
+  sMultiviewTextureBindGroupLayout = {};
+  sMultiviewPipelineLayout = {};
+  sEmptyArrayTextureView = {};
+  g_emptyMultiviewTextureBindGroup = {};
   {
     std::lock_guard lock{sBindGroupLayoutMutex};
     sUniformBindGroupLayouts.clear();

@@ -1,0 +1,74 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- PrimedGun v2 on Meta Quest. The OpenXR entries follow Wiicompiled VR's
+     working Quest manifest (and DolphinXR's before it). -->
+<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+
+    <!-- The Khronos loader brokers the system OpenXR runtime through this permission. -->
+    <uses-permission android:name="org.khronos.openxr.permission.OPENXR_SYSTEM" />
+    <!-- SDL's haptics call Vibrator.cancel() unconditionally. -->
+    <uses-permission android:name="android.permission.VIBRATE" />
+    <!-- The Archipelago client's WebSocket (ws:// only in this build). -->
+    <uses-permission android:name="android.permission.INTERNET" />
+
+    <queries>
+        <provider android:authorities="org.khronos.openxr.runtime_broker;org.khronos.openxr.system_runtime_broker" />
+        <intent>
+            <action android:name="org.khronos.openxr.OpenXRRuntimeService" />
+        </intent>
+        <intent>
+            <action android:name="org.khronos.openxr.OpenXRApiLayerService" />
+        </intent>
+    </queries>
+
+    <uses-feature android:name="android.hardware.vulkan.level" android:required="true" android:version="1" />
+    <uses-feature android:name="android.hardware.vulkan.version" android:required="true" android:version="0x00401000" />
+    <uses-feature android:name="android.hardware.vr.headtracking" android:required="true" android:version="1" />
+    <uses-feature android:name="android.software.xr.api.openxr" android:required="true" />
+    <!-- XR_FB_passthrough around the virtual screen: without this flag Horizon OS
+         keeps the app passthrough-disabled and the layer composites nothing. -->
+    <uses-feature android:name="com.oculus.feature.PASSTHROUGH" android:required="false" />
+    <uses-feature android:name="android.hardware.touchscreen" android:required="false" />
+    <uses-feature android:name="android.hardware.gamepad" android:required="false" />
+
+    <application
+        android:allowBackup="false"
+        android:appCategory="game"
+        android:hasFragileUserData="true"
+        android:icon="@mipmap/ic_launcher"
+        android:label="@string/app_name"
+        android:theme="@style/Theme.PrimedGun.Vr">
+
+        <meta-data android:name="com.oculus.supportedDevices" android:value="quest2|quest3|quest3s|questpro" />
+        <meta-data android:name="com.oculus.vr.focusaware" android:value="true" />
+        <!-- Let the runtime move CPU budget to the GPU; the per-eye replay is GPU-bound. -->
+        <meta-data android:name="com.oculus.trade_cpu_for_gpu_amount" android:value="-1" />
+
+        <!-- The game. Its own process, which PrimedGunVrActivity ends when the game
+             closes: SDLActivity cannot be created twice in one process, and the
+             OpenXR device must not start twice. Every configuration change is
+             handled in place for the same reason. -->
+        <activity
+            android:name=".PrimedGunVrActivity"
+            android:configChanges="density|fontScale|fontWeightAdjustment|grammaticalGender|keyboard|keyboardHidden|layoutDirection|locale|navigation|orientation|screenLayout|screenSize|smallestScreenSize|touchscreen|uiMode"
+            android:excludeFromRecents="false"
+            android:exported="true"
+            android:launchMode="singleTask"
+            android:preferMinimalPostProcessing="true"
+            android:process=":game"
+            android:resizeableActivity="false"
+            android:screenOrientation="landscape"
+            android:theme="@style/Theme.PrimedGun.Vr">
+            <property
+                android:name="android.window.PROPERTY_XR_ACTIVITY_START_MODE"
+                android:value="XR_ACTIVITY_START_MODE_FULL_SPACE_UNMANAGED" />
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN" />
+                <category android:name="com.oculus.intent.category.VR" />
+                <category android:name="android.intent.category.DEFAULT" />
+                <!-- Until the launcher panel exists, the library starts the game directly. -->
+                <category android:name="android.intent.category.LAUNCHER" />
+            </intent-filter>
+        </activity>
+    </application>
+
+</manifest>

@@ -31,6 +31,7 @@
 #include <sstream>
 #include <string>
 #include <thread>
+#include <vector>
 
 #if defined(MP_ENABLE_OPENXR)
 #include "vr/openxr_backend.h"
@@ -42,6 +43,7 @@
 #elif defined(__ANDROID__)
 #include "vr/openxr_android.h"
 #include "vr/openxr_vulkan.h"
+#include "vr/openxr_vulkan_direct.h"
 #include <time.h>
 #include <unistd.h>
 #define XR_USE_TIMESPEC
@@ -80,9 +82,13 @@ void ConfigurePolicy(bool enabled) noexcept {
 #if defined(_WIN32)
 // TODO(phase 5): the Vulkan binding through the openxr_windows.h variant wrapper.
 using GraphicsBackend = OpenXRD3D12Backend;
+inline constexpr const char* kFallbackNote = "; continuing on the mirror output";
 
 #else
-using GraphicsBackend = OpenXRVulkanBackend;
+// Direct presentation when Aurora's Dawn offers it, else the AHardwareBuffer bridge.
+using GraphicsBackend = OpenXRQuestVulkanBackend;
+// A standalone headset has no mirror window to fall back to (see OnRuntimeExitRequested).
+inline constexpr const char* kFallbackNote = "";
 inline constexpr const char* kGraphicsBackendName = "Vulkan";
 #endif
 
@@ -405,6 +411,8 @@ public:
 #endif
         if (has_extension("XR_FB_display_refresh_rate")) {
             runtime_->LoadFunction("xrGetDisplayRefreshRateFB", &get_display_refresh_rate_);
+            runtime_->LoadFunction("xrEnumerateDisplayRefreshRatesFB", &enumerate_display_refresh_rates_);
+            runtime_->LoadFunction("xrRequestDisplayRefreshRateFB", &request_display_refresh_rate_);
         }
         if (has_extension("XR_EXT_performance_settings")) {
             runtime_->LoadFunction("xrPerfSettingsSetPerformanceLevelEXT", &set_performance_level_);
@@ -534,6 +542,9 @@ public:
         prepared_ = false;
         convert_display_time_ = nullptr;
         get_display_refresh_rate_ = nullptr;
+        enumerate_display_refresh_rates_ = nullptr;
+        request_display_refresh_rate_ = nullptr;
+        display_refresh_rate_requested_ = false;
         set_performance_level_ = nullptr;
         headset_hz_.store(0, std::memory_order_relaxed);
         rendered_fps_.store(0, std::memory_order_relaxed);
@@ -577,6 +588,12 @@ public:
         return true;
     }
 
+    uint32_t FrameRequestTimeoutMs() const noexcept {
+        return running_.load(std::memory_order_acquire) && session_running_.load(std::memory_order_acquire)
+                   ? kFrameRequestWaitRunningMs
+                   : kFrameRequestWaitIdleMs;
+    }
+
     bool LatestFrameRequest(OpenXRFrameRequest& request) {
         std::lock_guard lock(request_mutex_);
         if (request_.serial == 0) {
@@ -611,6 +628,10 @@ public:
 
     void SetRenderScale(float scale) noexcept {
         render_scale_.store(ClampRenderScale(scale), std::memory_order_relaxed);
+    }
+
+    void SetDisplayRefreshRate(float hz) noexcept {
+        display_refresh_rate_.store(std::clamp(hz, 0.0f, 144.0f), std::memory_order_relaxed);
     }
 
     OpenXREyeResolution EyeResolution(float scale) const noexcept {
@@ -739,6 +760,21 @@ private:
                                << (hinted ? "set" : "refused") << std::endl;
         return true;
     }
+
+    // Aurora's GX FIFO processor turns the game's GX commands into recorded draws on a thread
+    // of its own, Wiicompiled's GX thread in this lineage; Wiicompiled went from 52-56 to 60
+    // FPS on a Quest 3 once that thread had a renderer hint.
+    bool RegisterAuroraGxWorkerThread() {
+        const uint32_t thread_id = aurora_get_gx_worker_native_thread_id();
+        if (thread_id == 0 || runtime_ == nullptr) {
+            return false;
+        }
+        const bool hinted =
+            OpenXRAndroidRegisterThreadId(*runtime_, OpenXRAndroidThreadType::RendererWorker, thread_id);
+        PORTVR_LOG() << "OpenXR: Android thread hint for Aurora's GX processor "
+                               << (hinted ? "set" : "refused") << std::endl;
+        return true;
+    }
 #endif
 
     // Asks the runtime for the configured performance level in both domains. Standalone
@@ -767,6 +803,60 @@ private:
                                << (XR_SUCCEEDED(gpu) ? "set" : "refused") << " (" << gpu << ")" << std::endl;
     }
 
+    // XR_FB_display_refresh_rate. The game's 60 Hz simulation is drawn once per XR
+    // frame with interpolated presentation, so any rate the headset offers moves
+    // smoothly; each costs one draw of the game and both eyes per display frame.
+    // 0 leaves the runtime's choice, 72 Hz on a Quest unless its system says otherwise.
+    void ApplyDisplayRefreshRate() {
+        const float wanted = display_refresh_rate_.load(std::memory_order_relaxed);
+        applied_display_refresh_rate_ = wanted;
+        if (runtime_ == nullptr || !runtime_->HasSession() || request_display_refresh_rate_ == nullptr) {
+            return;
+        }
+        if (!(wanted > 0.0f)) {
+            if (display_refresh_rate_requested_) {
+                display_refresh_rate_requested_ = false;
+                const XrResult result = request_display_refresh_rate_(runtime_->Session(), 0.0f);
+                PORTVR_LOG() << "OpenXR: display refresh rate left to the runtime (" << result << ")"
+                             << std::endl;
+            }
+            return;
+        }
+        std::vector<float> rates;
+        if (enumerate_display_refresh_rates_ != nullptr) {
+            uint32_t count = 0;
+            if (XR_SUCCEEDED(enumerate_display_refresh_rates_(runtime_->Session(), 0, &count, nullptr)) &&
+                count != 0) {
+                rates.resize(count);
+                if (XR_SUCCEEDED(enumerate_display_refresh_rates_(runtime_->Session(), count, &count,
+                                                                   rates.data()))) {
+                    rates.resize(count);
+                } else {
+                    rates.clear();
+                }
+            }
+        }
+        float chosen = wanted;
+        if (!rates.empty()) {
+            chosen = rates.front();
+            for (const float rate : rates) {
+                if (std::fabs(rate - wanted) < std::fabs(chosen - wanted)) {
+                    chosen = rate;
+                }
+            }
+        }
+        const XrResult result = request_display_refresh_rate_(runtime_->Session(), chosen);
+        display_refresh_rate_requested_ = XR_SUCCEEDED(result);
+        std::ostringstream offered;
+        for (size_t i = 0; i < rates.size(); ++i) {
+            offered << (i == 0 ? "" : ", ") << rates[i];
+        }
+        PORTVR_LOG() << "OpenXR: display refresh rate " << chosen << " Hz (asked for " << wanted
+                     << ", offered " << (rates.empty() ? std::string("unknown") : offered.str()) << ") "
+                     << (XR_SUCCEEDED(result) ? "requested" : "refused") << " (" << result << ")"
+                     << std::endl;
+    }
+
     static bool ProvideStereoFrame(uint32_t, AuroraStereoFrame* output, void* userdata) {
         auto* self = static_cast<OpenXRIntegration*>(userdata);
         if (self == nullptr || output == nullptr) {
@@ -791,6 +881,7 @@ private:
         // frame worker, which submits the GPU work, are the ones that matter; this thread only
         // paces.
         bool worker_registered = false;
+        bool gx_worker_registered = false;
         if (runtime_ != nullptr) {
             const bool pacing_hinted =
                 OpenXRAndroidRegisterThread(*runtime_, OpenXRAndroidThreadType::RendererWorker);
@@ -802,9 +893,11 @@ private:
             PORTVR_LOG() << "OpenXR: Android thread hints: game " << (game_hinted ? "set" : "refused")
                                    << ", pacing " << (pacing_hinted ? "set" : "refused") << std::endl;
             worker_registered = RegisterAuroraFrameWorkerThread();
+            gx_worker_registered = RegisterAuroraGxWorkerThread();
         }
 #endif
         ApplyPerformanceLevel();
+        exit_requested_.store(false, std::memory_order_release);
         bool fatal = false;
         uint32_t consecutive_skips = 0;
         bool store_gate_set = false;
@@ -819,17 +912,29 @@ private:
             if (!worker_registered) {
                 worker_registered = RegisterAuroraFrameWorkerThread();
             }
+            if (!gx_worker_registered) {
+                gx_worker_registered = RegisterAuroraGxWorkerThread();
+            }
 #endif
             const OpenXREventStatus events = diagnostics::Measure(diagnostics::Stage::PollEvents, [&] {
                 return runtime_->PollEvents();
             });
             const bool session_active = runtime_->IsSessionRunning();
+            session_running_.store(session_active, std::memory_order_release);
             PrimeVRPolicySetSessionActive(session_active);
             const uint64_t session_run_serial = runtime_->SessionRunSerial();
             if (session_run_serial != applied_session_run_serial_) {
                 applied_session_run_serial_ = session_run_serial;
                 ResetTrackingOrigin();
                 diagnostics::OnSessionStarted();
+                // A runtime may drop the request when the session stops (the headset
+                // asleep, the system menu); every new session asks again.
+                ApplyPerformanceLevel();
+                applied_display_refresh_rate_ = -1.0f;
+            }
+            if (session_active &&
+                display_refresh_rate_.load(std::memory_order_relaxed) != applied_display_refresh_rate_) {
+                ApplyDisplayRefreshRate();
             }
             if (session_active != session_was_active_) {
                 session_was_active_ = session_active;
@@ -842,7 +947,7 @@ private:
                 }
             }
             if (events == OpenXREventStatus::ExitRequested) {
-                SetError("OpenXR runtime requested session exit; continuing on the mirror output");
+                OnRuntimeExitRequested();
                 break;
             }
             if (events == OpenXREventStatus::Error) {
@@ -952,7 +1057,7 @@ private:
                 continue;
             }
             if (begin == OpenXRBeginStatus::ExitRequested) {
-                SetError("OpenXR runtime requested session exit; continuing on the mirror output");
+                OnRuntimeExitRequested();
                 break;
             }
             if (begin == OpenXRBeginStatus::Error) {
@@ -1080,12 +1185,12 @@ private:
                 }
                 if (consecutive_skips >= kMaxConsecutiveSkips) {
                     SetError(std::string("Aurora's ") + kGraphicsBackendName +
-                             " stereo copy keeps failing; continuing on the mirror output");
+                             " stereo copy keeps failing" + kFallbackNote);
                     fatal = true;
                 }
             } else if (!submit) {
                 SetError(std::string("Aurora's ") + kGraphicsBackendName +
-                         " stereo copy failed; continuing on the mirror output");
+                         " stereo copy failed" + kFallbackNote);
                 fatal = true;
             } else {
                 consecutive_skips = 0;
@@ -1105,6 +1210,14 @@ private:
         aurora_set_stereo_panel_layer(false);
         running_.store(false, std::memory_order_release);
         PrimeVRPolicySetSessionActive(false);
+#if defined(__ANDROID__)
+        // A standalone headset has no desktop to continue on: whatever ended the
+        // session ends the app, and the launcher shows an error if there was one.
+        if (!stop_.load(std::memory_order_acquire)) {
+            OpenXRAndroidRequestQuit(exit_requested_.load(std::memory_order_acquire) ? std::string()
+                                                                                      : LastError());
+        }
+#endif
         if (!stop_.load(std::memory_order_acquire)) {
             // A runtime/backend failure can happen while Aurora is submitting.
             // Ask the producer to reach a safe frame boundary, drain Aurora,
@@ -1125,7 +1238,7 @@ private:
             return true;
         }
         if (status == OpenXRBeginStatus::ExitRequested) {
-            SetError("OpenXR runtime requested session exit; continuing on the mirror output");
+            OnRuntimeExitRequested();
             return false;
         }
         if (status == OpenXRBeginStatus::Error) {
@@ -1146,7 +1259,7 @@ private:
             return true;
         }
         if (prepared == OpenXRBeginStatus::ExitRequested) {
-            SetError("OpenXR runtime requested session exit; continuing on the mirror output");
+            OnRuntimeExitRequested();
             return false;
         }
         if (prepared == OpenXRBeginStatus::Error) {
@@ -1220,7 +1333,7 @@ private:
             diagnostics::OnSubmission(false);
             if (submission == OpenXRSubmissionStatus::Failed) {
                 SetError(std::string("Aurora's ") + kGraphicsBackendName +
-                         " stereo copy failed; continuing on the mirror output");
+                         " stereo copy failed" + kFallbackNote);
                 return false;
             }
             ++consecutive_skips;
@@ -1230,7 +1343,7 @@ private:
             }
             if (consecutive_skips >= kMaxConsecutiveSkips) {
                 SetError(std::string("Aurora's ") + kGraphicsBackendName +
-                         " stereo copy keeps failing; continuing on the mirror output");
+                         " stereo copy keeps failing" + kFallbackNote);
                 return false;
             }
             return KeepAlive();
@@ -1244,7 +1357,7 @@ private:
             return true;
         }
         if (begin == OpenXRBeginStatus::ExitRequested) {
-            SetError("OpenXR runtime requested session exit; continuing on the mirror output");
+            OnRuntimeExitRequested();
             return false;
         }
         if (begin == OpenXRBeginStatus::Error) {
@@ -1265,7 +1378,7 @@ private:
         }
         if (copy == OpenXRSubmissionStatus::Failed) {
             SetError(std::string("Aurora's ") + kGraphicsBackendName +
-                     " stereo copy failed; continuing on the mirror output");
+                     " stereo copy failed" + kFallbackNote);
             return false;
         }
         if (!submit) {
@@ -1696,6 +1809,14 @@ private:
         PORTVR_LOG() << "OpenXR: " << LastError() << std::endl;
     }
 
+    // The runtime ended the session: Quit in the system menu, or the session was lost.
+    // The desktop keeps playing in its window; on a standalone headset the app ends
+    // with it (PacingThread), and that is no error.
+    void OnRuntimeExitRequested() {
+        exit_requested_.store(true, std::memory_order_release);
+        SetError(std::string("OpenXR runtime requested session exit") + kFallbackNote);
+    }
+
     OpenXRLogCallback logger_;
     std::unique_ptr<OpenXRRuntime> runtime_;
     std::unique_ptr<GraphicsBackend> backend_;
@@ -1714,6 +1835,11 @@ private:
     uint64_t request_serial_ = 0;
     std::atomic<float> lean_back_degrees_{GetVrSettings().lean_back_degrees};
     std::atomic<float> render_scale_{GetVrSettings().render_scale};
+    std::atomic<float> display_refresh_rate_{GetVrSettings().display_refresh_rate};
+    // Pacing thread only: the rate last asked for (-1 forces a request), and
+    // whether the runtime accepted one this session.
+    float applied_display_refresh_rate_ = -1.0f;
+    bool display_refresh_rate_requested_ = false;
     // The left eye for OpenXRGetEyeResolution: the runtime's description of it, set while a
     // session runs, and the size it is rendered at now (0 without a session).
     mutable std::mutex eye_view_mutex_;
@@ -1731,6 +1857,8 @@ private:
     std::chrono::steady_clock::time_point timing_start_ = std::chrono::steady_clock::now();
     uint32_t timing_submissions_ = 0;
     PFN_xrGetDisplayRefreshRateFB get_display_refresh_rate_ = nullptr;
+    PFN_xrEnumerateDisplayRefreshRatesFB enumerate_display_refresh_rates_ = nullptr;
+    PFN_xrRequestDisplayRefreshRateFB request_display_refresh_rate_ = nullptr;
     PFN_xrPerfSettingsSetPerformanceLevelEXT set_performance_level_ = nullptr;
 #if defined(_WIN32)
     using ConvertDisplayTime = XrResult (XRAPI_PTR*)(XrInstance, XrTime, LARGE_INTEGER*);
@@ -1756,6 +1884,14 @@ private:
     bool prepared_ = false;
     bool provider_registered_ = false;
     bool graphics_retained_ = false;
+    std::atomic<bool> exit_requested_{false};
+    // Whether the XR session runs, for the game loop's wait (FrameRequestTimeoutMs).
+    std::atomic<bool> session_running_{false};
+    // The pacing thread gives a packet 50 ms (RenderFirstCycle); a shorter wait in the
+    // game loop drew frames between requests that no packet asked for: on a Quest at
+    // 72 Hz nearly every other draw, which took the GPU from the headset.
+    static constexpr uint32_t kFrameRequestWaitRunningMs = 50;
+    static constexpr uint32_t kFrameRequestWaitIdleMs = 16;
     uint32_t game_thread_id_ = 0;
 };
 
@@ -1849,6 +1985,14 @@ void OpenXRSetRenderScale(float scale) noexcept {
 #endif
 }
 
+void OpenXRSetDisplayRefreshRate(float hz) noexcept {
+#if MP_OPENXR_GRAPHICS_BACKEND
+    OpenXRIntegration::Get().SetDisplayRefreshRate(hz);
+#else
+    (void)hz;
+#endif
+}
+
 OpenXREyeResolution OpenXRGetEyeResolution(float scale) noexcept {
 #if MP_OPENXR_GRAPHICS_BACKEND
     return OpenXRIntegration::Get().EyeResolution(scale);
@@ -1890,6 +2034,14 @@ void OpenXRSetRecenterCallback(void (*callback)()) noexcept {
 #endif
 }
 
+uint32_t OpenXRFrameRequestTimeoutMs() noexcept {
+#if MP_OPENXR_GRAPHICS_BACKEND
+    return OpenXRIntegration::Get().FrameRequestTimeoutMs();
+#else
+    return 16;
+#endif
+}
+
 bool OpenXRWaitForFrameRequest(OpenXRFrameRequest& request, uint32_t timeout_ms) noexcept {
 #if MP_OPENXR_GRAPHICS_BACKEND
     if (!OpenXRIntegration::Get().IsRunning()) {
@@ -1919,6 +2071,22 @@ std::string OpenXRLastError() {
     return OpenXRIntegration::Get().LastError();
 #else
     return "OpenXR is not wired to a graphics backend on this platform";
+#endif
+}
+
+bool OpenXRHeadsetIsOnlyDisplay() noexcept {
+#if defined(MP_ENABLE_OPENXR) && defined(__ANDROID__)
+    return true;
+#else
+    return false;
+#endif
+}
+
+void OpenXRRequestAppQuit(const std::string& error) {
+#if defined(MP_ENABLE_OPENXR) && defined(__ANDROID__)
+    OpenXRAndroidRequestQuit(error);
+#else
+    (void)error;
 #endif
 }
 

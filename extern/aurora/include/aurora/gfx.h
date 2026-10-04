@@ -101,6 +101,11 @@ void aurora_set_stereo_head_locked(float sizeScale, float distanceScale);
 // shown as the mono image on the virtual screen, which is the fail-safe path.
 void aurora_set_stereo_immersive_replay(bool enabled);
 bool aurora_get_stereo_immersive_replay(void);
+// Whether an immersive frame draws both eyes in one Vulkan multiview render pass
+// when the device can (default true). Read at frame begin.
+void aurora_set_stereo_multiview(bool enabled);
+// The device can (PrimedGun's patched Dawn on Vulkan, with the OpenXR interop).
+bool aurora_get_stereo_multiview_available(void);
 
 #ifdef __cplusplus
 }

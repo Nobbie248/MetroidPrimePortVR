@@ -142,6 +142,15 @@ struct DrawCache {
   std::array<uint32_t, 2> stereoUniformOffsets{UINT32_MAX, UINT32_MAX};
   std::array<gfx::BindGroupRef, 2> stereoBindGroups{};
   uint64_t stereoEpoch = 0;
+  // Multiview stereo replay (gfx/stereo_multiview.hpp): the pipelines drawing both
+  // views, one per MultiviewMode, made for the current config when a multiview
+  // frame first needs one (bit `mode` of the mask); the mode the staged uniform
+  // needs (gfx::stereo_multiview_mode); the stereo bind groups are then
+  // [multiview bind group, 0].
+  std::array<gfx::PipelineRef, 3> multiviewPipelineRefs{};
+  u8 multiviewPipelineMask = 0;
+  u8 multiviewMode = MultiviewNone;
+  bool stereoBindGroupsMultiview = false;
   gfx::Range fogRange{};
   FogRangeLutKey fogRangeKey{};
   bool hasFogRange = false;
@@ -384,6 +393,32 @@ static u32 calc_vtx_size(GXVtxFmt fmt) noexcept {
   return vtxSize;
 }
 
+// The multiview shader variant the uniform just staged needs
+// (gfx::stage_stereo_uniforms), or MultiviewNone, which leaves the draw out of
+// the eye passes, when the staged data does not sit where that variant reads it:
+// the clip matrices or the second eye copy at the shader's uniform size
+// (shader.cpp to_multiview_source).
+static u8 staged_multiview_mode(const DrawCache& cache) noexcept {
+  const u8 mode = gfx::stereo_multiview_mode();
+  const auto& offsets = cache.stereoUniformOffsets;
+  u32 stride = cache.shaderInfo.uniformSize;
+  if (mode == MultiviewClip) {
+    stride = gfx::align_uniform(cache.uniformRange.size);
+  } else if (mode == MultiviewFull && offsets[0] != offsets[1]) {
+    stride = offsets[1] - offsets[0];
+  }
+  if (stride != cache.shaderInfo.uniformSize) {
+    static bool sReported = false;
+    if (!sReported) {
+      sReported = true;
+      Log.error("Multiview uniform data lies {} bytes on, the shader expects {}", stride,
+                cache.shaderInfo.uniformSize);
+    }
+    return MultiviewNone;
+  }
+  return mode;
+}
+
 static void push_gx_draw(GXPrimitive prim, GXVtxFmt fmt, u16 vtxCount, gfx::Range vertRange, gfx::Range idxRange,
                          u32 numIndices) noexcept {
   auto& state = g_gxState;
@@ -411,6 +446,7 @@ static void push_gx_draw(GXPrimitive prim, GXVtxFmt fmt, u16 vtxCount, gfx::Rang
     populate_pipeline_config(cache.config, prim, fmt);
     cache.shaderInfo = build_shader_info(cache.config.shaderConfig);
     cache.pipelineRef = gfx::pipeline_ref(cache.config);
+    cache.multiviewPipelineMask = 0;
     cache.fmt = fmt;
     cache.lineMode = lineMode;
     cache.hasPipeline = true;
@@ -434,12 +470,16 @@ static void push_gx_draw(GXPrimitive prim, GXVtxFmt fmt, u16 vtxCount, gfx::Rang
       state.dirty |= DirtyUniform;
     }
   }
-  // Stereo replay: eye bind groups for draws that sample a per-eye EFB copy.
+  // Stereo replay: eye bind groups for draws that sample a per-eye EFB copy, or
+  // under multiview every draw's bind group of 2D array views.
+  const bool multiview = gfx::recording_multiview();
   if (gfx::stereo_shadow::active()) {
     const uint64_t stereoEpoch = gfx::stereo_shadow::epoch();
-    if (!bindGroupsValid || cache.stereoEpoch != stereoEpoch) {
-      cache.stereoBindGroups = build_stereo_bind_groups(cache.shaderInfo);
+    if (!bindGroupsValid || cache.stereoEpoch != stereoEpoch || cache.stereoBindGroupsMultiview != multiview) {
+      cache.stereoBindGroups = multiview ? std::array<gfx::BindGroupRef, 2>{build_multiview_bind_group(cache.shaderInfo), {}}
+                                         : build_stereo_bind_groups(cache.shaderInfo);
       cache.stereoEpoch = stereoEpoch;
+      cache.stereoBindGroupsMultiview = multiview;
     }
   } else {
     cache.stereoBindGroups = {};
@@ -448,7 +488,19 @@ static void push_gx_draw(GXPrimitive prim, GXVtxFmt fmt, u16 vtxCount, gfx::Rang
   const bool uniformValid = (state.dirty & DirtyUniform) == 0 && cache.uniformRange.size != 0;
   if (!uniformValid) {
     cache.uniformRange = build_uniform(cache.shaderInfo, cache.stereoUniformOffsets);
+    cache.multiviewMode = multiview ? staged_multiview_mode(cache) : MultiviewNone;
     state.dirty &= ~DirtyUniform;
+  }
+  gfx::PipelineRef multiviewPipeline{};
+  if (multiview && cache.multiviewMode != MultiviewNone) {
+    const u8 modeBit = 1u << cache.multiviewMode;
+    if ((cache.multiviewPipelineMask & modeBit) == 0) {
+      PipelineConfig multiviewConfig = cache.config;
+      multiviewConfig.shaderConfig.multiview = cache.multiviewMode;
+      cache.multiviewPipelineRefs[cache.multiviewMode] = gfx::pipeline_ref(multiviewConfig);
+      cache.multiviewPipelineMask |= modeBit;
+    }
+    multiviewPipeline = cache.multiviewPipelineRefs[cache.multiviewMode];
   }
   if (cache.config.shaderConfig.fogRangeEnabled) {
     const auto key = fog_range_lut_key();
@@ -459,6 +511,8 @@ static void push_gx_draw(GXPrimitive prim, GXVtxFmt fmt, u16 vtxCount, gfx::Rang
     }
   }
   immediates.fogRangeBase = cache.fogRange.offset / sizeof(u32);
+  // MultiviewFull: an eye pair (element view_index of it) or one uniform for both eyes.
+  immediates.eyeMask = cache.stereoUniformOffsets[0] != cache.stereoUniformOffsets[1] ? 1 : 0;
 
   state.dirty &= ~DirtyImmediates;
 
@@ -484,6 +538,7 @@ static void push_gx_draw(GXPrimitive prim, GXVtxFmt fmt, u16 vtxCount, gfx::Rang
       .dstAlpha = state.dstAlpha,
       .stereoUniformOffset = cache.stereoUniformOffsets,
       .stereoTextureBindGroup = cache.stereoBindGroups,
+      .multiviewPipeline = multiviewPipeline,
   });
 }
 
@@ -949,6 +1004,7 @@ void clear_draw_cache() noexcept {
   sDrawCache.bindGeneration = 0;
   sDrawCache.uniformRange = {};
   sDrawCache.stereoUniformOffsets = {UINT32_MAX, UINT32_MAX};
+  sDrawCache.multiviewMode = MultiviewNone;
   sDrawCache.stereoBindGroups = {};
   sDrawCache.stereoEpoch = 0;
   sDrawCache.fogRange = {};

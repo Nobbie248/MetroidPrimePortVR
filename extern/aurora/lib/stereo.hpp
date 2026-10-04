@@ -14,6 +14,8 @@ struct EyeImage {
   const wgpu::TextureView* view = nullptr;
   wgpu::Extent3D size{};
   wgpu::TextureFormat format = wgpu::TextureFormat::Undefined;
+  // The array layer of `texture` that holds this eye (multiview eye targets).
+  uint32_t layer = 0;
 };
 
 struct SinkFrame {

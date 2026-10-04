@@ -7,6 +7,7 @@
 #include "vr/vr_pad.h"
 #include "vr/vr_settings.h"
 
+#include <aurora/gfx.h>
 #include <imgui.h>
 
 namespace PortVr {
@@ -77,6 +78,34 @@ void DrawVrDebugTab() {
   ImGui::SeparatorText("Headset");
   changed |= ImGui::Checkbox("Enable the headset (takes effect at the next start)", &s.enabled);
   changed |= ImGui::Checkbox("Immersive replay", &s.immersive_replay);
+  {
+    const bool available = aurora_get_stereo_multiview_available();
+    ImGui::BeginDisabled(!available);
+    changed |= ImGui::Checkbox("Multiview eyes (both eyes in one pass)", &s.multiview);
+    ImGui::EndDisabled();
+    if (!available) {
+      ImGui::SameLine();
+      ImGui::TextDisabled("(Quest only)");
+    }
+  }
+#if defined(__ANDROID__)
+  changed |= ImGui::Checkbox("Direct to headset (takes effect at the next start)", &s.direct_present);
+#endif
+  {
+    // XR_FB_display_refresh_rate (Quest, Virtual Desktop); the nearest rate offered.
+    static constexpr float kRates[] = {0.0f, 72.0f, 80.0f, 90.0f, 120.0f};
+    int rate = 0;
+    for (int i = 0; i < static_cast<int>(sizeof(kRates) / sizeof(kRates[0])); ++i) {
+      if (s.display_refresh_rate == kRates[i]) {
+        rate = i;
+      }
+    }
+    if (ImGui::Combo("Display refresh rate", &rate, "Headset default\0" "72 Hz\0" "80 Hz\0" "90 Hz\0"
+                                                    "120 Hz\0")) {
+      s.display_refresh_rate = kRates[rate];
+      changed = true;
+    }
+  }
   ImGui::TextWrapped(
       "On: the world is drawn per eye. Off: the headset shows the flat image on the virtual screen, "
       "which is also what happens for menus and cinematics.");

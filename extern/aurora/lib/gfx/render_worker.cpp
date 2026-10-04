@@ -8,6 +8,10 @@
 
 #include <tracy/Tracy.hpp>
 
+#if defined(__ANDROID__)
+#include <unistd.h>
+#endif
+
 namespace aurora::gfx::render_worker {
 namespace {
 constexpr size_t QueueCapacity = 256;
@@ -18,6 +22,8 @@ thread::Thread g_thread;
 std::atomic_bool g_running = false;
 std::atomic_size_t g_pendingItems = 0;
 std::thread::id g_workerThreadId;
+// The kernel's id for this thread, for an OpenXR runtime's scheduling hints.
+std::atomic<uint32_t> g_workerNativeId = 0;
 
 void complete_sync(const std::shared_ptr<SyncState>& sync) {
   if (!sync) {
@@ -33,6 +39,9 @@ void complete_sync(const std::shared_ptr<SyncState>& sync) {
 
 void worker_main(std::stop_token token) {
   g_workerThreadId = std::this_thread::get_id();
+#if defined(__ANDROID__)
+  g_workerNativeId.store(static_cast<uint32_t>(gettid()), std::memory_order_release);
+#endif
 
   while (true) {
     bool closed = false;
@@ -55,6 +64,7 @@ void worker_main(std::stop_token token) {
     }
   }
 
+  g_workerNativeId.store(0, std::memory_order_release);
   g_workerThreadId = {};
 }
 
@@ -267,6 +277,8 @@ void synchronize() {
 }
 
 bool is_worker_thread() noexcept { return g_workerThreadId == std::this_thread::get_id(); }
+
+uint32_t native_thread_id() noexcept { return g_workerNativeId.load(std::memory_order_acquire); }
 
 bool is_idle() noexcept { return g_pendingItems.load(std::memory_order_acquire) == 0; }
 

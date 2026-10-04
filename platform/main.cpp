@@ -721,7 +721,9 @@ int main(int argc, char** argv) {
     const PortVr::OpenXRStartupResult vrStartup = PortVr::OpenXRPrepareAurora(config);
     if (vrStartup == PortVr::OpenXRStartupResult::Unavailable) {
         PortLog::Write("port: OpenXR unavailable: %s\n", PortVr::OpenXRLastError().c_str());
-        if (PortVr::GetVrSettings().required) {
+        // PortVr: a Quest has no desktop to fall back to.
+        if (PortVr::GetVrSettings().required || PortVr::OpenXRHeadsetIsOnlyDisplay()) {
+            PortVr::OpenXRRequestAppQuit("The headset could not start: " + PortVr::OpenXRLastError());
             return 1;
         }
     }
@@ -840,7 +842,8 @@ int main(int argc, char** argv) {
             PortLog::Write("port: OpenXR session started\n");
         } else {
             PortLog::Write("port: OpenXR did not start: %s\n", PortVr::OpenXRLastError().c_str());
-            if (PortVr::GetVrSettings().required) {
+            if (PortVr::GetVrSettings().required || PortVr::OpenXRHeadsetIsOnlyDisplay()) {
+                PortVr::OpenXRRequestAppQuit("The headset session could not start: " + PortVr::OpenXRLastError());
                 aurora_dvd_close();
                 aurora_shutdown();
                 return 1;
@@ -854,6 +857,9 @@ int main(int argc, char** argv) {
     } catch (const std::exception& error) {
         PortLog::Write( "metroid_prime_port: %s\n", error.what());
     }
+    // Port: Android never runs exit handlers (SDL_main returns into Java and the
+    // process is later killed), so the atexit save would not happen there.
+    PortDebug::SaveSettingsNow();
 
     // PortVr: stop publishing stereo work and destroy the session before
     // Aurora's device goes.

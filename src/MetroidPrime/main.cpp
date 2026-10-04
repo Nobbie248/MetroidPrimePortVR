@@ -1147,7 +1147,7 @@ int CMain::RsMain(int argc, const char* const* argv) {
         // PortVr: the headset paces the loop. The pacing thread publishes one
         // request per packet it hands Aurora; the loop draws once per request.
         // A timeout (session idle, headset off) keeps the loop turning.
-        PortVr::OpenXRWaitForFrameRequest(sVrFrameRequest, 10);
+        PortVr::OpenXRWaitForFrameRequest(sVrFrameRequest, PortVr::OpenXRFrameRequestTimeoutMs());
         nextFrameDeadline = SDL_GetTicksNS();
       } else if (PortDebug::FrameLimitEnabled() && !PortDebug::Turbo()) {
         nextFrameDeadline += framePeriodNs;

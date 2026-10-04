@@ -1,5 +1,7 @@
 #include "recording.hpp"
 
+#include <atomic>
+
 #include "encoding.hpp"
 #include "frame.hpp"
 #include "resource_cache.hpp"
@@ -53,6 +55,9 @@ struct FrameRecorder {
   size_t frameSlot = 0;
   uint32_t currentRenderPass = UINT32_MAX;
   uint32_t drawCallCount = 0;
+  // Draws recorded under each stereo route this frame (AURORA_STEREO_ROUTE_*), for the
+  // diagnostics line (log_stereo_frame_stats).
+  std::array<uint32_t, 8> routeDrawCounts{};
   uint32_t mergedDrawCallCount = 0;
   bool inOffscreen = false;
   std::optional<RenderPass> suspendedEfbPass;
@@ -64,8 +69,10 @@ struct FrameRecorder {
   ClipRect cachedScissor;
   bool suppressRenderWorker = false;
   uint8_t stereoRoute = AURORA_STEREO_ROUTE_WORLD;
+  bool finalPassMonoUnneeded = false;
   stereo_replay::HeadLockedPlane headLockedPlane;
   StereoScreenTexMtx stereoScreenTexMtx;
+  uint8_t multiviewMode = 0; // gx::MultiviewMode of the last stage_stereo_uniforms
 #ifdef AURORA_GFX_DEBUG_GROUPS
   std::vector<std::string> debugGroupStack;
 #endif
@@ -81,6 +88,36 @@ struct FrameRecorder {
 };
 
 FrameRecorder g_recorder;
+std::atomic_bool g_stereoDiagnostics{false};
+
+void log_stereo_frame_stats(const FramePacket& frame) {
+  static uint32_t sImmersiveFrames = 0;
+  if (!frame.stereo.immersive || (sImmersiveFrames++ % 600) != 0) {
+    return;
+  }
+  uint32_t efbPasses = 0;
+  uint32_t eyePasses = 0;
+  uint32_t monoSkipped = 0;
+  uint32_t copies = 0;
+  uint32_t eyeCopies = 0;
+  uint32_t discarded = 0;
+  for (const auto& pass : frame.renderPasses) {
+    efbPasses += pass.efb ? 1 : 0;
+    eyePasses += pass.stereo.enabled ? 1 : 0;
+    monoSkipped += pass.stereo.enabled && pass.stereo.skipMono ? 1 : 0;
+    copies += pass.resolveTarget ? 1 : 0;
+    eyeCopies += pass.stereo.copyTargets[0] ? 1 : 0;
+    discarded += pass.discardable ? 1 : 0;
+  }
+  const auto& routes = g_recorder.routeDrawCounts;
+  Log.info("stereo frame: {} passes ({} EFB, {} replayed per eye, {} eyes only, {} discarded), {} EFB copies "
+           "({} taken per eye), {} draws (world {}, head-locked {}, head-locked 2D {}, fullscreen {}, sky {}, "
+           "skipped {})",
+           frame.renderPasses.size(), efbPasses, eyePasses, monoSkipped, discarded, copies, eyeCopies,
+           g_recorder.drawCallCount, routes[AURORA_STEREO_ROUTE_WORLD], routes[AURORA_STEREO_ROUTE_HEAD_LOCKED],
+           routes[AURORA_STEREO_ROUTE_HEAD_LOCKED_2D], routes[AURORA_STEREO_ROUTE_FULLSCREEN],
+           routes[AURORA_STEREO_ROUTE_SKY], routes[AURORA_STEREO_ROUTE_SKIP]);
+}
 
 std::string pass_label(std::string_view kind) {
 #ifdef AURORA_GFX_DEBUG_GROUPS
@@ -320,6 +357,7 @@ void push_command(CommandType type, const Command::Data& data) {
 // Inline payload helpers: draw_payload.hpp (shared with the stereo eye encoder).
 
 void push_draw_command(DrawCommand data) {
+  ++g_recorder.routeDrawCounts[g_recorder.stereoRoute & 7];
   push_command(CommandType::Draw, Command::Data{.draw = data});
   ++g_recorder.drawCallCount;
 }
@@ -530,6 +568,16 @@ void stereo_seal_pass(FramePacket& frame, uint32_t passIndex) {
         .size = {target.width, target.height, 1},
     };
   }
+  if (state.multiview) {
+    // Both eyes in one pass over the targets' two layers (stereo_multiview.hpp).
+    const auto& multiview = stereo_multiview_target();
+    if (!multiview.colorView || !multiview.depthView) {
+      return;
+    }
+    pass.stereo.multiview = true;
+    pass.stereo.multiviewColorView = multiview.colorView;
+    pass.stereo.multiviewDepthView = multiview.depthView;
+  }
   pass.stereo.enabled = true;
   state.replayed = true;
 }
@@ -551,6 +599,7 @@ void begin_recording(FramePacket& packet, size_t frameSlot) {
   g_recorder.frameSlot = frameSlot;
   g_passSnapshotPools[frameSlot].used = 0;
   g_recorder.drawCallCount = 0;
+  g_recorder.routeDrawCounts = {};
   g_recorder.mergedDrawCallCount = 0;
   g_recorder.suspendedEfbPass.reset();
   g_recorder.stereoRoute = AURORA_STEREO_ROUTE_WORLD;
@@ -802,7 +851,7 @@ void set_scissor(const ClipRect& cmd) noexcept {
 // --- stereo replay ---
 
 void set_frame_stereo(const StereoFrameState& state) noexcept {
-  stereo_shadow::begin_frame(state.immersive);
+  stereo_shadow::begin_frame(state.immersive, state.multiview);
   if (!g_recorder.active()) {
     return;
   }
@@ -817,6 +866,12 @@ StereoFrameState recorded_stereo_state() noexcept {
 }
 
 void set_stereo_draw_route(uint8_t route) noexcept { g_recorder.stereoRoute = route; }
+
+bool recording_multiview() noexcept { return g_recorder.active() && g_recorder.frame().stereo.multiview; }
+
+void set_final_pass_mono_unneeded(bool unneeded) noexcept { g_recorder.finalPassMonoUnneeded = unneeded; }
+
+void set_stereo_diagnostics(bool enabled) noexcept { g_stereoDiagnostics.store(enabled, std::memory_order_relaxed); }
 
 uint8_t stereo_draw_route() noexcept { return g_recorder.stereoRoute; }
 
@@ -835,6 +890,7 @@ StereoScreenTexMtx stereo_screen_tex_mtx() noexcept { return g_recorder.stereoSc
 std::array<uint32_t, 2> stage_stereo_uniforms(const uint8_t* mono, Range monoRange,
                                               const StereoUniformLayout& layout) noexcept {
   constexpr std::array<uint32_t, 2> none{UINT32_MAX, UINT32_MAX};
+  g_recorder.multiviewMode = gx::MultiviewNone;
   if (!g_recorder.active()) {
     return none;
   }
@@ -850,10 +906,63 @@ std::array<uint32_t, 2> stage_stereo_uniforms(const uint8_t* mono, Range monoRan
   if (!layout.valid() || monoRange.size != layout.size) {
     return none;
   }
+  const size_t alignment = resources().limits.minUniformBufferOffsetAlignment;
+  const auto exhausted = [&] {
+    if (!frame.stereo.uniformsExhausted) {
+      Log.warn("Stereo replay ran out of uniform space at {} bytes; the rest of frame {} is mono only",
+               frame.uniforms.size(), frame.frameId);
+      frame.stereo.uniformsExhausted = true;
+    }
+    return none;
+  };
+  const auto& pass = current_render_passes()[g_recorder.currentRenderPass];
+  const auto& monoSize = pass.colorAttachments[SceneColorAttachmentIndex].size;
+  Mat4x4<float> monoProjection;
+  std::memcpy(&monoProjection, mono + layout.projectionOffset, sizeof(monoProjection));
+  // Multiview (stereo_multiview.hpp, gx/shader.cpp MultiviewClip): the draw keeps its
+  // mono uniform, followed by each eye's clip matrix and the eyes' render size (the
+  // eye target's, as compose_stereo_uniform makes it, or for 2D content the mono one).
+  const auto stage_eye_clips = [&](const std::array<Mat4x4<float>, AURORA_STEREO_EYE_COUNT>& clips,
+                                   bool eyeRenderSize) {
+    struct EyeClipBlock {
+      std::array<Mat4x4<float>, AURORA_STEREO_EYE_COUNT> clip;
+      std::array<float, 4> render;
+    };
+    static_assert(sizeof(EyeClipBlock) == 144);
+    float renderSize[2];
+    std::memcpy(renderSize, mono, sizeof(renderSize));
+    if (eyeRenderSize) {
+      const auto& params = state.eyes[0]; // both eyes share a size under multiview
+      renderSize[0] *=
+          monoSize.width != 0 ? static_cast<float>(params.width) / static_cast<float>(monoSize.width) : 1.0f;
+      renderSize[1] *=
+          monoSize.height != 0 ? static_cast<float>(params.height) / static_cast<float>(monoSize.height) : 1.0f;
+    }
+    const EyeClipBlock block{
+        .clip = clips,
+        .render = {renderSize[0], renderSize[1], 0.0f, 0.0f},
+    };
+    if (frame.uniforms.size() + sizeof(block) + alignment + 2 * gx::MaxUniformSize > frame.uniforms.capacity()) {
+      return exhausted();
+    }
+    const auto range = push(frame.uniforms, reinterpret_cast<const uint8_t*>(&block), sizeof(block), alignment);
+    // The shader finds the block at the mono uniform's aligned end.
+    if (range.offset != monoRange.offset + AURORA_ALIGN(monoRange.size, alignment)) {
+      static bool sReported = false;
+      if (!sReported) {
+        sReported = true;
+        Log.error("Multiview eye clips staged at {}, not after the uniform at {} ({} bytes)", range.offset,
+                  monoRange.offset, monoRange.size);
+      }
+      return none;
+    }
+    g_recorder.multiviewMode = gx::MultiviewClip;
+    return std::array<uint32_t, 2>{monoRange.offset, monoRange.offset};
+  };
   // 2D content and full-screen effects: the same uniform in both eyes.
   const std::array<uint32_t, 2> same{monoRange.offset, monoRange.offset};
   if (route == AURORA_STEREO_ROUTE_FULLSCREEN || route == AURORA_STEREO_ROUTE_SCREEN_2D) {
-    return same;
+    return state.multiview ? stage_eye_clips({monoProjection, monoProjection}, false) : same;
   }
   // An orthographic draw is 2D content, identical in both eyes, unless its
   // route lays it on the head-locked plane (stereo_replay.hpp HeadLockedPlane).
@@ -861,25 +970,40 @@ std::array<uint32_t, 2> stage_stereo_uniforms(const uint8_t* mono, Range monoRan
   const bool onPlane =
       !perspective && route == AURORA_STEREO_ROUTE_HEAD_LOCKED_2D && g_recorder.headLockedPlane.valid();
   if (!perspective && !onPlane) {
-    return same;
+    return state.multiview ? stage_eye_clips({monoProjection, monoProjection}, false) : same;
   }
-  const size_t alignment = resources().limits.minUniformBufferOffsetAlignment;
-  const size_t needed =
-      2 * (AURORA_ALIGN(static_cast<size_t>(layout.size), alignment) + alignment) + gx::MaxUniformSize;
-  if (frame.uniforms.size() + needed > frame.uniforms.capacity()) {
-    if (!frame.stereo.uniformsExhausted) {
-      Log.warn("Stereo replay ran out of uniform space at {} bytes; the rest of frame {} is mono only",
-               frame.uniforms.size(), frame.frameId);
-      frame.stereo.uniformsExhausted = true;
-    }
-    return none;
-  }
-  const auto& pass = current_render_passes()[g_recorder.currentRenderPass];
-  const auto& monoSize = pass.colorAttachments[SceneColorAttachmentIndex].size;
   const stereo_replay::HudScreen plane =
       onPlane ? stereo_replay::head_locked_plane_screen(g_recorder.headLockedPlane, state.headLockedScaleXY,
                                                         state.headLockedScaleZ)
               : stereo_replay::HudScreen{};
+  const bool headLocked = route == AURORA_STEREO_ROUTE_HEAD_LOCKED || route == AURORA_STEREO_ROUTE_HEAD_LOCKED_2D;
+  // A screen-projecting texture matrix (AuroraSetStereoScreenTexMtx) differs per eye:
+  // under multiview such a draw takes the full eye copies (MultiviewFull).
+  const auto screenTexMtx = g_recorder.stereoScreenTexMtx;
+  const bool perEyeTexMtx = !onPlane && screenTexMtx.texSlot != 0xFF;
+  if (state.multiview && !perEyeTexMtx) {
+    std::array<Mat4x4<float>, AURORA_STEREO_EYE_COUNT> clips;
+    for (uint32_t eye = 0; eye < AURORA_STEREO_EYE_COUNT; ++eye) {
+      const auto& params = state.eyes[eye];
+      if (onPlane) {
+        clips[eye] = stereo_replay::compose_head_locked_2d_projection(
+            params.projection, params.headLockedViewFromCenter, plane, monoProjection);
+      } else {
+        const Mat3x4<float>& viewFromCenter = headLocked                            ? params.headLockedViewFromCenter
+                                              : route == AURORA_STEREO_ROUTE_SKY ? params.skyViewFromCenter
+                                                                                 : params.viewFromCenter;
+        clips[eye] = compose_eye_clip(stereo_replay::compose_projection(params.projection, monoProjection),
+                                      viewFromCenter, headLocked ? state.headLockedScaleXY : 1.0f,
+                                      headLocked ? state.headLockedScaleZ : 1.0f);
+      }
+    }
+    return stage_eye_clips(clips, true);
+  }
+  const size_t needed =
+      2 * (AURORA_ALIGN(static_cast<size_t>(layout.size), alignment) + alignment) + 2 * gx::MaxUniformSize;
+  if (frame.uniforms.size() + needed > frame.uniforms.capacity()) {
+    return exhausted();
+  }
   thread_local std::vector<uint8_t> scratch;
   std::array<uint32_t, 2> offsets{};
   for (uint32_t eye = 0; eye < AURORA_STEREO_EYE_COUNT; ++eye) {
@@ -899,8 +1023,6 @@ std::array<uint32_t, 2> stage_stereo_uniforms(const uint8_t* mono, Range monoRan
                                     .renderScaleY = renderScaleY,
                                 });
     } else {
-      const bool headLocked =
-          route == AURORA_STEREO_ROUTE_HEAD_LOCKED || route == AURORA_STEREO_ROUTE_HEAD_LOCKED_2D;
       // A sky draw (AURORA_STEREO_ROUTE_SKY) takes the eye's rotation only.
       const Mat3x4<float>* viewFromCenter = headLocked                            ? &params.headLockedViewFromCenter
                                             : route == AURORA_STEREO_ROUTE_SKY ? &params.skyViewFromCenter
@@ -917,15 +1039,19 @@ std::array<uint32_t, 2> stage_stereo_uniforms(const uint8_t* mono, Range monoRan
           });
       // A screen-projecting texture matrix (AuroraSetStereoScreenTexMtx) is
       // derived again from the eye's composed projection and position matrix.
-      const auto screenTexMtx = g_recorder.stereoScreenTexMtx;
       if (screenTexMtx.texSlot != 0xFF) {
         compose_stereo_screen_tex_mtx(scratch.data(), layout, screenTexMtx.texSlot, screenTexMtx.pnSlot);
       }
     }
     offsets[eye] = push(frame.uniforms, scratch.data(), layout.size, alignment).offset;
   }
+  if (state.multiview) {
+    g_recorder.multiviewMode = gx::MultiviewFull;
+  }
   return offsets;
 }
+
+uint8_t stereo_multiview_mode() noexcept { return g_recorder.multiviewMode; }
 
 template <>
 void push_draw_command(clear::DrawData data) {
@@ -935,6 +1061,15 @@ void push_draw_command(clear::DrawData data) {
 template <>
 PipelineRef pipeline_ref(const clear::PipelineConfig& config) {
   return find_pipeline(ShaderType::Clear, config, [=] { return create_pipeline(config); });
+}
+
+PipelineRef clear_multiview_pipeline_ref(const clear::PipelineConfig& config) noexcept {
+  if (!recording_multiview()) {
+    return {};
+  }
+  clear::PipelineConfig multiviewConfig = config;
+  multiviewConfig.multiview = true;
+  return pipeline_ref(multiviewConfig);
 }
 
 void resolve_pass_into(TextureHandle texture, ClipRect rect, bool clearColor, bool clearAlpha, bool clearDepth,
@@ -1038,8 +1173,9 @@ void resolve_pass_into(TextureHandle texture, ClipRect rect, bool clearColor, bo
   if (!fullColorClear && (clearColor || clearAlpha)) {
     // If we're only clearing color _or_ alpha, perform a clear draw
     const auto targetLayout = current_render_passes()[g_recorder.currentRenderPass].target_layout();
+    const auto clearConfig = clear::make_pipeline_config(targetLayout, clearColor, clearAlpha, false);
     push_draw_command(clear::DrawData{
-        .pipeline = pipeline_ref(clear::make_pipeline_config(targetLayout, clearColor, clearAlpha, false)),
+        .pipeline = pipeline_ref(clearConfig),
         .color =
             wgpu::Color{
                 .r = clearColorValue.x(),
@@ -1047,6 +1183,7 @@ void resolve_pass_into(TextureHandle texture, ClipRect rect, bool clearColor, bo
                 .b = clearColorValue.z(),
                 .a = clearColorValue.w(),
             },
+        .multiviewPipeline = clear_multiview_pipeline_ref(clearConfig),
     });
   }
   push_command(CommandType::SetViewport, Command::Data{.setViewport = g_recorder.cachedViewport});
@@ -1289,16 +1426,24 @@ PipelineRef pipeline_ref(const rmlui::PipelineConfig& config) {
 
 void finish() {
   ZoneScoped;
+  // One frame's worth: set again before every finish() (aurora.cpp end_frame).
+  const bool finalPassMonoUnneeded = std::exchange(g_recorder.finalPassMonoUnneeded, false);
   if (!g_recorder.active()) {
     return;
   }
   AURORA_ASSERT(!g_recorder.inOffscreen, "finish called while offscreen rendering is active");
   if (g_recorder.currentRenderPass != UINT32_MAX) {
     auto& frame = current_frame_packet();
-    frame.uniforms.append_zeroes(gx::MaxUniformSize);
+    // A multiview draw's binding spans an eye pair (stereo_multiview.hpp).
+    frame.uniforms.append_zeroes(frame.stereo.multiview ? 2 * gx::MaxUniformSize : gx::MaxUniformSize);
     auto& pass = frame.renderPasses[g_recorder.currentRenderPass];
     pass.captureDepthSnapshot = true;
+    // Honoured only if sealing gives the pass its eye passes (encoding.cpp).
+    pass.stereo.skipMono = finalPassMonoUnneeded;
     enqueue_pass(frame, g_recorder.currentRenderPass);
+    if (g_stereoDiagnostics.load(std::memory_order_relaxed)) {
+      log_stereo_frame_stats(frame);
+    }
     g_recorder.currentRenderPass = UINT32_MAX;
   }
 }

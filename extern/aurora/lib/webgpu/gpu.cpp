@@ -89,6 +89,7 @@ bool g_hasCoreFeatures = false;
 bool g_bcTexturesSupported = false;
 bool g_astcTexturesSupported = false;
 bool g_textureComponentSwizzleSupported = false;
+bool g_multiviewSupported = false;
 static std::atomic_bool g_initialized = false;
 static std::atomic_bool g_vsyncEnabled = true;
 
@@ -227,6 +228,17 @@ wgpu::TextureFormat best_surface_format() {
   if (g_surfaceCapabilities.formatCount == 0) {
     return wgpu::TextureFormat::Undefined;
   }
+#if defined(__ANDROID__)
+  // The eyes take the surface format, and the Quest's OpenXR bridge shares them
+  // through AHardwareBuffers, which have no BGRA format (vulkan_interop.cpp).
+  if (g_config.xrInterop) {
+    for (size_t i = 0; i < g_surfaceCapabilities.formatCount; ++i) {
+      if (to_linear(g_surfaceCapabilities.formats[i]) == wgpu::TextureFormat::RGBA8Unorm) {
+        return wgpu::TextureFormat::RGBA8Unorm;
+      }
+    }
+  }
+#endif
   for (size_t i = 0; i < g_surfaceCapabilities.formatCount; ++i) {
     const auto format = to_linear(g_surfaceCapabilities.formats[i]);
     if (format == wgpu::TextureFormat::RGBA8Unorm || format == wgpu::TextureFormat::BGRA8Unorm) {
@@ -945,6 +957,7 @@ bool initialize(AuroraBackend auroraBackend, bool allowCpu) {
     g_bcTexturesSupported = false;
     g_astcTexturesSupported = false;
     g_textureComponentSwizzleSupported = false;
+    g_multiviewSupported = false;
     wgpu::SupportedFeatures supportedFeatures;
     g_adapter.GetFeatures(&supportedFeatures);
     for (size_t i = 0; i < supportedFeatures.featureCount; ++i) {
@@ -978,6 +991,27 @@ bool initialize(AuroraBackend auroraBackend, bool allowCpu) {
         requiredFeatures.push_back(feature);
       }
 #endif
+#if defined(WEBGPU_DAWN) && defined(__ANDROID__)
+      // The Quest's OpenXR bridge (lib/webgpu/vulkan_interop.cpp) shares the eyes with the
+      // runtime's own VkDevice through AHardwareBuffers ordered by sync fds. Its cancel and
+      // forget paths release Dawn objects from the XR pacing thread, hence the implicit
+      // device synchronization.
+      if (g_config.xrInterop && g_backendType == wgpu::BackendType::Vulkan &&
+          (feature == wgpu::FeatureName::SharedTextureMemoryAHardwareBuffer ||
+           feature == wgpu::FeatureName::SharedFenceSyncFD ||
+           feature == wgpu::FeatureName::ImplicitDeviceSynchronization)) {
+        requiredFeatures.push_back(feature);
+      }
+#if defined(WGPU_DAWN_RENDER_PASS_MULTIVIEW_INIT)
+      // PrimedGun's patched Dawn (quest/dawn): both eyes in one Vulkan multiview
+      // render pass (gfx/stereo_multiview.hpp).
+      if (g_config.xrInterop && g_backendType == wgpu::BackendType::Vulkan &&
+          feature == wgpu::FeatureName::DawnMultiview) {
+        requiredFeatures.push_back(feature);
+        g_multiviewSupported = true;
+      }
+#endif
+#endif
     }
     std::string featureList;
     for (auto featureName : requiredFeatures) {
@@ -985,6 +1019,9 @@ bool initialize(AuroraBackend auroraBackend, bool allowCpu) {
       featureList += magic_enum::enum_name(featureName);
     }
     Log.info("Enabling features: {}", featureList);
+    if (g_multiviewSupported) {
+      Log.info("Vulkan multiview enabled for the stereo eye passes");
+    }
 #ifdef WEBGPU_DAWN
     wgpu::DawnCacheDeviceDescriptor cacheDescriptor({.nextInChain = nullptr});
     cacheDescriptor.SetDawnLoadCacheDataCallback(
@@ -1016,6 +1053,9 @@ bool initialize(AuroraBackend auroraBackend, bool allowCpu) {
     };
     constexpr std::array disableToggles{
         "timestamp_quantization",
+        // Adreno strikes again!
+        // https://github.com/TwilitRealm/dusklight/issues/2563
+        "use_spirv_reconvergence_mode",
     };
     wgpu::DawnTogglesDescriptor togglesDescriptor(wgpu::DawnTogglesDescriptor::Init{
         .nextInChain = &cacheDescriptor,

@@ -89,6 +89,7 @@
 #include <filesystem>
 #include <fstream>
 #include <mutex>
+#include <sstream>
 #include <string>
 #include <utility>
 #include <vector>
@@ -598,11 +599,9 @@ void SaveSettings() {
     return;
   }
   const std::string path = SettingsFilePath();
-  std::ofstream file(path, std::ios::trunc);
-  if (!file.is_open()) {
-    std::fprintf(stderr, "metroid_prime_port: could not write settings to %s\n", path.c_str());
-    return;
-  }
+  // Port: the text is built here and written to a temporary file that replaces the
+  // old one, so an app killed mid-write (Android) keeps the previous settings.
+  std::ostringstream file;
   const char* aspect = sAspectMode == PortDebug::kAspect_16_9  ? "16:9"
                        : sAspectMode == PortDebug::kAspect_Window ? "window"
                                                                   : "4:3";
@@ -699,7 +698,34 @@ void SaveSettings() {
     file << '\n';
   }
   PortVr::WriteVrSettings(file);
-  file.flush();
+  const std::string text = file.str();
+  const std::filesystem::path target = PortPaths::detail::FromUtf8(path);
+  std::filesystem::path temporary = target;
+  temporary += ".tmp";
+  bool written = false;
+  {
+    std::ofstream out(temporary, std::ios::trunc);
+    if (out.is_open()) {
+      out << text;
+      out.flush();
+      written = out.good();
+    }
+  }
+  std::error_code renameError;
+  if (written) {
+    std::filesystem::rename(temporary, target, renameError);
+  }
+  if (!written || renameError) {
+    // A folder that refuses the temporary file or the rename: write in place.
+    std::error_code ignored;
+    std::filesystem::remove(temporary, ignored);
+    std::ofstream out(target, std::ios::trunc);
+    if (!out.is_open()) {
+      std::fprintf(stderr, "metroid_prime_port: could not write settings to %s\n", path.c_str());
+      return;
+    }
+    out << text;
+  }
   std::fprintf(stderr, "metroid_prime_port: saved settings to %s\n", path.c_str());
   sSettingsDirty = false;
 }
@@ -766,6 +792,12 @@ bool SDLCALL debug_event_watch(void*, SDL_Event* event) {
   }
   if (IsPhysicalInput(*event)) {
     sPhysicalInput.store(true, std::memory_order_release);
+  }
+  // Port: a phone or headset app going to the background may be killed without
+  // another word, so unsaved settings are written now. SDL delivers these on the
+  // thread that pumps events, the game's, before it may block for the pause.
+  if (event->type == SDL_EVENT_WILL_ENTER_BACKGROUND || event->type == SDL_EVENT_TERMINATING) {
+    SaveSettings();
   }
   return true;
 }

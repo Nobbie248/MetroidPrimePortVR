@@ -41,4 +41,10 @@ void submitted(const std::optional<PendingSink>& pending) noexcept;
 // Game thread, between frames: releases the targets and forgets the provider.
 void shutdown() noexcept;
 
+// True on a standalone headset (Android) while the stereo provider and sink are
+// registered: the headset is then the only display, and nothing shows the window's
+// image, so the window is not presented and an immersive frame's final pass
+// renders its eyes only.
+bool headset_owns_display() noexcept;
+
 } // namespace aurora::stereo_host

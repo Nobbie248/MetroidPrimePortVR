@@ -84,5 +84,7 @@ void synchronize();
 
 bool is_worker_thread() noexcept;
 bool is_idle() noexcept;
+// The worker's kernel thread id where the platform has one (Android), else 0.
+uint32_t native_thread_id() noexcept;
 
 } // namespace aurora::gfx::render_worker

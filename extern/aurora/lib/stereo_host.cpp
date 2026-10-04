@@ -2,9 +2,13 @@
 
 #include "internal.hpp"
 #include "stereo_overlay.hpp"
+#include "gfx/recording.hpp"
+#include "gfx/render_worker.hpp"
 #include "gfx/stereo_eyes.hpp"
+#include "gfx/stereo_multiview.hpp"
 #include "gfx/stereo_replay.hpp"
 #include "gfx/stereo_shadow.hpp"
+#include "gx/fifo.hpp"
 #include "webgpu/gpu.hpp"
 
 #include <aurora/gfx.h>
@@ -217,12 +221,18 @@ gfx::StereoFrameState begin_frame(uint64_t contentTag) noexcept {
     }
     return state;
   }
-  if (!gfx::ensure_stereo_eye_targets(state.eyes)) {
+  // Both eyes in one render pass when the device and the frame allow it
+  // (gfx/stereo_multiview.hpp).
+  const bool multiview = gfx::stereo_multiview::usable(state.eyes[0].width, state.eyes[0].height,
+                                                       state.eyes[1].width, state.eyes[1].height,
+                                                       webgpu::g_graphicsConfig.msaaSamples);
+  if (!gfx::ensure_stereo_eye_targets(state.eyes, multiview)) {
     Log.warn("Stereo packet {} has no usable eye size ({}x{}, {}x{}); shown as mono", packet.frameToken,
              state.eyes[0].width, state.eyes[0].height, state.eyes[1].width, state.eyes[1].height);
     return state;
   }
   state.immersive = true;
+  state.multiview = multiview;
   for (uint32_t eye = 0; eye < AURORA_STEREO_EYE_COUNT; ++eye) {
     const auto& target = gfx::stereo_eye_target(eye);
     const auto& output = target.output();
@@ -231,6 +241,7 @@ gfx::StereoFrameState begin_frame(uint64_t contentTag) noexcept {
         .view = output.view,
         .size = {target.width, target.height, 1},
         .format = output.format,
+        .layer = target.layer,
     };
   }
   return state;
@@ -263,6 +274,7 @@ std::optional<PendingSink> encode(wgpu::CommandEncoder& encoder, const gfx::Ster
           .view = &output.view,
           .size = output.size,
           .format = output.format,
+          .layer = output.layer,
       };
     }
   } else {
@@ -318,6 +330,15 @@ void shutdown() noexcept {
   gfx::release_stereo_eye_targets();
   gfx::stereo_shadow::shutdown();
   stereo_overlay::shutdown();
+}
+
+bool headset_owns_display() noexcept {
+#if defined(__ANDROID__)
+  return g_provider != nullptr && g_sink != nullptr;
+#else
+  // The desktop window mirrors the game for whoever watches.
+  return false;
+#endif
 }
 
 } // namespace aurora::stereo_host
@@ -399,7 +420,9 @@ void aurora_set_pipeline_cache_idle_store(bool allowed) {
   g_pipelineCacheIdleStore.store(allowed, std::memory_order_relaxed);
 }
 
-uint32_t aurora_get_frame_worker_native_thread_id(void) { return 0; }
+uint32_t aurora_get_frame_worker_native_thread_id(void) { return aurora::gfx::render_worker::native_thread_id(); }
+
+uint32_t aurora_get_gx_worker_native_thread_id(void) { return aurora::gx::fifo::native_thread_id(); }
 
 void aurora_set_present_schedule(uint64_t /*baseNanos*/, uint64_t /*intervalNanos*/) {}
 
@@ -415,7 +438,10 @@ void aurora_set_stereo_frame_interpolation(bool enabled) {
 
 bool aurora_get_stereo_frame_interpolation() { return g_frameInterpolation.load(std::memory_order_relaxed); }
 
-void aurora_set_stereo_motion_logging(bool enabled) { g_motionLogging.store(enabled, std::memory_order_relaxed); }
+void aurora_set_stereo_motion_logging(bool enabled) {
+  g_motionLogging.store(enabled, std::memory_order_relaxed);
+  aurora::gfx::set_stereo_diagnostics(enabled);
+}
 
 void aurora_set_stereo_stop_at_display_copy(bool enabled) {
   g_stopAtDisplayCopy.store(enabled, std::memory_order_relaxed);
@@ -472,3 +498,9 @@ void aurora_set_stereo_head_locked(float sizeScale, float distanceScale) {
 void aurora_set_stereo_immersive_replay(bool enabled) { g_immersiveReplay.store(enabled, std::memory_order_relaxed); }
 
 bool aurora_get_stereo_immersive_replay(void) { return g_immersiveReplay.load(std::memory_order_relaxed); }
+
+void aurora_set_stereo_multiview(bool enabled) { aurora::gfx::stereo_multiview::set_requested(enabled); }
+
+bool aurora_get_stereo_multiview_available(void) {
+  return aurora::gfx::stereo_multiview::kApiAvailable && aurora::webgpu::g_multiviewSupported;
+}

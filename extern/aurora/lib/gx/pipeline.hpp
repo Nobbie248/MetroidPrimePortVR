@@ -23,8 +23,12 @@ struct DrawData {
   // UINT32_MAX leaves the draw out of that eye.
   std::array<uint32_t, 2> stereoUniformOffset{UINT32_MAX, UINT32_MAX};
   // ... and the texture bind groups, when the draw samples an EFB copy taken
-  // per eye; zero binds the mono group.
+  // per eye; zero binds the mono group. Under multiview (gfx/stereo_multiview.hpp)
+  // [0] is the multiview pipeline's bind group, of 2D array views.
   std::array<gfx::BindGroupRef, 2> stereoTextureBindGroup{};
+  // Multiview: the pipeline that draws both views of an eye pass, with the
+  // uniform pair at stereoUniformOffset[0]; zero when the frame replays per eye.
+  gfx::PipelineRef multiviewPipeline{};
 };
 
 constexpr uint32_t GXPipelineConfigVersion = 14;
@@ -49,6 +53,8 @@ wgpu::RenderPipeline create_pipeline([[maybe_unused]] const PipelineConfig& conf
 void render(const DrawData& data, const wgpu::RenderPassEncoder& pass);
 // The same draw in a stereo eye pass, bound to its eye uniform.
 void render_eye(const DrawData& data, const wgpu::RenderPassEncoder& pass, uint32_t eye);
+// The same draw in a multiview eye pass (gfx/stereo_multiview.hpp): both eyes at once.
+void render_multiview(const DrawData& data, const wgpu::RenderPassEncoder& pass);
 
 void queue_surface(const u8* dlStart, uint32_t dlSize, bool bigEndian) noexcept;
 } // namespace aurora::gx

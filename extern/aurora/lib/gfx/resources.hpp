@@ -34,6 +34,9 @@ struct Resources {
   wgpu::BindGroup staticBindGroup;
   wgpu::BindGroupLayout uniformBindGroupLayout;
   wgpu::BindGroup uniformBindGroup;
+  // The multiview stereo replay's (stereo_multiview.hpp): two GX uniforms wide, an
+  // eye pair from the dynamic offset. Only with the feature.
+  wgpu::BindGroup multiviewUniformBindGroup;
   wgpu::Limits limits;
   AuroraStats stats{};
 };

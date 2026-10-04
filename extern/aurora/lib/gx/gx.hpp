@@ -77,17 +77,32 @@ enum DirtyFlag : u8 {
   DirtyAll = DirtyPipeline | DirtyTextures | DirtyUniform | DirtyImmediates,
 };
 
+// ShaderConfig::multiview (gfx/stereo_multiview.hpp).
+enum MultiviewMode : u8 {
+  MultiviewNone = 0,
+  // The mono uniform, then each eye's clip matrix (gfx/stereo_uniform.hpp compose_eye_clip):
+  // only the clip position depends on the view, which Adreno runs once for both.
+  MultiviewClip = 1,
+  // A pair of full eye uniforms, element view_index: a texture matrix that projects
+  // onto the screen differs per eye (AuroraSetStereoScreenTexMtx).
+  MultiviewFull = 2,
+};
+
 struct DrawImmediateData {
   u32 vtxStart = 0;
   u32 currentPnMtx = 0;
   u32 fogRangeBase = 0;
-  u32 _pad = 0;
+  // Multiview stereo replay: 1 when the draw's uniform is a pair of eye copies
+  // (element `view_index & eyeMask` of it), 0 when both eyes share the mono one.
+  u32 eyeMask = 0;
   std::array<u32, MaxIndexAttr> arrayStart{};
 };
 static_assert(std::has_unique_object_representations_v<DrawImmediateData>);
 static_assert(sizeof(DrawImmediateData) == 64);
 
 extern wgpu::BindGroup g_emptyTextureBindGroup;
+// The multiview stereo replay's (gfx/stereo_multiview.hpp): 2D array views.
+extern wgpu::BindGroup g_emptyMultiviewTextureBindGroup;
 
 template <typename Arg, Arg Default>
 struct TevPass {
@@ -517,7 +532,11 @@ struct ShaderConfig {
   u8 vtxStride = 0;
   u8 lineMode : 2 = 0; // 1 = GX_LINES, 2 = GX_LINESTRIP, 3 = GX_POINTS
   u8 fogRangeEnabled : 1 = false;
-  u8 pad1 : 5 = 0;
+  // Stereo replay under Vulkan multiview (gfx/stereo_multiview.hpp): the shader
+  // draws both views of an eye pass, MultiviewClip or MultiviewFull. Taken from
+  // the padding, so the configs (and pipeline cache keys) without it keep their bytes.
+  u8 multiview : 2 = 0;
+  u8 pad1 : 3 = 0;
   u8 pbr = 0; // GX_AURORA_SET_PBR
   u8 sdf = 0; // GX_AURORA_SET_SDF
   std::array<u8, 3> pad2{};
@@ -572,6 +591,10 @@ GXBindGroups build_bind_groups(const ShaderInfo& info) noexcept;
 // a sampled texture has per-eye stand-ins (gfx/stereo_shadow.hpp); zero when the
 // mono bind group applies to both eyes.
 std::array<gfx::BindGroupRef, 2> build_stereo_bind_groups(const ShaderInfo& info) noexcept;
+// Multiview stereo replay (gfx/stereo_multiview.hpp): the texture bind group of a
+// multiview pipeline, every sampled texture as a 2D array view (an EFB copy taken
+// per eye as both its layers); zero when nothing is sampled.
+gfx::BindGroupRef build_multiview_bind_group(const ShaderInfo& info) noexcept;
 
 u8 comp_type_size(GXAttr attr, GXCompType type) noexcept;
 u8 comp_cnt_count(GXAttr attr, GXCompCnt cnt) noexcept;

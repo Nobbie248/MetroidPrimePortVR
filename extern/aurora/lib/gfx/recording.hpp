@@ -9,6 +9,10 @@
 #include <cstdint>
 #include <string>
 
+namespace aurora::gfx::clear {
+struct PipelineConfig;
+} // namespace aurora::gfx::clear
+
 namespace aurora::gfx::detail {
 
 struct FramePacket;
@@ -55,6 +59,12 @@ struct ColorPassDescriptor {
 };
 
 void finish();
+// For the next finish(): nothing will read the final pass's mono image, so an
+// immersive frame renders that pass into the eyes only (StereoPassReplay::skipMono).
+void set_final_pass_mono_unneeded(bool unneeded) noexcept;
+// Logs what an immersive frame asks of the eyes every 600 frames (passes, copies,
+// draws); the host's VR diagnostics switch (aurora_set_stereo_motion_logging).
+void set_stereo_diagnostics(bool enabled) noexcept;
 void begin_color_pass(const ColorPassDescriptor& desc);
 void end_color_pass();
 void queue_texture_copy(wgpu::TexelCopyTextureInfo src, wgpu::TexelCopyTextureInfo dst, wgpu::Extent3D size);
@@ -121,6 +131,11 @@ StereoFrameState recorded_stereo_state() noexcept;
 // The draw route the GX FIFO last set (AuroraStereoDrawRoute), applied to the
 // uniforms staged from now on. Resets to WORLD at frame begin.
 void set_stereo_draw_route(uint8_t route) noexcept;
+// Whether the frame being recorded replays its eyes through multiview
+// (stereo_multiview.hpp): its draws then need their multiview pipelines.
+bool recording_multiview() noexcept;
+// A clear draw's pipeline for a multiview eye pass, or zero outside a multiview frame.
+PipelineRef clear_multiview_pipeline_ref(const clear::PipelineConfig& config) noexcept;
 uint8_t stereo_draw_route() noexcept;
 // The plane AURORA_STEREO_ROUTE_HEAD_LOCKED_2D lays orthographic draws on and
 // takes EFB copies through (stereo_replay.hpp HeadLockedPlane), as the GX FIFO
@@ -142,7 +157,12 @@ StereoScreenTexMtx stereo_screen_tex_mtx() noexcept;
 // Stages the eye copies of the GX uniform just pushed at `monoRange` (whose
 // CPU-side bytes are `mono`) and returns the offsets the draw binds per eye:
 // the mono offset for a draw that is identical in both eyes, UINT32_MAX for
-// one that is left out of them.
+// one that is left out of them. In a multiview frame (stereo_multiview.hpp) a
+// draw keeps its mono uniform and gets the eyes' clip matrices pushed right
+// after it, or for a per-eye screen texture matrix its two eye copies, back to
+// back; stereo_multiview_mode then names the shader variant (gx::MultiviewMode)
+// the draw needs, MultiviewNone when it stays out of the eye passes.
 std::array<uint32_t, 2> stage_stereo_uniforms(const uint8_t* mono, Range monoRange,
                                               const StereoUniformLayout& layout) noexcept;
+uint8_t stereo_multiview_mode() noexcept;
 } // namespace aurora::gfx

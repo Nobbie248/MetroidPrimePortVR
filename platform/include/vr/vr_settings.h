@@ -27,12 +27,26 @@ struct PortVrSettings {
     MirrorView mirror_view = MirrorView::Normal;
     ControllerModeSetting controller_mode = ControllerModeSetting::PrimedGun;
     uint32_t frame_interpolation_fps = 0; // 0 off, 1 auto, else 72/90/120 (Quest; later)
+#if defined(__ANDROID__)
+    // Of the runtime's recommended eye size. The Quest's GPU gets PrimedGun Quest's
+    // eye size (1428x1496 on a Quest 3); launcher/core/launcher_keys.cpp agrees.
+    float render_scale = 0.85f;
+#else
     float render_scale = 1.0f;         // of the runtime's recommended eye size
+#endif
     float lean_back_degrees = 0.0f;
     bool passthrough = true;           // Quest only
     bool diagnostics_logging = false;  // [xr-diag]
     bool immersive_replay = true;      // draw the world per eye; off shows the mono image on the virtual screen
+    bool multiview = true;             // Quest: both eyes in one Vulkan multiview render pass
+    // Quest: the session runs on Dawn's own Vulkan device and the eyes are copied straight into
+    // its swapchain images (PrimedGun's patched Dawn); off shares them with a second device
+    // through AHardwareBuffers. Taken when the headset starts.
+    bool direct_present = true;
     std::string performance_level = "boost"; // XR_EXT_performance_settings
+    // XR_FB_display_refresh_rate (Quest, Virtual Desktop): the headset's display rate
+    // in Hz, the nearest one it offers; 0 leaves the runtime's own (72 Hz on a Quest).
+    float display_refresh_rate = 0.0f;
     // Where a virtual screen (menus, cinematics, pause/map when detached) hangs.
     float screen_distance_meters = 1.5f;  // PrimedGun ScreenDistance
     float screen_width_meters = 2.0f;     // PrimedGun ScreenSize: 1.5 m tall at 4:3

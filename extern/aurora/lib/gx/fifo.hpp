@@ -25,6 +25,8 @@ enum class ProcessingMode : uint8_t {
   Thread
 };
 ProcessingMode processing_mode() noexcept;
+// The FIFO processor thread's kernel id where the platform has one (Android), else 0.
+uint32_t native_thread_id() noexcept;
 
 void init();
 void shutdown();

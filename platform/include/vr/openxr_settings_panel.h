@@ -76,11 +76,19 @@ struct Frame {
     float wheel = 0.0f;
 };
 
+// Nothing draws the panel yet: Aurora's stereo overlay is a placeholder. Until it
+// does, the panel never opens, since an invisible one would only take the
+// controllers away from the game until the next press (on PC too).
+inline constexpr bool kSettingsPanelDrawn = false;
+
 // Whether the button that opens and closes the panel is held. As a Wii Remote
 // that is left Y, which has no Wii button, and with the controllers nothing to
 // the game it is left Y too; as a gamepad left Y is GameCube Y, so both
 // thumbsticks clicked together stand in for it.
 inline bool ToggleHeld(const std::array<HandInputs, 2>& hands, OpenXRControllerMode mode) noexcept {
+    if (!kSettingsPanelDrawn) {
+        return false;
+    }
     switch (mode) {
     case OpenXRControllerMode::PrimedGun:
         // PrimedGun: the off hand's thumbstick click or menu button (left Y is

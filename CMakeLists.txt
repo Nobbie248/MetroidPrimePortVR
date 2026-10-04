@@ -38,8 +38,9 @@ endif()
 include(CTest)
 option(MP_BUILD_TESTS "Build native-port regression tests" ON)
 option(MP_ENABLE_SMOKE_DRIVER "Enable the opt-in real-disc lifecycle test driver" OFF)
-# OpenXR VR (PrimedGun v2). The functional backend is Windows D3D12, so only
-# Windows defaults to carrying the loader.
+# OpenXR VR (PrimedGun v2): Windows D3D12, and the Meta Quest (Android Vulkan)
+# build in quest/. Only Windows defaults to carrying the loader; the Quest build
+# asks for it, so upstream's phone APK (android/) stays without.
 set(MP_ENABLE_OPENXR_DEFAULT OFF)
 if(WIN32)
     set(MP_ENABLE_OPENXR_DEFAULT ON)
@@ -130,8 +131,8 @@ endif()
 # fetched at configure time (static loader), as Wiicompiled VR does.
 set(MP_OPENXR_TARGET "")
 if(MP_ENABLE_OPENXR)
-    if(NOT WIN32)
-        message(WARNING "OpenXR is only wired for Windows in this port; disabling MP_ENABLE_OPENXR")
+    if(NOT WIN32 AND NOT ANDROID)
+        message(WARNING "OpenXR is only wired for Windows and Android (Quest) in this port; disabling MP_ENABLE_OPENXR")
         set(MP_ENABLE_OPENXR OFF)
     else()
         if(NOT MP_OPENXR_SDK_DIR AND NOT FETCHCONTENT_SOURCE_DIR_OPENXR)
@@ -272,6 +273,15 @@ if(MP_ENABLE_OPENXR)
     if(WIN32)
         target_sources(metroid_prime_port PRIVATE platform/vr/openxr_d3d12.cpp)
         target_link_libraries(metroid_prime_port PRIVATE d3d12 dxgi)
+    elseif(ANDROID)
+        # The Quest: the loader's Android glue, and two Vulkan backends: direct
+        # presentation on Dawn's own device (PrimedGun's patched Dawn), or Wiicompiled's
+        # VkDevice of the runtime's own that meets Dawn's on AHardwareBuffers.
+        target_sources(metroid_prime_port PRIVATE
+            platform/vr/openxr_android.cpp
+            platform/vr/openxr_vulkan.cpp
+            platform/vr/openxr_vulkan_direct.cpp)
+        target_link_libraries(metroid_prime_port PRIVATE android log vulkan)
     endif()
     target_link_libraries(metroid_prime_port PRIVATE ${MP_OPENXR_TARGET})
 endif()

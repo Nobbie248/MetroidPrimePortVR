@@ -271,6 +271,24 @@ TextureHandle new_conv_texture(uint32_t width, uint32_t height, u32 gxFormat, co
                                       std::move(attachmentTextureView), size, wgpuFormat, 1, gxFormat);
 }
 
+const wgpu::TextureView& array_texture_view(TextureRef& ref) noexcept {
+  if (!ref.arrayTextureView && ref.texture) {
+    wgpu::TextureViewDescriptor descriptor{
+        .label = "Multiview array view",
+        .format = ref.format,
+        .dimension = wgpu::TextureViewDimension::e2DArray,
+        .mipLevelCount = std::max(ref.mipCount, 1u),
+        .arrayLayerCount = 1,
+    };
+    wgpu::TextureComponentSwizzleDescriptor swizzle;
+    if (setup_swizzle(swizzle, ref.gxFormat)) {
+      descriptor.nextInChain = &swizzle;
+    }
+    ref.arrayTextureView = ref.texture.CreateView(&descriptor);
+  }
+  return ref.arrayTextureView;
+}
+
 void write_texture(TextureRef& ref, ArrayRef<uint8_t> data) noexcept {
   ZoneScoped;
 

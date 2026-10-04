@@ -538,6 +538,22 @@ void initialize() {
         .entries = entries.data(),
     };
     g_resources.uniformBindGroup = g_device.CreateBindGroup(&bindGroupDescriptor);
+    if (webgpu::g_multiviewSupported) {
+      const std::array multiviewEntries{
+          wgpu::BindGroupEntry{
+              .binding = 0,
+              .buffer = g_resources.uniformBuffer,
+              .size = 2 * gx::MaxUniformSize,
+          },
+      };
+      const wgpu::BindGroupDescriptor multiviewDescriptor{
+          .label = "Multiview uniform bind group",
+          .layout = g_resources.uniformBindGroupLayout,
+          .entryCount = multiviewEntries.size(),
+          .entries = multiviewEntries.data(),
+      };
+      g_resources.multiviewUniformBindGroup = g_device.CreateBindGroup(&multiviewDescriptor);
+    }
   }
 
   gx::initialize();
@@ -590,6 +606,7 @@ void shutdown() {
   g_resources.staticBindGroup = {};
   g_resources.staticBindGroupLayout = {};
   g_resources.uniformBindGroup = {};
+  g_resources.multiviewUniformBindGroup = {};
   g_resources.uniformBindGroupLayout = {};
   g_frameIndex = UINT32_MAX;
   g_frameSlots.reset();

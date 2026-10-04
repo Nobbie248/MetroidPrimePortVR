@@ -257,6 +257,8 @@ void aurora_request_pipeline_cache_store();
 void aurora_set_pipeline_cache_idle_store(bool allowed);
 // The native thread id of Aurora's frame worker, or 0 where there is none.
 uint32_t aurora_get_frame_worker_native_thread_id(void);
+// The native thread id of Aurora's GX FIFO processor, or 0 where there is none.
+uint32_t aurora_get_gx_worker_native_thread_id(void);
 // Absolute schedule for the next sealed frame on steady_clock (retained replay only).
 void aurora_set_present_schedule(uint64_t baseNanos, uint64_t intervalNanos);
 void aurora_report_producer_paced(bool paced);

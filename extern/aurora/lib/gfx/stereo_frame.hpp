@@ -56,11 +56,17 @@ struct StereoEyeOutput {
   wgpu::TextureView view;
   wgpu::Extent3D size{};
   wgpu::TextureFormat format = wgpu::TextureFormat::Undefined;
+  // The eye's array layer of `texture` (both eyes share one texture under
+  // multiview, stereo_multiview.hpp).
+  uint32_t layer = 0;
 };
 
 struct StereoFrameState {
   bool active = false;    // the provider handed over a packet for this frame
   bool immersive = false; // the packet replays per eye (mode, tag and targets all checked at begin)
+  // The eye passes are one Vulkan multiview pass each (stereo_multiview.hpp),
+  // decided with the targets at begin.
+  bool multiview = false;
   bool replayed = false;  // at least one EFB pass was sealed with eye passes
   bool uniformsExhausted = false; // the uniform budget ran out: later draws are mono-only (logged once)
   uint64_t frameToken = 0;
@@ -88,6 +94,16 @@ struct StereoEyePass {
 
 struct StereoPassReplay {
   bool enabled = false;
+  // Only the eyes render this pass: it is an immersive frame's final pass (no EFB
+  // copy follows it) on a headset that owns the display, so nothing reads its mono
+  // image (recording.cpp finish(), stereo_host::headset_owns_display).
+  bool skipMono = false;
+  // Both eyes in one Vulkan multiview render pass, into these views of the eye
+  // targets' two layers (stereo_multiview.hpp); `eyes` then holds each layer's
+  // own view, which the copies taken from an eye read.
+  bool multiview = false;
+  wgpu::TextureView multiviewColorView;
+  wgpu::TextureView multiviewDepthView;
   std::array<StereoEyePass, AURORA_STEREO_EYE_COUNT> eyes{};
   // This pass's EFB copy, taken again from each eye (stereo_shadow.hpp).
   std::array<TextureHandle, AURORA_STEREO_EYE_COUNT> copyTargets{};

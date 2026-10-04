@@ -16,10 +16,13 @@ struct Entry {
   std::weak_ptr<TextureRef> mono;
   EyeTextures eyes;
   bool valid = false;
+  // The eyes are the two layers of one texture (multiview, stereo_multiview.hpp).
+  bool layered = false;
 };
 
 absl::flat_hash_map<const TextureRef*, Entry> g_entries;
 bool g_active = false;
+bool g_multiview = false;
 uint64_t g_epoch = 1;
 uint32_t g_frames = 0;
 
@@ -36,6 +39,45 @@ TextureHandle make_like(const TextureRef& mono, EyeSize size) noexcept {
       mono.attachmentTextureView && mono.format == webgpu::g_graphicsConfig.surfaceConfiguration.format;
   return render ? new_render_texture(size.width, size.height, mono.gxFormat, "Stereo eye copy")
                 : new_conv_texture(size.width, size.height, mono.gxFormat, "Stereo eye converted copy");
+}
+
+// Multiview: both eyes' textures as the two layers of one texture made like
+// `mono`, `size` across. Each eye is a texture of its own layer (so copies and
+// palette conversions write and read it as before), and both carry the view of
+// both layers that a multiview draw binds (stereo_multiview.hpp).
+EyeTextures make_layered_like(const TextureRef& mono, EyeSize size) noexcept {
+  const wgpu::TextureDescriptor descriptor{
+      .label = "Stereo eye copies (multiview)",
+      .usage = wgpu::TextureUsage::TextureBinding | wgpu::TextureUsage::RenderAttachment | wgpu::TextureUsage::CopyDst,
+      .dimension = wgpu::TextureDimension::e2D,
+      .size = {size.width, size.height, 2},
+      .format = mono.format,
+      .mipLevelCount = 1,
+      .sampleCount = 1,
+  };
+  auto texture = webgpu::g_device.CreateTexture(&descriptor);
+  const wgpu::TextureViewDescriptor arrayDescriptor{
+      .label = "Stereo eye copies array view",
+      .format = mono.format,
+      .dimension = wgpu::TextureViewDimension::e2DArray,
+      .arrayLayerCount = 2,
+  };
+  auto arrayView = texture.CreateView(&arrayDescriptor);
+  EyeTextures eyes;
+  for (uint32_t eye = 0; eye < 2; ++eye) {
+    const wgpu::TextureViewDescriptor layerDescriptor{
+        .label = "Stereo eye copy layer view",
+        .format = mono.format,
+        .dimension = wgpu::TextureViewDimension::e2D,
+        .baseArrayLayer = eye,
+        .arrayLayerCount = 1,
+    };
+    auto view = texture.CreateView(&layerDescriptor);
+    eyes[eye] = std::make_shared<TextureRef>(texture, view, view, wgpu::Extent3D{size.width, size.height, 1},
+                                             mono.format, 1, mono.gxFormat);
+    eyes[eye]->arrayTextureView = arrayView;
+  }
+  return eyes;
 }
 
 // The eye's size for a mono texture `mono` across, made from a source
@@ -68,13 +110,17 @@ Entry* find(const TextureRef* mono) noexcept {
 Entry& ensure(const TextureHandle& mono, const std::array<EyeSize, 2>& sizes) noexcept {
   auto& entry = g_entries[mono.get()];
   const auto current = entry.mono.lock();
-  bool reusable = current == mono;
+  // Layers share a size: multiview eyes always do (stereo_multiview::usable).
+  const bool layered = g_multiview && sizes[0].width == sizes[1].width && sizes[0].height == sizes[1].height;
+  bool reusable = current == mono && entry.layered == layered;
   for (uint32_t eye = 0; eye < 2 && reusable; ++eye) {
     reusable = entry.eyes[eye] && fits(*entry.eyes[eye], *mono, sizes[eye]);
   }
   if (!reusable) {
     entry.mono = mono;
-    entry.eyes = {make_like(*mono, sizes[0]), make_like(*mono, sizes[1])};
+    entry.eyes = layered ? make_layered_like(*mono, sizes[0])
+                         : EyeTextures{make_like(*mono, sizes[0]), make_like(*mono, sizes[1])};
+    entry.layered = layered;
     entry.valid = false;
   }
   return entry;
@@ -89,8 +135,9 @@ void set_valid(Entry& entry, bool valid) noexcept {
 
 } // namespace
 
-void begin_frame(bool immersive) noexcept {
+void begin_frame(bool immersive, bool multiview) noexcept {
   g_active = immersive;
+  g_multiview = immersive && multiview;
   ++g_epoch;
   if ((++g_frames % 600) == 0) {
     for (auto it = g_entries.begin(); it != g_entries.end();) {
@@ -152,6 +199,14 @@ bool palette_conv(const tex_palette_conv::ConvRequest& mono,
 const TextureRef* eye_texture(const TextureRef* mono, uint32_t eye) noexcept {
   const Entry* entry = find(mono);
   return entry != nullptr && entry->valid ? entry->eyes[eye].get() : nullptr;
+}
+
+WGPUTextureView layered_view(const TextureRef* mono) noexcept {
+  const Entry* entry = find(mono);
+  if (entry == nullptr || !entry->valid || !entry->layered || !entry->eyes[0]) {
+    return nullptr;
+  }
+  return entry->eyes[0]->arrayTextureView.Get();
 }
 
 void shutdown() noexcept {

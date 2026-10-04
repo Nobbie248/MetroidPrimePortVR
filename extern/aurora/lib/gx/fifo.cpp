@@ -11,6 +11,10 @@
 
 #include <tracy/Tracy.hpp>
 
+#if defined(__ANDROID__)
+#include <unistd.h>
+#endif
+
 namespace aurora::gx::fifo {
 namespace detail {
 uint8_t* sBufferData = nullptr;
@@ -35,6 +39,8 @@ uint64_t sStreamBase = 0;
 std::mutex sBufferMutex;
 std::atomic<uint32_t> sWorkerWake{0};
 thread::Thread sWorkerThread;
+// The kernel's id for the worker, for an OpenXR runtime's scheduling hints.
+std::atomic<uint32_t> sWorkerNativeId{0};
 std::atomic<DrawDoneCallback> sDrawDoneCallback{nullptr};
 
 void dispatch_draw_done() noexcept {
@@ -78,6 +84,9 @@ void process_to(uint64_t target, std::memory_order order) noexcept {
 
 void worker_main(std::stop_token token) noexcept {
   std::stop_callback wakeOnStop{token, wake_worker};
+#if defined(__ANDROID__)
+  sWorkerNativeId.store(static_cast<uint32_t>(gettid()), std::memory_order_release);
+#endif
   while (true) {
     const uint32_t event = sWorkerWake.load(std::memory_order_acquire);
     const uint64_t processed = sProcessed.load(std::memory_order_relaxed);
@@ -111,10 +120,13 @@ void stop_worker() {
   }
   sWorkerThread.request_stop();
   sWorkerThread.join();
+  sWorkerNativeId.store(0, std::memory_order_release);
 }
 } // namespace
 
 ProcessingMode processing_mode() noexcept { return kProcessingMode; }
+
+uint32_t native_thread_id() noexcept { return sWorkerNativeId.load(std::memory_order_acquire); }
 
 void init() {
   stop_worker();

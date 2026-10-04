@@ -455,6 +455,11 @@ void after_submit() noexcept {
   }
 }
 
+bool snapshot_wanted() noexcept {
+  std::lock_guard lock{g_mutex};
+  return g_enabled && g_snapshotRequested;
+}
+
 namespace testing {
 void reset() noexcept {
   std::lock_guard lock{g_mutex};

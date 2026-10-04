@@ -23,6 +23,11 @@ public:
   void SetIsVisibleGame(bool visible);
   void SetPlayerHas(const rstl::reserved_vector< bool, 4 >& enables);
   void SetSelection(int selection, int pending, float interp);
+#ifdef TARGET_PC
+  // PortVr: item `item` (0..3 as EBeamId / EPlayerVisor, -1 none) is drawn at
+  // full brightness over the phase's colours: the VR beam wheel's hover.
+  void PortVrSetHighlight(int item) { x84_portVrHighlight = item; }
+#endif
 
 private:
   struct SMenuItem {
@@ -55,6 +60,9 @@ private:
   float x78_textFader;
   float x7c_animDur;
   bool x80_24_swapBeamControls : 1;
+#ifdef TARGET_PC
+  int x84_portVrHighlight; // PortVr
+#endif
 };
 CHECK_SIZEOF(CHudVisorBeamMenu, 0x84)
 

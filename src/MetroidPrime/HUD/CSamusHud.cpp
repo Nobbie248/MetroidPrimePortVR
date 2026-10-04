@@ -50,6 +50,10 @@
 #include "MetroidPrime/Weapons/CGameProjectile.hpp"
 #include "rstl/math.hpp"
 
+#ifdef TARGET_PC
+#include "vr/vr_view.h"
+#endif
+
 #include <float.h>
 #include <math.h>
 #include <stdio.h>
@@ -581,6 +585,10 @@ void CSamusHud::UpdateVisorAndBeamMenus(float dt, const CStateManager& mgr) {
   if (!x2a8_beamMenu.null()) {
     x2a8_beamMenu->SetSelection(currentBeam, nextBeam, beamInterp);
     x2a8_beamMenu->SetPlayerHas(BuildPlayerHasBeams(mgr));
+#ifdef TARGET_PC
+    // PortVr: the VR beam wheel's hover lights that beam's box.
+    x2a8_beamMenu->PortVrSetHighlight(PortVr::VrBeamWheelHoverBeam());
+#endif
   }
   if (!x2a4_visorMenu.null()) {
     x2a4_visorMenu->SetSelection(visor, nextVisor, visorInterp);

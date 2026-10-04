@@ -48,6 +48,21 @@ const char* VisorDirectionName(int direction) {
   }
 }
 
+const char* BeamName(int beam) {
+  switch (beam) {
+  case 0:
+    return "Power";
+  case 1:
+    return "Wave";
+  case 2:
+    return "Ice";
+  case 3:
+    return "Plasma";
+  default:
+    return "none";
+  }
+}
+
 } // namespace
 
 void DrawVrDebugTab() {
@@ -138,6 +153,12 @@ void DrawVrDebugTab() {
   changed |= ImGui::SliderFloat("Rumble intensity", &s.rumble_intensity, 0.f, 1.f, "%.2f");
   changed |= ImGui::Checkbox("Grip inputs", &s.grip_inputs_enabled);
   changed |= ImGui::Checkbox("Jump with the primary button", &s.combat_jump_use_primary_button);
+  changed |= ImGui::Checkbox("Beam wheel lights the HUD beam box", &s.beam_wheel_hud_highlight);
+  ImGui::TextWrapped("While the weapon hand's B holds the beam wheel open, the beam the cannon points at "
+                     "has its box on the HUD lit (PrimedGun drew its own panel of icons instead).");
+  const VrPadState pad = GetVrPadState();
+  ImGui::Text("Beam wheel: %s   hover: %s", pad.weapon_panel ? "open" : "closed",
+              pad.weapon_panel ? BeamName(pad.weapon_selected) : "-");
 
   ImGui::SeparatorText("Visor gesture");
   changed |= ImGui::Checkbox("Pick visors with the off hand next to the head", &s.xr_dpad_enabled);
@@ -148,7 +169,6 @@ void DrawVrDebugTab() {
   changed |= ImGui::SliderFloat("Gesture stick deadzone", &s.xr_dpad_deadzone, 0.05f, 0.95f, "%.2f");
   ImGui::TextWrapped("The zone reaches 6 cm past the radius, down to 4 cm past the 'below' distance and 28 cm "
                      "above the head; the deadzone counts up to 0.25 (all as in PrimedGun).");
-  const VrPadState pad = GetVrPadState();
   ImGui::Text("Off hand: %s   stick: %s", pad.visor_zone ? "at the head" : "away",
               pad.visor_zone ? VisorDirectionName(pad.visor_direction) : "-");
 

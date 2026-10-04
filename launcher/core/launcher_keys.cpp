@@ -37,6 +37,7 @@ constexpr KeyInfo kKeys[] = {
     {"vr_vr_menu_hold_left_stick", K::Bool, "0", 0, 0, 0, false},
     {"vr_vr_menu_requires_head_zone", K::Bool, "0", 0, 0, 0, false},
     {"vr_combat_jump_use_primary_button", K::Bool, "0"},
+    {"vr_beam_wheel_hud_highlight", K::Bool, "1"},
     {"vr_rumble_enabled", K::Bool, "1"},
     {"vr_rumble_hand", K::Choice, "right", 0, 0, 0, true, true, "both,left,right"},
     {"vr_grip_inputs_enabled", K::Bool, "1"},

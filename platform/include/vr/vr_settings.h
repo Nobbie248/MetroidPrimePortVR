@@ -88,6 +88,11 @@ struct PortVrSettings {
     // Chozo Ghosts and Metroid Prime's second form) in the headset. Off, it is
     // not drawn while the headset runs; the desktop always draws it.
     bool space_warp = true;
+    // The beam wheel's hover shown on the HUD: while the weapon hand's B holds
+    // the wheel open, the beam the aim ray points at has its beam box on the
+    // HUD lit (CHudVisorBeamMenu), where PrimedGun drew its own panel of four
+    // icons with a frame around the hovered one.
+    bool beam_wheel_hud_highlight = true;
     float frustum_culling_degrees = 115.0f;
     float metroid_hud_distance = 0.75f;
     float metroid_hud_size = 0.75f;

@@ -1,3 +1,59 @@
+## VR: the beam wheel's hover lights the HUD's beam box (2026-10-04)
+
+PrimedGun showed its beam wheel (hold the weapon hand's B, point the cannon up,
+right, down or left) on a panel of its own: four PNG icons floating in front of
+the controller with an orange frame around the hovered one. The port has had
+the wheel itself since the pad synthesis was lifted (`platform/vr/vr_pad.cpp`
+tracks the hovered beam in `VrPadState::weapon_selected`), but nothing showed
+the hover: the player released B blind and watched the HUD flash afterwards.
+
+With source access the HUD's own beam menu does the job. `CHudVisorBeamMenu`
+already draws the four beam boxes (`model_beamloz*` / `model_beamicon*`) and
+recolours them every tick from the GuiColors tweak: the active grey (0.66) for
+the current beam's icon, the inactive grey (0.56) for the others, and a
+translucent dark blue for the current beam's lozenge. Those colours modulate
+the models, so the game's own select flash (`kAP_SelectFlash`, alternating the
+two greys on the pending beam) is the brightest the boxes ever get in retail.
+
+- `PortVr::VrBeamWheelHoverBeam()` (`platform/vr/vr_view.cpp`) turns the pad's
+  hover into `CPlayerState::EBeamId` (the wheel counts PrimedGun's way, Power /
+  Wave / Ice / Plasma; the game puts Ice before Wave), or -1 when the wheel is
+  closed, nothing is hovered, the controllers are not in gameplay, or the
+  setting is off.
+- `CSamusHud::UpdateVisorAndBeamMenus` hands it to the beam menu
+  (`PortVrSetHighlight`), and `CHudVisorBeamMenu::Update` sets that item's icon
+  and lozenge to white after the phase's colours, so the hovered box reads as a
+  clear step brighter than everything else, selected beam included. A beam the
+  player does not own yet is left alone (its icon is invisible anyway). The
+  highlight lasts exactly as long as the hover: every phase that follows
+  rewrites the colours.
+- Setting `vr_beam_wheel_hud_highlight` (default on): F1 VR tab, Controls
+  (with a live "Beam wheel: open / hover: Ice" readout), launcher Controller
+  tab, Reset Controller list, `tests/port_launcher.cpp` default check.
+
+The first headset run showed the wheel itself inverted: aiming up lit (and
+switched to) Ice, aiming right Plasma. PrimedGun's `PrimedGunRollFreeQuat`
+levels the panel with right = forward x up = (-fz, 0, fx); the port's copy in
+`vr_pad.cpp` had (fz, 0, -fx), the left vector. With up = right x forward that
+basis is the level one rolled 180 degrees about the aim, so the frozen panel
+was upside down: both of its axes, the hand-travel fallback's too, read
+negated, and its centre sat 5.5 cm below the aim instead of above. The aim ray
+itself was right, which is why nothing looked broken until the HUD showed the
+hover.
+
+- The wheel's maths moved to the header-only
+  `platform/include/vr/vr_beam_wheel.h` (levelled frame, panel, ray or travel
+  measure, four-way pick, C-stick direction, `EBeamId` order), with the sign
+  fixed. `vr_pad.cpp` and `VrBeamWheelHoverBeam` use it.
+- `tests/port_vr_beam_wheel.cpp` (`port_vr_beam_wheel_tests`) turns a
+  simulated controller up, right, down and left from six facings, pitches and
+  rolls and expects Power, Wave, Ice and Plasma, and checks the levelled frame,
+  the travel fallback and the mappings. With the old sign it fails on its
+  first check.
+
+Confirmed in the headset: the wheel picks the box it points at and the HUD lights it. build/vr and build/nooxr
+pass 39/39.
+
 ## The capture harness was reading a stranded save, and contradicted itself (2026-09-27)
 
 Two harness defects found while closing the last prompt surface. Neither is a port

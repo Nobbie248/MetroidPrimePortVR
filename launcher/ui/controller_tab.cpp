@@ -27,6 +27,10 @@ void BuildControllerTab(TabContext& ctx, QTabWidget* tabs) {
   ctx.Check(layout, QObject::tr("VR menu requires controller near head to activate"),
             "vr_vr_menu_requires_head_zone");
   ctx.Check(layout, QObject::tr("Use A button for jump"), "vr_combat_jump_use_primary_button");
+  ctx.Check(layout, QObject::tr("Beam wheel lights the HUD beam box"),
+            "vr_beam_wheel_hud_highlight",
+            QObject::tr("While B holds the beam wheel open, the beam the cannon points at has its "
+                        "box on the HUD lit."));
 
   ctx.Separator(layout);
   layout->addWidget(ctx.Section(QObject::tr("Rumble / Grip Inputs")));
@@ -79,6 +83,7 @@ void BuildControllerTab(TabContext& ctx, QTabWidget* tabs) {
           "vr_vr_menu_requires_head_zone", "vr_vr_menu_floating", "vr_cinematic_screen_enabled",
           "vr_game_menu_screen_enabled", "vr_rumble_enabled", "vr_rumble_intensity",
           "vr_rumble_hand", "vr_xr_dpad_enabled", "vr_combat_jump_use_primary_button",
+          "vr_beam_wheel_hud_highlight",
           "vr_grip_inputs_enabled", "vr_grip_inputs_use_trackpad", "vr_trackpad_press_threshold",
           "vr_index_grip_press_threshold", "vr_directional_movement_enabled",
           "vr_directional_movement_use_right_stick", "vr_directional_movement_use_hmd_direction",

@@ -42,7 +42,11 @@ CHudVisorBeamMenu::CHudVisorBeamMenu(CGuiFrame& frame, EVisorBeamMenu type,
 , x6c_animPhase(kAP_Steady)
 , x70_(FLT_EPSILON)
 , x74_(FLT_EPSILON)
-, x78_textFader(0.f) {
+, x78_textFader(0.f)
+#ifdef TARGET_PC
+, x84_portVrHighlight(-1)
+#endif
+{
   x7c_animDur = gpTweakGui->GetBeamVisorMenuAnimTime();
   x80_24_swapBeamControls = gpGameState->GameOptions().GetSwapBeamControls();
   x20_textpane_menu = static_cast< CGuiTextPane* >(
@@ -203,6 +207,19 @@ void CHudVisorBeamMenu::Update(float dt, const bool init) {
   default:
     break;
   }
+#ifdef TARGET_PC
+  // PortVr: the VR beam wheel's hover. The hovered item's box and icon go to
+  // white over whatever the phase set: the colours here modulate the models,
+  // and the game's own select flash only reaches the active grey (0.66), so
+  // white reads as a clear step up, the way PrimedGun's frame around the
+  // hovered icon did on its own panel. Beams not yet owned stay as they are.
+  if (x84_portVrHighlight >= 0 && x84_portVrHighlight < 4 &&
+      x28_menuItems[x84_portVrHighlight].xc_opacity > 0.f) {
+    SMenuItem& item = x28_menuItems[x84_portVrHighlight];
+    item.x4_model_icon->SetColor(CColor::White());
+    item.x0_model_loz->SetColor(CColor::White());
+  }
+#endif
   if (x78_textFader > 0.f) {
     x78_textFader = rstl::max_val(0.f, x78_textFader - dt);
     const float alpha = x78_textFader / x7c_animDur;

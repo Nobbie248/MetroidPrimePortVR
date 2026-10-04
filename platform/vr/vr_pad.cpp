@@ -5,6 +5,7 @@
 #include "vr/openxr_controller_snapshot.h"
 #include "vr/openxr_integration.h"
 #include "vr/openxr_screen_math.h"
+#include "vr/vr_beam_wheel.h"
 #include "vr/vr_settings.h"
 #include "vr/vr_visor_dpad.h"
 
@@ -37,23 +38,12 @@ constexpr float kJumpStickThreshold = 0.55f;
 constexpr uint32_t kGripGraceSamples = 30; // after gameplay starts, like PrimedGun
 constexpr uint32_t kBeamPulseSamples = 8;
 
-// The beam wheel's panel: 0.26 m ahead and 0.055 m above the aim pose at the
-// moment the modifier was pressed, 0.42 m square; coordinates normalised by
-// 0.21 m with a 0.25 deadzone, or the hand's travel / 0.075 m as a fallback.
-constexpr float kPanelForward = 0.26f;
-constexpr float kPanelUp = 0.055f;
-constexpr float kPanelHalfExtent = 0.21f;
-constexpr float kPanelHitLimit = 1.8f;
-constexpr float kPanelDeadzone = 0.25f;
-constexpr float kTravelScale = 0.075f;
-
-enum class Beam : int { None = -1, Power = 0, Wave = 1, Ice = 2, Plasma = 3 };
+// The beam wheel's panel and pick (vr/vr_beam_wheel.h).
+using BeamWheel::Beam;
 
 struct WheelState {
     bool open = false;
-    Quat base_orientation{0.0f, 0.0f, 0.0f, 1.0f};
-    Vec3 base_position{};
-    Vec3 panel_center{};
+    BeamWheel::Panel panel;
     bool first_sample = true;
     float zero_x = 0.0f;
     float zero_y = 0.0f;
@@ -83,52 +73,11 @@ BOOL ClaimPortZeroMotor(u32 chan, u32 cmd) {
     return TRUE;
 }
 
-Quat Normalize(Quat q) noexcept {
-    const float length = std::sqrt(q[0] * q[0] + q[1] * q[1] + q[2] * q[2] + q[3] * q[3]);
-    if (!(length > 1.0e-6f)) {
-        return {0.0f, 0.0f, 0.0f, 1.0f};
-    }
-    return {q[0] / length, q[1] / length, q[2] / length, q[3] / length};
-}
-
 Quat Multiply(const Quat& a, const Quat& b) noexcept {
     return {a[3] * b[0] + a[0] * b[3] + a[1] * b[2] - a[2] * b[1],
             a[3] * b[1] - a[0] * b[2] + a[1] * b[3] + a[2] * b[0],
             a[3] * b[2] + a[0] * b[1] - a[1] * b[0] + a[2] * b[3],
             a[3] * b[3] - a[0] * b[0] - a[1] * b[1] - a[2] * b[2]};
-}
-
-// The orientation with its roll removed: forward kept, up re-levelled.
-Quat RollFree(const Quat& q) noexcept {
-    const Vec3 forward = screen_math::Rotate(q, {0.0f, 0.0f, -1.0f});
-    Vec3 right{forward[2], 0.0f, -forward[0]}; // forward x world up
-    const float length = std::sqrt(right[0] * right[0] + right[2] * right[2]);
-    if (!(length > 1.0e-4f)) {
-        return q;
-    }
-    right = {right[0] / length, 0.0f, right[2] / length};
-    const Vec3 up{right[1] * forward[2] - right[2] * forward[1], right[2] * forward[0] - right[0] * forward[2],
-                  right[0] * forward[1] - right[1] * forward[0]};
-    // Rotation matrix columns (right, up, -forward) -> quaternion.
-    const float m00 = right[0], m01 = up[0], m02 = -forward[0];
-    const float m10 = right[1], m11 = up[1], m12 = -forward[1];
-    const float m20 = right[2], m21 = up[2], m22 = -forward[2];
-    const float trace = m00 + m11 + m22;
-    Quat out{};
-    if (trace > 0.0f) {
-        const float s = std::sqrt(trace + 1.0f) * 2.0f;
-        out = {(m21 - m12) / s, (m02 - m20) / s, (m10 - m01) / s, 0.25f * s};
-    } else if (m00 > m11 && m00 > m22) {
-        const float s = std::sqrt(1.0f + m00 - m11 - m22) * 2.0f;
-        out = {0.25f * s, (m01 + m10) / s, (m02 + m20) / s, (m21 - m12) / s};
-    } else if (m11 > m22) {
-        const float s = std::sqrt(1.0f + m11 - m00 - m22) * 2.0f;
-        out = {(m01 + m10) / s, 0.25f * s, (m12 + m21) / s, (m02 - m20) / s};
-    } else {
-        const float s = std::sqrt(1.0f + m22 - m00 - m11) * 2.0f;
-        out = {(m02 + m20) / s, (m12 + m21) / s, 0.25f * s, (m10 - m01) / s};
-    }
-    return Normalize(out);
 }
 
 int8_t ToStick(float value) noexcept {
@@ -187,21 +136,12 @@ bool GripPressed(const OpenXRControllerState& hand, const std::string& profile, 
 }
 
 void SetBeamCStick(Beam beam, PADStatus& pad) noexcept {
-    switch (beam) {
-    case Beam::Power:
-        pad.substickY = kStickFull;
-        break;
-    case Beam::Wave:
-        pad.substickX = kStickFull;
-        break;
-    case Beam::Ice:
-        pad.substickY = static_cast<int8_t>(-kStickFull);
-        break;
-    case Beam::Plasma:
-        pad.substickX = static_cast<int8_t>(-kStickFull);
-        break;
-    case Beam::None:
-        break;
+    const std::array<int, 2> direction = BeamWheel::CStickDirection(beam);
+    if (direction[0] != 0) {
+        pad.substickX = static_cast<int8_t>(direction[0] * kStickFull);
+    }
+    if (direction[1] != 0) {
+        pad.substickY = static_cast<int8_t>(direction[1] * kStickFull);
     }
 }
 
@@ -231,60 +171,19 @@ void UpdateWeaponWheel(const OpenXRControllerState& weapon, bool modifier, bool 
     }
     if (!wheel.open) {
         wheel.open = true;
-        wheel.base_orientation = RollFree(Normalize(pose.orientation));
-        wheel.base_position = pose.position;
-        const Vec3 offset = screen_math::Rotate(wheel.base_orientation, {0.0f, kPanelUp, -kPanelForward});
-        wheel.panel_center = {pose.position[0] + offset[0], pose.position[1] + offset[1],
-                              pose.position[2] + offset[2]};
+        wheel.panel = BeamWheel::OpenPanel(pose.position, pose.orientation);
         wheel.first_sample = true;
         wheel.selected = Beam::None;
     }
-    // The roll-free aim ray against the frozen panel's plane.
-    const Quat current = RollFree(Normalize(pose.orientation));
-    const Vec3 direction = screen_math::Rotate(current, {0.0f, 0.0f, -1.0f});
-    const Vec3 panel_right = screen_math::Rotate(wheel.base_orientation, {1.0f, 0.0f, 0.0f});
-    const Vec3 panel_up = screen_math::Rotate(wheel.base_orientation, {0.0f, 1.0f, 0.0f});
-    const Vec3 panel_forward = screen_math::Rotate(wheel.base_orientation, {0.0f, 0.0f, -1.0f});
-    const Vec3 to_panel{wheel.panel_center[0] - pose.position[0], wheel.panel_center[1] - pose.position[1],
-                        wheel.panel_center[2] - pose.position[2]};
-    const float denominator = screen_math::Dot(direction, panel_forward);
-    float x = 0.0f;
-    float y = 0.0f;
-    bool hit = false;
-    if (std::fabs(denominator) > 0.025f) {
-        const float t = screen_math::Dot(to_panel, panel_forward) / denominator;
-        if (t > 0.02f && t < 2.0f) {
-            const Vec3 point{pose.position[0] + direction[0] * t - wheel.panel_center[0],
-                             pose.position[1] + direction[1] * t - wheel.panel_center[1],
-                             pose.position[2] + direction[2] * t - wheel.panel_center[2]};
-            x = screen_math::Dot(point, panel_right) / kPanelHalfExtent;
-            y = screen_math::Dot(point, panel_up) / kPanelHalfExtent;
-            hit = std::fabs(x) <= kPanelHitLimit && std::fabs(y) <= kPanelHitLimit;
-        }
-    }
-    if (!hit) {
-        // The hand's travel in the base frame.
-        const Vec3 travel = screen_math::Rotate(screen_math::Conjugate(wheel.base_orientation),
-                                                {pose.position[0] - wheel.base_position[0],
-                                                 pose.position[1] - wheel.base_position[1],
-                                                 pose.position[2] - wheel.base_position[2]});
-        x = travel[0] / kTravelScale;
-        y = travel[1] / kTravelScale;
-    }
+    // The roll-free aim ray against the frozen panel, read from where the
+    // first sample landed: up Power, right Wave, down Ice, left Plasma.
+    const std::array<float, 2> aim = BeamWheel::Measure(wheel.panel, pose.position, pose.orientation);
     if (wheel.first_sample) {
         wheel.first_sample = false;
-        wheel.zero_x = x;
-        wheel.zero_y = y;
+        wheel.zero_x = aim[0];
+        wheel.zero_y = aim[1];
     }
-    x = std::clamp(x - wheel.zero_x, -1.0f, 1.0f);
-    y = std::clamp(y - wheel.zero_y, -1.0f, 1.0f);
-    if (std::fabs(x) < kPanelDeadzone && std::fabs(y) < kPanelDeadzone) {
-        wheel.selected = Beam::None;
-    } else if (std::fabs(x) >= std::fabs(y)) {
-        wheel.selected = x < 0.0f ? Beam::Plasma : Beam::Wave;
-    } else {
-        wheel.selected = y < 0.0f ? Beam::Ice : Beam::Power;
-    }
+    wheel.selected = BeamWheel::Pick(aim[0] - wheel.zero_x, aim[1] - wheel.zero_y);
 }
 
 // Classic: menus, the map, cutscenes, the morph ball. The plain GameCube

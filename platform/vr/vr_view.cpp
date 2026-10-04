@@ -5,6 +5,8 @@
 #include "vr/openxr_controller_snapshot.h"
 #include "vr/openxr_integration.h"
 #include "vr/prime_vr_policy.h"
+#include "vr/vr_beam_wheel.h"
+#include "vr/vr_pad.h"
 #include "vr/vr_settings.h"
 
 #include "Kyoto/Math/CFrustumPlanes.hpp"
@@ -164,6 +166,22 @@ bool VrRemoveCinematicBars() noexcept {
 bool VrSkyAtInfinity() noexcept { return OpenXRIsRunning() && GetVrSettings().sky_at_infinity; }
 
 bool VrHideSpaceWarp() noexcept { return OpenXRIsRunning() && !GetVrSettings().space_warp; }
+
+int VrBeamWheelHoverBeam() noexcept {
+    if (!GetVrSettings().beam_wheel_hud_highlight) {
+        return -1;
+    }
+    const VrPadState pad = GetVrPadState();
+    if (!pad.active || !pad.gameplay || !pad.weapon_panel) {
+        return -1;
+    }
+    // The wheel counts PrimedGun's way (Power, Wave, Ice, Plasma); the game's
+    // EBeamId puts Ice before Wave.
+    if (pad.weapon_selected < 0 || pad.weapon_selected > 3) {
+        return -1;
+    }
+    return BeamWheel::GameBeamId(static_cast<BeamWheel::Beam>(pad.weapon_selected));
+}
 
 bool VrCannonTransform(const CStateManager& mgr, const CPlayer& player, const CTransform4f& cameraXf,
                        CTransform4f& gunXf) noexcept {

@@ -57,6 +57,13 @@ bool VrSkyAtInfinity() noexcept;
 // The headset is running and the settings turn the space warp off
 // (CStateManager::DrawSpaceWarp draws nothing).
 bool VrHideSpaceWarp() noexcept;
+// The beam wheel's hover, for the HUD's beam menu (CHudVisorBeamMenu): the
+// beam the aim ray points at while the weapon hand's B holds the wheel open
+// (vr_pad.cpp), as CPlayerState::EBeamId (0 Power, 1 Ice, 2 Wave, 3 Plasma),
+// or -1 when the wheel is closed, nothing is hovered, or the
+// vr_beam_wheel_hud_highlight setting is off. The menu lights that beam's box,
+// where PrimedGun drew its own panel with a frame around the hovered icon.
+int VrBeamWheelHoverBeam() noexcept;
 
 // The 6DOF cannon. Once per simulation tick from CPlayer::UpdateGunTransform:
 // when the tracked controller drives the cannon, replaces `gunXf` (world) and

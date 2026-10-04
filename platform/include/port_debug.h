@@ -1,5 +1,6 @@
 #ifndef METROID_PRIME_PORT_PORT_DEBUG_H
 #define METROID_PRIME_PORT_PORT_DEBUG_H
+#include <chrono>
 #include <cstdint>
 #include <string>
 
@@ -165,6 +166,23 @@ void SetHideHelmet(bool enabled);
 // hit splashes on the visor.
 bool HideVisorEffects();
 void SetHideVisorEffects(bool enabled);
+// Hide the HUD's minimap, hundreds of draws a frame in a busy area.
+bool HideMinimap();
+void SetHideMinimap(bool enabled);
+// Where the game thread's frame goes (Performance tab): the game's update, the
+// world's draw and the HUD's, timed in the game code and averaged per frame.
+enum FramePhase { kPhaseUpdate = 0, kPhaseDrawWorld = 1, kPhaseDrawGui = 2, kPhaseCount = 3 };
+void NoteFramePhase(FramePhase phase, uint64_t nanoseconds);
+struct ScopedPhaseTimer {
+  explicit ScopedPhaseTimer(FramePhase p) : phase(p), start(std::chrono::steady_clock::now()) {}
+  ~ScopedPhaseTimer() {
+    NoteFramePhase(phase, static_cast<uint64_t>((std::chrono::steady_clock::now() - start).count()));
+  }
+  ScopedPhaseTimer(const ScopedPhaseTimer&) = delete;
+  ScopedPhaseTimer& operator=(const ScopedPhaseTimer&) = delete;
+  FramePhase phase;
+  std::chrono::steady_clock::time_point start;
+};
 // Every world's map shows as if its map station had been used; the save is
 // not changed.
 bool RevealMap();

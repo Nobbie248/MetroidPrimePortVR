@@ -1,4 +1,10 @@
 #include "command_processor.hpp"
+#include "../gfx/perf_counters.hpp"
+#include "../gfx/frame.hpp"
+#include "../gfx/hash.hpp"
+#include "../gfx/resource_cache.hpp"
+
+#include <cstring>
 
 #include "../gfx/depth_peek.hpp"
 #include "../gfx/probe.hpp"
@@ -26,74 +32,93 @@ namespace aurora::gx::fifo {
 namespace {
 constexpr Module Log{"aurora::gx::fifo"};
 
-u16 prepare_idx_buffer(ByteBuffer& buf, GXPrimitive prim, u16 vtxStart, u16 vtxCount) noexcept {
-  u16 numIndices = 0;
-  if (prim == GX_QUADS) {
-    buf.reserve_extra((vtxCount / 4) * 6 * sizeof(u16));
+// The triangle-list indices a primitive takes: its vertices as GX_TRIANGLES
+// for a strip, fan or quads, and those indices written out.
+u32 list_index_count(GXPrimitive prim, u16 vtxCount) noexcept {
+  switch (prim) {
+  case GX_QUADS:
+    return (vtxCount / 4u) * 6u;
+  case GX_TRIANGLES:
+    return vtxCount;
+  case GX_TRIANGLEFAN:
+  case GX_TRIANGLESTRIP:
+    return vtxCount < 3 ? vtxCount : (vtxCount - 3u) * 3u + 3u;
+  case GX_LINES:
+  case GX_LINESTRIP:
+  case GX_POINTS:
+    return 6;
+  default:
+    UNLIKELY FATAL("unsupported primitive type {}", static_cast<u32>(prim));
+  }
+  return 0;
+}
 
-    for (u16 v = 0; v < vtxCount; v += 4) {
-      u16 idx0 = vtxStart + v;
-      u16 idx1 = vtxStart + v + 1;
-      u16 idx2 = vtxStart + v + 2;
-      u16 idx3 = vtxStart + v + 3;
-
-      buf.append(idx0);
-      buf.append(idx1);
-      buf.append(idx2);
-      numIndices += 3;
-
-      buf.append(idx2);
-      buf.append(idx3);
-      buf.append(idx0);
-      numIndices += 3;
+void write_list_indices(u16* out, GXPrimitive prim, u16 vtxStart, u16 vtxCount) noexcept {
+  switch (prim) {
+  case GX_QUADS:
+    for (u32 v = 0; v + 4 <= vtxCount; v += 4) {
+      const u16 idx0 = static_cast<u16>(vtxStart + v);
+      *out++ = idx0;
+      *out++ = static_cast<u16>(idx0 + 1);
+      *out++ = static_cast<u16>(idx0 + 2);
+      *out++ = static_cast<u16>(idx0 + 2);
+      *out++ = static_cast<u16>(idx0 + 3);
+      *out++ = idx0;
     }
-  } else if (prim == GX_TRIANGLES) {
-    buf.reserve_extra(vtxCount * sizeof(u16));
-    for (u16 v = 0; v < vtxCount; ++v) {
-      const u16 idx = vtxStart + v;
-      buf.append(idx);
-      ++numIndices;
+    break;
+  case GX_TRIANGLES:
+    for (u32 v = 0; v < vtxCount; ++v) {
+      *out++ = static_cast<u16>(vtxStart + v);
     }
-  } else if (prim == GX_TRIANGLEFAN) {
-    buf.reserve_extra(((u32(vtxCount) - 3) * 3 + 3) * sizeof(u16));
-    for (u16 v = 0; v < vtxCount; ++v) {
-      const u16 idx = vtxStart + v;
+    break;
+  case GX_TRIANGLEFAN:
+    for (u32 v = 0; v < vtxCount; ++v) {
+      const u16 idx = static_cast<u16>(vtxStart + v);
       if (v < 3) {
-        buf.append(idx);
-        ++numIndices;
+        *out++ = idx;
         continue;
       }
-      buf.append(std::array{vtxStart, static_cast<u16>(idx - 1), idx});
-      numIndices += 3;
+      *out++ = vtxStart;
+      *out++ = static_cast<u16>(idx - 1);
+      *out++ = idx;
     }
-  } else if (prim == GX_TRIANGLESTRIP) {
-    buf.reserve_extra(((static_cast<u32>(vtxCount) - 3) * 3 + 3) * sizeof(u16));
-    for (u16 v = 0; v < vtxCount; ++v) {
-      const u16 idx = vtxStart + v;
+    break;
+  case GX_TRIANGLESTRIP:
+    for (u32 v = 0; v < vtxCount; ++v) {
+      const u16 idx = static_cast<u16>(vtxStart + v);
       if (v < 3) {
-        buf.append(idx);
-        ++numIndices;
+        *out++ = idx;
         continue;
       }
       if ((v & 1) == 0) {
-        buf.append(std::array{static_cast<u16>(idx - 2), static_cast<u16>(idx - 1), idx});
+        *out++ = static_cast<u16>(idx - 2);
+        *out++ = static_cast<u16>(idx - 1);
       } else {
-        buf.append(std::array{static_cast<u16>(idx - 1), static_cast<u16>(idx - 2), idx});
+        *out++ = static_cast<u16>(idx - 1);
+        *out++ = static_cast<u16>(idx - 2);
       }
-      numIndices += 3;
+      *out++ = idx;
     }
-  } else if (prim == GX_LINES || prim == GX_LINESTRIP || prim == GX_POINTS) {
-    buf.reserve_extra(6 * sizeof(u16));
-    buf.append<u16>(0);
-    buf.append<u16>(1);
-    buf.append<u16>(3);
-    buf.append<u16>(3);
-    buf.append<u16>(2);
-    buf.append<u16>(0);
-    numIndices = 6;
-  } else
-    UNLIKELY FATAL("unsupported primitive type {}", static_cast<u32>(prim));
-  return numIndices;
+    break;
+  case GX_LINES:
+  case GX_LINESTRIP:
+  case GX_POINTS:
+    out[0] = 0;
+    out[1] = 1;
+    out[2] = 3;
+    out[3] = 3;
+    out[4] = 2;
+    out[5] = 0;
+    break;
+  default:
+    break;
+  }
+}
+
+u32 prepare_idx_buffer(ByteBuffer& buf, GXPrimitive prim, u16 vtxStart, u16 vtxCount) noexcept {
+  const u32 count = list_index_count(prim, vtxCount);
+  write_list_indices(reinterpret_cast<u16*>(buf.append_uninitialized(count * sizeof(u16))), prim, vtxStart, vtxCount);
+  return count;
 }
 
 // GX FIFO opcodes - use CP_ prefix to avoid clashing with GXCommandList.h macros
@@ -147,7 +172,7 @@ struct DrawCache {
   // frame first needs one (bit `mode` of the mask); the mode the staged uniform
   // needs (gfx::stereo_multiview_mode); the stereo bind groups are then
   // [multiview bind group, 0].
-  std::array<gfx::PipelineRef, 3> multiviewPipelineRefs{};
+  std::array<gfx::PipelineRef, 4> multiviewPipelineRefs{};
   u8 multiviewPipelineMask = 0;
   u8 multiviewMode = MultiviewNone;
   bool stereoBindGroupsMultiview = false;
@@ -157,6 +182,123 @@ struct DrawCache {
   GXVtxFmt lastDrawFmt = GX_MAX_VTXFMT;
 };
 DrawCache sDrawCache;
+
+// The texture bind groups by what build_texture_bind_group reads. Prime binds a
+// few hundred texture sets a frame, each for a run of draws, so the descriptor
+// hashing and sampler lookups behind build_bind_groups only run for a set the
+// cache has not seen; direct-mapped by the key's hash, the whole key compared.
+struct BindGroupKey {
+  struct Slot {
+    const void* view = nullptr; // the texture's sample view
+    u32 mode0 = 0;              // wrap, filters, LOD bias, anisotropy
+    u32 mode1 = 0;              // LOD clamps
+    u32 flags = 0;              // replacement, arbitrary mips
+    u32 reserved = 0;
+  };
+  std::array<Slot, MaxTextures> slots{};
+  u32 sampled = 0;
+  u32 pbr = 0;
+  // The PBR probes by id, under the generation of their creations and
+  // destructions (an id's views are fixed in between).
+  u32 pbrCube = 0;
+  u32 pbrVolume = 0;
+  u32 probeGeneration = 0;
+  u32 reserved = 0;
+};
+static_assert(std::has_unique_object_representations_v<BindGroupKey>);
+u32 sProbeGeneration = 0;
+
+struct BindGroupCacheEntry {
+  BindGroupKey key{};
+  GXBindGroups mono{};
+  gfx::BindGroupRef multiview{};
+  uint64_t multiviewEpoch = 0;
+  uint32_t touchedFrame = UINT32_MAX;
+  bool used = false;
+  bool monoValid = false;
+  bool multiviewValid = false;
+};
+constexpr size_t BindGroupCacheSize = 1024;
+std::array<BindGroupCacheEntry, BindGroupCacheSize> sBindGroupCache{};
+
+BindGroupKey bind_group_key(const ShaderInfo& info) noexcept {
+  BindGroupKey key;
+  std::memset(&key, 0, sizeof(key));
+  for (u32 i = 0; i < MaxTextures; ++i) {
+    const auto& tex = g_gxState.textures[i];
+    if (!tex || !(info.sampledTextures[i] || info.sampledIndTextures[i])) {
+      continue;
+    }
+    key.sampled |= 1u << i;
+    auto& slot = key.slots[i];
+    slot.view = tex.ref->sampleTextureView.Get();
+    slot.mode0 = tex.texObj.mode0;
+    slot.mode1 = tex.texObj.mode1;
+    slot.flags = (tex.ref->isReplacement ? 1u : 0u) | (tex.ref->hasArbitraryMips ? 2u : 0u);
+  }
+  // Resolution has already applied texture invalidations. Key the resulting
+  // views, not that global generation: EFB copies can invalidate bindings
+  // every frame without changing any of the world's material descriptors.
+  key.pbr = g_gxState.pbr ? 1u : 0u;
+  key.pbrCube = g_gxState.pbrCube;
+  key.pbrVolume = g_gxState.pbrVolume;
+  key.probeGeneration = sProbeGeneration;
+  return key;
+}
+
+// The entry for the current textures, or null when the draw samples none. Once
+// a frame it keeps the entry's bind groups from expiring in the gfx cache; one
+// that has expired is built again.
+BindGroupCacheEntry* current_bind_group_entry(const ShaderInfo& info) noexcept {
+  if (!info.sampledTextures.any() && !info.sampledIndTextures.any()) {
+    return nullptr;
+  }
+  const BindGroupKey key = bind_group_key(info);
+  const uint64_t hash = XXH3_64bits(&key, sizeof(key));
+  auto& entry = sBindGroupCache[hash & (BindGroupCacheSize - 1)];
+  if (!entry.used || std::memcmp(&entry.key, &key, sizeof(key)) != 0) {
+    entry = BindGroupCacheEntry{};
+    entry.key = key;
+    entry.used = true;
+  }
+  const uint32_t frame = gfx::current_frame();
+  if (entry.touchedFrame != frame) {
+    entry.touchedFrame = frame;
+    if (entry.monoValid && entry.mono.textureBindGroup != 0 && !gfx::touch_bind_group(entry.mono.textureBindGroup)) {
+      entry.monoValid = false;
+    }
+    if (entry.multiviewValid && entry.multiview != 0 && !gfx::touch_bind_group(entry.multiview)) {
+      entry.multiviewValid = false;
+    }
+  }
+  return &entry;
+}
+
+GXBindGroups cached_bind_groups(const ShaderInfo& info) noexcept {
+  auto* entry = current_bind_group_entry(info);
+  if (entry == nullptr) {
+    return {};
+  }
+  if (!entry->monoValid || entry->mono.textureBindGroup == 0) {
+    gfx::perf::count(gfx::perf::g_fifoBindGroupMisses, gfx::perf::enabled());
+    entry->mono = build_bind_groups(info);
+    entry->monoValid = true;
+  }
+  return entry->mono;
+}
+
+gfx::BindGroupRef cached_multiview_bind_group(const ShaderInfo& info, uint64_t stereoEpoch) noexcept {
+  auto* entry = current_bind_group_entry(info);
+  if (entry == nullptr) {
+    return {};
+  }
+  if (!entry->multiviewValid || entry->multiview == 0 || entry->multiviewEpoch != stereoEpoch) {
+    entry->multiview = build_multiview_bind_group(info);
+    entry->multiviewEpoch = stereoEpoch;
+    entry->multiviewValid = true;
+  }
+  return entry->multiview;
+}
 
 FogRangeLutKey fog_range_lut_key() noexcept {
   const auto& state = g_gxState.fog;
@@ -230,6 +372,7 @@ static void handle_aurora(ByteReader& reader) noexcept;
 ProcessResult process(const u8* data, u32 size) noexcept {
   ZoneScoped;
   ByteReader reader{{data, size}};
+  const bool perfOn = gfx::perf::enabled();
 
   while (!reader.empty()) {
     const u8 cmd = reader.read<u8>();
@@ -241,7 +384,10 @@ ProcessResult process(const u8* data, u32 size) noexcept {
 
     case CP_CMD_LOAD_BP_REG: {
       const u32 value = reader.read<u32>();
-      handle_bp(value);
+      {
+        const gfx::perf::Bucket bucket{gfx::perf::g_fifoBpTicks, perfOn, &gfx::perf::g_fifoBpLoads};
+        handle_bp(value);
+      }
       if (reg_get(value, 8, 24) == GX_BP_REG_DRAWDONE) {
         return {static_cast<u32>(reader.offset()), true};
       }
@@ -250,6 +396,7 @@ ProcessResult process(const u8* data, u32 size) noexcept {
 
     case CP_CMD_LOAD_CP_REG: {
       const u8 addr = reader.read<u8>();
+      const gfx::perf::Bucket bucket{gfx::perf::g_fifoCpTicks, perfOn};
       handle_cp(addr, reader.read<u32>());
       break;
     }
@@ -258,6 +405,7 @@ ProcessResult process(const u8* data, u32 size) noexcept {
       const u32 header = reader.read<u32>();
       const u32 count = ((header >> 16) & 0xFFFF) + 1;
       const u16 addr = header & 0xFFFF;
+      const gfx::perf::Bucket bucket{gfx::perf::g_fifoXfTicks, perfOn, &gfx::perf::g_fifoXfLoads};
       handle_xf(addr, reader.take(count * sizeof(u32)));
       break;
     }
@@ -267,6 +415,7 @@ ProcessResult process(const u8* data, u32 size) noexcept {
     case CP_CMD_LOAD_INDX_C:
     case CP_CMD_LOAD_INDX_D: {
       ZoneScopedN("LOAD_INDX");
+      const gfx::perf::Bucket bucket{gfx::perf::g_fifoXfTicks, perfOn, &gfx::perf::g_fifoXfLoads};
       const u32 arrayType = GX_POS_MTX_ARRAY + (opcode - CP_CMD_LOAD_INDX_A) / 0x08;
       const u16 srcArrayIdx = reader.read<u16>();
       const u16 addrLen = reader.read<u16>();
@@ -305,6 +454,7 @@ ProcessResult process(const u8* data, u32 size) noexcept {
     }
 
     case GX_AURORA: {
+      const gfx::perf::Bucket bucket{gfx::perf::g_fifoAuroraTicks, perfOn};
       handle_aurora(reader);
       break;
     }
@@ -423,6 +573,8 @@ static void push_gx_draw(GXPrimitive prim, GXVtxFmt fmt, u16 vtxCount, gfx::Rang
                          u32 numIndices) noexcept {
   auto& state = g_gxState;
   auto& cache = sDrawCache;
+  const bool perfOn = gfx::perf::enabled();
+  const auto t0 = gfx::perf::stamp(perfOn);
 
   DrawImmediateData immediates{.vtxStart = vertRange.offset, .currentPnMtx = state.currentPnMtx};
   for (int i = GX_VA_POS; i <= GX_VA_TEX7; ++i) {
@@ -451,18 +603,24 @@ static void push_gx_draw(GXPrimitive prim, GXVtxFmt fmt, u16 vtxCount, gfx::Rang
     cache.lineMode = lineMode;
     cache.hasPipeline = true;
     state.dirty = (state.dirty & ~DirtyPipeline) | DirtyUniform;
+    gfx::perf::count(gfx::perf::g_fifoPipelineBuilds, perfOn);
     if (!hadPipeline || prevSampledTextures != cache.shaderInfo.sampledTextures ||
         prevSampledIndTextures != cache.shaderInfo.sampledIndTextures) {
       cache.bindGeneration = 0;
     }
   }
 
+  const auto tA = gfx::perf::stamp(perfOn);
   const bool bindGroupsValid =
       (state.dirty & DirtyTextures) == 0 && cache.bindGeneration == texture::current_bind_generation();
   if (!bindGroupsValid) {
+    gfx::perf::count(gfx::perf::g_fifoBindGroupBuilds, perfOn);
     const auto prevBindGroup = cache.bindGroups.textureBindGroup;
-    resolve_sampled_textures(cache.shaderInfo);
-    cache.bindGroups = build_bind_groups(cache.shaderInfo);
+    {
+      const gfx::perf::Bucket bucket{gfx::perf::g_fifoResolveTicks, perfOn};
+      resolve_sampled_textures(cache.shaderInfo);
+    }
+    cache.bindGroups = cached_bind_groups(cache.shaderInfo);
     cache.bindGeneration = texture::current_bind_generation();
     state.dirty &= ~DirtyTextures;
     // For texture_size_bias uniform
@@ -476,8 +634,9 @@ static void push_gx_draw(GXPrimitive prim, GXVtxFmt fmt, u16 vtxCount, gfx::Rang
   if (gfx::stereo_shadow::active()) {
     const uint64_t stereoEpoch = gfx::stereo_shadow::epoch();
     if (!bindGroupsValid || cache.stereoEpoch != stereoEpoch || cache.stereoBindGroupsMultiview != multiview) {
-      cache.stereoBindGroups = multiview ? std::array<gfx::BindGroupRef, 2>{build_multiview_bind_group(cache.shaderInfo), {}}
-                                         : build_stereo_bind_groups(cache.shaderInfo);
+      cache.stereoBindGroups =
+          multiview ? std::array<gfx::BindGroupRef, 2>{cached_multiview_bind_group(cache.shaderInfo, stereoEpoch), {}}
+                    : build_stereo_bind_groups(cache.shaderInfo);
       cache.stereoEpoch = stereoEpoch;
       cache.stereoBindGroupsMultiview = multiview;
     }
@@ -485,22 +644,31 @@ static void push_gx_draw(GXPrimitive prim, GXVtxFmt fmt, u16 vtxCount, gfx::Rang
     cache.stereoBindGroups = {};
   }
 
+  const auto t1 = gfx::perf::stamp(perfOn);
   const bool uniformValid = (state.dirty & DirtyUniform) == 0 && cache.uniformRange.size != 0;
   if (!uniformValid) {
+    gfx::perf::count(gfx::perf::g_fifoUniformBuilds, perfOn);
     cache.uniformRange = build_uniform(cache.shaderInfo, cache.stereoUniformOffsets);
-    cache.multiviewMode = multiview ? staged_multiview_mode(cache) : MultiviewNone;
+    cache.multiviewMode = staged_multiview_mode(cache);
     state.dirty &= ~DirtyUniform;
   }
+  const auto t2 = gfx::perf::stamp(perfOn);
+  // The eye passes' pipeline: under multiview the staged mode's; per eye, EyeClipImmediate
+  // for a draw staged with its eye clips (a MultiviewFull one keeps its per-eye uniform
+  // copies and the plain pipeline).
   gfx::PipelineRef multiviewPipeline{};
-  if (multiview && cache.multiviewMode != MultiviewNone) {
-    const u8 modeBit = 1u << cache.multiviewMode;
+  const u8 eyeMode = multiview                                 ? cache.multiviewMode
+                     : cache.multiviewMode == MultiviewClip ? static_cast<u8>(EyeClipImmediate)
+                                                            : static_cast<u8>(MultiviewNone);
+  if (eyeMode != MultiviewNone) {
+    const u8 modeBit = 1u << eyeMode;
     if ((cache.multiviewPipelineMask & modeBit) == 0) {
-      PipelineConfig multiviewConfig = cache.config;
-      multiviewConfig.shaderConfig.multiview = cache.multiviewMode;
-      cache.multiviewPipelineRefs[cache.multiviewMode] = gfx::pipeline_ref(multiviewConfig);
+      PipelineConfig eyeConfig = cache.config;
+      eyeConfig.shaderConfig.multiview = eyeMode;
+      cache.multiviewPipelineRefs[eyeMode] = gfx::pipeline_ref(eyeConfig);
       cache.multiviewPipelineMask |= modeBit;
     }
-    multiviewPipeline = cache.multiviewPipelineRefs[cache.multiviewMode];
+    multiviewPipeline = cache.multiviewPipelineRefs[eyeMode];
   }
   if (cache.config.shaderConfig.fogRangeEnabled) {
     const auto key = fog_range_lut_key();
@@ -540,6 +708,14 @@ static void push_gx_draw(GXPrimitive prim, GXVtxFmt fmt, u16 vtxCount, gfx::Rang
       .stereoTextureBindGroup = cache.stereoBindGroups,
       .multiviewPipeline = multiviewPipeline,
   });
+  if (perfOn) {
+    const auto t3 = gfx::perf::tick();
+    gfx::perf::add(gfx::perf::g_fifoPipelineTicks, t0, tA);
+    gfx::perf::add(gfx::perf::g_fifoBindsTicks, tA, t1);
+    gfx::perf::add(gfx::perf::g_fifoUniformTicks, t1, t2);
+    gfx::perf::add(gfx::perf::g_fifoPushTicks, t2, t3);
+    gfx::perf::g_fifoDrawsPushed.fetch_add(1, std::memory_order_relaxed);
+  }
 }
 
 static void handle_draw_unmerged(GXPrimitive prim, GXVtxFmt fmt, u16 vtxCount, gfx::Range vertRange) noexcept {
@@ -549,6 +725,7 @@ static void handle_draw_unmerged(GXPrimitive prim, GXVtxFmt fmt, u16 vtxCount, g
 
   if (prim != GX_TRIANGLES) {
     ZoneScopedN("build idx buffer");
+    const gfx::perf::Bucket bucket{gfx::perf::g_fifoVertsTicks, gfx::perf::enabled()};
     static ByteBuffer idxBuf;
     numIndices = prepare_idx_buffer(idxBuf, prim, 0, vtxCount);
     idxRange = gfx::push_indices(idxBuf.data(), idxBuf.size(), 4);
@@ -558,7 +735,22 @@ static void handle_draw_unmerged(GXPrimitive prim, GXVtxFmt fmt, u16 vtxCount, g
   push_gx_draw(prim, fmt, vtxCount, vertRange, idxRange, numIndices);
 }
 
-static void draw_prim(GXPrimitive prim, GXVtxFmt fmt, u16 vtxCount, ByteReader& reader) noexcept {
+// Index staging for a merged draw: `count` more list indices, a new range
+// 4-byte aligned, its staged offset in `offset`.
+static u16* reserve_staged_indices(ByteBuffer& indices, u32 count, bool newRange, u32& offset) noexcept {
+  if (newRange) {
+    const size_t aligned = AURORA_ALIGN(indices.size(), 4);
+    if (aligned > indices.size()) {
+      indices.append_zeroes(aligned - indices.size());
+    }
+  }
+  offset = static_cast<u32>(indices.size());
+  return reinterpret_cast<u16*>(indices.append_uninitialized(static_cast<size_t>(count) * sizeof(u16)));
+}
+
+// `cmd` is the FIFO draw command, whose following commands of the same kind
+// merge along; 0 for a draw delivered otherwise (GX_AURORA_DRAW_SIZED).
+static void draw_prim(u8 cmd, GXPrimitive prim, GXVtxFmt fmt, u16 vtxCount, ByteReader& reader) noexcept {
   ZoneScoped;
   u32 vtxSize;
   if (g_gxState.lastVtxFmt == fmt)
@@ -573,54 +765,87 @@ static void draw_prim(GXPrimitive prim, GXVtxFmt fmt, u16 vtxCount, ByteReader& 
   const bool cleanState = g_gxState.dirty == 0 && fmt == sDrawCache.lastDrawFmt && sDrawCache.lineMode == 0 &&
                           prim != GX_LINES && prim != GX_LINESTRIP && prim != GX_POINTS;
   auto* lastDraw = cleanState ? gfx::get_last_draw_command<DrawData>() : nullptr;
-  const bool canMerge = lastDraw != nullptr && lastDraw->instanceCount == 1;
+  ByteBuffer* const verts = lastDraw != nullptr ? gfx::staging_verts() : nullptr;
+  ByteBuffer* const indices = lastDraw != nullptr ? gfx::staging_indices() : nullptr;
+  const bool canMerge = lastDraw != nullptr && lastDraw->instanceCount == 1 && verts != nullptr &&
+                        indices != nullptr && lastDraw->vtxCount + vtxCount <= UINT16_MAX;
+  const bool perfOn = gfx::perf::enabled();
+  const auto t0 = gfx::perf::stamp(perfOn);
 
-  // Push raw vertex data to buffer. Merged draws must remain contiguous with the previous range.
-  const auto vertexData = reader.take(totalVtxBytes);
-  gfx::Range vertRange = gfx::push_verts(vertexData.data(), vertexData.size(), canMerge ? 0 : 4);
-
-  // Try to merge with previous draw call
-  if (canMerge) {
-    u32 numIndices = 0;
-    gfx::Range idxRange;
-    static ByteBuffer idxBuf;
-    const bool hadIndexRange = lastDraw->idxRange.size != 0;
-    if (lastDraw->indexCount == 0 && prim != GX_TRIANGLES) {
-      // Generate triangle index buffer for previous draw
-      lastDraw->indexCount = prepare_idx_buffer(idxBuf, GX_TRIANGLES, 0, lastDraw->vtxCount);
+  if (!canMerge) {
+    const auto vertexData = reader.take(totalVtxBytes);
+    const gfx::Range vertRange = gfx::push_verts(vertexData.data(), vertexData.size(), 4);
+    if (perfOn) {
+      gfx::perf::add(gfx::perf::g_fifoVertsTicks, t0, gfx::perf::tick());
     }
-    if (lastDraw->indexCount != 0) {
-      numIndices += prepare_idx_buffer(idxBuf, prim, lastDraw->vtxCount, vtxCount);
-      idxRange = gfx::push_indices(idxBuf.data(), idxBuf.size(), hadIndexRange ? 0 : 4);
-      idxBuf.clear();
-    }
-    CHECK(lastDraw->vertRange.offset + lastDraw->vertRange.size == vertRange.offset,
-          "Non-consecutive vertex ranges ({} < {})", lastDraw->vertRange.offset + lastDraw->vertRange.size,
-          vertRange.offset);
-    if (hadIndexRange) {
-      CHECK(lastDraw->idxRange.offset + lastDraw->idxRange.size == idxRange.offset,
-            "Non-consecutive index ranges ({} < {})", lastDraw->idxRange.offset + lastDraw->idxRange.size,
-            idxRange.offset);
-    }
-    lastDraw->vertRange.size += vertRange.size;
-    if (lastDraw->idxRange.size == 0) {
-      lastDraw->idxRange = idxRange;
-    } else {
-      lastDraw->idxRange.size += idxRange.size;
-    }
-    lastDraw->vtxCount += vtxCount;
-    lastDraw->indexCount += numIndices;
-    gfx::detail::increment_merged_draw_count();
+    handle_draw_unmerged(prim, fmt, vtxCount, vertRange);
     return;
   }
 
-  handle_draw_unmerged(prim, fmt, vtxCount, vertRange);
+  // Merge into the previous draw. Prime's world surfaces are thousands of short
+  // strips a frame, so this appends to the staging buffers directly, and takes
+  // the strips that follow under the same command in the same loop.
+  u32 merged = 0;
+  while (true) {
+    const auto vertexData = reader.take(totalVtxBytes);
+    CHECK(lastDraw->vertRange.offset + lastDraw->vertRange.size == verts->size(),
+          "Non-consecutive vertex ranges ({} < {})", lastDraw->vertRange.offset + lastDraw->vertRange.size,
+          verts->size());
+    if (totalVtxBytes > 0) {
+      std::memcpy(verts->append_uninitialized(totalVtxBytes), vertexData.data(), totalVtxBytes);
+    }
+    lastDraw->vertRange.size += totalVtxBytes;
+    if (lastDraw->indexCount == 0 && prim != GX_TRIANGLES) {
+      // The previous draw's own triangles take their list indices first
+      const u32 count = list_index_count(GX_TRIANGLES, static_cast<u16>(lastDraw->vtxCount));
+      u32 offset = 0;
+      write_list_indices(reserve_staged_indices(*indices, count, true, offset), GX_TRIANGLES, 0,
+                         static_cast<u16>(lastDraw->vtxCount));
+      lastDraw->idxRange = gfx::Range{offset, static_cast<u32>(count * sizeof(u16))};
+      lastDraw->indexCount = count;
+    }
+    if (lastDraw->indexCount != 0) {
+      const u32 count = list_index_count(prim, vtxCount);
+      const bool newRange = lastDraw->idxRange.size == 0;
+      u32 offset = 0;
+      u16* const out = reserve_staged_indices(*indices, count, newRange, offset);
+      write_list_indices(out, prim, static_cast<u16>(lastDraw->vtxCount), vtxCount);
+      if (newRange) {
+        lastDraw->idxRange = gfx::Range{offset, static_cast<u32>(count * sizeof(u16))};
+      } else {
+        CHECK(lastDraw->idxRange.offset + lastDraw->idxRange.size == offset, "Non-consecutive index ranges ({} < {})",
+              lastDraw->idxRange.offset + lastDraw->idxRange.size, offset);
+        lastDraw->idxRange.size += static_cast<u32>(count * sizeof(u16));
+      }
+      lastDraw->indexCount += count;
+    }
+    lastDraw->vtxCount += vtxCount;
+    ++merged;
+
+    // The next command, when it is another strip of this kind
+    if (cmd == 0 || reader.remaining() < 3 || reader.data()[reader.offset()] != cmd) {
+      break;
+    }
+    const u16 nextCount = read_bits<u16>(reader.data() + reader.offset() + 1);
+    const u32 nextBytes = nextCount * vtxSize;
+    if (nextCount == 0 || lastDraw->vtxCount + nextCount > UINT16_MAX || nextBytes > reader.remaining() - 3) {
+      break;
+    }
+    reader.skip(3);
+    vtxCount = nextCount;
+    totalVtxBytes = nextBytes;
+  }
+  gfx::detail::increment_merged_draw_count(merged);
+  if (perfOn) {
+    gfx::perf::add(gfx::perf::g_fifoVertsTicks, t0, gfx::perf::tick());
+    gfx::perf::g_fifoDrawsMerged.fetch_add(merged, std::memory_order_relaxed);
+  }
 }
 
 static void handle_draw(u8 cmd, ByteReader& reader) noexcept {
   const auto fmt = static_cast<GXVtxFmt>(cmd & CP_VAT_MASK);
   const auto prim = static_cast<GXPrimitive>(cmd & CP_OPCODE_MASK);
-  draw_prim(prim, fmt, reader.read<u16>(), reader);
+  draw_prim(cmd, prim, fmt, reader.read<u16>(), reader);
 }
 
 void handle_aurora(ByteReader& reader) noexcept {
@@ -821,7 +1046,7 @@ void handle_aurora(ByteReader& reader) noexcept {
                     "GX_AURORA_DRAW_SIZED: {} bytes is not a whole number of size-{} vertices", byteLen, vtxSize);
       u32 vtxCount = byteLen / vtxSize;
       AURORA_ASSERT(vtxCount <= 0xFFFF, "GX_AURORA_DRAW_SIZED: too many vertices ({})", vtxCount);
-      draw_prim(prim, fmt, static_cast<u16>(vtxCount), reader);
+      draw_prim(0, prim, fmt, static_cast<u16>(vtxCount), reader);
     }
   } else if (subCmd == GX_AURORA_DRAW_INDEXED) {
     ZoneScopedN("DRAW_INDEXED");
@@ -893,6 +1118,7 @@ void handle_aurora(ByteReader& reader) noexcept {
       g_gxState.dirty |= DirtyUniform;
     }
   } else if (subCmd == GX_AURORA_CREATE_PBR_CUBE) {
+    ++sProbeGeneration;
     const u32 id = reader.read<u32>();
     const u32 size = reader.read<u32>();
     const u32 mipCount = reader.read<u32>();
@@ -900,6 +1126,7 @@ void handle_aurora(ByteReader& reader) noexcept {
     gfx::probe::create_cube(id, size, mipCount, texels->data(), texels->size());
     g_gxState.dirty |= DirtyTextures;
   } else if (subCmd == GX_AURORA_DESTROY_PBR_CUBE) {
+    ++sProbeGeneration;
     gfx::probe::destroy_cube(reader.read<u32>());
     g_gxState.dirty |= DirtyTextures;
   } else if (subCmd == GX_AURORA_SET_PBR_CUBE) {
@@ -934,6 +1161,7 @@ void handle_aurora(ByteReader& reader) noexcept {
       }
     }
   } else if (subCmd == GX_AURORA_CREATE_PBR_VOLUME) {
+    ++sProbeGeneration;
     const u32 id = reader.read<u32>();
     const u32 sizeX = reader.read<u32>();
     const u32 sizeY = reader.read<u32>();
@@ -942,6 +1170,7 @@ void handle_aurora(ByteReader& reader) noexcept {
     gfx::probe::create_volume(id, sizeX, sizeY, sizeZ, texels->data(), texels->size());
     g_gxState.dirty |= DirtyTextures;
   } else if (subCmd == GX_AURORA_DESTROY_PBR_VOLUME) {
+    ++sProbeGeneration;
     gfx::probe::destroy_volume(reader.read<u32>());
     g_gxState.dirty |= DirtyTextures;
   } else if (subCmd == GX_AURORA_SET_PBR_VOLUME) {
@@ -1001,6 +1230,9 @@ void handle_aurora(ByteReader& reader) noexcept {
 }
 
 void clear_draw_cache() noexcept {
+  // Uniform/vertex ranges belong to this frame, but texture bind groups do
+  // not. Keep their descriptor cache warm; current_bind_group_entry() checks
+  // the resource cache's lifetime before reusing an entry in a later frame.
   sDrawCache.bindGeneration = 0;
   sDrawCache.uniformRange = {};
   sDrawCache.stereoUniformOffsets = {UINT32_MAX, UINT32_MAX};
@@ -1009,6 +1241,12 @@ void clear_draw_cache() noexcept {
   sDrawCache.stereoEpoch = 0;
   sDrawCache.fogRange = {};
   sDrawCache.hasFogRange = false;
+}
+
+void reset_draw_cache() noexcept {
+  // Initialization/shutdown can replace layouts and default texture views.
+  sBindGroupCache.fill(BindGroupCacheEntry{});
+  sDrawCache = {};
 }
 
 } // namespace aurora::gx::fifo

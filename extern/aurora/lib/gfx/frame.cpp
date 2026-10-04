@@ -538,7 +538,9 @@ void initialize() {
         .entries = entries.data(),
     };
     g_resources.uniformBindGroup = g_device.CreateBindGroup(&bindGroupDescriptor);
-    if (webgpu::g_multiviewSupported) {
+    {
+      // The uniform with the eye clips after it (gx::MultiviewClip, EyeClipImmediate),
+      // or the eye pair under multiview.
       const std::array multiviewEntries{
           wgpu::BindGroupEntry{
               .binding = 0,

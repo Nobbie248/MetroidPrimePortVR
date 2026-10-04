@@ -302,6 +302,14 @@ public:
     m_length += size;
   }
 
+  // Room for `size` more bytes, returned for the caller to fill.
+  [[nodiscard]] uint8_t* append_uninitialized(size_t size) {
+    resize(m_length + size, false);
+    uint8_t* const out = m_data + m_length;
+    m_length += size;
+    return out;
+  }
+
   void release() {
     if (m_data != nullptr && m_owned) {
       free(m_data);

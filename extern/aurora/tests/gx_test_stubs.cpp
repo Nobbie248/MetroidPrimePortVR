@@ -7,6 +7,7 @@
 #include "gfx/resources.hpp"
 #include "gfx/depth_peek.hpp"
 #include "gfx/recording.hpp"
+#include "gfx/perf_counters.hpp"
 #include "gfx/stereo_shadow.hpp"
 #include "gfx/tex_copy_conv.hpp"
 #include "gfx/tex_palette_conv.hpp"
@@ -46,7 +47,7 @@ Resources& resources() noexcept {
   return resources;
 }
 
-void increment_merged_draw_count() noexcept {}
+void increment_merged_draw_count(uint32_t) noexcept {}
 } // namespace aurora::gfx::detail
 
 namespace aurora::webgpu {
@@ -69,10 +70,16 @@ void configure(const GXRenderModeObj*) noexcept {}
 
 // --- get_texture ---
 namespace aurora::gx {
+namespace testing {
+bool sampledTexture = false;
+uint64_t bindGeneration = 1;
+uint32_t bindBuilds = 0;
+uint32_t multiviewBuilds = 0;
+} // namespace testing
 const gfx::TextureBind& get_texture(GXTexMapID id) noexcept { return g_gxState.textures[id]; }
 namespace texture {
 void invalidate_bindings() noexcept {}
-uint64_t current_bind_generation() noexcept { return 1; }
+uint64_t current_bind_generation() noexcept { return testing::bindGeneration; }
 } // namespace texture
 void evict_texture_object(u32 texObjId) noexcept {
   for (auto& obj : g_gxState.loadedTextures) {
@@ -120,8 +127,15 @@ namespace aurora::gx {
 void populate_pipeline_config(PipelineConfig& config, GXPrimitive primitive, GXVtxFmt fmt) noexcept {
   // No-op for tests
 }
-GXBindGroups build_bind_groups(const ShaderInfo& info) noexcept { return {}; }
-ShaderInfo build_shader_info(const ShaderConfig& config) noexcept { return {}; }
+GXBindGroups build_bind_groups(const ShaderInfo& info) noexcept {
+  return {.textureBindGroup = ++testing::bindBuilds};
+}
+gfx::BindGroupRef build_multiview_bind_group(const ShaderInfo&) noexcept { return ++testing::multiviewBuilds; }
+ShaderInfo build_shader_info(const ShaderConfig& config) noexcept {
+  ShaderInfo info{};
+  info.sampledTextures[0] = testing::sampledTexture;
+  return info;
+}
 gfx::Range build_uniform(const ShaderInfo& info) noexcept { return {.size = 1}; }
 gfx::Range build_uniform(const ShaderInfo& info, std::array<uint32_t, 2>& stereoUniformOffsets) noexcept {
   stereoUniformOffsets = {UINT32_MAX, UINT32_MAX};
@@ -133,6 +147,18 @@ std::array<gfx::BindGroupRef, 2> build_stereo_bind_groups(const ShaderInfo& info
 
 // --- Stereo replay stubs (the FIFO never runs immersive here) ---
 namespace aurora::gfx {
+namespace testing {
+uint32_t frame = 0;
+bool bindGroupsAlive = true;
+bool multiview = false;
+uint64_t stereoEpoch = 1;
+} // namespace testing
+uint32_t current_frame() noexcept { return testing::frame; }
+bool touch_bind_group(BindGroupRef) { return testing::bindGroupsAlive; }
+bool recording_multiview() noexcept { return testing::multiview; }
+uint8_t stereo_multiview_mode() noexcept { return 0; }
+uint32_t align_uniform(uint32_t value) { return (value + 255u) & ~255u; }
+PipelineRef clear_multiview_pipeline_ref(const clear::PipelineConfig&) noexcept { return 0; }
 void set_stereo_draw_route(uint8_t route) noexcept {}
 uint8_t stereo_draw_route() noexcept { return 0; }
 void set_stereo_head_locked_plane(float tanHalfWidth, float tanHalfHeight, float distance) noexcept {}
@@ -140,13 +166,15 @@ stereo_replay::HeadLockedPlane stereo_head_locked_plane() noexcept { return {}; 
 void set_stereo_screen_tex_mtx(uint8_t texSlot, uint8_t pnSlot) noexcept {}
 StereoScreenTexMtx stereo_screen_tex_mtx() noexcept { return {}; }
 namespace stereo_shadow {
-bool active() noexcept { return false; }
-uint64_t epoch() noexcept { return 0; }
+bool active() noexcept { return testing::multiview; }
+uint64_t epoch() noexcept { return testing::stereoEpoch; }
 } // namespace stereo_shadow
 } // namespace aurora::gfx
 
 // --- Buffer push stubs ---
 namespace aurora::gfx {
+ByteBuffer* staging_verts() noexcept { return nullptr; }
+ByteBuffer* staging_indices() noexcept { return nullptr; }
 Range push_verts(const uint8_t* data, size_t length, size_t alignment) { return {}; }
 Range push_indices(const uint8_t* data, size_t length, size_t alignment) { return {}; }
 Range push_uniform(const uint8_t* data, size_t length) { return {}; }
@@ -213,6 +241,7 @@ gx::DrawData* get_last_draw_command() {
 
 // --- TextureBind::get_descriptor ---
 namespace aurora::gfx {
+void TextureRef::count_live(int) noexcept {}
 wgpu::SamplerDescriptor TextureBind::get_descriptor() const noexcept { return wgpu::SamplerDescriptor{}; }
 } // namespace aurora::gfx
 
@@ -356,3 +385,32 @@ void aurora::gfx::push_debug_group(std::string) {}
 void push_debug_group(const char*) {}
 void pop_debug_group() {}
 void aurora::gfx::insert_debug_marker(std::string) {}
+
+// Disabled diagnostics for the asset-free FIFO tests.
+namespace aurora::gfx::perf {
+bool enabled() noexcept { return false; }
+std::atomic<uint64_t> g_fifoNs{0};
+std::atomic<uint64_t> g_fifoBytes{0};
+std::atomic<uint64_t> g_encodeNs{0};
+std::atomic<uint64_t> g_submitNs{0};
+std::atomic<uint64_t> g_fifoXfTicks{0};
+std::atomic<uint64_t> g_fifoBpTicks{0};
+std::atomic<uint64_t> g_fifoCpTicks{0};
+std::atomic<uint64_t> g_fifoAuroraTicks{0};
+std::atomic<uint64_t> g_fifoVertsTicks{0};
+std::atomic<uint64_t> g_fifoPipelineTicks{0};
+std::atomic<uint64_t> g_fifoBindsTicks{0};
+std::atomic<uint64_t> g_fifoUniformTicks{0};
+std::atomic<uint64_t> g_fifoPushTicks{0};
+std::atomic<uint32_t> g_fifoXfLoads{0};
+std::atomic<uint32_t> g_fifoBpLoads{0};
+std::atomic<uint32_t> g_fifoDrawsMerged{0};
+std::atomic<uint32_t> g_fifoDrawsPushed{0};
+std::atomic<uint32_t> g_fifoPipelineBuilds{0};
+std::atomic<uint32_t> g_fifoBindGroupBuilds{0};
+std::atomic<uint32_t> g_fifoBindGroupMisses{0};
+std::atomic<uint64_t> g_fifoResolveTicks{0};
+std::atomic<uint32_t> g_fifoUniformBuilds{0};
+std::atomic<uint64_t> g_drainWaitNs{0};
+std::atomic<uint32_t> g_drainCalls{0};
+}

@@ -138,6 +138,11 @@ bool sHudWide = false;
 int sHudScale = PortDebug::kHudScaleMax;
 bool sHideHelmet = false;
 bool sHideVisorEffects = false;
+bool sHideMinimap = false;
+// Game-thread phases (NoteFramePhase), accumulated over RecordFrame's window.
+uint64_t sPhaseNs[PortDebug::kPhaseCount] = {};
+double sPhaseMs[PortDebug::kPhaseCount] = {};
+uint32_t sTimingLoops = 0;
 bool sRevealMap = false;
 bool sMapPickups = false;
 bool sMapLogicColors = true;
@@ -392,6 +397,8 @@ void ApplySetting(const std::string& key, const std::string& value) {
     sHideHelmet = ParseBool(value);
   } else if (key == "hide_visor_effects") {
     sHideVisorEffects = ParseBool(value);
+  } else if (key == "hide_minimap") {
+    sHideMinimap = ParseBool(value);
   } else if (key == "reveal_map") {
     sRevealMap = ParseBool(value);
   } else if (key == "map_pickups") {
@@ -612,6 +619,7 @@ void SaveSettings() {
   file << "hud_scale=" << sHudScale << '\n';
   file << "hide_helmet=" << (sHideHelmet ? 1 : 0) << '\n';
   file << "hide_visor_effects=" << (sHideVisorEffects ? 1 : 0) << '\n';
+  file << "hide_minimap=" << (sHideMinimap ? 1 : 0) << '\n';
   file << "reveal_map=" << (sRevealMap ? 1 : 0) << '\n';
   file << "map_pickups=" << (sMapPickups ? 1 : 0) << '\n';
   file << "map_logic_colors=" << (sMapLogicColors ? 1 : 0) << '\n';
@@ -1002,6 +1010,7 @@ bool FrameLimitEnabled() {
 void RecordFrame(uint64_t durationNs, unsigned ticks, bool presented) {
   sTimingNs += durationNs;
   sTimingTicks += ticks;
+  ++sTimingLoops;
   if (presented) ++sTimingFrames;
   // Wall-clock time for the same span, kept separately from the frame's own
   // duration. Dividing presented frames by the frame's CPU time reports
@@ -1023,6 +1032,11 @@ void RecordFrame(uint64_t durationNs, unsigned ticks, bool presented) {
     sActualFps = sTimingFrames / (wallSeconds > 0.0 ? wallSeconds : seconds);
     sThroughputFps = sTimingFrames / seconds;
     sActualTps = sTimingTicks / seconds;
+    for (int i = 0; i < kPhaseCount; ++i) {
+      sPhaseMs[i] = sTimingLoops > 0 ? static_cast<double>(sPhaseNs[i]) / 1.0e6 / sTimingLoops : 0.0;
+      sPhaseNs[i] = 0;
+    }
+    sTimingLoops = 0;
     if (sTraceTiming) {
       std::fprintf(stderr,
                    "[timing] presented=%.1f FPS throughput=%.1f FPS simulation=%.1f ticks/s cap=%s\n",
@@ -1139,6 +1153,19 @@ void SetHideVisorEffects(bool enabled) {
   sHideVisorEffects = enabled;
   MarkDirty();
 }
+
+bool HideMinimap() {
+  EnsureInitialized();
+  return sHideMinimap;
+}
+
+void SetHideMinimap(bool enabled) {
+  EnsureInitialized();
+  sHideMinimap = enabled;
+  MarkDirty();
+}
+
+void NoteFramePhase(FramePhase phase, uint64_t nanoseconds) { sPhaseNs[phase] += nanoseconds; }
 
 bool RevealMap() {
   EnsureInitialized();
@@ -2574,6 +2601,8 @@ void DrawPerformanceTab() {
     ImGui::Text("Measured simulation: %.1f ticks/s (target %u)", sActualTps, sSimRate);
   }
   ImGui::Text("Frame time: %.2f ms", static_cast< double >(ImGui::GetIO().DeltaTime) * 1000.0);
+  ImGui::Text("Game thread per frame: update %.2f ms, world draw %.2f ms, HUD draw %.2f ms", sPhaseMs[kPhaseUpdate],
+              sPhaseMs[kPhaseDrawWorld], sPhaseMs[kPhaseDrawGui]);
 
   bool interpolate = sFrameInterpolation;
   if (ImGui::Checkbox("Per-frame look (uncapped)", &interpolate)) {
@@ -3619,6 +3648,11 @@ void DrawRenderTab() {
   bool hideVisorFx = sHideVisorEffects;
   if (ImGui::Checkbox("Hide visor effects", &hideVisorFx)) {
     SetHideVisorEffects(hideVisorFx);
+  }
+  ImGui::SameLine();
+  bool hideMinimap = sHideMinimap;
+  if (ImGui::Checkbox("Hide minimap", &hideMinimap)) {
+    SetHideMinimap(hideMinimap);
   }
   ImGui::TextWrapped(
       "Visor effects: steam, Samus's reflection, and rain, water and goo on the visor.");

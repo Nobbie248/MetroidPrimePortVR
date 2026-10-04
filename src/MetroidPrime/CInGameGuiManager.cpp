@@ -270,6 +270,9 @@ void CInGameGuiManager::StartFadeIn() {
 }
 
 void CInGameGuiManager::Draw(const CStateManager& mgr) const {
+#ifdef TARGET_PC
+  const PortDebug::ScopedPhaseTimer phaseTimer(PortDebug::kPhaseDrawGui);
+#endif
   if (!GetIsGameDraw()) {
     gpRender->SetRequestRGBA6(true);
   }
@@ -383,7 +386,12 @@ void CInGameGuiManager::Draw(const CStateManager& mgr) const {
   if (preDrawBlur) {
     x3c_pauseScreenBlur->Draw(mgr);
   }
-  if (notInCine && x1e8_enableAutoMapper != 0 &&
+#ifdef TARGET_PC
+  const bool drawMinimap = !PortDebug::HideMinimap();
+#else
+  const bool drawMinimap = true;
+#endif
+  if (drawMinimap && notInCine && x1e8_enableAutoMapper != 0 &&
       (x3c_pauseScreenBlur->IsGameDraw() || IsInOrTransitioningToOrFromState(kIGGS_MapScreen))) {
     const CPlayerState& playerState = *mgr.GetPlayerState();
     const CPlayer::EPlayerMorphBallState morphState =

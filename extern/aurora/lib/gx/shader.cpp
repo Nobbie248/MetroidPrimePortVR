@@ -1467,7 +1467,11 @@ namespace {
 //    mask 0 when both eyes share one), for a draw whose texture matrix differs per
 //    eye. A uniform indexed by the view is slower on Adreno (it stays out of the
 //    constant registers, and the views share no work), so it is the exception.
+//  - EyeClipImmediate: MultiviewClip's uniform in a per-eye pass: no multiview extension
+//    or array textures, the eye from the immediates (imm.eye_mask) instead of the view.
 std::string to_multiview_source(std::string source, uint32_t uniformSize, MultiviewMode mode) {
+  const bool byImmediate = mode == EyeClipImmediate;
+  const bool clip = mode == MultiviewClip || byImmediate;
   bool complete = true;
   const auto replace_once = [&](std::string_view from, std::string_view to) {
     const size_t pos = source.find(from);
@@ -1478,7 +1482,7 @@ std::string to_multiview_source(std::string source, uint32_t uniformSize, Multiv
     source.replace(pos, from.size(), to);
   };
   // GX texture samples go through helpers that add the layer (textures named tex0..tex7).
-  for (size_t pos = 0; (pos = source.find("textureSample", pos)) != std::string::npos;) {
+  for (size_t pos = 0; !byImmediate && (pos = source.find("textureSample", pos)) != std::string::npos;) {
     size_t end = pos + std::string_view{"textureSample"}.size();
     for (const std::string_view suffix : {"Bias"sv, "Grad"sv, "Level"sv}) {
       if (source.compare(end, suffix.size(), suffix) == 0) {
@@ -1497,17 +1501,19 @@ std::string to_multiview_source(std::string source, uint32_t uniformSize, Multiv
       pos = end;
     }
   }
-  for (size_t pos = 0; (pos = source.find("texture_2d<f32>", pos)) != std::string::npos;) {
+  for (size_t pos = 0; !byImmediate && (pos = source.find("texture_2d<f32>", pos)) != std::string::npos;) {
     source.replace(pos, std::string_view{"texture_2d<f32>"}.size(), "texture_2d_array<f32>");
   }
   replace_once("    _pad: u32,", "    eye_mask: u32,");
-  replace_once("fn vs_main(\n    @builtin(vertex_index) vidx: u32",
-               "fn vs_main(\n    @builtin(view_index) mv_view_in: u32,\n    @builtin(vertex_index) vidx: u32");
+  if (!byImmediate) {
+    replace_once("fn vs_main(\n    @builtin(vertex_index) vidx: u32",
+                 "fn vs_main(\n    @builtin(view_index) mv_view_in: u32,\n    @builtin(vertex_index) vidx: u32");
+  }
   constexpr std::string_view fragmentEntry = "fn fs_main(in: VertexOutput) -> @location(0) vec4f {";
   constexpr std::string_view fragmentEntryView =
       "fn fs_main(in: VertexOutput, @builtin(view_index) mv_view_in: u32) -> @location(0) vec4f {\n"
       "    mv_view = mv_view_in;";
-  if (mode == MultiviewClip) {
+  if (clip) {
     replace_once("var<uniform> ubuf: Uniform;", "var<uniform> ubuf_mv: UniformMV;");
     constexpr std::string_view bodyStart = "    var out: VertexOutput;";
     constexpr std::string_view bodyEnd = "\n    return out;\n}";
@@ -1535,10 +1541,13 @@ std::string to_multiview_source(std::string source, uint32_t uniformSize, Multiv
         complete = false;
       }
       source.replace(bodyBegin, end - bodyBegin,
-                     "\n    mv_view = mv_view_in;\n    let ubuf = &ubuf_mv.u;\n    let mv_eye1 = mv_view_in != 0u;" +
+                     (byImmediate ? "\n    let ubuf = &ubuf_mv.u;\n    let mv_eye1 = imm.eye_mask != 0u;"
+                                  : "\n    mv_view = mv_view_in;\n    let ubuf = &ubuf_mv.u;\n    let mv_eye1 = "
+                                    "mv_view_in != 0u;") +
                          body);
     }
-    replace_once(fragmentEntry, std::string{fragmentEntryView} + "\n    let ubuf = &ubuf_mv.u;");
+    replace_once(fragmentEntry,
+                 std::string{byImmediate ? fragmentEntry : fragmentEntryView} + "\n    let ubuf = &ubuf_mv.u;");
   } else {
     replace_once("var<uniform> ubuf: Uniform;", "var<uniform> ubuf_eyes: array<UniformEye, 2>;");
     replace_once("    var out: VertexOutput;", "    var out: VertexOutput;\n    mv_view = mv_view_in;\n"
@@ -1555,42 +1564,43 @@ std::string to_multiview_source(std::string source, uint32_t uniformSize, Multiv
   if (!complete) {
     Log.error("Multiview shader rewrite missed an anchor; the generated shader changed shape");
   }
-  return fmt::format(R"""(enable chromium_experimental_multiview;
-{0}
+  static constexpr std::string_view kMultiviewHelpers = R"""(
+var<private> mv_view: u32;
+
+fn mv_layer(t: texture_2d_array<f32>) -> u32 {
+    return min(mv_view, textureNumLayers(t) - 1u);
+}
+
+fn mvSample(t: texture_2d_array<f32>, s: sampler, uv: vec2f) -> vec4f {
+    return textureSample(t, s, uv, mv_layer(t));
+}
+
+fn mvSampleBias(t: texture_2d_array<f32>, s: sampler, uv: vec2f, bias: f32) -> vec4f {
+    return textureSampleBias(t, s, uv, mv_layer(t), bias);
+}
+
+fn mvSampleGrad(t: texture_2d_array<f32>, s: sampler, uv: vec2f, ddx: vec2f, ddy: vec2f) -> vec4f {
+    return textureSampleGrad(t, s, uv, mv_layer(t), ddx, ddy);
+}
+
+fn mvSampleLevel(t: texture_2d_array<f32>, s: sampler, uv: vec2f, level: f32) -> vec4f {
+    return textureSampleLevel(t, s, uv, mv_layer(t), level);
+}
+)""";
+  return fmt::format(R"""({0}{1}
 struct UniformEye {{
-    @size({1}) u: Uniform,
+    @size({2}) u: Uniform,
 }};
 
 struct UniformMV {{
-    @size({1}) u: Uniform,
+    @size({2}) u: Uniform,
     eye_clip0: mat4x4f,
     eye_clip1: mat4x4f,
     eye_render: vec4f,
 }};
-
-var<private> mv_view: u32;
-
-fn mv_layer(t: texture_2d_array<f32>) -> u32 {{
-    return min(mv_view, textureNumLayers(t) - 1u);
-}}
-
-fn mvSample(t: texture_2d_array<f32>, s: sampler, uv: vec2f) -> vec4f {{
-    return textureSample(t, s, uv, mv_layer(t));
-}}
-
-fn mvSampleBias(t: texture_2d_array<f32>, s: sampler, uv: vec2f, bias: f32) -> vec4f {{
-    return textureSampleBias(t, s, uv, mv_layer(t), bias);
-}}
-
-fn mvSampleGrad(t: texture_2d_array<f32>, s: sampler, uv: vec2f, ddx: vec2f, ddy: vec2f) -> vec4f {{
-    return textureSampleGrad(t, s, uv, mv_layer(t), ddx, ddy);
-}}
-
-fn mvSampleLevel(t: texture_2d_array<f32>, s: sampler, uv: vec2f, level: f32) -> vec4f {{
-    return textureSampleLevel(t, s, uv, mv_layer(t), level);
-}}
-)""",
-                     source, uniformSize);
+{3})""",
+                     byImmediate ? ""sv : "enable chromium_experimental_multiview;\n"sv, source, uniformSize,
+                     byImmediate ? ""sv : kMultiviewHelpers);
 }
 } // namespace
 

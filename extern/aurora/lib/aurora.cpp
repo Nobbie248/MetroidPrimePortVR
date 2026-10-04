@@ -15,6 +15,7 @@
 #include "stereo_host.hpp"
 #include "webgpu/gpu.hpp"
 #include "webgpu/gpu_prof.hpp"
+#include "gfx/perf_counters.hpp"
 #include <webgpu/webgpu_cpp.h>
 #endif
 
@@ -572,6 +573,7 @@ void end_frame(uint64_t contentTag) noexcept {
     const auto buffer = encoder.Finish(&cmdBufDescriptor);
     {
       ZoneScopedN("Queue Submit");
+      const gfx::perf::Timer timer{gfx::perf::g_submitNs};
       g_queue.Submit(1, &buffer);
     }
     webgpu::gpu_prof::after_submit();

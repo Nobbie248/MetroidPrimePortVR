@@ -104,6 +104,16 @@ wgpu::BindGroup find_bind_group(BindGroupRef id) {
   return it->second.bindGroup;
 }
 
+bool touch_bind_group(BindGroupRef id) {
+  std::lock_guard lock{g_bindGroupCacheMutex};
+  const auto it = g_cachedBindGroups.find(id);
+  if (it == g_cachedBindGroups.end()) {
+    return false;
+  }
+  it->second.lastUsedFrame = current_frame();
+  return true;
+}
+
 wgpu::Sampler sampler_ref(const wgpu::SamplerDescriptor& descriptor) {
   const auto id = xxh3_hash(descriptor);
   std::lock_guard lock{g_samplerCacheMutex};

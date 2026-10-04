@@ -6,6 +6,7 @@
 
 #include "gx_test_common.hpp"
 #include "__gx.h"
+#include "gx/pipeline.hpp"
 
 #include <algorithm>
 #include <atomic>
@@ -16,7 +17,22 @@
 
 using aurora::gx::g_gxState;
 
+namespace aurora::gx::testing {
+extern bool sampledTexture;
+extern uint64_t bindGeneration;
+extern uint32_t bindBuilds;
+extern uint32_t multiviewBuilds;
+}
+
+namespace aurora::gfx::testing {
+extern uint32_t frame;
+extern bool bindGroupsAlive;
+extern bool multiview;
+extern uint64_t stereoEpoch;
+}
+
 namespace aurora::gfx {
+extern gx::DrawData g_testLastDraw;
 extern uint32_t g_testDrawCount;
 extern std::atomic<uint32_t> g_testProcessedDrawCount;
 namespace testing {
@@ -27,6 +43,102 @@ extern std::atomic<uint32_t> offscreenWidth;
 extern std::atomic<uint32_t> offscreenHeight;
 } // namespace testing
 } // namespace aurora::gfx
+
+// Exercise the real FIFO draw/cache path, with stub GPU resources so lifetime
+// and descriptor changes can be tested without a graphics device.
+class GXBindGroupCacheTest : public GXFifoTest {
+protected:
+  void SetUp() override {
+    GXFifoTest::SetUp();
+    aurora::gx::testing::sampledTexture = true;
+    aurora::gx::testing::bindGeneration = 1;
+    aurora::gx::testing::bindBuilds = 0;
+    aurora::gx::testing::multiviewBuilds = 0;
+    aurora::gfx::testing::frame = 0;
+    aurora::gfx::testing::bindGroupsAlive = true;
+    aurora::gfx::testing::multiview = false;
+    aurora::gfx::testing::stereoEpoch = 1;
+    SetTexture(1);
+  }
+
+  void TearDown() override {
+    aurora::gx::testing::sampledTexture = false;
+    aurora::gfx::testing::multiview = false;
+    GXFifoTest::TearDown();
+  }
+
+  void SetTexture(uintptr_t view) {
+    g_gxState.textures[0].ref = std::make_shared<aurora::gfx::TextureRef>(
+        wgpu::Texture{}, wgpu::TextureView::Acquire(reinterpret_cast<WGPUTextureView>(view)),
+        wgpu::TextureView{}, wgpu::Extent3D{32, 32, 1}, wgpu::TextureFormat::RGBA8Unorm, 1, GX_TF_RGBA8);
+  }
+
+  aurora::gfx::BindGroupRef Draw() {
+    g_gxState.dirty |= aurora::gx::DirtyPipeline | aurora::gx::DirtyTextures;
+    // Zero enabled attributes: the three vertices have no payload in this test.
+    decode_fifo({static_cast<u8>(GX_TRIANGLES), 0, 3});
+    return aurora::gfx::g_testLastDraw.bindGroups.textureBindGroup;
+  }
+
+  void NextFrame() {
+    aurora::gx::fifo::end_frame();
+    ++aurora::gfx::testing::frame;
+    ++aurora::gfx::testing::stereoEpoch;
+  }
+};
+
+TEST_F(GXBindGroupCacheTest, ReusesUnchangedMaterialAcrossFramesAndGlobalInvalidation) {
+  const auto first = Draw();
+  NextFrame();
+  ++aurora::gx::testing::bindGeneration;
+  EXPECT_EQ(Draw(), first);
+  EXPECT_EQ(aurora::gx::testing::bindBuilds, 1u);
+}
+
+TEST_F(GXBindGroupCacheTest, ChangedViewAndSamplerRebuildBindings) {
+  const auto first = Draw();
+  NextFrame();
+  SetTexture(2);
+  const auto second = Draw();
+  EXPECT_NE(second, first);
+  g_gxState.textures[0].texObj.mode0 ^= 1;
+  EXPECT_NE(Draw(), second);
+  EXPECT_EQ(aurora::gx::testing::bindBuilds, 3u);
+}
+
+TEST_F(GXBindGroupCacheTest, ReplacementSamplerPolicyRebuildsBindings) {
+  const auto first = Draw();
+  g_gxState.textures[0].ref->isReplacement = true;
+  const auto second = Draw();
+  EXPECT_NE(second, first);
+  g_gxState.textures[0].ref->hasArbitraryMips = true;
+  EXPECT_NE(Draw(), second);
+}
+
+TEST_F(GXBindGroupCacheTest, ExpiredResourceRebuildsBeforeReuse) {
+  const auto first = Draw();
+  NextFrame();
+  aurora::gfx::testing::bindGroupsAlive = false;
+  EXPECT_NE(Draw(), first);
+  EXPECT_EQ(aurora::gx::testing::bindBuilds, 2u);
+}
+
+TEST_F(GXBindGroupCacheTest, MultiviewRechecksChangedEyeCopies) {
+  aurora::gfx::testing::multiview = true;
+  Draw();
+  Draw();
+  EXPECT_EQ(aurora::gx::testing::multiviewBuilds, 1u);
+  NextFrame();
+  Draw();
+  EXPECT_EQ(aurora::gx::testing::multiviewBuilds, 2u);
+  EXPECT_EQ(aurora::gx::testing::bindBuilds, 1u);
+}
+
+TEST_F(GXBindGroupCacheTest, FullResetDropsBindingsFromPreviousDevice) {
+  const auto first = Draw();
+  aurora::gx::fifo::reset_draw_cache();
+  EXPECT_NE(Draw(), first);
+}
 
 namespace {
 bool wait_for(const std::atomic<uint32_t>& value, uint32_t expected) {

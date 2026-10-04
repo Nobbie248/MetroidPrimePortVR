@@ -27,7 +27,8 @@ struct DrawData {
   // [0] is the multiview pipeline's bind group, of 2D array views.
   std::array<gfx::BindGroupRef, 2> stereoTextureBindGroup{};
   // Multiview: the pipeline that draws both views of an eye pass, with the
-  // uniform pair at stereoUniformOffset[0]; zero when the frame replays per eye.
+  // uniform pair at stereoUniformOffset[0]. In a frame replayed per eye, the
+  // EyeClipImmediate pipeline for a draw staged with its eye clips, else zero.
   gfx::PipelineRef multiviewPipeline{};
 };
 

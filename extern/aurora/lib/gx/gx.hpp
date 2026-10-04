@@ -86,6 +86,9 @@ enum MultiviewMode : u8 {
   // A pair of full eye uniforms, element view_index: a texture matrix that projects
   // onto the screen differs per eye (AuroraSetStereoScreenTexMtx).
   MultiviewFull = 2,
+  // MultiviewClip's uniform in the per-eye passes of a frame without multiview: the
+  // eye is the draw's immediate (DrawImmediateData::eyeMask, 0 or 1), set per pass.
+  EyeClipImmediate = 3,
 };
 
 struct DrawImmediateData {
@@ -535,9 +538,10 @@ struct ShaderConfig {
   u8 vtxStride = 0;
   u8 lineMode : 2 = 0; // 1 = GX_LINES, 2 = GX_LINESTRIP, 3 = GX_POINTS
   u8 fogRangeEnabled : 1 = false;
-  // Stereo replay under Vulkan multiview (gfx/stereo_multiview.hpp): the shader
-  // draws both views of an eye pass, MultiviewClip or MultiviewFull. Taken from
-  // the padding, so the configs (and pipeline cache keys) without it keep their bytes.
+  // Stereo replay (gfx/stereo_multiview.hpp): the shader draws both views of a
+  // multiview eye pass (MultiviewClip or MultiviewFull), or one eye of a per-eye pass
+  // from the same clip block (EyeClipImmediate). Taken from the padding, so the
+  // configs (and pipeline cache keys) without it keep their bytes.
   u8 multiview : 2 = 0;
   u8 pad1 : 3 = 0;
   u8 pbr = 0; // GX_AURORA_SET_PBR

@@ -8,6 +8,7 @@
 
 #include "clear.hpp"
 #include "draw_payload.hpp"
+#include "perf_counters.hpp"
 #include "pipeline_cache.hpp"
 #include "stereo_eyes.hpp"
 #include "stereo_shadow.hpp"
@@ -94,6 +95,37 @@ std::atomic_bool g_stereoDiagnostics{false};
 // stereo statistics lines (log_stereo_frame_stats), while diagnostics are on.
 std::atomic<uint64_t> g_eyeUniformNs{0};
 std::atomic<uint32_t> g_eyeUniformDraws{0};
+} // namespace
+
+namespace perf {
+std::atomic<uint64_t> g_fifoNs{0};
+std::atomic<uint64_t> g_fifoBytes{0};
+std::atomic<uint64_t> g_encodeNs{0};
+std::atomic<uint64_t> g_submitNs{0};
+std::atomic<uint64_t> g_fifoXfTicks{0};
+std::atomic<uint64_t> g_fifoBpTicks{0};
+std::atomic<uint64_t> g_fifoCpTicks{0};
+std::atomic<uint64_t> g_fifoAuroraTicks{0};
+std::atomic<uint64_t> g_fifoVertsTicks{0};
+std::atomic<uint64_t> g_fifoPipelineTicks{0};
+std::atomic<uint64_t> g_fifoBindsTicks{0};
+std::atomic<uint64_t> g_fifoUniformTicks{0};
+std::atomic<uint64_t> g_fifoPushTicks{0};
+std::atomic<uint32_t> g_fifoXfLoads{0};
+std::atomic<uint32_t> g_fifoBpLoads{0};
+std::atomic<uint32_t> g_fifoDrawsMerged{0};
+std::atomic<uint32_t> g_fifoDrawsPushed{0};
+std::atomic<uint32_t> g_fifoPipelineBuilds{0};
+std::atomic<uint32_t> g_fifoBindGroupBuilds{0};
+std::atomic<uint32_t> g_fifoBindGroupMisses{0};
+std::atomic<uint64_t> g_fifoResolveTicks{0};
+std::atomic<uint32_t> g_fifoUniformBuilds{0};
+std::atomic<uint64_t> g_drainWaitNs{0};
+std::atomic<uint32_t> g_drainCalls{0};
+bool enabled() noexcept { return g_stereoDiagnostics.load(std::memory_order_relaxed); }
+} // namespace perf
+
+namespace {
 
 void log_stereo_frame_stats(const FramePacket& frame) {
   static uint32_t sImmersiveFrames = 0;
@@ -118,13 +150,68 @@ void log_stereo_frame_stats(const FramePacket& frame) {
   const double eyeUniformMs =
       static_cast<double>(g_eyeUniformNs.exchange(0, std::memory_order_relaxed)) / 600.0 / 1.0e6;
   const uint32_t eyeUniformDraws = g_eyeUniformDraws.exchange(0, std::memory_order_relaxed) / 600;
+  const auto perFrameMs = [](std::atomic<uint64_t>& ns) {
+    return static_cast<double>(ns.exchange(0, std::memory_order_relaxed)) / 600.0 / 1.0e6;
+  };
+  const double fifoMs = perFrameMs(perf::g_fifoNs);
+  const uint64_t fifoKb = perf::g_fifoBytes.exchange(0, std::memory_order_relaxed) / 600 / 1024;
+  const double drainWaitMs = perFrameMs(perf::g_drainWaitNs);
+  const uint32_t drainCalls = perf::g_drainCalls.exchange(0, std::memory_order_relaxed) / 600;
+  const double encodeMs = perFrameMs(perf::g_encodeNs);
+  const double submitMs = perFrameMs(perf::g_submitNs);
+  const auto& uploads = resources().stats;
   Log.info("stereo frame: {} passes ({} EFB, {} replayed per eye, {} eyes only, {} discarded), {} EFB copies "
            "({} taken per eye), {} draws (world {}, head-locked {}, head-locked 2D {}, fullscreen {}, sky {}, "
-           "skipped {}), eye uniforms {:.2f} ms/frame ({} draws)",
+           "skipped {}), eye uniforms {:.2f} ms/frame ({} draws); per frame: fifo {:.2f} ms ({} KB), game waits "
+           "for fifo {:.2f} ms ({} drains), encode {:.2f} ms, submit {:.2f} ms; uploads verts {} KB, indices {} KB, "
+           "uniforms {} KB, storage {} KB, textures {} KB",
            frame.renderPasses.size(), efbPasses, eyePasses, monoSkipped, discarded, copies, eyeCopies,
            g_recorder.drawCallCount, routes[AURORA_STEREO_ROUTE_WORLD], routes[AURORA_STEREO_ROUTE_HEAD_LOCKED],
            routes[AURORA_STEREO_ROUTE_HEAD_LOCKED_2D], routes[AURORA_STEREO_ROUTE_FULLSCREEN],
-           routes[AURORA_STEREO_ROUTE_SKY], routes[AURORA_STEREO_ROUTE_SKIP], eyeUniformMs, eyeUniformDraws);
+           routes[AURORA_STEREO_ROUTE_SKY], routes[AURORA_STEREO_ROUTE_SKIP], eyeUniformMs, eyeUniformDraws, fifoMs,
+           fifoKb, drainWaitMs, drainCalls, encodeMs, submitMs, uploads.lastVertSize / 1024,
+           uploads.lastIndexSize / 1024, uploads.lastUniformSize / 1024, uploads.lastStorageSize / 1024,
+           uploads.lastTextureUploadSize / 1024);
+  // The FIFO processor's buckets, in ticks calibrated over the window since the
+  // last line (the first line, with no window yet, shows zeros).
+  static uint64_t sLastTick = perf::tick();
+  static auto sLastSteady = std::chrono::steady_clock::now();
+  const uint64_t nowTick = perf::tick();
+  const auto nowSteady = std::chrono::steady_clock::now();
+  const double windowNs =
+      static_cast<double>(std::chrono::duration_cast<std::chrono::nanoseconds>(nowSteady - sLastSteady).count());
+  const double ticksPerNs = windowNs > 0.0 ? static_cast<double>(nowTick - sLastTick) / windowNs : 0.0;
+  sLastTick = nowTick;
+  sLastSteady = nowSteady;
+  const auto bucketMs = [ticksPerNs](std::atomic<uint64_t>& ticks) {
+    const auto value = static_cast<double>(ticks.exchange(0, std::memory_order_relaxed));
+    return ticksPerNs > 0.0 ? value / ticksPerNs / 600.0 / 1.0e6 : 0.0;
+  };
+  const auto perFrame = [](std::atomic<uint32_t>& calls) { return calls.exchange(0, std::memory_order_relaxed) / 600; };
+  const double xfMs = bucketMs(perf::g_fifoXfTicks);
+  const uint32_t xfLoads = perFrame(perf::g_fifoXfLoads);
+  const double bpMs = bucketMs(perf::g_fifoBpTicks);
+  const uint32_t bpLoads = perFrame(perf::g_fifoBpLoads);
+  const double cpMs = bucketMs(perf::g_fifoCpTicks);
+  const double auroraMs = bucketMs(perf::g_fifoAuroraTicks);
+  const double vertsMs = bucketMs(perf::g_fifoVertsTicks);
+  const uint32_t merged = perFrame(perf::g_fifoDrawsMerged);
+  const uint32_t pushed = perFrame(perf::g_fifoDrawsPushed);
+  const double pipelineMs = bucketMs(perf::g_fifoPipelineTicks);
+  const uint32_t pipelineBuilds = perFrame(perf::g_fifoPipelineBuilds);
+  const double bindsMs = bucketMs(perf::g_fifoBindsTicks);
+  const uint32_t bindGroupBuilds = perFrame(perf::g_fifoBindGroupBuilds);
+  const uint32_t bindGroupMisses = perFrame(perf::g_fifoBindGroupMisses);
+  const double resolveMs = bucketMs(perf::g_fifoResolveTicks);
+  const double uniformMs = bucketMs(perf::g_fifoUniformTicks);
+  const uint32_t uniformBuilds = perFrame(perf::g_fifoUniformBuilds);
+  const double pushMs = bucketMs(perf::g_fifoPushTicks);
+  Log.info("fifo processor per frame: xf {:.2f} ms ({} loads), bp {:.2f} ms ({} loads), cp {:.2f} ms, aurora {:.2f} "
+           "ms; draws {} merged + {} pushed: verts {:.2f} ms, pipeline {:.2f} ms ({} builds), bind groups {:.2f} ms "
+           "({} builds, {} cache misses, resolve {:.2f} ms), uniform {:.2f} ms ({} builds), push {:.2f} ms; tick "
+           "{:.3f} GHz",
+           xfMs, xfLoads, bpMs, bpLoads, cpMs, auroraMs, merged, pushed, vertsMs, pipelineMs, pipelineBuilds, bindsMs,
+           bindGroupBuilds, bindGroupMisses, resolveMs, uniformMs, uniformBuilds, pushMs, ticksPerNs);
 }
 
 std::string pass_label(std::string_view kind) {
@@ -549,6 +636,7 @@ void enqueue_op(FramePacket& frame, uint32_t opIndex) {
     if (op.renderPass == nullptr && op.textureCopy == nullptr && op.encoderTask == nullptr) {
       return;
     }
+    const perf::Timer timer{perf::g_encodeNs};
     encode_op(packet->encoder, *packet, op);
   });
 }
@@ -688,9 +776,9 @@ void seed_offscreen_cache(uint32_t width, uint32_t height, wgpu::TextureFormat c
 
 } // namespace testing
 
-void increment_merged_draw_count() noexcept {
+void increment_merged_draw_count(uint32_t count) noexcept {
   if (g_recorder.active()) {
-    ++g_recorder.mergedDrawCallCount;
+    g_recorder.mergedDrawCallCount += count;
   }
 }
 
@@ -927,9 +1015,10 @@ std::array<uint32_t, 2> stage_stereo_uniforms(const uint8_t* mono, Range monoRan
   const auto& monoSize = pass.colorAttachments[SceneColorAttachmentIndex].size;
   Mat4x4<float> monoProjection;
   std::memcpy(&monoProjection, mono + layout.projectionOffset, sizeof(monoProjection));
-  // Multiview (stereo_multiview.hpp, gx/shader.cpp MultiviewClip): the draw keeps its
-  // mono uniform, followed by each eye's clip matrix and the eyes' render size (the
-  // eye target's, as compose_stereo_uniform makes it, or for 2D content the mono one).
+  // gx/shader.cpp MultiviewClip (and EyeClipImmediate for a frame replayed per eye):
+  // the draw keeps its mono uniform, followed by each eye's clip matrix and the eyes'
+  // render size (the eye target's, as compose_stereo_uniform makes it, or for 2D
+  // content the mono one).
   const auto stage_eye_clips = [&](const std::array<Mat4x4<float>, AURORA_STEREO_EYE_COUNT>& clips,
                                    bool eyeRenderSize) {
     struct EyeClipBlock {
@@ -989,7 +1078,7 @@ std::array<uint32_t, 2> stage_stereo_uniforms(const uint8_t* mono, Range monoRan
   // under multiview such a draw takes the full eye copies (MultiviewFull).
   const auto screenTexMtx = g_recorder.stereoScreenTexMtx;
   const bool perEyeTexMtx = !onPlane && screenTexMtx.texSlot != 0xFF;
-  if (state.multiview && !perEyeTexMtx) {
+  if (!perEyeTexMtx) {
     std::array<Mat4x4<float>, AURORA_STEREO_EYE_COUNT> clips;
     for (uint32_t eye = 0; eye < AURORA_STEREO_EYE_COUNT; ++eye) {
       const auto& params = state.eyes[eye];
@@ -1462,7 +1551,8 @@ void finish() {
   if (g_recorder.currentRenderPass != UINT32_MAX) {
     auto& frame = current_frame_packet();
     // A multiview draw's binding spans an eye pair (stereo_multiview.hpp).
-    frame.uniforms.append_zeroes(frame.stereo.multiview ? 2 * gx::MaxUniformSize : gx::MaxUniformSize);
+    // The eye clip block's bind group spans two uniforms past any offset (frame.cpp).
+    frame.uniforms.append_zeroes(2 * gx::MaxUniformSize);
     auto& pass = frame.renderPasses[g_recorder.currentRenderPass];
     pass.captureDepthSnapshot = true;
     // Honoured only if sealing gives the pass its eye passes (encoding.cpp).
@@ -1490,6 +1580,10 @@ Range push_indices(const uint8_t* data, size_t length, size_t alignment) {
   }
   return push(current_frame_packet().indices, data, length, alignment);
 }
+
+ByteBuffer* staging_verts() noexcept { return g_recorder.active() ? &current_frame_packet().verts : nullptr; }
+
+ByteBuffer* staging_indices() noexcept { return g_recorder.active() ? &current_frame_packet().indices : nullptr; }
 
 Range push_uniform(const uint8_t* data, size_t length) {
   ZoneScoped;

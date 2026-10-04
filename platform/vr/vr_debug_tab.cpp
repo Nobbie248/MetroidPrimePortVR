@@ -6,6 +6,7 @@
 #include "vr/prime_vr_policy.h"
 #include "vr/vr_pad.h"
 #include "vr/vr_settings.h"
+#include "vr/vr_log.h"
 
 #include <aurora/gfx.h>
 #include <imgui.h>
@@ -80,6 +81,12 @@ void PortVrNoteHudDraws(uint32_t visor, uint32_t hud, uint32_t map, uint32_t hel
   sHudDrawsHud.store(hud, std::memory_order_relaxed);
   sHudDrawsMap.store(map, std::memory_order_relaxed);
   sHudDrawsHelmet.store(helmet, std::memory_order_relaxed);
+  // To the log with the stereo statistics' cadence while [xr-diag] is on.
+  static uint32_t sCalls = 0;
+  if ((++sCalls % 600) == 0 && GetVrSettings().diagnostics_logging) {
+    PORTVR_LOG() << "[vr] HUD draw commands per frame: visor " << visor << ", HUD " << hud << ", minimap " << map
+                 << ", helmet " << helmet << std::endl;
+  }
 }
 
 void DrawVrDebugTab() {
@@ -249,6 +256,10 @@ void DrawVrDebugTab() {
 
   ImGui::SeparatorText("Diagnostics");
   changed |= ImGui::Checkbox("[xr-diag] logging", &s.diagnostics_logging);
+  if (ImGui::IsItemHovered()) {
+    ImGui::SetTooltip("Includes detailed CPU timers in the graphics command processor. This can reduce throughput, "
+                      "especially in draw-heavy rooms. Disable it when comparing normal performance.");
+  }
 
   if (changed) {
     SetVrSettings(s);

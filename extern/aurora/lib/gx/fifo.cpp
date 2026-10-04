@@ -1,4 +1,5 @@
 #include "fifo.hpp"
+#include "../gfx/perf_counters.hpp"
 
 #include "../thread.hpp"
 #include "command_processor.hpp"
@@ -68,7 +69,13 @@ void process_to(uint64_t target, std::memory_order order) noexcept {
                     published);
       const auto start = static_cast<uint32_t>(processed - sStreamBase);
       const auto size = static_cast<uint32_t>(target - processed);
-      result = process(detail::sBufferData + start, size);
+      {
+        const gfx::perf::Timer timer{gfx::perf::g_fifoNs};
+        result = process(detail::sBufferData + start, size);
+      }
+      if (gfx::perf::enabled()) {
+        gfx::perf::g_fifoBytes.fetch_add(result.bytesProcessed, std::memory_order_relaxed);
+      }
     }
     AURORA_ASSERT(result.bytesProcessed > 0 && result.bytesProcessed <= target - processed,
                   "FIFO processor made invalid progress: processed {} of {} remaining bytes", result.bytesProcessed,
@@ -130,6 +137,7 @@ uint32_t native_thread_id() noexcept { return sWorkerNativeId.load(std::memory_o
 
 void init() {
   stop_worker();
+  reset_draw_cache();
 
   constexpr uint32_t initialCapacity = 64 * 1024;
   free(detail::sBufferData);
@@ -152,7 +160,10 @@ void init() {
   start_worker();
 }
 
-void shutdown() { stop_worker(); }
+void shutdown() {
+  stop_worker();
+  reset_draw_cache();
+}
 
 void begin_frame() noexcept { sFrameActive = true; }
 
@@ -266,8 +277,12 @@ void drain() {
     sPublished.store(target, std::memory_order_release);
     wake_worker();
 
+    if (gfx::perf::enabled()) {
+      gfx::perf::g_drainCalls.fetch_add(1, std::memory_order_relaxed);
+    }
     uint64_t processed = sProcessed.load(std::memory_order_acquire);
     if (processed < target) {
+      const gfx::perf::Timer timer{gfx::perf::g_drainWaitNs};
       do {
         sProcessed.wait(processed, std::memory_order_acquire);
         processed = sProcessed.load(std::memory_order_acquire);

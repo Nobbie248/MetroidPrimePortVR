@@ -25,7 +25,7 @@ struct RecordedFrame {
 void begin_recording(FramePacket& packet, size_t frameSlot);
 RecordedFrame end_recording();
 void shutdown_recording();
-void increment_merged_draw_count() noexcept;
+void increment_merged_draw_count(uint32_t count = 1) noexcept;
 
 namespace testing {
 void suppress_render_worker(bool suppress) noexcept;
@@ -85,6 +85,10 @@ Range push_verts(ArrayRef<T> data, size_t alignment) {
   return push_verts(reinterpret_cast<const uint8_t*>(data.data()), data.size() * sizeof(T), alignment);
 }
 Range push_indices(const uint8_t* data, size_t length, size_t alignment);
+// The frame's vertex and index staging, for gx's strip merging
+// (gx/command_processor.cpp) to append to directly; null outside a frame.
+ByteBuffer* staging_verts() noexcept;
+ByteBuffer* staging_indices() noexcept;
 template <typename T>
 Range push_indices(ArrayRef<T> data, size_t alignment) {
   return push_indices(reinterpret_cast<const uint8_t*>(data.data()), data.size() * sizeof(T), alignment);

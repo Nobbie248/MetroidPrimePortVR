@@ -1331,6 +1331,7 @@ void CStateManager::Update(float dt) {
   if (GetWantsToQuit()) return;
 
 #ifdef TARGET_PC
+  const PortDebug::ScopedPhaseTimer phaseTimer(PortDebug::kPhaseUpdate);
   // The debug free camera can hold the simulation still. The console keeps running.
   if (PortFreeCam::Frozen()) {
     PortConsoleTick(*this);
@@ -2773,6 +2774,7 @@ void CStateManager::PortCaptureProbeFace() const {
 
 void CStateManager::DrawWorld() const {
 #ifdef TARGET_PC
+  const PortDebug::ScopedPhaseTimer phaseTimer(PortDebug::kPhaseDrawWorld);
   PortCaptureProbeFace();
 #endif
   const CTimeProvider timeProvider(xf14_curTimeMod900);

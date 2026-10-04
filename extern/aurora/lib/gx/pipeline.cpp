@@ -15,7 +15,8 @@ namespace aurora::gx {
 
 wgpu::RenderPipeline create_pipeline(const PipelineConfig& config) {
   ZoneScoped;
-  if (config.shaderConfig.multiview && !webgpu::g_multiviewSupported) {
+  if ((config.shaderConfig.multiview == MultiviewClip || config.shaderConfig.multiview == MultiviewFull) &&
+      !webgpu::g_multiviewSupported) {
     // A multiview config from the pipeline cache on a device without the feature
     // (gfx/stereo_multiview.hpp): its shader would not compile. Never bound.
     return {};
@@ -53,13 +54,22 @@ void render_eye(const DrawData& data, const wgpu::RenderPassEncoder& pass, uint3
   if (uniformOffset == UINT32_MAX) {
     return;
   }
-  if (!gfx::bind_pipeline(data.pipeline, pass)) {
+  const auto& resources = gfx::detail::resources();
+  // EyeClipImmediate (a frame without multiview): the mono uniform with the eye clips
+  // after it, the eye named by the immediates.
+  const bool eyeClip = data.multiviewPipeline != gfx::PipelineRef{};
+  if (!gfx::bind_pipeline(eyeClip ? data.multiviewPipeline : data.pipeline, pass)) {
     return;
   }
-
-  const auto& resources = gfx::detail::resources();
-  pass.SetImmediates(0, &data.immediateData, sizeof(data.immediateData));
-  gfx::bind_gx_uniform(pass, resources.uniformBindGroup, uniformOffset);
+  if (eyeClip) {
+    DrawImmediateData immediates = data.immediateData;
+    immediates.eyeMask = eye;
+    pass.SetImmediates(0, &immediates, sizeof(immediates));
+    gfx::bind_gx_uniform(pass, resources.multiviewUniformBindGroup, uniformOffset);
+  } else {
+    pass.SetImmediates(0, &data.immediateData, sizeof(data.immediateData));
+    gfx::bind_gx_uniform(pass, resources.uniformBindGroup, uniformOffset);
+  }
   const gfx::BindGroupRef textureBindGroup =
       data.stereoTextureBindGroup[eye] ? data.stereoTextureBindGroup[eye] : data.bindGroups.textureBindGroup;
   gfx::bind_gx_textures(pass, textureBindGroup);

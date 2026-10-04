@@ -6,6 +6,8 @@ namespace aurora::gfx {
 
 BindGroupRef bind_group_ref(const WGPUBindGroupDescriptor& descriptor);
 wgpu::BindGroup find_bind_group(BindGroupRef id);
+// Keeps a cached bind group from expiring this frame; false once it has.
+bool touch_bind_group(BindGroupRef id);
 wgpu::Sampler sampler_ref(const wgpu::SamplerDescriptor& descriptor);
 
 namespace detail {

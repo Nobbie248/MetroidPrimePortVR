@@ -356,7 +356,9 @@ wgpu::RenderPipeline build_pipeline(const PipelineConfig& config, ArrayRef<wgpu:
       .targetCount = colorTargets.size(),
       .targets = colorTargets.data(),
   };
-  const bool multiview = config.shaderConfig.multiview != 0;
+  // EyeClipImmediate keeps the plain layout: its larger uniform binding is bound at the draw.
+  const bool multiview =
+      config.shaderConfig.multiview == MultiviewClip || config.shaderConfig.multiview == MultiviewFull;
   wgpu::RenderPipelineDescriptor descriptor{
       .label = label,
       .layout = multiview ? sMultiviewPipelineLayout : sPipelineLayout,

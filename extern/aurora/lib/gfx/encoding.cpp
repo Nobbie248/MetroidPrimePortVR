@@ -8,6 +8,7 @@
 #include "stereo_multiview.hpp"
 #include "stereo_shadow.hpp"
 #include "pipeline_cache.hpp"
+#include "resource_cache.hpp"
 #include "probe.hpp"
 #include "tex_copy_conv.hpp"
 #include "tex_palette_conv.hpp"
@@ -42,11 +43,23 @@ PipelineRef g_currentPipeline;
 // null when unknown.
 WGPUBindGroup g_currentUniform = nullptr;
 uint32_t g_currentUniformOffset = 0;
+// ... and the texture bind group and index range (bind_gx_textures, bind_gx_indices).
+BindGroupRef g_currentTextures = 0;
+uint64_t g_currentIndexOffset = UINT64_MAX;
+uint64_t g_currentIndexSize = 0;
+
+// After a draw of another kind, which binds what it needs itself.
+void forget_gx_binds() {
+  g_currentUniform = nullptr;
+  g_currentTextures = 0;
+  g_currentIndexOffset = UINT64_MAX;
+  g_currentIndexSize = 0;
+}
 
 // At a pass's start and end, and after a draw that may bind state of its own.
 void forget_bound_state() {
   g_currentPipeline = UINTPTR_MAX;
-  g_currentUniform = nullptr;
+  forget_gx_binds();
 }
 
 void apply_viewport(const wgpu::RenderPassEncoder& pass, const Viewport& vp) {
@@ -363,7 +376,7 @@ void render_pass(const wgpu::RenderPassEncoder& pass, FramePacket& frame, Render
       if (draw.encoder != nullptr) {
         draw.encoder(draw.payload.data(), pass, passInfo);
         if (draw.kind == DrawKind::Other) {
-          g_currentUniform = nullptr; // RmlUi binds group 1 too
+          forget_gx_binds(); // RmlUi binds its own groups and index buffers
         }
       }
     } break;
@@ -689,5 +702,23 @@ void bind_gx_uniform(const wgpu::RenderPassEncoder& pass, const wgpu::BindGroup&
   pass.SetBindGroup(1, bindGroup, 1, &offset);
   g_currentUniform = bindGroup.Get();
   g_currentUniformOffset = offset;
+}
+
+void bind_gx_textures(const wgpu::RenderPassEncoder& pass, BindGroupRef bindGroup) {
+  if (bindGroup == 0 || bindGroup == g_currentTextures) {
+    return;
+  }
+  pass.SetBindGroup(2, find_bind_group(bindGroup));
+  g_currentTextures = bindGroup;
+}
+
+void bind_gx_indices(const wgpu::RenderPassEncoder& pass, const wgpu::Buffer& buffer, uint64_t offset,
+                     uint64_t size) {
+  if (offset == g_currentIndexOffset && size == g_currentIndexSize) {
+    return;
+  }
+  pass.SetIndexBuffer(buffer, wgpu::IndexFormat::Uint16, offset, size);
+  g_currentIndexOffset = offset;
+  g_currentIndexSize = size;
 }
 } // namespace aurora::gfx

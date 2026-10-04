@@ -103,6 +103,9 @@ static_assert(sizeof(DrawImmediateData) == 64);
 extern wgpu::BindGroup g_emptyTextureBindGroup;
 // The multiview stereo replay's (gfx/stereo_multiview.hpp): 2D array views.
 extern wgpu::BindGroup g_emptyMultiviewTextureBindGroup;
+// GX draw commands the game has issued (GXBegin, GXCallDisplayList), for the port's
+// per-section draw counts (aurora_gx_draw_commands_issued). Game thread only.
+extern uint32_t g_drawCommandsIssued;
 
 template <typename Arg, Arg Default>
 struct TevPass {

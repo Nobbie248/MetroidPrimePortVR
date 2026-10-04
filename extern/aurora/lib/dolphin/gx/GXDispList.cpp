@@ -47,6 +47,7 @@ u32 GXEndDisplayList() {
 }
 
 void GXCallDisplayList(const void* data, u32 nbytes) {
+  ++aurora::gx::g_drawCommandsIssued;
   // Flush any pending dirty state before calling
   if (__gx->dirtyState != 0) {
     __GXSetDirtyState();

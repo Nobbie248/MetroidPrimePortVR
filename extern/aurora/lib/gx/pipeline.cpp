@@ -35,10 +35,8 @@ void render(const DrawData& data, const wgpu::RenderPassEncoder& pass) {
   const auto& resources = gfx::detail::resources();
   pass.SetImmediates(0, &data.immediateData, sizeof(data.immediateData));
   gfx::bind_gx_uniform(pass, resources.uniformBindGroup, data.uniformRange.offset);
-  if (data.bindGroups.textureBindGroup) {
-    pass.SetBindGroup(2, gfx::find_bind_group(data.bindGroups.textureBindGroup));
-  }
-  pass.SetIndexBuffer(resources.indexBuffer, wgpu::IndexFormat::Uint16, data.idxRange.offset, data.idxRange.size);
+  gfx::bind_gx_textures(pass, data.bindGroups.textureBindGroup);
+  gfx::bind_gx_indices(pass, resources.indexBuffer, data.idxRange.offset, data.idxRange.size);
   if (data.dstAlpha != UINT32_MAX) {
     const wgpu::Color color{0.f, 0.f, 0.f, data.dstAlpha / 255.f};
     pass.SetBlendConstant(&color);
@@ -64,10 +62,8 @@ void render_eye(const DrawData& data, const wgpu::RenderPassEncoder& pass, uint3
   gfx::bind_gx_uniform(pass, resources.uniformBindGroup, uniformOffset);
   const gfx::BindGroupRef textureBindGroup =
       data.stereoTextureBindGroup[eye] ? data.stereoTextureBindGroup[eye] : data.bindGroups.textureBindGroup;
-  if (textureBindGroup) {
-    pass.SetBindGroup(2, gfx::find_bind_group(textureBindGroup));
-  }
-  pass.SetIndexBuffer(resources.indexBuffer, wgpu::IndexFormat::Uint16, data.idxRange.offset, data.idxRange.size);
+  gfx::bind_gx_textures(pass, textureBindGroup);
+  gfx::bind_gx_indices(pass, resources.indexBuffer, data.idxRange.offset, data.idxRange.size);
   if (data.dstAlpha != UINT32_MAX) {
     const wgpu::Color color{0.f, 0.f, 0.f, data.dstAlpha / 255.f};
     pass.SetBlendConstant(&color);
@@ -94,10 +90,8 @@ void render_multiview(const DrawData& data, const wgpu::RenderPassEncoder& pass)
   // pair of eye copies from this offset (MultiviewFull; the mono uniform as
   // element 0 when the eye mask is 0).
   gfx::bind_gx_uniform(pass, resources.multiviewUniformBindGroup, uniformOffset);
-  if (data.stereoTextureBindGroup[0]) {
-    pass.SetBindGroup(2, gfx::find_bind_group(data.stereoTextureBindGroup[0]));
-  }
-  pass.SetIndexBuffer(resources.indexBuffer, wgpu::IndexFormat::Uint16, data.idxRange.offset, data.idxRange.size);
+  gfx::bind_gx_textures(pass, data.stereoTextureBindGroup[0]);
+  gfx::bind_gx_indices(pass, resources.indexBuffer, data.idxRange.offset, data.idxRange.size);
   if (data.dstAlpha != UINT32_MAX) {
     const wgpu::Color color{0.f, 0.f, 0.f, data.dstAlpha / 255.f};
     pass.SetBlendConstant(&color);

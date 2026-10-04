@@ -10,6 +10,8 @@
 #include <aurora/gfx.h>
 #include <imgui.h>
 
+#include <atomic>
+
 namespace PortVr {
 namespace {
 
@@ -66,6 +68,20 @@ const char* BeamName(int beam) {
 
 } // namespace
 
+namespace {
+std::atomic<uint32_t> sHudDrawsVisor{0};
+std::atomic<uint32_t> sHudDrawsHud{0};
+std::atomic<uint32_t> sHudDrawsMap{0};
+std::atomic<uint32_t> sHudDrawsHelmet{0};
+} // namespace
+
+void PortVrNoteHudDraws(uint32_t visor, uint32_t hud, uint32_t map, uint32_t helmet) {
+  sHudDrawsVisor.store(visor, std::memory_order_relaxed);
+  sHudDrawsHud.store(hud, std::memory_order_relaxed);
+  sHudDrawsMap.store(map, std::memory_order_relaxed);
+  sHudDrawsHelmet.store(helmet, std::memory_order_relaxed);
+}
+
 void DrawVrDebugTab() {
   PortVrSettings s = GetVrSettings();
   bool changed = false;
@@ -79,6 +95,9 @@ void DrawVrDebugTab() {
     const OpenXRFrameTiming timing = OpenXRGetFrameTiming();
     ImGui::Text("Display %.0f Hz   new frames to the headset: %.1f/s", timing.headset_hz, timing.rendered_fps);
   }
+  ImGui::Text("HUD draw commands per frame: visor %u, HUD %u, minimap %u, helmet %u",
+              sHudDrawsVisor.load(std::memory_order_relaxed), sHudDrawsHud.load(std::memory_order_relaxed),
+              sHudDrawsMap.load(std::memory_order_relaxed), sHudDrawsHelmet.load(std::memory_order_relaxed));
 
   ImGui::SeparatorText("Headset");
   changed |= ImGui::Checkbox("Enable the headset (takes effect at the next start)", &s.enabled);

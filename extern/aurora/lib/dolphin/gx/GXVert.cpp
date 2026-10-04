@@ -32,10 +32,17 @@ void post_begin(u16 nVerts) {
 }
 } // namespace
 
+namespace aurora::gx {
+uint32_t g_drawCommandsIssued = 0;
+} // namespace aurora::gx
+
 extern "C" {
+
+uint32_t aurora_gx_draw_commands_issued(void) { return aurora::gx::g_drawCommandsIssued; }
 
 void GXBegin(GXPrimitive primitive, GXVtxFmt vtxFmt, u16 nVerts) {
   pre_begin();
+  ++aurora::gx::g_drawCommandsIssued;
 
   const u8 drawCmd = static_cast<u8>(vtxFmt) | static_cast<u8>(primitive);
   sBeginAuto = nVerts == GX_AUTO;

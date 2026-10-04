@@ -31,6 +31,7 @@
 #include "dolphin/gx.h"
 #ifdef TARGET_PC
 #include "aurora/gfx.h"
+#include "vr/vr_debug_tab.h"
 #include "vr/vr_view.h"
 #endif
 #include "float.h"
@@ -306,9 +307,24 @@ void CInGameGuiManager::Draw(const CStateManager& mgr) const {
                    x1ec_hudVisMode);
     }
   }
+#ifdef TARGET_PC
+  // PortVr: what each HUD section costs, for the F1 VR tab (PortVrNoteHudDraws).
+  uint32_t drawsVisor = 0;
+  uint32_t drawsHud = 0;
+  uint32_t drawsMap = 0;
+  uint32_t drawsHelmet = 0;
+  uint32_t drawsMark = aurora_gx_draw_commands_issued();
+  const auto drawsSince = [&drawsMark] {
+    const uint32_t now = aurora_gx_draw_commands_issued();
+    const uint32_t count = now - drawsMark;
+    drawsMark = now;
+    return count;
+  };
+#endif
   if (x3c_pauseScreenBlur->IsGameDraw()) {
     x34_samusHud->GetTargetingManager().Draw(mgr, true);
 #ifdef TARGET_PC
+    drawsSince();
     // PortVr: the visor, helmet and HUD are drawn in the GUI camera's own space,
     // so the headset keeps them in front of the head. The reticle above stays in
     // the world (CSamusHud::Draw routes its own reticle draw the same way).
@@ -341,6 +357,9 @@ void CInGameGuiManager::Draw(const CStateManager& mgr) const {
     if (!PortDebug::HideVisorEffects()) {
       x40_samusReflection->Draw(mgr);
     }
+#ifdef TARGET_PC
+    drawsVisor = drawsSince();
+#endif
     if (drawVisor) {
       const bool hudVis = x1ec_hudVisMode != CTweakGui::kHud_Zero;
       const bool targeting = x1e4_enableTargetingManager != 0;
@@ -354,6 +373,7 @@ void CInGameGuiManager::Draw(const CStateManager& mgr) const {
                          hudVis, targeting && !scanVisor);
     }
 #ifdef TARGET_PC
+    drawsHud = drawsSince();
     AuroraSetStereoDrawRoute(AURORA_STEREO_ROUTE_WORLD);
 #endif
   }
@@ -383,6 +403,7 @@ void CInGameGuiManager::Draw(const CStateManager& mgr) const {
     // PortVr: the minimap and its depth mask are drawn in the HUD frame
     // camera's space, so the headset keeps them in front of the head too.
     AuroraSetStereoDrawRoute(AURORA_STEREO_ROUTE_HEAD_LOCKED);
+    drawsSince();
 #endif
     CGuiCamera* camera = x34_samusHud->GetBaseHudFrame()->GetFrameCamera();
     camera->Draw(CGuiWidgetDrawParms(0.f, CVector3f::Zero()));
@@ -411,6 +432,7 @@ void CInGameGuiManager::Draw(const CStateManager& mgr) const {
     CGraphics::SetDepthWriteMode(true, kE_LEqual, true);
     x148_model_automapper->SetIsVisible(false);
 #ifdef TARGET_PC
+    drawsMap = drawsSince();
     AuroraSetStereoDrawRoute(AURORA_STEREO_ROUTE_WORLD);
 #endif
   }
@@ -422,12 +444,17 @@ void CInGameGuiManager::Draw(const CStateManager& mgr) const {
 #ifdef TARGET_PC
     // PortVr: the helmet frame is drawn in its GUI camera's space: head-locked.
     AuroraSetStereoDrawRoute(AURORA_STEREO_ROUTE_HEAD_LOCKED);
+    drawsSince();
 #endif
     x34_samusHud->DrawHelmet(mgr, cameraOffset);
 #ifdef TARGET_PC
+    drawsHelmet = drawsSince();
     AuroraSetStereoDrawRoute(AURORA_STEREO_ROUTE_WORLD);
 #endif
   }
+#ifdef TARGET_PC
+  PortVr::PortVrNoteHudDraws(drawsVisor, drawsHud, drawsMap, drawsHelmet);
+#endif
   if (!x4c_saveUI.null()) {
     x4c_saveUI->Draw();
   }

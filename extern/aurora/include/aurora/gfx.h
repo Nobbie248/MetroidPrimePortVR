@@ -48,6 +48,9 @@ void aurora_enable_vsync(bool enabled);
 void aurora_set_stereo_frame_interpolation(bool enabled);
 bool aurora_get_stereo_frame_interpolation();
 void aurora_set_stereo_motion_logging(bool enabled);
+// GX draw commands issued so far (GXBegin and display list calls), a running
+// count the game samples around a section to know what it draws.
+uint32_t aurora_gx_draw_commands_issued(void);
 // How each immersive eye is replayed (retained for the replay path).
 void aurora_set_stereo_stop_at_display_copy(bool enabled);
 void aurora_set_stereo_skip_copy_clears(bool enabled);

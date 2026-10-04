@@ -24,7 +24,9 @@ struct PortVrSettings {
     // --- headset renderer (Wiicompiled [vr]) ---
     bool enabled = true;
     bool required = false;             // a failed headset start stops the game instead of falling back
-    MirrorView mirror_view = MirrorView::Normal;
+    // What the desktop window shows while the headset runs. An eye view spares
+    // the flat image's rendering, a third of each frame's encoding work.
+    MirrorView mirror_view = MirrorView::Left;
     ControllerModeSetting controller_mode = ControllerModeSetting::PrimedGun;
     uint32_t frame_interpolation_fps = 0; // 0 off, 1 auto, else 72/90/120 (Quest; later)
 #if defined(__ANDROID__)

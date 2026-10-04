@@ -395,12 +395,17 @@ void end_frame(uint64_t contentTag) noexcept {
   // eyes are rendered. Anything that would read it keeps it: a screenshot, a depth
   // snapshot, or a frame the sink would show as mono (stereo_host::encode).
   const bool headsetOwnsDisplay = stereo_host::headset_owns_display();
+  // The desktop window showing an eye instead of the flat image needs that image as little
+  // (stereo_host::mirror_skips_mono): the window is then drawn from the eye targets below.
+  const int mirrorView = stereo_host::mirror_view();
+  const bool mirrorSkipsMono = stereo_host::mirror_skips_mono();
+  bool monoUnneeded = false;
   {
     const auto stereo = gfx::recorded_stereo_state();
-    gfx::set_final_pass_mono_unneeded(headsetOwnsDisplay && stereo.active && stereo.immersive &&
-                                      stereo.contentTag == contentTag &&
-                                      !g_screenshotRequested.load(std::memory_order_acquire) &&
-                                      !gfx::depth_peek::snapshot_wanted());
+    monoUnneeded = (headsetOwnsDisplay || mirrorSkipsMono) && stereo.active && stereo.immersive &&
+                   stereo.contentTag == contentTag && !g_screenshotRequested.load(std::memory_order_acquire) &&
+                   !gfx::depth_peek::snapshot_wanted();
+    gfx::set_final_pass_mono_unneeded(monoUnneeded);
   }
   gfx::finish();
   auto imguiDrawData = imgui::freeze();
@@ -423,7 +428,8 @@ void end_frame(uint64_t contentTag) noexcept {
 
   const auto stereoState = gfx::recorded_stereo_state();
   gfx::end_frame([rmlBindGroup = std::move(rmlBindGroup), rmlOverlay, viewport, contentTag, logicalFrame, stereoState,
-                  headsetOwnsDisplay, imguiDrawData = std::move(imguiDrawData)](
+                  headsetOwnsDisplay, mirrorView, mirrorSkipsMono, monoUnneeded,
+                  imguiDrawData = std::move(imguiDrawData)](
                      wgpu::CommandEncoder& encoder, std::vector<gfx::AfterSubmitCallback> afterSubmitCallbacks) {
     if (g_screenshotRequested.exchange(false, std::memory_order_acq_rel)) {
       record_screenshot(encoder, afterSubmitCallbacks);
@@ -450,8 +456,52 @@ void end_frame(uint64_t contentTag) noexcept {
 
     const bool canPresent = currentTexture && currentView;
     if (canPresent) {
+      const uint32_t surfaceWidth = webgpu::g_graphicsConfig.surfaceConfiguration.width;
+      const uint32_t surfaceHeight = webgpu::g_graphicsConfig.surfaceConfiguration.height;
+      // The window drawn from the eyes: their mono image was not rendered (monoUnneeded). A
+      // frame whose eyes were not replayed after all keeps the flat image.
+      const bool eyesForWindow = mirrorSkipsMono && monoUnneeded && stereoState.replayed;
+      struct WindowEye {
+        wgpu::BindGroup bindGroup;
+        gfx::Viewport viewport;
+      };
+      std::array<WindowEye, AURORA_STEREO_EYE_COUNT> windowEyes{};
+      uint32_t windowEyeCount = 0;
       wgpu::BindGroup presentBindGroup;
-      if (rmlBindGroup && !rmlOverlay) {
+      if (eyesForWindow) {
+        const auto eyeSource = [&](uint32_t eye) {
+          const auto& output = stereoState.outputs[eye];
+          return webgpu::TextureWithSampler{
+              .texture = output.texture,
+              .view = output.view,
+              .size = output.size,
+              .format = output.format,
+              .sampler = webgpu::present_source().sampler,
+          };
+        };
+        if (mirrorView == AURORA_STEREO_MIRROR_BOTH) {
+          // Side by side, each eye letterboxed into its half.
+          for (uint32_t eye = 0; eye < AURORA_STEREO_EYE_COUNT; ++eye) {
+            const auto source = eyeSource(eye);
+            if (!source.view) {
+              continue;
+            }
+            auto half = webgpu::calculate_present_viewport(surfaceWidth / 2, surfaceHeight, source.size.width,
+                                                           source.size.height);
+            half.left += static_cast<float>(eye * (surfaceWidth / 2));
+            windowEyes[windowEyeCount++] = {webgpu::create_copy_bind_group(source), half};
+          }
+        } else if (mirrorView == AURORA_STEREO_MIRROR_LEFT || mirrorView == AURORA_STEREO_MIRROR_RIGHT) {
+          const auto source = eyeSource(mirrorView == AURORA_STEREO_MIRROR_RIGHT ? 1 : 0);
+          if (source.view) {
+            const auto eyeViewport =
+                webgpu::calculate_present_viewport(surfaceWidth, surfaceHeight, source.size.width, source.size.height);
+            windowEyes[windowEyeCount++] = {
+                webgpu::create_copy_bind_group(webgpu::resample_source(encoder, eyeViewport, source)), eyeViewport};
+          }
+        }
+        // AURORA_STEREO_MIRROR_NONE: the window stays clear under the overlay.
+      } else if (rmlBindGroup && !rmlOverlay) {
         presentBindGroup = rmlBindGroup;
       } else {
         const auto& resampledSource = webgpu::resample_present_source(encoder, viewport);
@@ -472,13 +522,19 @@ void end_frame(uint64_t contentTag) noexcept {
             .timestampWrites = webgpu::gpu_prof::pass_writes("Present blit"),
         };
         const auto pass = encoder.BeginRenderPass(&renderPassDescriptor);
-        // Copy EFB -> XFB (swapchain)
         pass.SetPipeline(webgpu::g_CopyPipeline);
-        pass.SetBindGroup(0, presentBindGroup, 0, nullptr);
-        set_present_viewport(pass, viewport, webgpu::g_graphicsConfig.surfaceConfiguration.width,
-                             webgpu::g_graphicsConfig.surfaceConfiguration.height);
-
-        pass.Draw(3);
+        if (eyesForWindow) {
+          for (uint32_t i = 0; i < windowEyeCount; ++i) {
+            pass.SetBindGroup(0, windowEyes[i].bindGroup, 0, nullptr);
+            set_present_viewport(pass, windowEyes[i].viewport, surfaceWidth, surfaceHeight);
+            pass.Draw(3);
+          }
+        } else {
+          // Copy EFB -> XFB (swapchain)
+          pass.SetBindGroup(0, presentBindGroup, 0, nullptr);
+          set_present_viewport(pass, viewport, surfaceWidth, surfaceHeight);
+          pass.Draw(3);
+        }
         if (rmlBindGroup && rmlOverlay) {
           pass.SetPipeline(webgpu::g_CopyPremultipliedAlphaPipeline);
           pass.SetBindGroup(0, rmlBindGroup, 0, nullptr);

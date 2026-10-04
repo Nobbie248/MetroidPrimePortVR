@@ -34,6 +34,10 @@ struct StereoUniformLayout {
   uint32_t normalOffset = 0;     // kStereoPositionMatrices Mat3x4 normal matrices
   uint32_t lightsOffset = 0;     // kStereoLights lights, 0 when the shader has none
   uint32_t size = 0;             // the whole uniform
+  // The one position (and normal) matrix slot the draw can index, when its
+  // vertices carry no matrix index (gx/shader.cpp: in_pnmtxidx is the current
+  // one); -1 composes all of them.
+  int32_t fixedPositionSlot = -1;
 
   // The layout fill_uniform produces for a shader: `lineMode` != 0 adds one
   // 16-byte block before the projection; `lightingEnabled` places the lights
@@ -101,7 +105,11 @@ inline void compose_stereo_uniform(uint8_t* uniform, const StereoUniformLayout& 
   projection = stereo_replay::compose_projection(*eye.projection, projection);
   std::memcpy(uniform + layout.projectionOffset, &projection, sizeof(projection));
 
-  for (uint32_t i = 0; i < kStereoPositionMatrices; ++i) {
+  const bool oneSlot = layout.fixedPositionSlot >= 0 &&
+                       static_cast<uint32_t>(layout.fixedPositionSlot) < kStereoPositionMatrices;
+  const uint32_t firstSlot = oneSlot ? static_cast<uint32_t>(layout.fixedPositionSlot) : 0;
+  const uint32_t endSlot = oneSlot ? firstSlot + 1 : kStereoPositionMatrices;
+  for (uint32_t i = firstSlot; i < endSlot; ++i) {
     const size_t offset = layout.positionOffset + i * sizeof(Mat3x4<float>);
     Mat3x4<float> source;
     std::memcpy(&source, uniform + offset, sizeof(source));
@@ -117,7 +125,7 @@ inline void compose_stereo_uniform(uint8_t* uniform, const StereoUniformLayout& 
     const auto transformed = stereo_replay::compose_affine(*eye.viewFromCenter, source);
     std::memcpy(uniform + offset, &transformed, sizeof(transformed));
   }
-  for (uint32_t i = 0; i < kStereoPositionMatrices; ++i) {
+  for (uint32_t i = firstSlot; i < endSlot; ++i) {
     const size_t offset = layout.normalOffset + i * sizeof(Mat3x4<float>);
     Mat3x4<float> source;
     std::memcpy(&source, uniform + offset, sizeof(source));

@@ -22,7 +22,7 @@ constexpr KeyInfo kKeys[] = {
     // Port Config: headset
     {"vr_enabled", K::Bool, "1"},
     {"vr_controller_mode", K::Choice, "primedgun", 0, 0, 0, true, true, "primedgun,gamepad,none"},
-    {"vr_mirror_view", K::Choice, "normal", 0, 0, 0, false, true, "normal,both,left,right,none"},
+    {"vr_mirror_view", K::Choice, "left", 0, 0, 0, false, true, "normal,both,left,right,none"},
 #if defined(__ANDROID__)
     // The Quest's default eye size (platform/include/vr/vr_settings.h).
     {"vr_render_scale", K::Float, "0.85", 0.25f, 2.0f, 0.05f},

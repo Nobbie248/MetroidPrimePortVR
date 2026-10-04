@@ -534,10 +534,14 @@ gfx::Range build_uniform(const ShaderInfo& info, std::array<uint32_t, 2>& stereo
   const auto range = gfx::push_uniform(buf.data(), buf.size());
   // The eye copies are composed from the CPU-side bytes while they are in hand:
   // the staged uniform lives in write-mapped memory, which is slow to read back.
-  stereoUniformOffsets = gfx::stage_stereo_uniforms(
-      buf.data(), range,
-      gfx::StereoUniformLayout::for_gx(info.lineMode, info.lightingEnabled,
-                                       static_cast<uint32_t>(info.loadsTevReg.count()), range.size));
+  auto layout = gfx::StereoUniformLayout::for_gx(info.lineMode, info.lightingEnabled,
+                                                 static_cast<uint32_t>(info.loadsTevReg.count()), range.size);
+  // Vertices without a matrix index all take the current position matrix
+  // (shader.cpp), so only that one needs its eye copies.
+  if (!info.indexAttr.test(GX_VA_PNMTXIDX)) {
+    layout.fixedPositionSlot = static_cast<int32_t>(g_gxState.currentPnMtx);
+  }
+  stereoUniformOffsets = gfx::stage_stereo_uniforms(buf.data(), range, layout);
   return range;
 }
 } // namespace aurora::gx

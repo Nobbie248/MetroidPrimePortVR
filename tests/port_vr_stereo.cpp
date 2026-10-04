@@ -279,6 +279,45 @@ int main() {
             stereo_replay::eye_copy_extent(256, 640, 0, 16384) == 256,
         "without a reference the mono size stays");
 
+  {
+    // A draw whose vertices carry no matrix index uses one position matrix: only
+    // that slot (and its normal matrix) is composed for the eye, the others stay.
+    auto fixed = StereoUniformLayout::for_gx(0, false, 0, 2400);
+    fixed.fixedPositionSlot = 1;
+    std::vector<uint8_t> uniform(fixed.size, 0);
+    const auto slot0 = Affine(1, 0, 0, 1, 0, 1, 0, 2, 0, 0, 1, 3);
+    const auto slot1 = Affine(1, 0, 0, 4, 0, 1, 0, 5, 0, 0, 1, 6);
+    std::memcpy(uniform.data() + fixed.positionOffset, &slot0, sizeof(slot0));
+    std::memcpy(uniform.data() + fixed.positionOffset + sizeof(Mat3x4<float>), &slot1, sizeof(slot1));
+    const auto rotation = Affine(0, 0, -1, 0, 0, 1, 0, 0, 1, 0, 0, 0);
+    std::memcpy(uniform.data() + fixed.normalOffset, &rotation, sizeof(rotation));
+    std::memcpy(uniform.data() + fixed.normalOffset + sizeof(Mat3x4<float>), &rotation, sizeof(rotation));
+    Mat4x4<float> projection{};
+    projection.m0 = Vec4<float>{1.f, 0.f, 0.f, 0.f};
+    projection.m1 = Vec4<float>{0.f, 1.f, 0.f, 0.f};
+    projection.m2 = Vec4<float>{0.f, 0.f, -1.f, -1.f};
+    projection.m3 = Vec4<float>{0.f, 0.f, -1.f, 0.f};
+    std::memcpy(uniform.data() + fixed.projectionOffset, &projection, sizeof(projection));
+    const auto view = Affine(1, 0, 0, 0.032f, 0, 1, 0, 0, 0, 0, 1, 0);
+    auto eye = uniform;
+    compose_stereo_uniform(eye.data(), fixed, StereoEyeCompose{&projection, &view, 1.f, 1.f, 1.f, 1.f});
+    Mat3x4<float> out0;
+    Mat3x4<float> out1;
+    std::memcpy(&out0, eye.data() + fixed.positionOffset, sizeof(out0));
+    std::memcpy(&out1, eye.data() + fixed.positionOffset + sizeof(Mat3x4<float>), sizeof(out1));
+    Check(Near(out1.m0[3], 4.032f) && Near(out0.m0[3], 1.f), "only the fixed position slot takes the eye offset");
+    Mat3x4<float> normal0;
+    Mat3x4<float> normal1;
+    std::memcpy(&normal0, eye.data() + fixed.normalOffset, sizeof(normal0));
+    std::memcpy(&normal1, eye.data() + fixed.normalOffset + sizeof(Mat3x4<float>), sizeof(normal1));
+    Check(std::memcmp(&normal0, &rotation, sizeof(rotation)) == 0, "the other slot's normal matrix stays");
+    fixed.fixedPositionSlot = -1;
+    auto all = uniform;
+    compose_stereo_uniform(all.data(), fixed, StereoEyeCompose{&projection, &view, 1.f, 1.f, 1.f, 1.f});
+    std::memcpy(&out0, all.data() + fixed.positionOffset, sizeof(out0));
+    Check(Near(out0.m0[3], 1.032f), "without a fixed slot every position matrix takes it");
+  }
+
   std::puts("port_vr_stereo_tests: ok");
   return 0;
 }

@@ -25,6 +25,7 @@
 #include "../window.hpp"
 
 #include <array>
+#include <chrono>
 #include <cstring>
 #include <new>
 #include <optional>
@@ -89,6 +90,10 @@ struct FrameRecorder {
 
 FrameRecorder g_recorder;
 std::atomic_bool g_stereoDiagnostics{false};
+// What composing the eye uniform copies costs on the FIFO thread, between two
+// stereo statistics lines (log_stereo_frame_stats), while diagnostics are on.
+std::atomic<uint64_t> g_eyeUniformNs{0};
+std::atomic<uint32_t> g_eyeUniformDraws{0};
 
 void log_stereo_frame_stats(const FramePacket& frame) {
   static uint32_t sImmersiveFrames = 0;
@@ -110,13 +115,16 @@ void log_stereo_frame_stats(const FramePacket& frame) {
     discarded += pass.discardable ? 1 : 0;
   }
   const auto& routes = g_recorder.routeDrawCounts;
+  const double eyeUniformMs =
+      static_cast<double>(g_eyeUniformNs.exchange(0, std::memory_order_relaxed)) / 600.0 / 1.0e6;
+  const uint32_t eyeUniformDraws = g_eyeUniformDraws.exchange(0, std::memory_order_relaxed) / 600;
   Log.info("stereo frame: {} passes ({} EFB, {} replayed per eye, {} eyes only, {} discarded), {} EFB copies "
            "({} taken per eye), {} draws (world {}, head-locked {}, head-locked 2D {}, fullscreen {}, sky {}, "
-           "skipped {})",
+           "skipped {}), eye uniforms {:.2f} ms/frame ({} draws)",
            frame.renderPasses.size(), efbPasses, eyePasses, monoSkipped, discarded, copies, eyeCopies,
            g_recorder.drawCallCount, routes[AURORA_STEREO_ROUTE_WORLD], routes[AURORA_STEREO_ROUTE_HEAD_LOCKED],
            routes[AURORA_STEREO_ROUTE_HEAD_LOCKED_2D], routes[AURORA_STEREO_ROUTE_FULLSCREEN],
-           routes[AURORA_STEREO_ROUTE_SKY], routes[AURORA_STEREO_ROUTE_SKIP]);
+           routes[AURORA_STEREO_ROUTE_SKY], routes[AURORA_STEREO_ROUTE_SKIP], eyeUniformMs, eyeUniformDraws);
 }
 
 std::string pass_label(std::string_view kind) {
@@ -1004,6 +1012,25 @@ std::array<uint32_t, 2> stage_stereo_uniforms(const uint8_t* mono, Range monoRan
   if (frame.uniforms.size() + needed > frame.uniforms.capacity()) {
     return exhausted();
   }
+  // Diagnostics: what the eye copies cost (log_stereo_frame_stats).
+  struct EyeUniformTimer {
+    const bool on = g_stereoDiagnostics.load(std::memory_order_relaxed);
+    const std::chrono::steady_clock::time_point start =
+        on ? std::chrono::steady_clock::now() : std::chrono::steady_clock::time_point{};
+    ~EyeUniformTimer() {
+      if (on) {
+        g_eyeUniformNs.fetch_add(
+            static_cast<uint64_t>((std::chrono::steady_clock::now() - start).count()), std::memory_order_relaxed);
+        g_eyeUniformDraws.fetch_add(1, std::memory_order_relaxed);
+      }
+    }
+  } eyeUniformTimer;
+  // A screen-projecting texture matrix is derived from position matrix pnSlot, so
+  // that slot must be composed whichever one the vertices use.
+  StereoUniformLayout eyeLayout = layout;
+  if (screenTexMtx.texSlot != 0xFF) {
+    eyeLayout.fixedPositionSlot = -1;
+  }
   thread_local std::vector<uint8_t> scratch;
   std::array<uint32_t, 2> offsets{};
   for (uint32_t eye = 0; eye < AURORA_STEREO_EYE_COUNT; ++eye) {
@@ -1028,7 +1055,7 @@ std::array<uint32_t, 2> stage_stereo_uniforms(const uint8_t* mono, Range monoRan
                                             : route == AURORA_STEREO_ROUTE_SKY ? &params.skyViewFromCenter
                                                                                : &params.viewFromCenter;
       compose_stereo_uniform(
-          scratch.data(), layout,
+          scratch.data(), eyeLayout,
           StereoEyeCompose{
               .projection = &params.projection,
               .viewFromCenter = viewFromCenter,
@@ -1040,7 +1067,7 @@ std::array<uint32_t, 2> stage_stereo_uniforms(const uint8_t* mono, Range monoRan
       // A screen-projecting texture matrix (AuroraSetStereoScreenTexMtx) is
       // derived again from the eye's composed projection and position matrix.
       if (screenTexMtx.texSlot != 0xFF) {
-        compose_stereo_screen_tex_mtx(scratch.data(), layout, screenTexMtx.texSlot, screenTexMtx.pnSlot);
+        compose_stereo_screen_tex_mtx(scratch.data(), eyeLayout, screenTexMtx.texSlot, screenTexMtx.pnSlot);
       }
     }
     offsets[eye] = push(frame.uniforms, scratch.data(), layout.size, alignment).offset;

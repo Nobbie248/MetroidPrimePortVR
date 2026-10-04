@@ -74,10 +74,28 @@ void DrawVrDebugTab() {
   const PrimeVRPolicySnapshot policy = PrimeVRPolicyGetSnapshot();
   ImGui::Text("Headset: %s   presentation: %s", running ? "running" : "not running",
               PresentationName(policy.presentation));
+  if (running) {
+    // What the headset gets, as opposed to the Performance tab's mirror rate.
+    const OpenXRFrameTiming timing = OpenXRGetFrameTiming();
+    ImGui::Text("Display %.0f Hz   new frames to the headset: %.1f/s", timing.headset_hz, timing.rendered_fps);
+  }
 
   ImGui::SeparatorText("Headset");
   changed |= ImGui::Checkbox("Enable the headset (takes effect at the next start)", &s.enabled);
   changed |= ImGui::Checkbox("Immersive replay", &s.immersive_replay);
+  {
+    // In MirrorView's order: Normal, Both, Left, Right, None.
+    static constexpr const char* kWindowViews[] = {"the flat image", "both eyes", "left eye", "right eye",
+                                                   "nothing"};
+    int view = static_cast<int>(s.mirror_view);
+    if (ImGui::Combo("Window shows", &view, kWindowViews, 5)) {
+      s.mirror_view = static_cast<MirrorView>(view);
+      changed = true;
+    }
+    if (ImGui::IsItemHovered()) {
+      ImGui::SetTooltip("An eye view spares the flat image's rendering, a third of each frame's encoding work.");
+    }
+  }
   {
     const bool available = aurora_get_stereo_multiview_available();
     ImGui::BeginDisabled(!available);

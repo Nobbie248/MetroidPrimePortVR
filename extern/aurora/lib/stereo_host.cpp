@@ -341,6 +341,16 @@ bool headset_owns_display() noexcept {
 #endif
 }
 
+int mirror_view() noexcept { return g_mirrorView.load(std::memory_order_relaxed); }
+
+bool mirror_skips_mono() noexcept {
+#if defined(__ANDROID__)
+  return false;
+#else
+  return g_provider != nullptr && g_sink != nullptr && mirror_view() != AURORA_STEREO_MIRROR_NORMAL;
+#endif
+}
+
 } // namespace aurora::stereo_host
 
 namespace aurora::stereo {

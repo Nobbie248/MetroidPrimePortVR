@@ -676,7 +676,11 @@ wgpu::BindGroup create_copy_bind_group(const TextureWithSampler& source) {
 }
 
 const TextureWithSampler& resample_present_source(const wgpu::CommandEncoder& encoder, const Viewport& viewport) {
-  const auto& source = present_source();
+  return resample_source(encoder, viewport, present_source());
+}
+
+const TextureWithSampler& resample_source(const wgpu::CommandEncoder& encoder, const Viewport& viewport,
+                                          const TextureWithSampler& source) {
   const uint32_t width = viewport_extent(viewport.width);
   const uint32_t height = viewport_extent(viewport.height);
   if (!g_resampledFrameBuffer.view || g_resampledFrameBuffer.size.width != width ||

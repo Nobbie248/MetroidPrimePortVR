@@ -47,4 +47,13 @@ void shutdown() noexcept;
 // renders its eyes only.
 bool headset_owns_display() noexcept;
 
+// The desktop window's view of a stereo frame (aurora_set_stereo_mirror_view):
+// an AuroraStereoMirrorView value.
+int mirror_view() noexcept;
+// True on the desktop while the stereo provider and sink are registered and the
+// window shows something other than the flat image (an eye, both, or nothing):
+// an immersive frame's final pass then renders its eyes only, as on a standalone
+// headset, and the window is drawn from the eye targets.
+bool mirror_skips_mono() noexcept;
+
 } // namespace aurora::stereo_host

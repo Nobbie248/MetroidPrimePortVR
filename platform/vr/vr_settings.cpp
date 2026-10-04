@@ -3,6 +3,9 @@
 #include "vr/vr_settings.h"
 
 #include "port_debug.h"
+#if defined(MP_ENABLE_OPENXR)
+#include "vr/openxr_diagnostics.h"
+#endif
 #include "vr/openxr_integration.h"
 #include "vr/prime_vr_policy.h"
 
@@ -262,10 +265,29 @@ void SetVrSettings(const PortVrSettings& settings) noexcept {
     PortDebug::MarkVrSettingsDirty();
 }
 
+namespace {
+AuroraStereoMirrorView AuroraMirrorView(MirrorView view) noexcept {
+    switch (view) {
+    case MirrorView::Both: return AURORA_STEREO_MIRROR_BOTH;
+    case MirrorView::Left: return AURORA_STEREO_MIRROR_LEFT;
+    case MirrorView::Right: return AURORA_STEREO_MIRROR_RIGHT;
+    case MirrorView::None: return AURORA_STEREO_MIRROR_NONE;
+    case MirrorView::Normal: break;
+    }
+    return AURORA_STEREO_MIRROR_NORMAL;
+}
+} // namespace
+
 void PushVrSettingsToAurora() noexcept {
     const PortVrSettings settings = GetVrSettings();
     aurora_set_stereo_immersive_replay(settings.immersive_replay);
     aurora_set_stereo_multiview(settings.multiview);
+    aurora_set_stereo_mirror_view(AuroraMirrorView(settings.mirror_view));
+#if defined(MP_ENABLE_OPENXR)
+    // [xr-diag] follows the toggle at once, with Aurora's stereo frame statistics.
+    PortVr::diagnostics::SetEnabled(settings.diagnostics_logging);
+    aurora_set_stereo_motion_logging(settings.diagnostics_logging);
+#endif
     // The presentation policy's half of the same settings; whether the headset
     // is enabled stays whatever the session set.
     PrimeVRPolicyConfig policy = PrimeVRPolicyGetSnapshot().config;

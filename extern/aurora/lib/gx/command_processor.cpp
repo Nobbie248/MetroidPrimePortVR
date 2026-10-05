@@ -224,6 +224,8 @@ const DeindexPlan& deindex_plan(GXVtxFmt fmt) noexcept {
   plan.count = 0;
   plan.active = false;
   const auto& vtxFmt = g_gxState.vtxFmts[fmt];
+  // gx.hpp deindexed_attr_align: the layout populate_pipeline_config describes
+  const bool aligned = deindexed_layout();
   u32 src = 0;
   u32 dst = 0;
   for (int i = GX_VA_PNMTXIDX; i <= GX_VA_TEX7; ++i) {
@@ -231,6 +233,9 @@ const DeindexPlan& deindex_plan(GXVtxFmt fmt) noexcept {
     const auto type = g_gxState.vtxDesc[i];
     if (type == GX_NONE) {
       continue;
+    }
+    if (aligned) {
+      dst = AURORA_ALIGN(dst, deindexed_attr_align(attr));
     }
     const auto& attrFmt = vtxFmt.attrs[i];
     const u32 compSize = comp_type_size(attr, attrFmt.type);
@@ -259,7 +264,7 @@ const DeindexPlan& deindex_plan(GXVtxFmt fmt) noexcept {
     dst += compSize * cnt;
   }
   plan.srcStride = src;
-  plan.dstStride = dst;
+  plan.dstStride = aligned ? AURORA_ALIGN(dst, 4u) : dst;
   return plan;
 }
 

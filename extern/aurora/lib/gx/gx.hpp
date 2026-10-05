@@ -615,4 +615,25 @@ gfx::BindGroupRef build_multiview_bind_group(const ShaderInfo& info) noexcept;
 
 u8 comp_type_size(GXAttr attr, GXCompType type) noexcept;
 u8 comp_cnt_count(GXAttr attr, GXCompCnt cnt) noexcept;
+
+// The vertex records the FIFO processor resolves (GXState::deindexVertices, for a
+// format with an indexed attribute) are laid out aligned: every attribute but the
+// one-byte matrix indices starts on a 4-byte boundary and the stride is a multiple
+// of 4, so the vertex shader reads whole words. The Quest's Adreno mis-reads values
+// that straddle words in a storage buffer (textures smeared, vertices exploded).
+// populate_pipeline_config and the FIFO processor's plan both follow it.
+constexpr u32 deindexed_attr_align(GXAttr attr) noexcept {
+  return attr >= GX_VA_PNMTXIDX && attr <= GX_VA_TEX7MTXIDX ? 1u : 4u;
+}
+inline bool deindexed_layout() noexcept {
+  if (!g_gxState.deindexVertices) {
+    return false;
+  }
+  for (int i = GX_VA_POS; i <= GX_VA_TEX7; ++i) {
+    if (g_gxState.vtxDesc[i] == GX_INDEX8 || g_gxState.vtxDesc[i] == GX_INDEX16) {
+      return true;
+    }
+  }
+  return false;
+}
 } // namespace aurora::gx

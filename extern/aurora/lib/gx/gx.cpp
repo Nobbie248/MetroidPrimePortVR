@@ -402,6 +402,7 @@ void populate_pipeline_config(PipelineConfig& config, GXPrimitive primitive, GXV
   config.shaderConfig.pbr = g_gxState.pbr;
   config.shaderConfig.sdf = g_gxState.sdf;
   u8 vtxOffset = 0;
+  const bool aligned = deindexed_layout();
   for (int i = GX_VA_PNMTXIDX; i <= GX_VA_TEX7; ++i) {
     const auto attr = static_cast<GXAttr>(i);
     const auto type = g_gxState.vtxDesc[i];
@@ -409,6 +410,9 @@ void populate_pipeline_config(PipelineConfig& config, GXPrimitive primitive, GXV
     if (type == GX_NONE) {
       mapping = {};
       continue;
+    }
+    if (aligned) {
+      vtxOffset = static_cast<u8>(AURORA_ALIGN(vtxOffset, deindexed_attr_align(attr)));
     }
     const auto& attrFmt = vtxFmt.attrs[i];
     const auto cnt = comp_cnt_count(attr, attrFmt.cnt);
@@ -447,7 +451,7 @@ void populate_pipeline_config(PipelineConfig& config, GXPrimitive primitive, GXV
       Log.fatal("populate_pipeline_config: Invalid vertex type {}", type);
     }
   }
-  config.shaderConfig.vtxStride = vtxOffset;
+  config.shaderConfig.vtxStride = aligned ? static_cast<u8>(AURORA_ALIGN(vtxOffset, 4u)) : vtxOffset;
   config.shaderConfig.currentPnMtx =
       config.shaderConfig.attrs[GX_VA_PNMTXIDX].attrType == GX_NONE ? static_cast<u8>(g_gxState.currentPnMtx) : 0;
   if (primitive == GX_LINES) {

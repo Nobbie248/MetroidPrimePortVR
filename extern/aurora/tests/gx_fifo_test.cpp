@@ -138,8 +138,16 @@ TEST_F(GXDeindexTest, DirectAttributesStayAndBaseIndexAndRangeApply) {
   g_gxState.arrays[GX_VA_TEX0] = {.data = coords.data(), .size = 12, .stride = 4, .le = false, .baseIndex = 1};
   // Records: matrix index, then a big-endian 16-bit index; index 5 is past the array
   decode_fifo({static_cast<u8>(GX_TRIANGLES), 0, 3, 3, 0, 0, 6, 0, 1, 9, 0, 5});
-  const std::vector<u8> expected{3, 20, 21, 22, 23, 6, 30, 31, 32, 33, 9, 0, 0, 0, 0};
-  EXPECT_EQ(aurora::gfx::testing::pushedVerts, expected);
+  // Resolved records are aligned: the coordinates at 4, a stride of 8 (padding unread)
+  const auto& verts = aurora::gfx::testing::pushedVerts;
+  ASSERT_EQ(verts.size(), 24u);
+  const std::array<std::array<u8, 5>, 3> expected{{{3, 20, 21, 22, 23}, {6, 30, 31, 32, 33}, {9, 0, 0, 0, 0}}};
+  for (u32 v = 0; v < expected.size(); ++v) {
+    EXPECT_EQ(verts[v * 8], expected[v][0]) << "record " << v;
+    for (u32 b = 0; b < 4; ++b) {
+      EXPECT_EQ(verts[v * 8 + 4 + b], expected[v][1 + b]) << "record " << v << " byte " << b;
+    }
+  }
 }
 
 TEST_F(GXBindGroupCacheTest, ReusesUnchangedMaterialAcrossFramesAndGlobalInvalidation) {

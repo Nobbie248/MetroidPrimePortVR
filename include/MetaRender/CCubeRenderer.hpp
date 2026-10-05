@@ -41,6 +41,9 @@ class CSkinnedModel;
 class CCubeSurface;
 class CLight;
 class CModelFlags;
+#ifdef TARGET_PC
+namespace PortSurfaceCulling { class Context; }
+#endif
 
 class CCubeRenderer : public IRenderer, public IWeaponRenderer, public TOneStatic< CCubeRenderer > {
 private:
@@ -180,8 +183,14 @@ public:
                           const float*, const CModelFlags&);
   void SetupRendererStates(bool depthWrite);
   void SetupCGraphicsStates();
+#ifdef TARGET_PC
+  // Port: reuse one conservative culling snapshot throughout each world pass.
+  void AddWorldSurfaces(CCubeModel& model, const PortSurfaceCulling::Context& culling);
+  void HandleUnsortedModel(const CAreaListItem*, CCubeModel&, const PortSurfaceCulling::Context& culling);
+#else
   void AddWorldSurfaces(CCubeModel& model);
   void HandleUnsortedModel(const CAreaListItem*, CCubeModel&);
+#endif
   void HandleUnsortedModelWireframe(const CAreaListItem*, CCubeModel&);
   void ActivateLightsForModel(const CAreaListItem*, const CCubeModel&);
   void RenderBucketItems(const CAreaListItem*);

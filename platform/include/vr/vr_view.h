@@ -22,6 +22,7 @@ class CFrustumPlanes;
 class CPlayer;
 class CStateManager;
 
+namespace PortSurfaceCulling { struct StereoVolume; }
 namespace PortVr {
 
 // The headset is running and this frame is shown immersively (the world per
@@ -40,6 +41,11 @@ bool VrHeadGaze(const CTransform4f& cameraXf, CVector3f& origin, CVector3f& dire
 // Replaces `frustum` with the head-facing cone of the settings' culling angle
 // when immersive and culling is enabled; false leaves it alone.
 bool VrCullingFrustum(const CTransform4f& cameraXf, float nearZ, CFrustumPlanes& frustum) noexcept;
+
+// Conservative actual-eye volumes for static world surface culling. Includes
+// lean-back, positional tracking and a margin around each eye. False keeps all.
+bool VrSurfaceCullingVolume(const CTransform4f& cameraXf,
+                            PortSurfaceCulling::StereoVolume& volume) noexcept;
 
 // Immersive: the first-person camera keeps its yaw only (the headset supplies
 // the pitch), does not bob, and the arm cannon does not fidget.

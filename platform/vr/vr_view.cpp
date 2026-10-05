@@ -8,6 +8,7 @@
 #include "vr/vr_beam_wheel.h"
 #include "vr/vr_pad.h"
 #include "vr/vr_settings.h"
+#include "port_surface_culling_math.h"
 
 #include "Kyoto/Math/CFrustumPlanes.hpp"
 #include "Kyoto/Math/CQuaternion.hpp"
@@ -152,6 +153,44 @@ bool VrCullingFrustum(const CTransform4f& cameraXf, float nearZ, CFrustumPlanes&
 }
 
 bool VrFlattenLookPitch() noexcept { return ImmersiveNow(); }
+
+bool VrSurfaceCullingVolume(const CTransform4f& cameraXf,
+                            PortSurfaceCulling::StereoVolume& volume) noexcept {
+    volume = {};
+    const PortVrSettings settings = GetVrSettings();
+    OpenXRFrameRequest request{};
+    if (!settings.frustum_culling_enabled || !ImmersiveNow() ||
+        !OpenXRLatestFrameRequest(request) || !request.immersive || !request.head_valid ||
+        !request.base_valid || !std::isfinite(request.units_per_meter) || request.units_per_meter <= 0.f) {
+        return false;
+    }
+    const CQuaternion leanInverse = AxisQuaternion(1.f, 0.f, 0.f, -settings.lean_back_degrees * kDegreesToRadians);
+    const auto vector = [](const CVector3f& v) {
+        return PortSurfaceCulling::Vector{v.GetX(), v.GetY(), v.GetZ()};
+    };
+    for (size_t eye = 0; eye < 2; ++eye) {
+        float norm = 0.f;
+        for (float component : request.eye_orientation[eye]) { norm += component * component; }
+        if (!std::isfinite(norm) || norm < 1.e-8f) { return false; }
+        const CQuaternion rotation = (leanInverse * PrimeFromXr(request.eye_orientation[eye])).BuildNormalized();
+        const CTransform4f facing = cameraXf.GetRotation() * rotation.BuildTransform4f();
+        const std::array<float, 3> fromBase{
+            request.eye_position[eye][0] - request.base_position[0],
+            request.eye_position[eye][1] - request.base_position[1],
+            request.eye_position[eye][2] - request.base_position[2],
+        };
+        const CVector3f origin = cameraXf.GetTranslation() +
+            cameraXf.Rotate(leanInverse.Transform(PrimeFromXr(fromBase)) * request.units_per_meter);
+        // Keep 7.5 degrees and 10 cm beyond each located eye. The renderer also
+        // retains anything inside its existing draw frustum, including probes.
+        if (!volume.eyes[eye].Build(vector(origin), vector(facing.GetRight()), vector(facing.GetForward()),
+                                   vector(facing.GetUp()), request.eye_fov[eye],
+                                   7.5f * kDegreesToRadians, 0.10f * request.units_per_meter)) {
+            return false;
+        }
+    }
+    return true;
+}
 
 bool VrNoCameraBob() noexcept { return ImmersiveNow() && GetVrSettings().patch_no_idle_sway; }
 

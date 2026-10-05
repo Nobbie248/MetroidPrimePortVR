@@ -206,6 +206,7 @@ set(MP_PORT_SOURCES
     platform/port_tracker.cpp
     platform/port_map_pickups.cpp
     platform/port_map_batch.cpp
+    platform/port_surface_culling.cpp
     platform/port_viewmodel.cpp
     platform/port_freecam.cpp
     platform/port_console.cpp
@@ -485,6 +486,10 @@ if(MP_BUILD_TESTS)
     target_include_directories(port_map_batch_tests PRIVATE platform/include)
     add_test(NAME port_map_batch_tests COMMAND port_map_batch_tests)
     set_tests_properties(port_map_batch_tests PROPERTIES TIMEOUT 15 LABELS port)
+    add_executable(port_surface_culling_tests tests/port_surface_culling.cpp)
+    target_include_directories(port_surface_culling_tests PRIVATE platform/include)
+    add_test(NAME port_surface_culling_tests COMMAND port_surface_culling_tests)
+    set_tests_properties(port_surface_culling_tests PROPERTIES TIMEOUT 15 LABELS port)
     # The stereo replay's uniform composition (extern/aurora/lib/gfx/stereo_uniform.hpp): pure
     # functions over the GX uniform bytes, so the test needs no GPU and no GX headers.
     add_executable(port_vr_stereo_tests tests/port_vr_stereo.cpp)

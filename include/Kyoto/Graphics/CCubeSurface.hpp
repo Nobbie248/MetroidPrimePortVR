@@ -48,6 +48,8 @@ public:
   // vertices can keep 16-bit display-list indices.
   void CallDisplayList() const;
 #ifdef TARGET_PC
+  // Port: a centre-only surface cannot safely participate in box culling.
+  bool HasBounds() const { return x0_data->mExtraSize >= sizeof(CAABox); }
   enum EPortBase { kPB_Pos, kPB_Nrm, kPB_Clr, kPB_UV, kPB_PackedUV, kPB_Count };
   // Surface extra data after the bounds: 'PBIX' then kPB_Count big-endian u32
   // base indices, in an extra block of at least 0x40 bytes. Returns false for

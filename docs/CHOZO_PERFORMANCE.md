@@ -218,3 +218,42 @@ Evidence is in `build/chozo-final/`: `minimap-off.txt` (PID 6620,
 `minimap-batch.apk`. `MP_FRAME_STATS` was omitted from the final run. Settings
 remain `vr_immersive_replay=1`; Guardian and proximity overrides were restored
 and `GET_PROPERTY` confirmed both disabled.
+
+## Conservative static surface culling (2026-10-05)
+
+Static opaque and alpha world surfaces now get an individual bounding-box
+visibility test after the existing model/PVS checks. Opaque surfaces are tested
+before material grouping (also when grouping is disabled), and alpha surfaces
+before insertion into the sorted buckets. The minimap room/door batches are
+unchanged. This is frustum culling, not occlusion or back-face culling.
+
+In immersive VR a surface is retained if its box intersects the original draw
+frustum **or either eye's expanded frustum**. Each eye uses its located position,
+orientation and asymmetric FOV, including the tracking base, world scale and
+lean-back transform. Each frustum has a 7.5-degree angular margin and a 10 cm
+translation margin; no extra far-plane cutoff is introduced. Unknown tracking,
+invalid FOV or disabled VR frustum culling disables the additional rejection.
+Keeping the original draw frustum also preserves offscreen capture views.
+
+Missing or invalid surface bounds are kept: retail surfaces without an extra
+bounds block return only their centre from `GetBounds()`, which cannot safely
+stand in for an enclosing box. Reflection and PBR materials are kept to preserve
+copy/probe side effects and potentially displaced vertices. Area/shadow draws,
+dynamic actors and wireframe rendering keep their existing paths.
+
+The feature is enabled by default; `MP_SURFACE_CULL=0` disables it. Quest accepts
+that environment override as an activity launch extra, enabling same-APK A/B
+comparisons. With `MP_FRAME_STATS` set, `[surface-cull]` logs per-frame considered,
+rejected, missing/invalid-bound and special-material counts every 600 frames.
+Omit `MP_FRAME_STATS` for final performance measurements.
+
+Windows VR and Quest release builds passed. The standalone
+`port_surface_culling_tests` covers boxes crossing a plane, a large wall whose
+corners all fall outside the view, asymmetric FOV, geometry seen by only one
+eye, camera rotation/translation, head-motion margins and invalid inputs. It
+also checks 10,000 boxes containing points visible under an independent
+projection calculation. Target GPU measurements and headset visual checks are
+pending; evidence for this change is stored in `build/chozo-culling/`. The APK
+was installed, but Quest's controller-required launch dialog prevented the
+game from starting. No GPU gain is measured yet. Guardian and proximity
+overrides were restored; `GET_PROPERTY` confirmed both disabled.

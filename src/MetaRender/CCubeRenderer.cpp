@@ -1,4 +1,7 @@
 #include "MetaRender/CCubeRenderer.hpp"
+#ifdef TARGET_PC
+#include "port_surface_culling.h"
+#endif
 #include "Kyoto/Basics/CBasics.hpp"
 
 #include "Collision/CollisionUtil.hpp"
@@ -634,9 +637,19 @@ void CCubeRenderer::SetupCGraphicsStates() {
   CCubeMaterial::EnsureTevsDirect();
 }
 
+#ifdef TARGET_PC
+// Port: reject bounded static surfaces before inserting them into draw buckets.
+void CCubeRenderer::AddWorldSurfaces(CCubeModel& model, const PortSurfaceCulling::Context& culling) {
+#else
 void CCubeRenderer::AddWorldSurfaces(CCubeModel& model) {
+#endif
   const CPlane& viewPlane = xb0_viewPlane;
   for (CCubeSurface it = model.GetAlphaSurfaces(); it.IsValid(); it = it.GetNextSurface()) {
+#ifdef TARGET_PC
+    if (!culling.Visible(it, model.GetMaterialByIndex(it.GetMaterialIndex()).GetFlags())) {
+      continue;
+    }
+#endif
     uint blend = model.GetMaterialByIndex(it.GetMaterialIndex()).GetCompressedBlend();
     const CAABox bounds = it.GetBounds();
     void* surfData = it.x0_data;
@@ -699,7 +712,13 @@ void CCubeRenderer::RenderBucketItems(const CAreaListItem* areaListItem) {
   }
 }
 
+#ifdef TARGET_PC
+// Port: culling also applies when opaque material grouping is disabled.
+void CCubeRenderer::HandleUnsortedModel(const CAreaListItem* areaListItem, CCubeModel& model,
+                                       const PortSurfaceCulling::Context& culling) {
+#else
 void CCubeRenderer::HandleUnsortedModel(const CAreaListItem* areaListItem, CCubeModel& model) {
+#endif
   void* surfPtr = model.GetNormalSurfaces().x0_rawdata;
   if (surfPtr == nullptr) {
     return;
@@ -710,6 +729,12 @@ void CCubeRenderer::HandleUnsortedModel(const CAreaListItem* areaListItem, CCube
 
   CCubeSurface surf(surfPtr);
   do {
+#ifdef TARGET_PC
+    if (!culling.Visible(surf, model.GetMaterialByIndex(surf.GetMaterialIndex()).GetFlags())) {
+      surf = surf.GetNextSurface();
+      continue;
+    }
+#endif
     model.DrawSurface(surf, skNormalFlag);
     surf = surf.GetNextSurface();
   } while (surf.IsValid());
@@ -738,6 +763,10 @@ void CCubeRenderer::DrawUnsortedGeometry(int areaIdx, uint mask, uint targetMask
   const CAreaListItem* areaListItem = nullptr;
 
   SetupRendererStates(true);
+#ifdef TARGET_PC
+  // Port: keep area/shadow draws on their original visibility path.
+  const PortSurfaceCulling::Context culling(x44_frustumPlanes, !GetInAreaDraw());
+#endif
 
   for (AUTO(it, x1c_areaListItems.begin()); it != x1c_areaListItems.end(); ++it) {
     CAreaListItem& item = *it;
@@ -819,6 +848,7 @@ void CCubeRenderer::DrawUnsortedGeometry(int areaIdx, uint mask, uint targetMask
         if (batchMaterials && !GetInAreaDraw()) {
           for (auto surface = model.GetNormalSurfaces(); surface.IsValid(); surface = surface.GetNextSurface()) {
             const auto material = model.GetMaterialByIndex(surface.GetMaterialIndex());
+            if (!culling.Visible(surface, material.GetFlags())) { continue; }
             const uint excluded = kStateFlag_Reflection | kStateFlag_ReflectionSurfaceEye |
                                   kStateFlag_ReflectionIndirectTexture | kStateFlag_PortPBR;
             if (material.IsFlagSet(kStateFlag_DepthWrite) && (material.GetFlags() & excluded) == 0 &&
@@ -834,7 +864,11 @@ void CCubeRenderer::DrawUnsortedGeometry(int areaIdx, uint mask, uint targetMask
           continue;
         }
 #endif
+#ifdef TARGET_PC
+        HandleUnsortedModel(areaListItem, model, culling);
+#else
         HandleUnsortedModel(areaListItem, model);
+#endif
       }
     }
 #ifdef TARGET_PC
@@ -850,6 +884,9 @@ void CCubeRenderer::DrawSortedGeometry(int areaIdx, uint mask, uint targetMask) 
   (void)targetMask;
 
   SetupRendererStates(true);
+#ifdef TARGET_PC
+  const PortSurfaceCulling::Context culling(x44_frustumPlanes, !GetInAreaDraw());
+#endif
 
   const CAreaListItem* areaListItem = nullptr;
   for (AUTO(it, x1c_areaListItems.begin()); it != x1c_areaListItems.end(); ++it) {
@@ -871,7 +908,11 @@ void CCubeRenderer::DrawSortedGeometry(int areaIdx, uint mask, uint targetMask) 
     for (AUTO(modelIt, models.begin()); modelIt != models.end(); ++modelIt) {
       CCubeModel& model = **modelIt;
       if (model.GetShouldDrawWorldFlag()) {
+#ifdef TARGET_PC
+        AddWorldSurfaces(model, culling);
+#else
         AddWorldSurfaces(model);
+#endif
       }
     }
   }

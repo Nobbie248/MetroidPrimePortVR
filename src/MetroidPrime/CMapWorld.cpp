@@ -453,6 +453,14 @@ void CMapWorld::DrawAreas(const CMapWorldDrawParms& parms, int selArea,
       lastMode = kDM_Invalid;
       lastArea = -1;
     };
+    // A new batch starts from the line width the GX state has
+    const auto beginBatch = [&] {
+      if (batchPending) { return; }
+      u8 width;
+      GXTexOffset offset;
+      GXGetLineWidth(&width, &offset);
+      batch.Reset(width);
+    };
 #endif
     for (int i = 0; i < sortInfos.size(); ++i) {
       const CMapObjectSortInfo& info = sortInfos[i];
@@ -464,7 +472,10 @@ void CMapWorld::DrawAreas(const CMapWorldDrawParms& parms, int selArea,
       CMapArea* area = GetMapArea(areaIdx);
       const CTransform4f& areaXf = area->GetAreaPostTransform(parms.GetWorld(), areaIdx);
 #ifdef TARGET_PC
-      if (type != CMapObjectSortInfo::kOC_Surface) { flushBatch(); }
+      // Doors join the batch too; only icons interrupt it.
+      const bool batchesDoor = batchEnabled && (type == CMapObjectSortInfo::kOC_Door ||
+                                                type == CMapObjectSortInfo::kOC_DoorSurface);
+      if (type != CMapObjectSortInfo::kOC_Surface && !batchesDoor) { flushBatch(); }
 #endif
       if (type == CMapObjectSortInfo::kOC_Surface) {
         const CMapArea::CMapAreaSurface& surface = area->GetSurface(idx);
@@ -478,12 +489,7 @@ void CMapWorld::DrawAreas(const CMapWorldDrawParms& parms, int selArea,
         const CColor color = CColor::Modulate(surfaceColor, normalColor);
 #ifdef TARGET_PC
         if (batchEnabled) {
-          if (!batchPending) {
-            u8 width;
-            GXTexOffset offset;
-            GXGetLineWidth(&width, &offset);
-            batch.Reset(width);
-          }
+          beginBatch();
           if (surface.AppendToBatch(batch, area->GetVertices(), area->GetVertexCount(),
                                     areaXf, color, outlineColor, outlineWidth)) {
             batchPending = true;
@@ -506,6 +512,14 @@ void CMapWorld::DrawAreas(const CMapWorldDrawParms& parms, int selArea,
         const CTransform4f objXf =
             CTransform4f::Translate(CMapArea::GetAreaPostTranslate(parms.GetWorld(), areaIdx)) *
             object.GetTransform();
+#ifdef TARGET_PC
+        if (batchesDoor) {
+          beginBatch();
+          object.AppendDoorToBatch(batch, objXf, selArea, mwInfo, parms.GetAlpha());
+          batchPending = true;
+          continue;
+        }
+#endif
         gpRender->SetModelMatrix(
             type == CMapObjectSortInfo::kOC_Door
                 ? modelXf * objXf
@@ -517,6 +531,18 @@ void CMapWorld::DrawAreas(const CMapWorldDrawParms& parms, int selArea,
         lastMode = mode;
       } else if (type == CMapObjectSortInfo::kOC_DoorSurface) {
         const CMappableObject& object = area->GetMappableObject(idx / 6);
+#ifdef TARGET_PC
+        if (batchesDoor) {
+          beginBatch();
+          object.AppendDoorToBatch(
+              batch,
+              CTransform4f::Translate(CMapArea::GetAreaPostTranslate(parms.GetWorld(), areaIdx)) *
+                  object.GetTransform(),
+              selArea, mwInfo, parms.GetAlpha(), idx % 6);
+          batchPending = true;
+          continue;
+        }
+#endif
         gpRender->SetModelMatrix(
             modelXf *
             CTransform4f::Translate(CMapArea::GetAreaPostTranslate(parms.GetWorld(), areaIdx)) *

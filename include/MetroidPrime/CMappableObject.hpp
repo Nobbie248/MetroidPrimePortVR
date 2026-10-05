@@ -10,6 +10,11 @@
 
 class CTweakAutoMapper;
 class CMapWorldInfo;
+#ifdef TARGET_PC
+namespace PortMapBatch {
+class Geometry;
+}
+#endif
 
 class CMappableObject {
 public:
@@ -56,6 +61,10 @@ public:
 #ifdef TARGET_PC
   // A randomized door's colour on the map.
   void PortSetType(EMappableObjectType type) { x0_type = type; }
+  // Port: the door's faces (all six, or `face` alone) appended to the HUD minimap's
+  // batch in their drawing order, `objXf` placing the door in map space.
+  void AppendDoorToBatch(PortMapBatch::Geometry& batch, const CTransform4f& objXf, int curAreaId,
+                         const CMapWorldInfo& mwInfo, float alpha, int face = -1) const;
 #endif
   TEditorId GetObjId() const { return x8_objId; }
   const CTransform4f& GetTransform() const { return x10_transform; }

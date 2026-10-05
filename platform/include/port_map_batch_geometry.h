@@ -80,6 +80,24 @@ public:
     }
   }
 
+  // A quad face drawn as the map draws a door's: the 4-point strip filled, then
+  // the closed outline A, B, D, C, A. A part with zero alpha is left out (the map
+  // draws without depth writes, so it would change nothing); its colour is still
+  // the state the original sequence leaves.
+  void AppendQuadFace(const std::array<Position, 4>& corners, Color fill, Color outline) {
+    if (fill[3] != 0) {
+      AppendPolygon(Primitive::Strip, corners, fill);
+    } else {
+      SetColor(fill);
+    }
+    if (outline[3] != 0) {
+      const std::array<Position, 5> loop{corners[0], corners[1], corners[3], corners[2], corners[0]};
+      AppendOutline(loop, outline);
+    } else {
+      SetColor(outline);
+    }
+  }
+
   void AppendOutline(std::span<const Position> points, Color color) {
     SetColor(color);
     const float width = static_cast<float>(lineWidth_) / 6.f;

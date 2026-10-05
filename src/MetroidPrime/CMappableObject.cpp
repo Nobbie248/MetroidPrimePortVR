@@ -24,6 +24,10 @@
 
 #include "rstl/math.hpp"
 
+#ifdef TARGET_PC
+#include "port_map_batch_geometry.h"
+#endif
+
 struct SDrawData {
   float x0_x;
   float x4_y;
@@ -147,6 +151,32 @@ static inline void draw_door_surface(const CColor& firstColor, const CColor& sec
   GXPosition1x8(drawData.xc_idxA);
   CGX::End();
 }
+
+#ifdef TARGET_PC
+void CMappableObject::AppendDoorToBatch(PortMapBatch::Geometry& batch, const CTransform4f& objXf,
+                                        int curAreaId, const CMapWorldInfo& mwInfo, float alpha,
+                                        int face) const {
+  const rstl::pair< CColor, CColor > colors = GetDoorColors(curAreaId, mwInfo, alpha);
+  const auto rgba = [](const CColor& color) {
+    const GXColor gx = color.GetGXColor();
+    return PortMapBatch::Color{gx.r, gx.g, gx.b, gx.a};
+  };
+  const PortMapBatch::Color fill = rgba(colors.first);
+  const PortMapBatch::Color outline = rgba(colors.second);
+  const auto corner = [&](uchar idx) {
+    const CVector3f point = objXf * skDoorVerts[idx];
+    return PortMapBatch::Position{point.GetX(), point.GetY(), point.GetZ()};
+  };
+  const int first = face < 0 ? 0 : face;
+  const int end = face < 0 ? 6 : face + 1;
+  for (int i = first; i < end; ++i) {
+    const SDrawData& data = skDoorSurfaceInfos[i];
+    batch.AppendQuadFace(
+        {corner(data.xc_idxA), corner(data.xd_idxB), corner(data.xe_idxC), corner(data.xf_idxD)}, fill,
+        outline);
+  }
+}
+#endif
 
 void CMappableObject::Draw(int curArea, const CMapWorldInfo& mwInfo, float alpha,
                            bool needsVtxLoad) const {

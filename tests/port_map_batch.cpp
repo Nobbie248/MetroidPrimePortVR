@@ -65,5 +65,26 @@ int main() {
             ordered.Vertices().size() == kDrawVertices + 6 &&
             ordered.Vertices()[kDrawVertices].first == points[0],
         "draw count boundary preserves whole triangles and order");
+  // A door face: the strip filled, then the closed outline A, B, D, C, A
+  Geometry door(6);
+  const std::array<Position, 4> quad{{{0, 0, 0}, {1, 0, 0}, {0, 1, 0}, {1, 1, 0}}};
+  door.AppendQuadFace(quad, fill, line);
+  Check(door.Vertices().size() == 6 + 4 * 6, "door face: two fill triangles, four outline segments");
+  const int loop[] = {0, 1, 3, 2, 0};
+  for (int segment = 0; segment < 4; ++segment) {
+    const Vertex& vertex = door.Vertices()[6 + segment * 6];
+    Check(vertex.first == quad[loop[segment]] && vertex.second == quad[loop[segment + 1]] &&
+              vertex.color == line,
+          "door outline follows A, B, D, C, A after its fill");
+  }
+  // Fully transparent parts draw nothing (no depth writes on the map) but keep the colour state
+  door.Reset(6);
+  const Color clearFill{1, 2, 3, 0}, clearLine{4, 5, 6, 0};
+  door.AppendQuadFace(quad, clearFill, clearLine);
+  Check(door.Vertices().empty() && door.HasColor() && door.LastColor() == clearLine,
+        "a transparent door face is skipped");
+  door.AppendQuadFace(quad, clearFill, line);
+  Check(door.Vertices().size() == 24 && door.Vertices()[0].color == line && door.Vertices()[0].endpoint != -1.f,
+        "a transparent fill is skipped, its visible outline kept");
   std::puts("minimap geometry checks passed");
 }

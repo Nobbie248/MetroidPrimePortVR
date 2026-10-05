@@ -14,6 +14,10 @@
 #include "rstl/vector.hpp"
 
 class IWorld;
+#ifdef TARGET_PC
+class CTransform4f;
+namespace PortMapBatch { class Geometry; }
+#endif
 
 class CMapArea {
 public:
@@ -32,6 +36,12 @@ public:
 #endif
     void Draw(const CVector3f* verts, uint vertexCount, const CColor& surfColor,
               const CColor& lineColor, float lineWidth) const;
+#ifdef TARGET_PC
+    // Port: append a surface without changing its fill/outline ordering.
+    bool AppendToBatch(PortMapBatch::Geometry& batch, const CVector3f* verts, uint vertexCount,
+                       const CTransform4f& areaTransform, const CColor& surfColor,
+                       const CColor& lineColor, float lineWidth) const;
+#endif
 
     static void SetupGXMaterial();
 

@@ -5,6 +5,7 @@
 #include "gfx/texture.hpp"
 #include "gfx/resources.hpp"
 #include "gx/shader_info.hpp"
+#include "gx/pipeline.hpp"
 #include "webgpu/gpu.hpp"
 
 #include <algorithm>
@@ -62,6 +63,88 @@ protected:
   detail::FramePacket frame;
   bool recordingActive = true;
 };
+
+gx::PipelineConfig MapBatchConfig() {
+  gx::g_gxState = {};
+  auto& state = gx::g_gxState;
+  state.mapBatch = true;
+  state.cullMode = GX_CULL_FRONT;
+  state.deindexVertices = true;
+  for (auto attr : {GX_VA_POS, GX_VA_NRM, GX_VA_CLR0, GX_VA_TEX0}) {
+    state.vtxDesc[attr] = GX_DIRECT;
+  }
+  auto& vat = state.vtxFmts[7].attrs;
+  vat[GX_VA_POS] = {GX_POS_XYZ, GX_F32, 0};
+  vat[GX_VA_NRM] = {GX_NRM_XYZ, GX_F32, 0};
+  vat[GX_VA_CLR0] = {GX_CLR_RGBA, GX_RGBA8, 0};
+  vat[GX_VA_TEX0] = {GX_TEX_ST, GX_F32, 0};
+  state.numTevStages = 1;
+  state.tevStages[0].channelId = GX_COLOR0A0;
+  state.tevStages[0].colorPass.d = GX_CC_RASC;
+  state.tevStages[0].alphaPass.d = GX_CA_RASA;
+  for (auto& channel : state.colorChannelConfig) { channel.matSrc = GX_SRC_VTX; }
+  gx::PipelineConfig config{};
+  gx::populate_pipeline_config(config, GX_TRIANGLES, GX_VTXFMT7);
+  return config;
+}
+
+TEST_F(GfxRecordingTest, MapBatchLayoutAndCullStateAreIsolated) {
+  auto config = MapBatchConfig();
+  EXPECT_TRUE(config.shaderConfig.mapBatch);
+  EXPECT_EQ(config.cullMode, GX_CULL_NONE);
+  EXPECT_EQ(config.shaderConfig.mapCull, GX_CULL_FRONT);
+  EXPECT_EQ(config.shaderConfig.vtxStride, 36);
+  EXPECT_EQ(config.shaderConfig.attrs[GX_VA_NRM].offset, 12);
+  EXPECT_EQ(config.shaderConfig.attrs[GX_VA_CLR0].offset, 24);
+  EXPECT_EQ(config.shaderConfig.attrs[GX_VA_TEX0].offset, 28);
+  gx::g_gxState.tevSwapTable[0].red = GX_CH_BLUE;
+  gx::populate_pipeline_config(config, GX_TRIANGLES, GX_VTXFMT7);
+  EXPECT_EQ(config.shaderConfig.tevSwapTable[0].red, GX_CH_RED);
+  EXPECT_EQ(gx::g_gxState.tevSwapTable[0].red, GX_CH_BLUE);
+  gx::g_gxState.mapBatch = false;
+  gx::populate_pipeline_config(config, GX_TRIANGLES, GX_VTXFMT7);
+  EXPECT_EQ(config.cullMode, GX_CULL_FRONT);
+  EXPECT_FALSE(config.shaderConfig.mapBatch);
+  EXPECT_EQ(config.shaderConfig.mapCull, GX_CULL_NONE);
+}
+
+TEST_F(GfxRecordingTest, MapBatchShaderExpandsOutlinesInEveryEyeMode) {
+  auto config = MapBatchConfig().shaderConfig;
+  for (auto mode : {gx::MultiviewNone, gx::MultiviewClip, gx::MultiviewFull, gx::EyeClipImmediate}) {
+    config.multiview = mode;
+    const auto source = gx::build_shader_source(config);
+    EXPECT_NE(source.find("let in_tex0_uv ="), std::string::npos);
+    EXPECT_NE(source.find("in_tex0_uv.x * min(viewport_scale"), std::string::npos);
+    EXPECT_NE(source.find("@builtin(front_facing) map_front: bool"), std::string::npos);
+    EXPECT_NE(source.find("if (in.map_fill != 0u && map_front) { discard; }"), std::string::npos);
+    EXPECT_EQ(source.find("in_tex0."), std::string::npos);
+    if (mode == gx::MultiviewClip || mode == gx::EyeClipImmediate) {
+      EXPECT_NE(source.find("vec4f(mv_pos_a, 1.0) * ubuf_mv.eye_clip0"), std::string::npos);
+      EXPECT_NE(source.find("vec4f(mv_pos_b, 1.0) * ubuf_mv.eye_clip1"), std::string::npos);
+      EXPECT_EQ(source.find("* ubuf.proj"), std::string::npos);
+    }
+    if (mode == gx::MultiviewClip || mode == gx::MultiviewFull) {
+      EXPECT_NE(source.find("@builtin(view_index) mv_view_in"), std::string::npos);
+    } else {
+      EXPECT_EQ(source.find("@builtin(view_index)"), std::string::npos);
+    }
+  }
+}
+
+TEST_F(GfxRecordingTest, MapBatchColoursAndWidthsDoNotSplitUniforms) {
+  const auto config = MapBatchConfig().shaderConfig;
+  const auto info = gx::build_shader_info(config);
+  EXPECT_FALSE(info.sampledKColors.any());
+  EXPECT_FALSE(info.sampledTextures.any());
+  EXPECT_EQ(info.lineMode, 0);
+  detail::resources().limits.minUniformBufferOffsetAlignment = 256;
+  ByteBuffer snapshot;
+  std::array<uint32_t, 2> offsets{};
+  gx::build_uniform(info, offsets, &snapshot);
+  gx::g_gxState.lineWidth += 6;
+  gx::g_gxState.kcolors[0][0] += 1.f;
+  EXPECT_TRUE(gx::uniform_matches(info, snapshot));
+}
 
 TEST_F(GfxRecordingTest, CreateRestoreReturnsToEfb) {
   seed(320, 180);

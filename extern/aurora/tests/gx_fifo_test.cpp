@@ -175,6 +175,29 @@ protected:
   }
 };
 
+TEST_F(GXFifoTest, MapBatchModeRoundTripsAndResets) {
+  EXPECT_FALSE(g_gxState.mapBatch);
+  AuroraSetMapBatch(GX_TRUE);
+  decode_fifo(capture_fifo());
+  EXPECT_TRUE(g_gxState.mapBatch);
+  AuroraSetMapBatch(GX_FALSE);
+  decode_fifo(capture_fifo());
+  EXPECT_FALSE(g_gxState.mapBatch);
+}
+
+TEST_F(GXDrawMergeTest, MapBatchModeSeparatesOrdinaryTriangles) {
+  Draw(GX_TRIANGLES, 3);
+  AuroraSetMapBatch(GX_TRUE);
+  decode_fifo(capture_fifo());
+  Draw(GX_TRIANGLES, 3);
+  Draw(GX_TRIANGLES, 3);
+  EXPECT_EQ(aurora::gfx::g_testDrawCount, 2u);
+  AuroraSetMapBatch(GX_FALSE);
+  decode_fifo(capture_fifo());
+  Draw(GX_TRIANGLES, 3);
+  EXPECT_EQ(aurora::gfx::g_testDrawCount, 3u);
+}
+
 TEST_F(GXDrawMergeTest, IndependentLinesAndPointsKeepOneQuadAndAppendInstances) {
   for (const auto prim : {GX_LINES, GX_POINTS}) {
     g_gxState.dirty |= aurora::gx::DirtyPipeline;

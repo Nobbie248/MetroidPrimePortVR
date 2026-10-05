@@ -413,6 +413,7 @@ struct GXState {
   u8 numTexGens = 0;
   bool pbr = false; // GX_AURORA_SET_PBR
   u8 sdf = 0; // GX_AURORA_SET_SDF
+  bool mapBatch = false; // GX_AURORA_MAP_BATCH
   Mat3x4<float> pbrProbe; // GX_AURORA_SET_PBR_PROBE
   Vec4<float> pbrEmissive{1.f, 1.f, 1.f, 0.f}; // GX_AURORA_SET_PBR_MATERIAL
   Vec4<float> pbrBacklight{0.f, 0.f, 0.f, 0.f};
@@ -548,7 +549,8 @@ struct ShaderConfig {
   // from the same clip block (EyeClipImmediate). Taken from the padding, so the
   // configs (and pipeline cache keys) without it keep their bytes.
   u8 multiview : 2 = 0;
-  u8 pad1 : 3 = 0;
+  u8 mapBatch : 1 = false;
+  u8 mapCull : 2 = 0; // Fill culling in a batch whose line quads must be uncullable.
   u8 pbr = 0; // GX_AURORA_SET_PBR
   u8 sdf = 0; // GX_AURORA_SET_SDF
   // Without GX_VA_PNMTXIDX, the position (and normal) matrix every vertex takes: a

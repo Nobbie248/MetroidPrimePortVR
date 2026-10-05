@@ -25,6 +25,7 @@
 
 #ifdef TARGET_PC
 #include "port_apclient.h"
+#include "port_map_batch_geometry.h"
 
 #include <utility>
 #include <vector>
@@ -213,6 +214,86 @@ void CMapArea::CMapAreaSurface::Draw(const CVector3f* verts, uint vertexCount, c
     }
   }
 }
+
+#ifdef TARGET_PC
+// Port: preserve each sorted surface's fill/outline order in one vertex stream.
+bool CMapArea::CMapAreaSurface::AppendToBatch(
+    PortMapBatch::Geometry& batch, const CVector3f* verts, uint vertexCount,
+    const CTransform4f& areaTransform, const CColor& surfColor, const CColor& lineColor,
+    float lineWidth) const {
+  using PortMapBatch::Primitive;
+  const auto primitiveFor = [](uint value, Primitive& primitive) {
+    switch (value) {
+    case GX_TRIANGLES: primitive = Primitive::Triangles; return true;
+    case GX_TRIANGLESTRIP: primitive = Primitive::Strip; return true;
+    case GX_TRIANGLEFAN: primitive = Primitive::Fan; return true;
+    case GX_QUADS: primitive = Primitive::Quads; return true;
+    default: return false;
+    }
+  };
+  const int numSurfaces = CBasics::SwapBytes(*x18_surfOffset);
+  const int numOutlines = CBasics::SwapBytes(*x1c_outlineOffset);
+  // Validate before appending anything: fallback must not draw a partial face twice.
+  for (int outlines = 0; outlines < 2; ++outlines) {
+    const int* cursor = outlines ? x1c_outlineOffset + 1 : x18_surfOffset + 1;
+    for (int i = 0; i < (outlines ? numOutlines : numSurfaces); ++i) {
+      Primitive primitive;
+      if (!outlines && !primitiveFor(CBasics::SwapBytes(static_cast<uint>(*cursor++)), primitive)) {
+        return false;
+      }
+      const int count = CBasics::SwapBytes(*cursor++);
+      if (count < 0 || count > 65535) { return false; }
+      const uchar* indices = reinterpret_cast<const uchar*>(cursor);
+      for (int v = 0; v < count; ++v) {
+        if (indices[v] >= vertexCount) { return false; }
+      }
+      cursor += ((count + 3) & ~3) / 4;
+    }
+  }
+  const auto rgba = [](const CColor& color) {
+    const GXColor gx = color.GetGXColor();
+    return PortMapBatch::Color{gx.r, gx.g, gx.b, gx.a};
+  };
+  std::vector<PortMapBatch::Position> points;
+  const auto readPoints = [&](const int*& cursor, int count) {
+    const uchar* indices = reinterpret_cast<const uchar*>(cursor);
+    points.clear();
+    points.reserve(count);
+    for (int v = 0; v < count; ++v) {
+      const CVector3f point = areaTransform * verts[indices[v]];
+      points.push_back({point.GetX(), point.GetY(), point.GetZ()});
+    }
+    cursor += ((count + 3) & ~3) / 4;
+  };
+  if (surfColor.GetAlpha() > 0.f) {
+    const auto color = rgba(surfColor);
+    batch.SetColor(color);
+    const int* cursor = x18_surfOffset + 1;
+    for (int i = 0; i < numSurfaces; ++i) {
+      Primitive primitive;
+      primitiveFor(CBasics::SwapBytes(static_cast<uint>(*cursor++)), primitive);
+      const int count = CBasics::SwapBytes(*cursor++);
+      readPoints(cursor, count);
+      batch.AppendPolygon(primitive, points, color);
+    }
+  }
+  if (lineColor.GetAlpha() > 0.f) {
+    const bool thick = lineWidth > 1.f;
+    const auto color = rgba(lineColor.WithAlphaModulatedBy(thick ? 0.5f : 1.f));
+    for (int pass = 0; pass < (thick ? 2 : 1); ++pass) {
+      if (thick) { batch.SetLineWidth(lineWidth - pass); }
+      batch.SetColor(color);
+      const int* cursor = x1c_outlineOffset + 1;
+      for (int i = 0; i < numOutlines; ++i) {
+        const int count = CBasics::SwapBytes(*cursor++);
+        readPoints(cursor, count);
+        batch.AppendOutline(points, color);
+      }
+    }
+  }
+  return true;
+}
+#endif
 
 void CMapArea::CMapAreaSurface::SetupGXMaterial() {
   const GXVtxDescList list[2] = {

@@ -1471,7 +1471,7 @@ namespace {
 //    constant registers, and the views share no work), so it is the exception.
 //  - EyeClipImmediate: MultiviewClip's uniform in a per-eye pass: no multiview extension
 //    or array textures, the eye from the immediates (imm.eye_mask) instead of the view.
-std::string to_multiview_source(std::string source, uint32_t uniformSize, MultiviewMode mode) {
+std::string to_multiview_source(std::string source, uint32_t uniformSize, MultiviewMode mode, bool mapBatch) {
   const bool byImmediate = mode == EyeClipImmediate;
   const bool clip = mode == MultiviewClip || byImmediate;
   bool complete = true;
@@ -1511,9 +1511,10 @@ std::string to_multiview_source(std::string source, uint32_t uniformSize, Multiv
     replace_once("fn vs_main(\n    @builtin(vertex_index) vidx: u32",
                  "fn vs_main(\n    @builtin(view_index) mv_view_in: u32,\n    @builtin(vertex_index) vidx: u32");
   }
-  constexpr std::string_view fragmentEntry = "fn fs_main(in: VertexOutput) -> @location(0) vec4f {";
-  constexpr std::string_view fragmentEntryView =
-      "fn fs_main(in: VertexOutput, @builtin(view_index) mv_view_in: u32) -> @location(0) vec4f {\n"
+  const std::string facing = mapBatch ? ", @builtin(front_facing) map_front: bool" : "";
+  const std::string fragmentEntry = "fn fs_main(in: VertexOutput" + facing + ") -> @location(0) vec4f {";
+  const std::string fragmentEntryView =
+      "fn fs_main(in: VertexOutput" + facing + ", @builtin(view_index) mv_view_in: u32) -> @location(0) vec4f {\n"
       "    mv_view = mv_view_in;";
   if (clip) {
     replace_once("var<uniform> ubuf: Uniform;", "var<uniform> ubuf_mv: UniformMV;");
@@ -1759,7 +1760,27 @@ std::string build_shader_source(const ShaderConfig& config) noexcept {
                                   attr_load_nbt_slice(config, NbtSlice::T, vidxAttr));
   }
 
-  if (config.lineMode == 0) {
+  if (config.mapBatch) {
+    // The ordered map stream interleaves fills and line quads. Expand endpoints
+    // in this eye's clip space, just as the existing GX_LINES shader does.
+    vtxOutAttrs += fmt::format("\n    @location({}) @interpolate(flat) map_fill: u32,", vtxOutIdx++);
+    vtxXfrAttrsPre +=
+        "\n    let mv_pos_a = vec4f(in_pos, 1.0) * ubuf.postex_mtx[in_pnmtxidx];"
+        "\n    let mv_pos_b = vec4f(in_nrm, 1.0) * ubuf.postex_mtx[in_pnmtxidx];"
+        "\n    let use_b = in_tex0_uv.y > 0.5;"
+        "\n    let mv_pos = select(mv_pos_a, mv_pos_b, use_b);"
+        "\n    let clip_a = vec4f(mv_pos_a, 1.0) * ubuf.proj;"
+        "\n    let clip_b = vec4f(mv_pos_b, 1.0) * ubuf.proj;"
+        "\n    let viewport_scale = ubuf.render_viewport_size / max(ubuf.logical_viewport_size, vec2f(1.0));"
+        "\n    let delta_px = (clip_b.xy / clip_b.w - clip_a.xy / clip_a.w) / 2.0 * ubuf.render_viewport_size;"
+        "\n    let dir_px = select(vec2f(1.0, 0.0), normalize(delta_px), dot(delta_px, delta_px) > 1e-10);"
+        "\n    let perp_px = vec2f(-dir_px.y, dir_px.x);"
+        "\n    let offset_px = perp_px * (in_tex0_uv.x * min(viewport_scale.x, viewport_scale.y) / 2.0);"
+        "\n    let offset_ndc = (offset_px * 2.0) / ubuf.render_viewport_size;"
+        "\n    let clip_base = select(clip_a, clip_b, use_b);"
+        "\n    out.pos = vec4f(clip_base.xy + offset_ndc * clip_base.w, clip_base.zw);"
+        "\n    out.map_fill = select(0u, 1u, in_tex0_uv.y < 0.0);";
+  } else if (config.lineMode == 0) {
     vtxXfrAttrsPre += fmt::format(
         "\n    let mv_pos = vec4f({}, 1.0) * ubuf.postex_mtx[in_pnmtxidx];"
         "\n    out.pos = vec4f(mv_pos, 1.0) * ubuf.proj;",
@@ -1806,6 +1827,16 @@ std::string build_shader_source(const ShaderConfig& config) noexcept {
   uniBufAttrs += fmt::format("\n    nrm_mtx: array<mat3x4f, {}>,", MaxPnMtx);
   std::string fragmentFnPre;
   std::string fragmentFn;
+  if (config.mapBatch) {
+    // GX lines ignore culling; only the fill primitives inherit the GX mode.
+    if (config.mapCull == GX_CULL_FRONT) {
+      fragmentFnPre += "\n    if (in.map_fill != 0u && map_front) { discard; }";
+    } else if (config.mapCull == GX_CULL_BACK) {
+      fragmentFnPre += "\n    if (in.map_fill != 0u && !map_front) { discard; }";
+    } else if (config.mapCull == GX_CULL_ALL) {
+      fragmentFnPre += "\n    if (in.map_fill != 0u) { discard; }";
+    }
+  }
 
   static std::array regName{"prev"sv, "tevreg0"sv, "tevreg1"sv, "tevreg2"sv};
   std::array<bool, MaxTevRegs> colorNormalized{};
@@ -2773,18 +2804,19 @@ fn vs_main(
 }}
 
 @fragment
-fn fs_main(in: VertexOutput) -> @location(0) vec4f {{{6}{5}
+fn fs_main(in: VertexOutput{9}) -> @location(0) vec4f {{{6}{5}
     return prev;
 }}
 )""",
                                         uniBufAttrs, texBindings, vtxOutAttrs, vtxInAttrs, vtxXfrAttrs, fragmentFn,
-                                        fragmentFnPre, vtxXfrAttrsPre, uniformPre);
+                                        fragmentFnPre, vtxXfrAttrsPre, uniformPre,
+                                        config.mapBatch ? ", @builtin(front_facing) map_front: bool" : "");
   if (EnableDebugPrints) {
     Log.info("Generated shader (hash {:x}): {}", hash, shaderSource);
   }
 
   if (config.multiview != MultiviewNone) {
-    return to_multiview_source(shaderSource, info.uniformSize, static_cast<MultiviewMode>(config.multiview));
+    return to_multiview_source(shaderSource, info.uniformSize, static_cast<MultiviewMode>(config.multiview), config.mapBatch);
   }
   return shaderSource;
 }

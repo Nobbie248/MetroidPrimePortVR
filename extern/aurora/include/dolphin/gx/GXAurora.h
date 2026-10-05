@@ -214,6 +214,13 @@ extern "C" {
  */
 #define GX_AURORA_STEREO_SCREEN_TEX_MTX 0x0052
 
+/**
+ * Ordered map triangles: POS/NRM carry both line endpoints, CLR0 the colour,
+ * TEX0 the signed logical line width and endpoint selector (negative for fills).
+ * A u8 enables/disables this shader variant; fills retain GX culling, lines do not.
+ */
+#define GX_AURORA_MAP_BATCH 0x0053
+
 
 /*
  * Debug marker stuff
@@ -268,6 +275,8 @@ void GXSetViewportRender(f32 left, f32 top, f32 wd, f32 ht, f32 nearz, f32 farz)
  * draws through the FIFO; resets to AURORA_STEREO_ROUTE_WORLD at every frame begin.
  */
 void AuroraSetStereoDrawRoute(u32 route);
+
+void AuroraSetMapBatch(u8 enabled);
 
 /**
  * The plane in front of the head that AURORA_STEREO_ROUTE_HEAD_LOCKED_2D lays orthographic draws on and takes EFB

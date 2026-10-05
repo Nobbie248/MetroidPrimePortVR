@@ -1203,6 +1203,12 @@ void handle_aurora(ByteReader& reader) noexcept {
       g_gxState.xfRegValid.reset(reg);
     }
     g_gxState.dirty |= DirtyUniform;
+  } else if (subCmd == GX_AURORA_MAP_BATCH) {
+    const bool enabled = reader.read<u8>() != 0;
+    if (g_gxState.mapBatch != enabled) {
+      g_gxState.mapBatch = enabled;
+      g_gxState.dirty |= DirtyPipeline;
+    }
   } else if (subCmd == GX_AURORA_STEREO_DRAW_ROUTE) {
     const u8 route = reader.read<u8>();
     if (route != gfx::stereo_draw_route()) {

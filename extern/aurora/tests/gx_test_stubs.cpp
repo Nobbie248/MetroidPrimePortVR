@@ -128,6 +128,8 @@ void populate_pipeline_config(PipelineConfig& config, GXPrimitive primitive, GXV
   config = {};
   config.cullMode = g_gxState.cullMode;
   config.shaderConfig.currentPnMtx = g_gxState.currentPnMtx;
+  config.shaderConfig.mapBatch = g_gxState.mapBatch && primitive == GX_TRIANGLES;
+  config.shaderConfig.mapCull = config.shaderConfig.mapBatch ? g_gxState.cullMode : GX_CULL_NONE;
   config.shaderConfig.lineMode = primitive == GX_LINES ? 1 : primitive == GX_LINESTRIP ? 2 : primitive == GX_POINTS ? 3 : 0;
 }
 GXBindGroups build_bind_groups(const ShaderInfo& info) noexcept {

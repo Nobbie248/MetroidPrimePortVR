@@ -401,6 +401,8 @@ void populate_pipeline_config(PipelineConfig& config, GXPrimitive primitive, GXV
   config.shaderConfig.fogRangeEnabled = g_gxState.fog.rangeEnabled;
   config.shaderConfig.pbr = g_gxState.pbr;
   config.shaderConfig.sdf = g_gxState.sdf;
+  config.shaderConfig.mapBatch = g_gxState.mapBatch && primitive == GX_TRIANGLES;
+  config.shaderConfig.mapCull = config.shaderConfig.mapBatch ? g_gxState.cullMode : GX_CULL_NONE;
   u8 vtxOffset = 0;
   const bool aligned = deindexed_layout();
   for (int i = GX_VA_PNMTXIDX; i <= GX_VA_TEX7; ++i) {
@@ -468,6 +470,11 @@ void populate_pipeline_config(PipelineConfig& config, GXPrimitive primitive, GXV
     config.shaderConfig.tevStages[i] = g_gxState.tevStages[i];
   }
   config.shaderConfig.tevStageCount = g_gxState.numTevStages;
+  if (config.shaderConfig.mapBatch) {
+    // Map colours are RGBA vertex data, independent of a previous TEV swap.
+    config.shaderConfig.tevSwapTable[0] = {};
+    config.shaderConfig.tevStages[0].tevSwapRas = GX_TEV_SWAP0;
+  }
   for (u8 i = 0; i < g_gxState.numIndStages; ++i) {
     config.shaderConfig.indStages[i] = g_gxState.indStages[i];
   }
@@ -489,7 +496,8 @@ void populate_pipeline_config(PipelineConfig& config, GXPrimitive primitive, GXV
   if (g_gxState.alphaCompare) {
     config.shaderConfig.alphaCompare = g_gxState.alphaCompare;
   }
-  const auto cullMode = config.shaderConfig.lineMode == 0 ? g_gxState.cullMode : GX_CULL_NONE;
+  const auto cullMode = config.shaderConfig.lineMode == 0 && !config.shaderConfig.mapBatch
+                            ? g_gxState.cullMode : GX_CULL_NONE;
   const auto [polygonOffset, polygonOffsetScale] = polygon_offset_for_cull_mode(cullMode);
   config = {
       .msaaSamples = gfx::get_sample_count(),

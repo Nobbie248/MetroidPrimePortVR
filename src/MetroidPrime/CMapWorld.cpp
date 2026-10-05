@@ -24,6 +24,8 @@
 #include "Kyoto/Graphics/CGX.hpp"
 #include "MetroidPrime/Player/CGameState.hpp"
 #include "port_map_pickups.h"
+#include "port_map_batch.h"
+#include <dolphin/gx/GXGet.h>
 #endif
 
 struct CMapObjectSortInfoGreaterThan {
@@ -438,6 +440,20 @@ void CMapWorld::DrawAreas(const CMapWorldDrawParms& parms, int selArea,
     EDrawMode lastMode = kDM_Invalid;
     int lastArea = -1;
     CMapArea::CMapAreaSurface::SetupGXMaterial();
+#ifdef TARGET_PC
+    // Port: only the HUD minimap; interactive full-map rendering keeps its path.
+    const bool batchEnabled = !inMapScreen && PortMapBatch::Enabled();
+    PortMapBatch::Geometry batch;
+    bool batchPending = false;
+    const auto flushBatch = [&] {
+      if (!batchPending) { return; }
+      PortMapBatch::Draw(batch, modelXf);
+      CMapArea::CMapAreaSurface::SetupGXMaterial();
+      batchPending = false;
+      lastMode = kDM_Invalid;
+      lastArea = -1;
+    };
+#endif
     for (int i = 0; i < sortInfos.size(); ++i) {
       const CMapObjectSortInfo& info = sortInfos[i];
       CMapObjectSortInfo::EObjectCode type = info.GetObjectCode();
@@ -447,6 +463,9 @@ void CMapWorld::DrawAreas(const CMapWorldDrawParms& parms, int selArea,
       const CColor& outlineColor = info.GetOutlineColor();
       CMapArea* area = GetMapArea(areaIdx);
       const CTransform4f& areaXf = area->GetAreaPostTransform(parms.GetWorld(), areaIdx);
+#ifdef TARGET_PC
+      if (type != CMapObjectSortInfo::kOC_Surface) { flushBatch(); }
+#endif
       if (type == CMapObjectSortInfo::kOC_Surface) {
         const CMapArea::CMapAreaSurface& surface = area->GetSurface(idx);
         float linear = gpTweakAutoMapper->x54_mapSurfaceNormColorLinear;
@@ -457,6 +476,22 @@ void CMapWorld::DrawAreas(const CMapWorldDrawParms& parms, int selArea,
         shade = constant + shade;
         const CColor normalColor(shade, shade, shade, 1.f);
         const CColor color = CColor::Modulate(surfaceColor, normalColor);
+#ifdef TARGET_PC
+        if (batchEnabled) {
+          if (!batchPending) {
+            u8 width;
+            GXTexOffset offset;
+            GXGetLineWidth(&width, &offset);
+            batch.Reset(width);
+          }
+          if (surface.AppendToBatch(batch, area->GetVertices(), area->GetVertexCount(),
+                                    areaXf, color, outlineColor, outlineWidth)) {
+            batchPending = true;
+            continue;
+          }
+          flushBatch();
+        }
+#endif
         bool needsVertices = lastArea != areaIdx || lastMode != kDM_Surface;
         if (needsVertices) {
           gpRender->SetModelMatrix(modelXf * areaXf);
@@ -492,6 +527,9 @@ void CMapWorld::DrawAreas(const CMapWorldDrawParms& parms, int selArea,
       }
       lastArea = areaIdx;
     }
+#ifdef TARGET_PC
+    flushBatch();
+#endif
   }
 #ifdef TARGET_PC
   if (PortMapPickups::Active()) {

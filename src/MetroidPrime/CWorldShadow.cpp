@@ -17,6 +17,25 @@
 
 #include "dolphin/gx/GXFrameBuffer.h"
 
+#ifdef TARGET_PC
+#include "aurora/gfx.h"
+#include <cstdlib>
+#include <dolphin/gx/GXAurora.h>
+
+namespace {
+// PortVr: the shadow texture is rendered from the light, not from the camera, so both eyes need the same image.
+// Routed SKIP, its draws and its EFB copy stay mono and the eyes sample the mono texture. Replayed per eye, each
+// eye would redraw it with its own field of view and pose, and copy it again. MP_MONO_SHADOW=0 replays it.
+bool MonoShadowTexture() {
+  static const bool enabled = [] {
+    const char* value = std::getenv("MP_MONO_SHADOW");
+    return value == nullptr || value[0] != '0';
+  }();
+  return enabled;
+}
+} // namespace
+#endif
+
 CWorldShadow::CWorldShadow(uint w, uint h, bool rgba8)
 : x0_texture(rs_new CTexture(rgba8 ? kTF_RGBA8 : kTF_RGB565, w, h, 1))
 , x4_view(CTransform4f::Identity())
@@ -63,6 +82,12 @@ void CWorldShadow::BuildLightShadowTexture(const CStateManager& mgr, TAreaId aid
       float distance = lightToPoint.Magnitude();
       float fov = CMath::Rad2Deg(CCast::ToReal32(atan2(x64_objHalfExtent, distance))) * 2.f;
       if (!(fov < 0.00001f)) {
+#ifdef TARGET_PC
+        const bool monoShadow = MonoShadowTexture();
+        if (monoShadow) {
+          AuroraSetStereoDrawRoute(AURORA_STEREO_ROUTE_SKIP);
+        }
+#endif
         lightToPoint.Normalize();
         x4_view =
             CTransform4f::LookAt(light.GetPosition(), centerPoint, CVector3f(0.0f, 0.0f, -1.0f));
@@ -151,6 +176,11 @@ void CWorldShadow::BuildLightShadowTexture(const CStateManager& mgr, TAreaId aid
         void* dest = x0_texture->GetBitMapData(0);
         GXCopyTex(dest, true);
         x0_texture->UnLock();
+#ifdef TARGET_PC
+        if (monoShadow) {
+          AuroraSetStereoDrawRoute(AURORA_STEREO_ROUTE_WORLD);
+        }
+#endif
 
         gpRender->SetViewport(backupVpLeft, backupVpTop, backupVpWidth, backupVpHeight);
         CGraphics::SetDepthRange(backupDepthNear, backupDepthFar);

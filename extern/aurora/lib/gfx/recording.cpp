@@ -668,7 +668,7 @@ void stereo_seal_pass(FramePacket& frame, uint32_t passIndex) {
   }
   auto& pass = frame.renderPasses[passIndex];
   auto& state = frame.stereo;
-  if (!state.immersive || !pass.efb || pass.sealed || pass.stereo.enabled) {
+  if (!state.immersive || !pass.efb || pass.sealed || pass.stereo.enabled || pass.stereo.monoOnly) {
     return;
   }
   for (uint32_t eye = 0; eye < AURORA_STEREO_EYE_COUNT; ++eye) {
@@ -1235,9 +1235,17 @@ void resolve_pass_into(TextureHandle texture, ClipRect rect, bool clearColor, bo
   // from each eye, into the copy's stand-ins (stereo_shadow.hpp), so effects
   // that sample it (the thermal and X-ray visors) see each eye's own view. Set
   // before the pass is enqueued: the frame worker may encode it at once.
+  // A copy made under AURORA_STEREO_ROUTE_SKIP is not a view (a shadow rendered
+  // from a light): it is taken from the mono EFB only and the eyes sample it.
+  // When it also clears the whole EFB, the next pass's eye passes clear the
+  // eyes too, so nothing could see this pass in them: it is not replayed.
+  const bool monoCopy = g_recorder.stereoRoute == AURORA_STEREO_ROUTE_SKIP && probeFace < 0;
+  if (monoCopy && clearColor && clearAlpha && (clearDepth || !prevPass.hasDepth) && !prevPass.hasStencil) {
+    prevPass.stereo.monoOnly = true;
+  }
   stereo_seal_pass(current_frame_packet(), g_recorder.currentRenderPass);
   if (probeFace < 0) {
-    if (prevPass.stereo.enabled && !gx::is_depth_format(resolveFormat)) {
+    if (prevPass.stereo.enabled && !monoCopy && !gx::is_depth_format(resolveFormat)) {
       // Each eye's copy at that eye's resolution (stereo_shadow.hpp).
       const auto& efbSize = prevPass.colorAttachments[SceneColorAttachmentIndex].size;
       std::array<stereo_shadow::EyeSize, AURORA_STEREO_EYE_COUNT> eyeTargets{};

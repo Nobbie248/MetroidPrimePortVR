@@ -94,6 +94,10 @@ struct StereoEyePass {
 
 struct StereoPassReplay {
   bool enabled = false;
+  // Never replayed into the eyes: the pass ends in a mono-only EFB copy (made
+  // under AURORA_STEREO_ROUTE_SKIP) that clears the whole EFB, so what it drew
+  // reaches the eyes only through that copy (recording.cpp resolve_pass_into).
+  bool monoOnly = false;
   // Only the eyes render this pass: it is an immersive frame's final pass (no EFB
   // copy follows it) on a headset that owns the display, so nothing reads its mono
   // image (recording.cpp finish(), stereo_host::headset_owns_display).

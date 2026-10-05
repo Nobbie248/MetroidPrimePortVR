@@ -1,5 +1,6 @@
 #include "recording.hpp"
 
+#include <cstdlib>
 #include <atomic>
 
 #include "encoding.hpp"
@@ -90,7 +91,10 @@ struct FrameRecorder {
 };
 
 FrameRecorder g_recorder;
-std::atomic_bool g_stereoDiagnostics{false};
+// MP_FRAME_STATS keeps the frame statistics on whatever the VR settings say,
+// for scripted runs without a headset.
+bool frame_stats_forced() noexcept { return std::getenv("MP_FRAME_STATS") != nullptr; }
+std::atomic_bool g_stereoDiagnostics{frame_stats_forced()};
 // What composing the eye uniform copies costs on the FIFO thread, between two
 // stereo statistics lines (log_stereo_frame_stats), while diagnostics are on.
 std::atomic<uint64_t> g_eyeUniformNs{0};
@@ -128,8 +132,9 @@ bool enabled() noexcept { return g_stereoDiagnostics.load(std::memory_order_rela
 namespace {
 
 void log_stereo_frame_stats(const FramePacket& frame) {
-  static uint32_t sImmersiveFrames = 0;
-  if (!frame.stereo.immersive || (sImmersiveFrames++ % 600) != 0) {
+  // Every 600th frame, immersive or not (a desktop run measures the same FIFO)
+  static uint32_t sFrames = 0;
+  if ((sFrames++ % 600) != 0) {
     return;
   }
   uint32_t efbPasses = 0;
@@ -967,7 +972,9 @@ bool recording_multiview() noexcept { return g_recorder.active() && g_recorder.f
 
 void set_final_pass_mono_unneeded(bool unneeded) noexcept { g_recorder.finalPassMonoUnneeded = unneeded; }
 
-void set_stereo_diagnostics(bool enabled) noexcept { g_stereoDiagnostics.store(enabled, std::memory_order_relaxed); }
+void set_stereo_diagnostics(bool enabled) noexcept {
+  g_stereoDiagnostics.store(enabled || frame_stats_forced(), std::memory_order_relaxed);
+}
 
 uint8_t stereo_draw_route() noexcept { return g_recorder.stereoRoute; }
 

@@ -2499,6 +2499,17 @@ void UpdateControllerNav() {
   if (sToggleRequested.exchange(false, std::memory_order_acq_rel)) {
     Toggle();
   }
+  // MP_LOAD_STATE=<slot>: that save state, loaded once a game has run for a
+  // moment; scripted runs boot a world (MP_BOOT_WORLD) and continue from it.
+  static int sBootLoadSlot = [] {
+    const char* value = std::getenv("MP_LOAD_STATE");
+    return value != nullptr ? std::atoi(value) : 0;
+  }();
+  static int sBootLoadFrames = 0;
+  if (sBootLoadSlot > 0 && PortDebug::StateManager() != nullptr && ++sBootLoadFrames > 90) {
+    PortSaveState::RequestLoad(sBootLoadSlot);
+    sBootLoadSlot = 0;
+  }
   if (const int hotkey = sSaveStateHotkey.exchange(0, std::memory_order_acq_rel);
       hotkey != 0 && sSaveStateHotkeys) {
     if (hotkey == 1) {

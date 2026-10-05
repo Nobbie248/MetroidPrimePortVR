@@ -375,6 +375,9 @@ public:
                                                                     : "Metroid Prime";
         config.engine_name = "Aurora";
         config.resolution_scale = GetVrSettings().render_scale;
+        // render_scale_ was read when this object was made, before the settings file
+        // loaded; the pacing loop would size the eyes back to that default.
+        SetRenderScale(config.resolution_scale);
 #if defined(_WIN32)
         config.required_extensions = {kRequiredAuroraBackend == BACKEND_VULKAN ? "XR_KHR_vulkan_enable2" : "XR_KHR_D3D12_enable"};
         config.optional_extensions = {"XR_KHR_win32_convert_performance_counter_time",

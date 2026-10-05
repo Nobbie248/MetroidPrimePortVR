@@ -165,6 +165,7 @@ class PrimedGunVrActivity : SDLActivity() {
         const val TAG = "PrimedGunVr"
         const val QUIT_GRACE_MS = 3000L
         // The game's per-run switches an adb start may pass as string extras.
-        val TEST_ENVIRONMENT = listOf("MP_BOOT_WORLD", "MP_FAST_BOOT", "MP_VR_LOG")
+        val TEST_ENVIRONMENT =
+            listOf("MP_BOOT_WORLD", "MP_FAST_BOOT", "MP_VR_LOG", "MP_LOAD_STATE", "MP_FRAME_STATS")
     }
 }

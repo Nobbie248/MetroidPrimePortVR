@@ -4,6 +4,8 @@
 #include "../gfx/hash.hpp"
 #include "../gfx/resource_cache.hpp"
 
+#include <absl/container/flat_hash_map.h>
+
 #include <cstring>
 
 #include "../gfx/depth_peek.hpp"
@@ -214,12 +216,13 @@ struct BindGroupCacheEntry {
   gfx::BindGroupRef multiview{};
   uint64_t multiviewEpoch = 0;
   uint32_t touchedFrame = UINT32_MAX;
-  bool used = false;
   bool monoValid = false;
   bool multiviewValid = false;
 };
-constexpr size_t BindGroupCacheSize = 1024;
-std::array<BindGroupCacheEntry, BindGroupCacheSize> sBindGroupCache{};
+// By the key's hash; the entries nothing used for a while are dropped now and then.
+absl::flat_hash_map<uint64_t, BindGroupCacheEntry> sBindGroupCache;
+constexpr uint32_t BindGroupCacheRetainFrames = 64;
+uint32_t sBindGroupCachePrunedFrame = 0;
 
 BindGroupKey bind_group_key(const ShaderInfo& info) noexcept {
   BindGroupKey key;
@@ -255,13 +258,22 @@ BindGroupCacheEntry* current_bind_group_entry(const ShaderInfo& info) noexcept {
   }
   const BindGroupKey key = bind_group_key(info);
   const uint64_t hash = XXH3_64bits(&key, sizeof(key));
-  auto& entry = sBindGroupCache[hash & (BindGroupCacheSize - 1)];
-  if (!entry.used || std::memcmp(&entry.key, &key, sizeof(key)) != 0) {
+  const uint32_t frame = gfx::current_frame();
+  if (frame != UINT32_MAX && frame - sBindGroupCachePrunedFrame > BindGroupCacheRetainFrames) {
+    sBindGroupCachePrunedFrame = frame;
+    absl::erase_if(sBindGroupCache, [frame](const auto& item) {
+      return frame - item.second.touchedFrame > BindGroupCacheRetainFrames;
+    });
+  }
+  auto [it, inserted] = sBindGroupCache.try_emplace(hash);
+  auto& entry = it->second;
+  if (inserted) {
+    entry.key = key;
+  } else if (std::memcmp(&entry.key, &key, sizeof(key)) != 0) {
+    // A hash collision: the newcomer takes the entry
     entry = BindGroupCacheEntry{};
     entry.key = key;
-    entry.used = true;
   }
-  const uint32_t frame = gfx::current_frame();
   if (entry.touchedFrame != frame) {
     entry.touchedFrame = frame;
     if (entry.monoValid && entry.mono.textureBindGroup != 0 && !gfx::touch_bind_group(entry.mono.textureBindGroup)) {
@@ -1245,7 +1257,7 @@ void clear_draw_cache() noexcept {
 
 void reset_draw_cache() noexcept {
   // Initialization/shutdown can replace layouts and default texture views.
-  sBindGroupCache.fill(BindGroupCacheEntry{});
+  sBindGroupCache.clear();
   sDrawCache = {};
 }
 

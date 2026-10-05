@@ -304,6 +304,7 @@ void PushVrSettingsToAurora() noexcept {
     aurora_set_stereo_head_locked(settings.metroid_hud_size, settings.metroid_hud_distance);
     // The pacing thread asks the runtime again when this changes.
     OpenXRSetDisplayRefreshRate(settings.display_refresh_rate);
+    OpenXRSetLeanBackDegrees(settings.lean_back_degrees);
 }
 
 void ResetVrCalibrationOffsets() noexcept {

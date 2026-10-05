@@ -581,7 +581,11 @@ constexpr auto kBpRegs = [] {
 
 // Matrix index A (0x30)
 void cp_mtx_index(u8, u32 value) noexcept {
+  const u32 previous = g_gxState.currentPnMtx;
   g_gxState.currentPnMtx = reg_get(value, 6, 0) / 3;
+  if (g_gxState.currentPnMtx != previous) {
+    g_gxState.dirty |= DirtyPipeline; // ShaderConfig::currentPnMtx
+  }
   g_gxState.xfRegValid.reset(0x18);
 }
 
@@ -755,7 +759,11 @@ void xf_chan_ctrl(u8 reg, u32 value) noexcept {
 
 // Matrix index A (0x18)
 void xf_mtx_index_a(u8, u32 value) noexcept {
+  const u32 previous = g_gxState.currentPnMtx;
   g_gxState.currentPnMtx = reg_get(value, 6, 0) / 3;
+  if (g_gxState.currentPnMtx != previous) {
+    g_gxState.dirty |= DirtyPipeline; // ShaderConfig::currentPnMtx
+  }
   g_gxState.cpRegValid.reset(0x30); // CP 0x30 also writes currentPnMtx
   for (u32 i = 0; i < 4; i++) {
     auto texMtx = static_cast<GXTexMtx>(reg_get(value, 6, 6 + i * 6));

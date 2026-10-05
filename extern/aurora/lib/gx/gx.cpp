@@ -443,6 +443,8 @@ void populate_pipeline_config(PipelineConfig& config, GXPrimitive primitive, GXV
     }
   }
   config.shaderConfig.vtxStride = vtxOffset;
+  config.shaderConfig.currentPnMtx =
+      config.shaderConfig.attrs[GX_VA_PNMTXIDX].attrType == GX_NONE ? static_cast<u8>(g_gxState.currentPnMtx) : 0;
   if (primitive == GX_LINES) {
     config.shaderConfig.lineMode = 1;
   } else if (primitive == GX_LINESTRIP) {

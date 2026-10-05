@@ -561,7 +561,7 @@ std::string vtx_attr(const ShaderConfig& config, GXAttr attr) {
   const auto type = config.attrs[attr].attrType;
   if (type == GX_NONE) {
     if (attr == GX_VA_PNMTXIDX) {
-      return "imm.current_pnmtx";
+      return fmt::format("{}u", config.currentPnMtx);
     }
     if (attr == GX_VA_NRM) {
       // Default normal
@@ -1724,7 +1724,7 @@ std::string build_shader_source(const ShaderConfig& config) noexcept {
     }
     vidxAttr = "in_vidx"sv;
   } else if (config.attrs[GX_VA_PNMTXIDX].attrType == GX_NONE) {
-    vtxXfrAttrsPre += "\n    let in_pnmtxidx = imm.current_pnmtx;";
+    vtxXfrAttrsPre += fmt::format("\n    let in_pnmtxidx = {}u;", config.currentPnMtx);
   }
 
   // Load vertex attributes

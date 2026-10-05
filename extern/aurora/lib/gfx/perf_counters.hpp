@@ -42,6 +42,10 @@ extern std::atomic<uint32_t> g_fifoBindGroupBuilds;
 extern std::atomic<uint32_t> g_fifoBindGroupMisses; // ... of which the cache had to build
 extern std::atomic<uint64_t> g_fifoResolveTicks;    // resolve_sampled_textures, within the bind groups' time
 extern std::atomic<uint32_t> g_fifoUniformBuilds;
+// Why a draw started a new draw instead of joining the last one; a draw with
+// several dirty kinds counts under each.
+enum MergeBreak { BreakPipeline, BreakTextures, BreakUniform, BreakImmediates, BreakFormat, BreakNoDraw, BreakCount };
+extern std::atomic<uint32_t> g_mergeBreaks[BreakCount];
 // The game thread blocked in gx::fifo::drain() for the FIFO processor, and
 // how many drains it asked for.
 extern std::atomic<uint64_t> g_drainWaitNs;
@@ -65,6 +69,11 @@ inline uint64_t tick() noexcept {
 inline uint64_t stamp(bool on) noexcept { return on ? tick() : 0; }
 inline void add(std::atomic<uint64_t>& sink, uint64_t from, uint64_t to) noexcept {
   sink.fetch_add(to - from, std::memory_order_relaxed);
+}
+inline void count_merge_break(MergeBreak why, bool on) noexcept {
+  if (on) {
+    g_mergeBreaks[why].fetch_add(1, std::memory_order_relaxed);
+  }
 }
 inline void count(std::atomic<uint32_t>& sink, bool on) noexcept {
   if (on) {

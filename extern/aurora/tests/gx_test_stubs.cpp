@@ -411,6 +411,7 @@ std::atomic<uint32_t> g_fifoBindGroupBuilds{0};
 std::atomic<uint32_t> g_fifoBindGroupMisses{0};
 std::atomic<uint64_t> g_fifoResolveTicks{0};
 std::atomic<uint32_t> g_fifoUniformBuilds{0};
+std::atomic<uint32_t> g_mergeBreaks[BreakCount]{};
 std::atomic<uint64_t> g_drainWaitNs{0};
 std::atomic<uint32_t> g_drainCalls{0};
 }

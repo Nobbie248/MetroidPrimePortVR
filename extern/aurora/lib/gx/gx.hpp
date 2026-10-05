@@ -546,7 +546,12 @@ struct ShaderConfig {
   u8 pad1 : 3 = 0;
   u8 pbr = 0; // GX_AURORA_SET_PBR
   u8 sdf = 0; // GX_AURORA_SET_SDF
-  std::array<u8, 3> pad2{};
+  // Without GX_VA_PNMTXIDX, the position (and normal) matrix every vertex takes: a
+  // constant index lets the GPU keep that one matrix in its constant memory instead
+  // of loading it for each vertex (on the Quest's Adreno, the vertex fetch stall
+  // dominated the eye passes).
+  u8 currentPnMtx = 0;
+  std::array<u8, 2> pad2{};
   std::array<AttrConfig, MaxVtxAttr> attrs;
   std::array<TevSwap, MaxTevSwap> tevSwapTable;
   std::array<TevStage, MaxTevStages> tevStages;

@@ -760,6 +760,20 @@ static u16* reserve_staged_indices(ByteBuffer& indices, u32 count, bool newRange
   return reinterpret_cast<u16*>(indices.append_uninitialized(static_cast<size_t>(count) * sizeof(u16)));
 }
 
+// Counts why a draw could not join the last one (perf_counters.hpp MergeBreak).
+static void count_merge_breaks(bool formatOrModeDiffers, bool noLastDraw) noexcept {
+  if (!gfx::perf::enabled()) {
+    return;
+  }
+  const u32 dirty = g_gxState.dirty;
+  gfx::perf::count_merge_break(gfx::perf::BreakPipeline, (dirty & DirtyPipeline) != 0);
+  gfx::perf::count_merge_break(gfx::perf::BreakTextures, (dirty & DirtyTextures) != 0);
+  gfx::perf::count_merge_break(gfx::perf::BreakUniform, (dirty & DirtyUniform) != 0);
+  gfx::perf::count_merge_break(gfx::perf::BreakImmediates, (dirty & DirtyImmediates) != 0);
+  gfx::perf::count_merge_break(gfx::perf::BreakFormat, formatOrModeDiffers);
+  gfx::perf::count_merge_break(gfx::perf::BreakNoDraw, dirty == 0 && !formatOrModeDiffers && noLastDraw);
+}
+
 // `cmd` is the FIFO draw command, whose following commands of the same kind
 // merge along; 0 for a draw delivered otherwise (GX_AURORA_DRAW_SIZED).
 static void draw_prim(u8 cmd, GXPrimitive prim, GXVtxFmt fmt, u16 vtxCount, ByteReader& reader) noexcept {
@@ -785,6 +799,10 @@ static void draw_prim(u8 cmd, GXPrimitive prim, GXVtxFmt fmt, u16 vtxCount, Byte
   const auto t0 = gfx::perf::stamp(perfOn);
 
   if (!canMerge) {
+    // Lines and points (instanced quads) never join one
+    count_merge_breaks(fmt != sDrawCache.lastDrawFmt || sDrawCache.lineMode != 0 || prim == GX_LINES ||
+                           prim == GX_LINESTRIP || prim == GX_POINTS,
+                       lastDraw == nullptr);
     const auto vertexData = reader.take(totalVtxBytes);
     const gfx::Range vertRange = gfx::push_verts(vertexData.data(), vertexData.size(), 4);
     if (perfOn) {

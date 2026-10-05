@@ -125,7 +125,10 @@ void set_render_scissor(const gfx::ClipRect& scissor) noexcept { g_gxState.rende
 // --- Shader/pipeline stubs ---
 namespace aurora::gx {
 void populate_pipeline_config(PipelineConfig& config, GXPrimitive primitive, GXVtxFmt fmt) noexcept {
-  // No-op for tests
+  config = {};
+  config.cullMode = g_gxState.cullMode;
+  config.shaderConfig.currentPnMtx = g_gxState.currentPnMtx;
+  config.shaderConfig.lineMode = primitive == GX_LINES ? 1 : primitive == GX_LINESTRIP ? 2 : primitive == GX_POINTS ? 3 : 0;
 }
 GXBindGroups build_bind_groups(const ShaderInfo& info) noexcept {
   return {.textureBindGroup = ++testing::bindBuilds};
@@ -137,9 +140,18 @@ ShaderInfo build_shader_info(const ShaderConfig& config) noexcept {
   return info;
 }
 gfx::Range build_uniform(const ShaderInfo& info) noexcept { return {.size = 1}; }
-gfx::Range build_uniform(const ShaderInfo& info, std::array<uint32_t, 2>& stereoUniformOffsets) noexcept {
+gfx::Range build_uniform(const ShaderInfo& info, std::array<uint32_t, 2>& stereoUniformOffsets,
+                         ByteBuffer* snapshot) noexcept {
   stereoUniformOffsets = {UINT32_MAX, UINT32_MAX};
+  if (snapshot != nullptr) {
+    snapshot->clear();
+    snapshot->append(g_gxState.lineWidth);
+  }
   return {.size = 1};
+}
+bool uniform_matches(const ShaderInfo&, const ByteBuffer& snapshot) noexcept {
+  return snapshot.size() == sizeof(g_gxState.lineWidth) &&
+         std::memcmp(snapshot.data(), &g_gxState.lineWidth, snapshot.size()) == 0;
 }
 void resolve_sampled_textures(const ShaderInfo& info) noexcept {}
 std::array<gfx::BindGroupRef, 2> build_stereo_bind_groups(const ShaderInfo& info) noexcept { return {}; }
@@ -173,16 +185,33 @@ uint64_t epoch() noexcept { return testing::stereoEpoch; }
 
 // --- Buffer push stubs ---
 namespace aurora::gfx {
-ByteBuffer* staging_verts() noexcept { return nullptr; }
-ByteBuffer* staging_indices() noexcept { return nullptr; }
 namespace testing {
 std::vector<uint8_t> pushedVerts; // the last push_verts' bytes
+bool mergeDraws = false;
+ByteBuffer stagedVerts;
+ByteBuffer stagedIndices;
 } // namespace testing
+ByteBuffer* staging_verts() noexcept { return testing::mergeDraws ? &testing::stagedVerts : nullptr; }
+ByteBuffer* staging_indices() noexcept { return testing::mergeDraws ? &testing::stagedIndices : nullptr; }
+static Range stage_test_bytes(ByteBuffer& buffer, const uint8_t* data, size_t length, size_t alignment) {
+  const auto offset = (buffer.size() + alignment - 1) / alignment * alignment;
+  (void)buffer.append_uninitialized(offset - buffer.size());
+  auto* dst = buffer.append_uninitialized(length);
+  if (length != 0) {
+    std::memcpy(dst, data, length);
+  }
+  return {static_cast<uint32_t>(offset), static_cast<uint32_t>(length)};
+}
 Range push_verts(const uint8_t* data, size_t length, size_t alignment) {
   testing::pushedVerts.assign(data, data + length);
+  if (testing::mergeDraws) {
+    return stage_test_bytes(testing::stagedVerts, data, length, alignment);
+  }
   return {};
 }
-Range push_indices(const uint8_t* data, size_t length, size_t alignment) { return {}; }
+Range push_indices(const uint8_t* data, size_t length, size_t alignment) {
+  return testing::mergeDraws ? stage_test_bytes(testing::stagedIndices, data, length, alignment) : Range{};
+}
 Range push_uniform(const uint8_t* data, size_t length) { return {}; }
 Range push_storage(const uint8_t* data, size_t length) { return {}; }
 
@@ -241,7 +270,7 @@ void push_draw_command<gx::DrawData>(gx::DrawData data) {
 }
 template <>
 gx::DrawData* get_last_draw_command() {
-  return nullptr;
+  return testing::mergeDraws && g_testDrawCount != 0 ? &g_testLastDraw : nullptr;
 }
 } // namespace aurora::gfx
 

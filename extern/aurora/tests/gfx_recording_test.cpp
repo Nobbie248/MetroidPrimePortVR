@@ -3,6 +3,8 @@
 #include "gfx/frame_packet.hpp"
 #include "gfx/recording.hpp"
 #include "gfx/texture.hpp"
+#include "gfx/resources.hpp"
+#include "gx/shader_info.hpp"
 #include "webgpu/gpu.hpp"
 
 #include <algorithm>
@@ -73,6 +75,42 @@ TEST_F(GfxRecordingTest, CreateRestoreReturnsToEfb) {
   EXPECT_TRUE(frame.renderPasses[0].sealed);
   EXPECT_TRUE(frame.renderPasses[0].discardable);
   EXPECT_EQ(count_efb_passes(), 1u);
+}
+
+TEST_F(GfxRecordingTest, UniformSnapshotComparesConsumedValues) {
+  gx::g_gxState = {};
+  detail::resources().limits.minUniformBufferOffsetAlignment = 256;
+  const auto info = gx::build_shader_info(gx::ShaderConfig{});
+  ByteBuffer snapshot;
+  std::array<uint32_t, 2> offsets{};
+  gx::build_uniform(info, offsets, &snapshot);
+  ASSERT_TRUE(gx::uniform_matches(info, snapshot));
+  // Triangle shaders do not consume line width or an unused konst register.
+  ++gx::g_gxState.lineWidth;
+  gx::g_gxState.kcolors[0][0] += 1.0f;
+  EXPECT_TRUE(gx::uniform_matches(info, snapshot));
+  gx::g_gxState.pnMtx[0].pos.m0[0] += 1.0f;
+  EXPECT_FALSE(gx::uniform_matches(info, snapshot));
+}
+
+TEST_F(GfxRecordingTest, UniformSnapshotIncludesLogicalTextureSizeAndLineWidth) {
+  gx::g_gxState = {};
+  detail::resources().limits.minUniformBufferOffsetAlignment = 256;
+  gx::ShaderConfig config{};
+  config.lineMode = 1;
+  auto info = gx::build_shader_info(config);
+  info.sampledTextures.set(0);
+  info.uniformSize += 16;
+  ByteBuffer snapshot;
+  std::array<uint32_t, 2> offsets{};
+  gx::build_uniform(info, offsets, &snapshot);
+  ASSERT_TRUE(gx::uniform_matches(info, snapshot));
+  ++gx::g_gxState.lineWidth;
+  EXPECT_FALSE(gx::uniform_matches(info, snapshot));
+  --gx::g_gxState.lineWidth;
+  gx::g_gxState.textures[0].texObj.image0 ^= 1;
+  EXPECT_FALSE(gx::uniform_matches(info, snapshot));
+  EXPECT_FALSE(gx::uniform_matches(info, ByteBuffer{}));
 }
 
 TEST_F(GfxRecordingTest, EfbPassUsesDiscoveredSceneLayout) {

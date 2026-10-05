@@ -526,11 +526,26 @@ gfx::Range build_uniform(const ShaderInfo& info) noexcept {
   return build_uniform(info, unused);
 }
 
-gfx::Range build_uniform(const ShaderInfo& info, std::array<uint32_t, 2>& stereoUniformOffsets) noexcept {
+bool uniform_matches(const ShaderInfo& info, const ByteBuffer& snapshot) noexcept {
+  if (snapshot.size() == 0) {
+    return false;
+  }
+  static ByteBuffer candidate;
+  candidate.clear();
+  fill_uniform(candidate, info);
+  return candidate.size() == snapshot.size() && std::memcmp(candidate.data(), snapshot.data(), snapshot.size()) == 0;
+}
+
+gfx::Range build_uniform(const ShaderInfo& info, std::array<uint32_t, 2>& stereoUniformOffsets,
+                         ByteBuffer* snapshot) noexcept {
   ZoneScoped;
   static ByteBuffer buf;
   buf.clear();
   fill_uniform(buf, info);
+  if (snapshot != nullptr) {
+    snapshot->clear();
+    std::memcpy(snapshot->append_uninitialized(buf.size()), buf.data(), buf.size());
+  }
   const auto range = gfx::push_uniform(buf.data(), buf.size());
   // The eye copies are composed from the CPU-side bytes while they are in hand:
   // the staged uniform lives in write-mapped memory, which is slow to read back.

@@ -30,6 +30,9 @@ extern uint32_t frame;
 extern bool bindGroupsAlive;
 extern bool multiview;
 extern uint64_t stereoEpoch;
+extern bool mergeDraws;
+extern aurora::ByteBuffer stagedVerts;
+extern aurora::ByteBuffer stagedIndices;
 }
 
 namespace aurora::gfx {
@@ -148,6 +151,148 @@ TEST_F(GXDeindexTest, DirectAttributesStayAndBaseIndexAndRangeApply) {
       EXPECT_EQ(verts[v * 8 + 4 + b], expected[v][1 + b]) << "record " << v << " byte " << b;
     }
   }
+}
+
+class GXDrawMergeTest : public GXDeindexTest {
+protected:
+  void SetUp() override {
+    GXDeindexTest::SetUp();
+    aurora::gfx::g_testDrawCount = 0;
+    aurora::gfx::testing::mergeDraws = true;
+    aurora::gfx::testing::stagedVerts.clear();
+    aurora::gfx::testing::stagedIndices.clear();
+    g_gxState.vtxDesc[GX_VA_POS] = GX_DIRECT;
+    g_gxState.vtxFmts[0].attrs[GX_VA_POS] = {GX_POS_XY, GX_S16, 0};
+  }
+  void TearDown() override {
+    aurora::gfx::testing::mergeDraws = false;
+    GXDeindexTest::TearDown();
+  }
+  void Draw(GXPrimitive prim, u16 count, u8 value = 1) {
+    std::vector<u8> bytes{static_cast<u8>(prim), static_cast<u8>(count >> 8), static_cast<u8>(count)};
+    bytes.resize(3 + count * 4, value);
+    decode_fifo(bytes);
+  }
+};
+
+TEST_F(GXDrawMergeTest, IndependentLinesAndPointsKeepOneQuadAndAppendInstances) {
+  for (const auto prim : {GX_LINES, GX_POINTS}) {
+    g_gxState.dirty |= aurora::gx::DirtyPipeline;
+    Draw(prim, 4, 11);
+    const auto before = aurora::gfx::g_testDrawCount;
+    const auto first = aurora::gfx::g_testLastDraw;
+    Draw(prim, 2, 22);
+    Draw(prim, 4, 33);
+    const auto& last = aurora::gfx::g_testLastDraw;
+    EXPECT_EQ(aurora::gfx::g_testDrawCount, before);
+    EXPECT_EQ(last.vtxCount, 10u);
+    EXPECT_EQ(last.instanceCount, prim == GX_LINES ? 5u : 10u);
+    EXPECT_EQ(last.indexCount, 6u);
+    EXPECT_EQ(last.idxRange.offset, first.idxRange.offset);
+    EXPECT_EQ(last.idxRange.size, first.idxRange.size);
+    EXPECT_EQ(last.vertRange.size, 40u);
+    const auto* staged = aurora::gfx::testing::stagedVerts.data() + last.vertRange.offset;
+    EXPECT_TRUE(std::all_of(staged, staged + 16, [](u8 v) { return v == 11; }));
+    EXPECT_TRUE(std::all_of(staged + 16, staged + 24, [](u8 v) { return v == 22; }));
+    EXPECT_TRUE(std::all_of(staged + 24, staged + 40, [](u8 v) { return v == 33; }));
+  }
+}
+
+TEST_F(GXDrawMergeTest, OddLineCountsStaySeparate) {
+  Draw(GX_LINES, 3);
+  Draw(GX_LINES, 2);
+  Draw(GX_LINES, 3);
+  EXPECT_EQ(aurora::gfx::g_testDrawCount, 3u);
+}
+
+TEST_F(GXDrawMergeTest, StripsBatchWithoutConnectingTheirEndpoints) {
+  decode_fifo({GX_LINESTRIP, 0, 3, 1,1,1,1, 2,2,2,2, 3,3,3,3,
+               GX_LINESTRIP, 0, 2, 4,4,4,4, 5,5,5,5});
+  EXPECT_EQ(aurora::gfx::g_testDrawCount, 1u);
+  EXPECT_EQ(aurora::gfx::g_testLastDraw.instanceCount, 3u);
+  EXPECT_EQ(aurora::gfx::g_testLastDraw.indexCount, 6u);
+  const std::vector<u8> expected{1,1,1,1, 2,2,2,2, 2,2,2,2, 3,3,3,3, 4,4,4,4, 5,5,5,5};
+  const auto& staged = aurora::gfx::testing::stagedVerts;
+  ASSERT_EQ(staged.size(), expected.size());
+  EXPECT_EQ(std::memcmp(staged.data(), expected.data(), expected.size()), 0);
+}
+
+TEST_F(GXDrawMergeTest, MaximumStripSplitsIntoCompleteSegments) {
+  Draw(GX_LINESTRIP, UINT16_MAX);
+  EXPECT_EQ(aurora::gfx::g_testDrawCount, 2u);
+  EXPECT_EQ(aurora::gfx::g_testLastDraw.instanceCount, 32767u);
+  EXPECT_EQ(aurora::gfx::testing::stagedVerts.size(), (UINT16_MAX - 1u) * 2u * 4u);
+}
+
+TEST_F(GXDrawMergeTest, ChangedShaderUniformOrFormatSplitsInstances) {
+  Draw(GX_LINES, 2);
+  g_gxState.cullMode = GX_CULL_ALL;
+  g_gxState.dirty |= aurora::gx::DirtyPipeline;
+  Draw(GX_LINES, 2);
+  ++g_gxState.lineWidth;
+  g_gxState.dirty |= aurora::gx::DirtyUniform;
+  Draw(GX_LINES, 2);
+  Draw(GX_POINTS, 2);
+  Draw(GX_TRIANGLES, 3);
+  EXPECT_EQ(aurora::gfx::g_testDrawCount, 5u);
+}
+
+TEST_F(GXDrawMergeTest, EquivalentFinalStateMergesAfterRegisterChanges) {
+  Draw(GX_LINES, 2);
+  g_gxState.dirty |= aurora::gx::DirtyAll;
+  Draw(GX_LINES, 2);
+  EXPECT_EQ(aurora::gfx::g_testDrawCount, 1u);
+  EXPECT_EQ(aurora::gfx::g_testLastDraw.instanceCount, 2u);
+}
+
+TEST_F(GXDrawMergeTest, ChangedSampledTextureStillSplits) {
+  aurora::gx::testing::sampledTexture = true;
+  const auto setTexture = [](uintptr_t view) {
+    g_gxState.textures[0].ref = std::make_shared<aurora::gfx::TextureRef>(
+        wgpu::Texture{}, wgpu::TextureView::Acquire(reinterpret_cast<WGPUTextureView>(view)),
+        wgpu::TextureView{}, wgpu::Extent3D{32, 32, 1}, wgpu::TextureFormat::RGBA8Unorm, 1, GX_TF_RGBA8);
+    g_gxState.dirty |= aurora::gx::DirtyTextures;
+  };
+  setTexture(1);
+  Draw(GX_LINES, 2);
+  setTexture(2);
+  Draw(GX_LINES, 2);
+  EXPECT_EQ(aurora::gfx::g_testDrawCount, 2u);
+  aurora::gx::testing::sampledTexture = false;
+}
+
+TEST_F(GXDrawMergeTest, ArrayChangesCopyNewElementsAndRebaseStripIndices) {
+  const std::array<u8, 16> first{1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16};
+  const std::array<u8, 16> second{21,22,23,24,25,26,27,28,29,30,31,32,33,34,35,36};
+  g_gxState.vtxDesc[GX_VA_POS] = GX_INDEX8;
+  g_gxState.arrays[GX_VA_POS] = {.data = first.data(), .size = 16, .stride = 4};
+  decode_fifo({GX_TRIANGLESTRIP, 0, 3, 0, 1, 2});
+  g_gxState.arrays[GX_VA_POS].data = second.data();
+  g_gxState.arrays[GX_VA_POS].baseIndex = 1;
+  g_gxState.dirty |= aurora::gx::DirtyImmediates;
+  decode_fifo({GX_TRIANGLESTRIP, 0, 3, 0, 1, 2});
+  EXPECT_EQ(aurora::gfx::g_testDrawCount, 1u);
+  const auto& last = aurora::gfx::g_testLastDraw;
+  EXPECT_EQ(last.vtxCount, 6u);
+  EXPECT_EQ(last.indexCount, 6u);
+  const auto* bytes = aurora::gfx::testing::stagedVerts.data() + last.vertRange.offset;
+  EXPECT_EQ(std::memcmp(bytes, first.data(), 12), 0);
+  EXPECT_EQ(std::memcmp(bytes + 12, second.data() + 4, 12), 0);
+  const std::array<u16, 6> expected{0,1,2,3,4,5};
+  EXPECT_EQ(std::memcmp(aurora::gfx::testing::stagedIndices.data() + last.idxRange.offset,
+                        expected.data(), sizeof(expected)), 0);
+}
+
+TEST_F(GXDrawMergeTest, IndexedGpuArraysAndCurrentMatrixChangesStillSplit) {
+  g_gxState.deindexVertices = false;
+  Draw(GX_TRIANGLES, 3);
+  g_gxState.dirty |= aurora::gx::DirtyImmediates;
+  Draw(GX_TRIANGLES, 3);
+  g_gxState.deindexVertices = true;
+  ++g_gxState.currentPnMtx;
+  g_gxState.dirty |= aurora::gx::DirtyImmediates;
+  Draw(GX_TRIANGLES, 3);
+  EXPECT_EQ(aurora::gfx::g_testDrawCount, 3u);
 }
 
 TEST_F(GXBindGroupCacheTest, ReusesUnchangedMaterialAcrossFramesAndGlobalInvalidation) {

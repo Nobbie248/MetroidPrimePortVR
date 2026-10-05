@@ -168,6 +168,10 @@ struct DrawCache {
   u8 lineMode = 0;
   bool hasPipeline = false;
   gfx::Range uniformRange{};
+  ByteBuffer uniformBytes;
+  u8 uniformRoute = 0;
+  gfx::stereo_replay::HeadLockedPlane uniformPlane{};
+  gfx::StereoScreenTexMtx uniformScreenTexMtx{};
   std::array<uint32_t, 2> stereoUniformOffsets{UINT32_MAX, UINT32_MAX};
   std::array<gfx::BindGroupRef, 2> stereoBindGroups{};
   uint64_t stereoEpoch = 0;
@@ -844,7 +848,10 @@ static void push_gx_draw(GXPrimitive prim, GXVtxFmt fmt, u16 vtxCount, gfx::Rang
   const bool uniformValid = (state.dirty & DirtyUniform) == 0 && cache.uniformRange.size != 0;
   if (!uniformValid) {
     gfx::perf::count(gfx::perf::g_fifoUniformBuilds, perfOn);
-    cache.uniformRange = build_uniform(cache.shaderInfo, cache.stereoUniformOffsets);
+    cache.uniformRange = build_uniform(cache.shaderInfo, cache.stereoUniformOffsets, &cache.uniformBytes);
+    cache.uniformRoute = gfx::stereo_draw_route();
+    cache.uniformPlane = gfx::stereo_head_locked_plane();
+    cache.uniformScreenTexMtx = gfx::stereo_screen_tex_mtx();
     cache.multiviewMode = staged_multiview_mode(cache);
     state.dirty &= ~DirtyUniform;
   }
@@ -958,6 +965,57 @@ static void count_merge_breaks(bool formatOrModeDiffers, bool noLastDraw) noexce
   gfx::perf::count_merge_break(gfx::perf::BreakNoDraw, dirty == 0 && !formatOrModeDiffers && noLastDraw);
 }
 
+// GX register writes can change unused state or temporarily change it and put
+// it back. Only the final shader, sampled textures and uniform bytes need to
+// agree to concatenate vertices. Keep submission order and all pass boundaries.
+static void reconcile_merge_state(GXPrimitive prim, GXVtxFmt fmt) noexcept {
+  auto& state = g_gxState;
+  auto& cache = sDrawCache;
+  if (!cache.hasPipeline || cache.uniformRange.size == 0 || prim == GX_LINESTRIP ||
+      gfx::get_last_draw_command<DrawData>() == nullptr) {
+    return;
+  }
+  const auto plane = gfx::stereo_head_locked_plane();
+  const auto screen = gfx::stereo_screen_tex_mtx();
+  if (cache.uniformRoute != gfx::stereo_draw_route() ||
+      cache.uniformPlane.tanHalfWidth != plane.tanHalfWidth ||
+      cache.uniformPlane.tanHalfHeight != plane.tanHalfHeight || cache.uniformPlane.distance != plane.distance ||
+      cache.uniformScreenTexMtx.texSlot != screen.texSlot || cache.uniformScreenTexMtx.pnSlot != screen.pnSlot) {
+    state.dirty |= DirtyUniform;
+    return;
+  }
+  if (gfx::stereo_shadow::active() && cache.stereoEpoch != gfx::stereo_shadow::epoch()) {
+    state.dirty |= DirtyTextures;
+    return;
+  }
+  if ((state.dirty & DirtyPipeline) != 0 || cache.fmt != fmt || cache.lineMode != line_mode_for_prim(prim)) {
+    PipelineConfig candidate{};
+    populate_pipeline_config(candidate, prim, fmt);
+    if (std::memcmp(&candidate, &cache.config, sizeof(candidate)) != 0) {
+      return;
+    }
+    state.dirty &= ~DirtyPipeline;
+    cache.fmt = fmt;
+    cache.lastDrawFmt = fmt;
+  }
+  if ((state.dirty & DirtyTextures) != 0 || cache.bindGeneration != texture::current_bind_generation()) {
+    state.dirty |= DirtyTextures;
+    resolve_sampled_textures(cache.shaderInfo);
+    const auto groups = cached_bind_groups(cache.shaderInfo);
+    if (groups.textureBindGroup != cache.bindGroups.textureBindGroup) {
+      return;
+    }
+    cache.bindGeneration = texture::current_bind_generation();
+    state.dirty &= ~DirtyTextures;
+    // Even an unchanged texture binding may have new logical dimensions or
+    // LOD bias. These live in the uniform, not in the bind-group descriptor.
+    state.dirty |= DirtyUniform;
+  }
+  if ((state.dirty & DirtyUniform) != 0 && uniform_matches(cache.shaderInfo, cache.uniformBytes)) {
+    state.dirty &= ~DirtyUniform;
+  }
+}
+
 // `cmd` is the FIFO draw command, whose following commands of the same kind
 // merge along; 0 for a draw delivered otherwise (GX_AURORA_DRAW_SIZED).
 static void draw_prim(u8 cmd, GXPrimitive prim, GXVtxFmt fmt, u16 vtxCount, ByteReader& reader) noexcept {
@@ -972,23 +1030,54 @@ static void draw_prim(u8 cmd, GXPrimitive prim, GXVtxFmt fmt, u16 vtxCount, Byte
   if (totalVtxBytes > reader.remaining())
     UNLIKELY { handle_draw_overrun(totalVtxBytes, reader); }
 
-  const bool cleanState = g_gxState.dirty == 0 && fmt == sDrawCache.lastDrawFmt && sDrawCache.lineMode == 0 &&
-                          prim != GX_LINES && prim != GX_LINESTRIP && prim != GX_POINTS;
+  // The GPU expands each strip segment to an independent quad already. Give it
+  // independent endpoint pairs so adjacent strips can share one instanced draw
+  // without creating a segment between strips. Expand the FIFO records before
+  // de-indexing, preserving all per-vertex attributes and their byte order.
+  if (prim == GX_LINESTRIP) {
+    const auto source = reader.take(totalVtxBytes);
+    static ByteBuffer pairs;
+    for (u32 first = 0; first + 1 < vtxCount;) {
+      const u32 segments = std::min<u32>(vtxCount - first - 1, UINT16_MAX / 2);
+      pairs.clear();
+      auto* dst = pairs.append_uninitialized(segments * 2 * vtxSize);
+      for (u32 segment = 0; segment < segments; ++segment) {
+        std::memcpy(dst + segment * 2 * vtxSize, source.data() + (first + segment) * vtxSize, 2 * vtxSize);
+      }
+      ByteReader pairReader{pairs.data(), pairs.size()};
+      draw_prim(0, GX_LINES, fmt, static_cast<u16>(segments * 2), pairReader);
+      first += segments;
+    }
+    return;
+  }
+
+  // Resolve the plan before clearing array dirtiness: after de-indexing, new
+  // array addresses/base indices change the copied records, not the GPU state.
+  const DeindexPlan* const plan = g_gxState.deindexVertices ? &deindex_plan(fmt) : nullptr;
+  if (g_gxState.dirty != 0 || fmt != sDrawCache.lastDrawFmt) {
+    reconcile_merge_state(prim, fmt);
+  }
+  const u32 drawDirty = g_gxState.dirty & ~(g_gxState.deindexVertices ? DirtyImmediates : 0u);
+  const u8 lineMode = line_mode_for_prim(prim);
+  const bool formatDiffers = fmt != sDrawCache.lastDrawFmt || sDrawCache.lineMode != lineMode;
+  // Independent lines and points are instances of the same quad. Line strips
+  // cannot concatenate: doing so would connect the end of one to the next.
+  const bool cleanState = drawDirty == 0 && !formatDiffers && prim != GX_LINESTRIP;
   auto* lastDraw = cleanState ? gfx::get_last_draw_command<DrawData>() : nullptr;
   ByteBuffer* const verts = lastDraw != nullptr ? gfx::staging_verts() : nullptr;
   ByteBuffer* const indices = lastDraw != nullptr ? gfx::staging_indices() : nullptr;
-  const bool canMerge = lastDraw != nullptr && lastDraw->instanceCount == 1 && verts != nullptr &&
-                        indices != nullptr && lastDraw->vtxCount + vtxCount <= UINT16_MAX;
+  const bool canMerge = lastDraw != nullptr && (lineMode != 0 || lastDraw->instanceCount == 1) &&
+                        lastDraw->immediateData.currentPnMtx == g_gxState.currentPnMtx && verts != nullptr &&
+                        indices != nullptr && lastDraw->vtxCount + vtxCount <= UINT16_MAX &&
+                        (prim != GX_LINES || (lastDraw->vtxCount % 2 == 0 && vtxCount % 2 == 0)) &&
+                        (prim != GX_TRIANGLES || ((lastDraw->indexCount != 0 || lastDraw->vtxCount % 3 == 0) &&
+                                                  vtxCount % 3 == 0));
   const bool perfOn = gfx::perf::enabled();
   const auto t0 = gfx::perf::stamp(perfOn);
-  const DeindexPlan* const plan = g_gxState.deindexVertices ? &deindex_plan(fmt) : nullptr;
   const bool deindex = plan != nullptr && plan->active;
 
   if (!canMerge) {
-    // Lines and points (instanced quads) never join one
-    count_merge_breaks(fmt != sDrawCache.lastDrawFmt || sDrawCache.lineMode != 0 || prim == GX_LINES ||
-                           prim == GX_LINESTRIP || prim == GX_POINTS,
-                       lastDraw == nullptr);
+    count_merge_breaks(formatDiffers || prim == GX_LINESTRIP, lastDraw == nullptr);
     const auto vertexData = reader.take(totalVtxBytes);
     const gfx::Range vertRange = push_vertex_records(plan, vertexData, vtxCount, 4);
     if (perfOn) {
@@ -1001,6 +1090,7 @@ static void draw_prim(u8 cmd, GXPrimitive prim, GXVtxFmt fmt, u16 vtxCount, Byte
   // Merge into the previous draw. Prime's world surfaces are thousands of short
   // strips a frame, so this appends to the staging buffers directly, and takes
   // the strips that follow under the same command in the same loop.
+  g_gxState.dirty &= ~DirtyImmediates;
   u32 merged = 0;
   while (true) {
     const auto vertexData = reader.take(totalVtxBytes);
@@ -1018,7 +1108,11 @@ static void draw_prim(u8 cmd, GXPrimitive prim, GXVtxFmt fmt, u16 vtxCount, Byte
       std::memcpy(verts->append_uninitialized(totalVtxBytes), vertexData.data(), totalVtxBytes);
     }
     lastDraw->vertRange.size += stagedBytes;
-    if (lastDraw->indexCount == 0 && prim != GX_TRIANGLES) {
+    if (lineMode != 0) {
+      // Keep the existing quad indices; instances address the appended points
+      // or independent pairs relative to the original draw's vertex start.
+      lastDraw->instanceCount += prim == GX_LINES ? vtxCount / 2 : vtxCount;
+    } else if (lastDraw->indexCount == 0 && prim != GX_TRIANGLES) {
       // The previous draw's own triangles take their list indices first
       const u32 count = list_index_count(GX_TRIANGLES, static_cast<u16>(lastDraw->vtxCount));
       u32 offset = 0;
@@ -1027,7 +1121,7 @@ static void draw_prim(u8 cmd, GXPrimitive prim, GXVtxFmt fmt, u16 vtxCount, Byte
       lastDraw->idxRange = gfx::Range{offset, static_cast<u32>(count * sizeof(u16))};
       lastDraw->indexCount = count;
     }
-    if (lastDraw->indexCount != 0) {
+    if (lineMode == 0 && lastDraw->indexCount != 0) {
       const u32 count = list_index_count(prim, vtxCount);
       const bool newRange = lastDraw->idxRange.size == 0;
       u32 offset = 0;
@@ -1051,7 +1145,8 @@ static void draw_prim(u8 cmd, GXPrimitive prim, GXVtxFmt fmt, u16 vtxCount, Byte
     }
     const u16 nextCount = read_bits<u16>(reader.data() + reader.offset() + 1);
     const u32 nextBytes = nextCount * vtxSize;
-    if (nextCount == 0 || lastDraw->vtxCount + nextCount > UINT16_MAX || nextBytes > reader.remaining() - 3) {
+    if (nextCount == 0 || lastDraw->vtxCount + nextCount > UINT16_MAX || nextBytes > reader.remaining() - 3 ||
+        (prim == GX_LINES && nextCount % 2 != 0) || (prim == GX_TRIANGLES && nextCount % 3 != 0)) {
       break;
     }
     reader.skip(3);

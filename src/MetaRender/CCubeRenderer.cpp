@@ -56,6 +56,9 @@
 #ifdef TARGET_PC
 #include "port_room_geo.h"
 #include <dolphin/gx/GXAurora.h>
+#include <algorithm>
+#include <cstdlib>
+#include <functional>
 #endif
 
 CCubeRenderer* CCubeRenderer::sRenderer = nullptr;
@@ -753,6 +756,33 @@ void CCubeRenderer::DrawUnsortedGeometry(int areaIdx, uint mask, uint targetMask
       pvs = nullptr;
     }
 
+#ifdef TARGET_PC
+    // Port: profiling experiment. Group only solid, depth-writing world
+    // surfaces; blended and reflective surfaces remain ordering barriers.
+    static const bool batchMaterials = std::getenv("MP_SORT_OPAQUE") != nullptr;
+    struct SolidSurface {
+      CCubeModel* model;
+      CCubeSurface surface;
+      const void* material;
+    };
+    std::vector<SolidSurface> solidSurfaces;
+    const auto flushSolidSurfaces = [&] {
+      std::stable_sort(solidSurfaces.begin(), solidSurfaces.end(), [](const auto& a, const auto& b) {
+        return std::less<const void*>{}(a.material, b.material);
+      });
+      CCubeModel* currentModel = nullptr;
+      for (const auto& draw : solidSurfaces) {
+        if (currentModel != draw.model) {
+          currentModel = draw.model;
+          currentModel->SetArraysCurrent();
+          ActivateLightsForModel(areaListItem, *currentModel);
+        }
+        currentModel->DrawSurface(draw.surface, skNormalFlag);
+      }
+      solidSurfaces.clear();
+    };
+#endif
+
     int modelIdx = 0;
     for (AUTO(modelIt, models.begin()); modelIt != models.end(); ++modelIt, ++modelIdx) {
       CCubeModel& model = **modelIt;
@@ -780,9 +810,31 @@ void CCubeRenderer::DrawUnsortedGeometry(int areaIdx, uint mask, uint targetMask
         HandleUnsortedModelWireframe(areaListItem, model);
       } else {
         model.SetShouldDrawWorldFlag(true);
+#ifdef TARGET_PC
+        if (batchMaterials && !GetInAreaDraw()) {
+          for (auto surface = model.GetNormalSurfaces(); surface.IsValid(); surface = surface.GetNextSurface()) {
+            const auto material = model.GetMaterialByIndex(surface.GetMaterialIndex());
+            const uint excluded = kStateFlag_Reflection | kStateFlag_ReflectionSurfaceEye |
+                                  kStateFlag_ReflectionIndirectTexture | kStateFlag_PortPBR;
+            if (material.IsFlagSet(kStateFlag_DepthWrite) && (material.GetFlags() & excluded) == 0 &&
+                material.GetCompressedBlend() == GX_BL_ONE) {
+              solidSurfaces.push_back({&model, surface, material.GetData()});
+            } else {
+              flushSolidSurfaces();
+              model.SetArraysCurrent();
+              ActivateLightsForModel(areaListItem, model);
+              model.DrawSurface(surface, skNormalFlag);
+            }
+          }
+          continue;
+        }
+#endif
         HandleUnsortedModel(areaListItem, model);
       }
     }
+#ifdef TARGET_PC
+    flushSolidSurfaces();
+#endif
   }
 
   SetupCGraphicsStates();

@@ -175,7 +175,13 @@ uint64_t epoch() noexcept { return testing::stereoEpoch; }
 namespace aurora::gfx {
 ByteBuffer* staging_verts() noexcept { return nullptr; }
 ByteBuffer* staging_indices() noexcept { return nullptr; }
-Range push_verts(const uint8_t* data, size_t length, size_t alignment) { return {}; }
+namespace testing {
+std::vector<uint8_t> pushedVerts; // the last push_verts' bytes
+} // namespace testing
+Range push_verts(const uint8_t* data, size_t length, size_t alignment) {
+  testing::pushedVerts.assign(data, data + length);
+  return {};
+}
 Range push_indices(const uint8_t* data, size_t length, size_t alignment) { return {}; }
 Range push_uniform(const uint8_t* data, size_t length) { return {}; }
 Range push_storage(const uint8_t* data, size_t length) { return {}; }
@@ -412,6 +418,8 @@ std::atomic<uint32_t> g_fifoBindGroupMisses{0};
 std::atomic<uint64_t> g_fifoResolveTicks{0};
 std::atomic<uint32_t> g_fifoUniformBuilds{0};
 std::atomic<uint32_t> g_mergeBreaks[BreakCount]{};
+std::atomic<uint64_t> g_fifoDeindexTicks{0};
+std::atomic<uint32_t> g_fifoDeindexedVerts{0};
 std::atomic<uint64_t> g_drainWaitNs{0};
 std::atomic<uint32_t> g_drainCalls{0};
 }

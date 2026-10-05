@@ -109,6 +109,11 @@ bool aurora_get_stereo_immersive_replay(void);
 void aurora_set_stereo_multiview(bool enabled);
 // The device can (PrimedGun's patched Dawn on Vulkan, with the OpenXR interop).
 bool aurora_get_stereo_multiview_available(void);
+// Whether the FIFO processor resolves indexed vertex attributes into direct ones
+// before the upload (default false): one fetch per attribute in the vertex shader
+// instead of an index and a dependent array fetch, which stalls the Quest's GPU,
+// for more CPU work per vertex. Takes effect at the next frame.
+void aurora_set_gx_deindex_vertices(bool enabled);
 
 #ifdef __cplusplus
 }

@@ -429,14 +429,19 @@ void populate_pipeline_config(PipelineConfig& config, GXPrimitive primitive, GXV
       break;
     }
     case GX_INDEX8:
-      mapping.stride = g_gxState.arrays[i].stride;
-      mapping.le = g_gxState.arrays[i].le;
-      vtxOffset += nbt3 ? 3 : 1;
-      break;
     case GX_INDEX16:
+      if (g_gxState.deindexVertices) {
+        // Resolved by the FIFO processor (command_processor.cpp deindex_plan): the
+        // array's elements inline, in the array's byte order, NBT3 as one block
+        mapping.attrType = GX_DIRECT;
+        mapping.le = g_gxState.arrays[i].le;
+        mapping.nbt3 = false;
+        vtxOffset += comp_type_size(attr, attrFmt.type) * cnt;
+        break;
+      }
       mapping.stride = g_gxState.arrays[i].stride;
       mapping.le = g_gxState.arrays[i].le;
-      vtxOffset += nbt3 ? 6 : 2;
+      vtxOffset += (type == GX_INDEX8 ? 1 : 2) * (nbt3 ? 3 : 1);
       break;
     default:
       Log.fatal("populate_pipeline_config: Invalid vertex type {}", type);

@@ -456,6 +456,11 @@ struct GXState {
   u16 lastVtxSize = 0;
   GXVtxFmt lastVtxFmt = GX_MAX_VTXFMT;
   u8 dirty = DirtyAll;
+  // Indexed vertex attributes are resolved by the FIFO processor into direct ones
+  // (aurora_set_gx_deindex_vertices, latched at frame end): one fetch per attribute
+  // in the vertex shader instead of an index fetch and a dependent array fetch,
+  // which stalls the Quest's GPU. The pipeline config describes the resolved layout.
+  bool deindexVertices = false;
 
   // Shadow registers
   std::array<u32, 0x100> bpRegCache = [] {

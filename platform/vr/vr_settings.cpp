@@ -163,6 +163,7 @@ const Field kFields[] = {
     VR_BOOL(multiview),
     VR_BOOL(direct_present),
     VR_BOOL(pipelined_rendering),
+    VR_BOOL(deindex_vertices),
     Field{"vr_performance_level",
           [](PortVrSettings& s, const std::string& v) {
               const std::string name = Lower(v);
@@ -283,6 +284,7 @@ void PushVrSettingsToAurora() noexcept {
     const PortVrSettings settings = GetVrSettings();
     aurora_set_stereo_immersive_replay(settings.immersive_replay);
     aurora_set_stereo_multiview(settings.multiview);
+    aurora_set_gx_deindex_vertices(settings.deindex_vertices);
     aurora_set_stereo_mirror_view(AuroraMirrorView(settings.mirror_view));
 #if defined(MP_ENABLE_OPENXR)
     // [xr-diag] follows the toggle at once, with Aurora's stereo frame statistics.

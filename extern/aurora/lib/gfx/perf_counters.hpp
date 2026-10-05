@@ -46,6 +46,9 @@ extern std::atomic<uint32_t> g_fifoUniformBuilds;
 // several dirty kinds counts under each.
 enum MergeBreak { BreakPipeline, BreakTextures, BreakUniform, BreakImmediates, BreakFormat, BreakNoDraw, BreakCount };
 extern std::atomic<uint32_t> g_mergeBreaks[BreakCount];
+// Vertex de-indexing on the FIFO processor (GXState::deindexVertices)
+extern std::atomic<uint64_t> g_fifoDeindexTicks;
+extern std::atomic<uint32_t> g_fifoDeindexedVerts;
 // The game thread blocked in gx::fifo::drain() for the FIFO processor, and
 // how many drains it asked for.
 extern std::atomic<uint64_t> g_drainWaitNs;

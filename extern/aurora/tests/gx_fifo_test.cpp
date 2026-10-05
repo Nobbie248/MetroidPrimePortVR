@@ -25,6 +25,7 @@ extern uint32_t multiviewBuilds;
 }
 
 namespace aurora::gfx::testing {
+extern std::vector<uint8_t> pushedVerts;
 extern uint32_t frame;
 extern bool bindGroupsAlive;
 extern bool multiview;
@@ -86,6 +87,60 @@ protected:
     ++aurora::gfx::testing::stereoEpoch;
   }
 };
+
+// Indexed attributes resolved by the FIFO processor (GXState::deindexVertices):
+// the staged records carry the array elements in place of the indices.
+class GXDeindexTest : public GXFifoTest {
+protected:
+  void SetUp() override {
+    GXFifoTest::SetUp();
+    g_gxState.deindexVertices = true;
+    g_gxState.lastVtxFmt = GX_MAX_VTXFMT;
+    g_gxState.dirty |= aurora::gx::DirtyPipeline;
+    aurora::gfx::testing::pushedVerts.clear();
+  }
+
+  void TearDown() override {
+    g_gxState.deindexVertices = false;
+    g_gxState.vtxDesc[GX_VA_PNMTXIDX] = GX_NONE;
+    g_gxState.vtxDesc[GX_VA_POS] = GX_NONE;
+    g_gxState.vtxDesc[GX_VA_TEX0] = GX_NONE;
+    g_gxState.arrays[GX_VA_POS] = {};
+    g_gxState.arrays[GX_VA_TEX0] = {};
+    g_gxState.lastVtxFmt = GX_MAX_VTXFMT;
+    g_gxState.dirty |= aurora::gx::DirtyAll;
+    GXFifoTest::TearDown();
+  }
+};
+
+TEST_F(GXDeindexTest, Index8PositionsCarryTheirElements) {
+  std::array<u8, 36> positions{};
+  for (u32 i = 0; i < positions.size(); ++i) {
+    positions[i] = static_cast<u8>(i + 1);
+  }
+  g_gxState.vtxDesc[GX_VA_POS] = GX_INDEX8;
+  g_gxState.vtxFmts[0].attrs[GX_VA_POS] = {GX_POS_XYZ, GX_F32, 0};
+  g_gxState.arrays[GX_VA_POS] = {.data = positions.data(), .size = 36, .stride = 12, .le = false};
+  decode_fifo({static_cast<u8>(GX_TRIANGLES), 0, 3, 2, 0, 1});
+  std::vector<u8> expected;
+  for (const u32 index : {2u, 0u, 1u}) {
+    expected.insert(expected.end(), positions.begin() + index * 12, positions.begin() + index * 12 + 12);
+  }
+  EXPECT_EQ(aurora::gfx::testing::pushedVerts, expected);
+}
+
+TEST_F(GXDeindexTest, DirectAttributesStayAndBaseIndexAndRangeApply) {
+  // Three 4-byte texture coordinates (S16 ST); the array starts at its element 1
+  const std::array<u8, 12> coords{10, 11, 12, 13, 20, 21, 22, 23, 30, 31, 32, 33};
+  g_gxState.vtxDesc[GX_VA_PNMTXIDX] = GX_DIRECT;
+  g_gxState.vtxDesc[GX_VA_TEX0] = GX_INDEX16;
+  g_gxState.vtxFmts[0].attrs[GX_VA_TEX0] = {GX_TEX_ST, GX_S16, 0};
+  g_gxState.arrays[GX_VA_TEX0] = {.data = coords.data(), .size = 12, .stride = 4, .le = false, .baseIndex = 1};
+  // Records: matrix index, then a big-endian 16-bit index; index 5 is past the array
+  decode_fifo({static_cast<u8>(GX_TRIANGLES), 0, 3, 3, 0, 0, 6, 0, 1, 9, 0, 5});
+  const std::vector<u8> expected{3, 20, 21, 22, 23, 6, 30, 31, 32, 33, 9, 0, 0, 0, 0};
+  EXPECT_EQ(aurora::gfx::testing::pushedVerts, expected);
+}
 
 TEST_F(GXBindGroupCacheTest, ReusesUnchangedMaterialAcrossFramesAndGlobalInvalidation) {
   const auto first = Draw();

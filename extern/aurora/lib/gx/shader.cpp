@@ -693,7 +693,9 @@ auto attr_address(const AttrConfig& mapping, GXAttr attr, std::string_view vidx,
                         imm_array_start(attr), vidx, vtxStride, dlOffset, mapping.stride, within),
             "abuf"sv, mapping.le};
   }
-  return {fmt::format("imm.vtx_start + {} * {}u + {}u", vidx, vtxStride, dlOffset + within), "vbuf"sv, false};
+  // Direct data is big-endian as the game wrote it, or an array element the FIFO
+  // processor inlined (GXState::deindexVertices) in that array's order
+  return {fmt::format("imm.vtx_start + {} * {}u + {}u", vidx, vtxStride, dlOffset + within), "vbuf"sv, mapping.le};
 }
 
 auto attr_load(const ShaderConfig& config, GXAttr attr, std::string_view vidx) -> std::string {

@@ -125,6 +125,8 @@ std::atomic<uint32_t> g_fifoBindGroupMisses{0};
 std::atomic<uint64_t> g_fifoResolveTicks{0};
 std::atomic<uint32_t> g_fifoUniformBuilds{0};
 std::atomic<uint32_t> g_mergeBreaks[BreakCount]{};
+std::atomic<uint64_t> g_fifoDeindexTicks{0};
+std::atomic<uint32_t> g_fifoDeindexedVerts{0};
 std::atomic<uint64_t> g_drainWaitNs{0};
 std::atomic<uint32_t> g_drainCalls{0};
 bool enabled() noexcept { return g_stereoDiagnostics.load(std::memory_order_relaxed); }
@@ -212,16 +214,19 @@ void log_stereo_frame_stats(const FramePacket& frame) {
   const double uniformMs = bucketMs(perf::g_fifoUniformTicks);
   const uint32_t uniformBuilds = perFrame(perf::g_fifoUniformBuilds);
   const double pushMs = bucketMs(perf::g_fifoPushTicks);
+  const double deindexMs = bucketMs(perf::g_fifoDeindexTicks);
+  const uint32_t deindexedVerts = perFrame(perf::g_fifoDeindexedVerts);
   std::array<uint32_t, perf::BreakCount> breaks{};
   for (size_t i = 0; i < breaks.size(); ++i) {
     breaks[i] = perFrame(perf::g_mergeBreaks[i]);
   }
   Log.info("fifo processor per frame: xf {:.2f} ms ({} loads), bp {:.2f} ms ({} loads), cp {:.2f} ms, aurora {:.2f} "
            "ms; draws {} merged + {} pushed: verts {:.2f} ms, pipeline {:.2f} ms ({} builds), bind groups {:.2f} ms "
-           "({} builds, {} cache misses, resolve {:.2f} ms), uniform {:.2f} ms ({} builds), push {:.2f} ms; tick "
-           "{:.3f} GHz",
+           "({} builds, {} cache misses, resolve {:.2f} ms), uniform {:.2f} ms ({} builds), push {:.2f} ms; "
+           "de-indexing {:.2f} ms ({} vertices); tick {:.3f} GHz",
            xfMs, xfLoads, bpMs, bpLoads, cpMs, auroraMs, merged, pushed, vertsMs, pipelineMs, pipelineBuilds, bindsMs,
-           bindGroupBuilds, bindGroupMisses, resolveMs, uniformMs, uniformBuilds, pushMs, ticksPerNs);
+           bindGroupBuilds, bindGroupMisses, resolveMs, uniformMs, uniformBuilds, pushMs, deindexMs, deindexedVerts,
+           ticksPerNs);
   Log.info("new draws per frame, by what kept them from joining the last one: pipeline state {}, textures {}, "
            "uniform data {}, immediates {}, vertex format or primitive kind {}, no draw to join {}",
            breaks[perf::BreakPipeline], breaks[perf::BreakTextures], breaks[perf::BreakUniform],

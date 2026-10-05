@@ -6,6 +6,8 @@
 
 #include <absl/container/flat_hash_map.h>
 
+#include <atomic>
+
 #include <cstring>
 
 #include "../gfx/depth_peek.hpp"
@@ -184,6 +186,182 @@ struct DrawCache {
   GXVtxFmt lastDrawFmt = GX_MAX_VTXFMT;
 };
 DrawCache sDrawCache;
+
+// Indexed vertex attributes resolved on the CPU (GXState::deindexVertices): the
+// plan for the current vertex format and arrays, mirroring populate_pipeline_config's
+// resolved layout, and the FIFO records rewritten with the array elements inline.
+std::atomic<bool> sDeindexRequested{false};
+struct DeindexAttr {
+  const u8* data = nullptr; // the array; null when none is set
+  u32 size = 0;
+  u32 stride = 0;
+  u32 base = 0;      // GX_AURORA_LOAD_ARRAY_BASE_INDEX
+  u16 srcOffset = 0; // of the index, or the direct data, in the FIFO record
+  u16 dstOffset = 0; // in the resolved record
+  u8 bytes = 0;      // per index: the element, or one slice of it (NBT3)
+  u8 indexSize = 0;  // 0: direct data, copied as it is
+  u8 indices = 1;    // 3 for GX_NRM_NBT3, one per slice
+};
+struct DeindexPlan {
+  GXVtxFmt fmt = GX_MAX_VTXFMT;
+  u32 srcStride = 0;
+  u32 dstStride = 0;
+  bool active = false; // any indexed attribute
+  u32 count = 0;
+  std::array<DeindexAttr, GX_VA_TEX7 + 1> attrs{};
+};
+DeindexPlan sDeindexPlan;
+u32 sDeindexOutOfRange = 0;
+
+// Rebuilt after any state change (the dirty bits clear with the first draw, so
+// the strips that follow reuse it).
+const DeindexPlan& deindex_plan(GXVtxFmt fmt) noexcept {
+  auto& plan = sDeindexPlan;
+  if (plan.fmt == fmt && g_gxState.dirty == 0) {
+    return plan;
+  }
+  plan.fmt = fmt;
+  plan.count = 0;
+  plan.active = false;
+  const auto& vtxFmt = g_gxState.vtxFmts[fmt];
+  u32 src = 0;
+  u32 dst = 0;
+  for (int i = GX_VA_PNMTXIDX; i <= GX_VA_TEX7; ++i) {
+    const auto attr = static_cast<GXAttr>(i);
+    const auto type = g_gxState.vtxDesc[i];
+    if (type == GX_NONE) {
+      continue;
+    }
+    const auto& attrFmt = vtxFmt.attrs[i];
+    const u32 compSize = comp_type_size(attr, attrFmt.type);
+    const u32 cnt = comp_cnt_count(attr, attrFmt.cnt);
+    const bool nbt3 = attr == GX_VA_NRM && attrFmt.cnt == GX_NRM_NBT3;
+    auto& a = plan.attrs[plan.count++];
+    a = {};
+    a.srcOffset = static_cast<u16>(src);
+    a.dstOffset = static_cast<u16>(dst);
+    if (type == GX_DIRECT) {
+      a.bytes = static_cast<u8>(compSize * cnt);
+      src += a.bytes;
+      dst += a.bytes;
+      continue;
+    }
+    const auto& array = g_gxState.arrays[i];
+    a.data = static_cast<const u8*>(array.data);
+    a.size = array.size;
+    a.stride = array.stride;
+    a.base = array.baseIndex;
+    a.indexSize = type == GX_INDEX8 ? 1 : 2;
+    a.indices = nbt3 ? 3 : 1;
+    a.bytes = static_cast<u8>(compSize * cnt / a.indices);
+    plan.active = true;
+    src += a.indexSize * a.indices;
+    dst += compSize * cnt;
+  }
+  plan.srcStride = src;
+  plan.dstStride = dst;
+  return plan;
+}
+
+// One attribute of `count` records: `Bytes` per element (0: a.bytes at run time),
+// `IndexSize` bytes per big-endian index (0: direct data, copied).
+template <u32 Bytes, u32 IndexSize>
+void deindex_attr(const DeindexAttr& a, const u8* src, u32 srcStride, u32 count, u8* dst, u32 dstStride) noexcept {
+  const u32 bytes = Bytes != 0 ? Bytes : a.bytes;
+  src += a.srcOffset;
+  dst += a.dstOffset;
+  for (u32 v = 0; v < count; ++v, src += srcStride, dst += dstStride) {
+    if constexpr (IndexSize == 0) {
+      std::memcpy(dst, src, bytes);
+    } else {
+      const u32 index = IndexSize == 1 ? src[0] : (static_cast<u32>(src[0]) << 8) | src[1];
+      const size_t offset = static_cast<size_t>(a.base + index) * a.stride;
+      if (offset + bytes <= a.size) [[likely]] {
+        std::memcpy(dst, a.data + offset, bytes);
+      } else {
+        // The GPU path would read whatever follows the array
+        std::memset(dst, 0, bytes);
+        ++sDeindexOutOfRange;
+      }
+    }
+  }
+}
+
+template <u32 IndexSize>
+void deindex_attr_sized(const DeindexAttr& a, const u8* src, u32 srcStride, u32 count, u8* dst,
+                        u32 dstStride) noexcept {
+  switch (a.bytes) {
+  case 1:
+    return deindex_attr<1, IndexSize>(a, src, srcStride, count, dst, dstStride);
+  case 2:
+    return deindex_attr<2, IndexSize>(a, src, srcStride, count, dst, dstStride);
+  case 4:
+    return deindex_attr<4, IndexSize>(a, src, srcStride, count, dst, dstStride);
+  case 6:
+    return deindex_attr<6, IndexSize>(a, src, srcStride, count, dst, dstStride);
+  case 8:
+    return deindex_attr<8, IndexSize>(a, src, srcStride, count, dst, dstStride);
+  case 12:
+    return deindex_attr<12, IndexSize>(a, src, srcStride, count, dst, dstStride);
+  default:
+    return deindex_attr<0, IndexSize>(a, src, srcStride, count, dst, dstStride);
+  }
+}
+
+// `count` FIFO records at `src` resolved into records at `dst`, attribute by
+// attribute. An index past its array reads as zeros.
+void deindex_records(const DeindexPlan& plan, const u8* src, u32 count, u8* dst) noexcept {
+  for (u32 k = 0; k < plan.count; ++k) {
+    const auto& a = plan.attrs[k];
+    if (a.indices != 1) {
+      // GX_NRM_NBT3: three indices, one per 3-vector slice
+      for (u32 s = 0; s < a.indices; ++s) {
+        DeindexAttr slice = a;
+        slice.srcOffset = static_cast<u16>(a.srcOffset + s * a.indexSize);
+        slice.dstOffset = static_cast<u16>(a.dstOffset + s * a.bytes);
+        slice.base = a.base;
+        // The slice's element starts s slices into the array element
+        slice.data = a.data != nullptr ? a.data + s * a.bytes : nullptr;
+        slice.size = a.size > s * a.bytes ? a.size - s * a.bytes : 0;
+        slice.indices = 1;
+        if (a.indexSize == 1) {
+          deindex_attr_sized<1>(slice, src, plan.srcStride, count, dst, plan.dstStride);
+        } else {
+          deindex_attr_sized<2>(slice, src, plan.srcStride, count, dst, plan.dstStride);
+        }
+      }
+      continue;
+    }
+    switch (a.indexSize) {
+    case 0:
+      deindex_attr_sized<0>(a, src, plan.srcStride, count, dst, plan.dstStride);
+      break;
+    case 1:
+      deindex_attr_sized<1>(a, src, plan.srcStride, count, dst, plan.dstStride);
+      break;
+    default:
+      deindex_attr_sized<2>(a, src, plan.srcStride, count, dst, plan.dstStride);
+      break;
+    }
+  }
+}
+
+// The records of a draw staged: resolved when the plan asks, else as they are.
+gfx::Range push_vertex_records(const DeindexPlan* plan, std::span<const u8> data, u32 vtxCount,
+                               size_t alignment) noexcept {
+  if (plan == nullptr || !plan->active) {
+    return gfx::push_verts(data.data(), data.size(), alignment);
+  }
+  static ByteBuffer resolved;
+  resolved.clear();
+  const size_t bytes = static_cast<size_t>(vtxCount) * plan->dstStride;
+  {
+    const gfx::perf::Bucket bucket{gfx::perf::g_fifoDeindexTicks, gfx::perf::enabled()};
+    deindex_records(*plan, data.data(), vtxCount, resolved.append_uninitialized(bytes));
+    gfx::perf::g_fifoDeindexedVerts.fetch_add(vtxCount, std::memory_order_relaxed);
+  }
+  return gfx::push_verts(resolved.data(), resolved.size(), alignment);
+}
 
 // The texture bind groups by what build_texture_bind_group reads. Prime binds a
 // few hundred texture sets a frame, each for a run of draws, so the descriptor
@@ -589,7 +767,8 @@ static void push_gx_draw(GXPrimitive prim, GXVtxFmt fmt, u16 vtxCount, gfx::Rang
   const auto t0 = gfx::perf::stamp(perfOn);
 
   DrawImmediateData immediates{.vtxStart = vertRange.offset, .currentPnMtx = state.currentPnMtx};
-  for (int i = GX_VA_POS; i <= GX_VA_TEX7; ++i) {
+  // The arrays, unless the vertices carry their elements already (deindexVertices)
+  for (int i = GX_VA_POS; i <= GX_VA_TEX7 && !state.deindexVertices; ++i) {
     if (state.vtxDesc[i] != GX_INDEX8 && state.vtxDesc[i] != GX_INDEX16) {
       continue;
     }
@@ -797,6 +976,8 @@ static void draw_prim(u8 cmd, GXPrimitive prim, GXVtxFmt fmt, u16 vtxCount, Byte
                         indices != nullptr && lastDraw->vtxCount + vtxCount <= UINT16_MAX;
   const bool perfOn = gfx::perf::enabled();
   const auto t0 = gfx::perf::stamp(perfOn);
+  const DeindexPlan* const plan = g_gxState.deindexVertices ? &deindex_plan(fmt) : nullptr;
+  const bool deindex = plan != nullptr && plan->active;
 
   if (!canMerge) {
     // Lines and points (instanced quads) never join one
@@ -804,7 +985,7 @@ static void draw_prim(u8 cmd, GXPrimitive prim, GXVtxFmt fmt, u16 vtxCount, Byte
                            prim == GX_LINESTRIP || prim == GX_POINTS,
                        lastDraw == nullptr);
     const auto vertexData = reader.take(totalVtxBytes);
-    const gfx::Range vertRange = gfx::push_verts(vertexData.data(), vertexData.size(), 4);
+    const gfx::Range vertRange = push_vertex_records(plan, vertexData, vtxCount, 4);
     if (perfOn) {
       gfx::perf::add(gfx::perf::g_fifoVertsTicks, t0, gfx::perf::tick());
     }
@@ -821,10 +1002,17 @@ static void draw_prim(u8 cmd, GXPrimitive prim, GXVtxFmt fmt, u16 vtxCount, Byte
     CHECK(lastDraw->vertRange.offset + lastDraw->vertRange.size == verts->size(),
           "Non-consecutive vertex ranges ({} < {})", lastDraw->vertRange.offset + lastDraw->vertRange.size,
           verts->size());
-    if (totalVtxBytes > 0) {
+    const u32 stagedBytes = deindex ? vtxCount * plan->dstStride : totalVtxBytes;
+    if (deindex) {
+      const gfx::perf::Bucket bucket{gfx::perf::g_fifoDeindexTicks, perfOn};
+      deindex_records(*plan, vertexData.data(), vtxCount, verts->append_uninitialized(stagedBytes));
+      if (perfOn) {
+        gfx::perf::g_fifoDeindexedVerts.fetch_add(vtxCount, std::memory_order_relaxed);
+      }
+    } else if (totalVtxBytes > 0) {
       std::memcpy(verts->append_uninitialized(totalVtxBytes), vertexData.data(), totalVtxBytes);
     }
-    lastDraw->vertRange.size += totalVtxBytes;
+    lastDraw->vertRange.size += stagedBytes;
     if (lastDraw->indexCount == 0 && prim != GX_TRIANGLES) {
       // The previous draw's own triangles take their list indices first
       const u32 count = list_index_count(GX_TRIANGLES, static_cast<u16>(lastDraw->vtxCount));
@@ -1099,7 +1287,8 @@ void handle_aurora(ByteReader& reader) noexcept {
     }
     const u32 totalVtxBytes = vtxCount * vtxSize;
     const auto vertexData = reader.take(totalVtxBytes);
-    const gfx::Range vertRange = gfx::push_verts(vertexData.data(), vertexData.size(), 4);
+    const DeindexPlan* const plan = g_gxState.deindexVertices ? &deindex_plan(fmt) : nullptr;
+    const gfx::Range vertRange = push_vertex_records(plan, vertexData, vtxCount, 4);
     if (indexCount != 0) {
       push_gx_draw(prim, fmt, vtxCount, vertRange, idxRange, indexCount);
     }
@@ -1271,6 +1460,13 @@ void clear_draw_cache() noexcept {
   sDrawCache.stereoEpoch = 0;
   sDrawCache.fogRange = {};
   sDrawCache.hasFogRange = false;
+  // Vertex de-indexing changes between frames only, with the pipelines
+  const bool deindex = sDeindexRequested.load(std::memory_order_relaxed);
+  if (deindex != g_gxState.deindexVertices) {
+    g_gxState.deindexVertices = deindex;
+    g_gxState.dirty |= DirtyPipeline | DirtyImmediates;
+    sDeindexPlan.fmt = GX_MAX_VTXFMT;
+  }
 }
 
 void reset_draw_cache() noexcept {
@@ -1280,3 +1476,7 @@ void reset_draw_cache() noexcept {
 }
 
 } // namespace aurora::gx::fifo
+
+extern "C" void aurora_set_gx_deindex_vertices(bool enabled) {
+  aurora::gx::fifo::sDeindexRequested.store(enabled, std::memory_order_relaxed);
+}

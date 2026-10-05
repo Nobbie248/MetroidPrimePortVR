@@ -168,6 +168,7 @@ void TestDefaultsMatchGame() {
       {"vr_multiview", FormatBool(s.multiview)},
       {"vr_direct_present", FormatBool(s.direct_present)},
       {"vr_pipelined_rendering", FormatBool(s.pipelined_rendering)},
+      {"vr_deindex_vertices", FormatBool(s.deindex_vertices)},
       {"vr_remove_cinematic_bars", FormatBool(s.remove_cinematic_bars)},
       {"vr_sky_at_infinity", FormatBool(s.sky_at_infinity)},
       {"vr_space_warp", FormatBool(s.space_warp)},

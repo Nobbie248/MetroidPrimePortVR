@@ -102,7 +102,8 @@ de-indexed vertex stride to four bytes. The earlier packed records let float
 loads straddle storage-buffer words; the Quest rendered those records wrongly.
 The user isolated this independently of grouping. `9f732ff0` groups eligible
 solid world surfaces by material and merges draws whose final state matches.
-The grouping experiment is enabled with the `MP_SORT_OPAQUE=1` launch extra.
+The grouping was first an opt-in experiment (`MP_SORT_OPAQUE=1`); it is now on
+by default, and `MP_SORT_OPAQUE=0` (also a Quest launch extra) turns it off.
 These fixes remain in place.
 
 The saved `quest/.runs/chozo-align_sort/logcat.txt` contains 613 world, 570

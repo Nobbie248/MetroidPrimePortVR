@@ -757,9 +757,14 @@ void CCubeRenderer::DrawUnsortedGeometry(int areaIdx, uint mask, uint targetMask
     }
 
 #ifdef TARGET_PC
-    // Port: profiling experiment. Group only solid, depth-writing world
-    // surfaces; blended and reflective surfaces remain ordering barriers.
-    static const bool batchMaterials = std::getenv("MP_SORT_OPAQUE") != nullptr;
+    // Port: group an area's solid, depth-writing world surfaces by material,
+    // so Aurora can merge their draws (each draw costs the Quest's GPU a
+    // fixed latency); blended and reflective surfaces remain ordering
+    // barriers. On by default; MP_SORT_OPAQUE=0 turns it off.
+    static const bool batchMaterials = [] {
+      const char* value = std::getenv("MP_SORT_OPAQUE");
+      return value == nullptr || value[0] != '0';
+    }();
     struct SolidSurface {
       CCubeModel* model;
       CCubeSurface surface;

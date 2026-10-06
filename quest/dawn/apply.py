@@ -17,6 +17,14 @@ Aurora has installed its hooks, Dawn creates its VkInstance and VkDevice through
 (aurora/dawn_vulkan_abi.h) hand Aurora the device's handles and lock, and wrap the runtime's swapchain
 images as Dawn textures.
 
+Fragment density maps (aurora_fdm.inc, Aurora's aurora/dawn_fdm_abi.h, after Wiicompiled VR's patch):
+VK_EXT_fragment_density_map on the dynamic rendering path, for foveated eye rendering. Aurora uploads
+immutable RG8 maps (one layer per view of a multiview pass) and binds one to the texture view its eye
+passes render through; RecordBeginDynamicRenderPass chains the bound map into those passes. The
+extension is enabled only when Aurora asks for it before the device is created, and every render
+pipeline then carries VK_PIPELINE_CREATE_RENDERING_FRAGMENT_DENSITY_MAP_ATTACHMENT_BIT_EXT, so the
+choice is made per launch.
+
 Every edit is anchored on Dawn source text, asserts that the anchor occurs once, and is skipped when
 already applied, so the script can run again on a patched tree. Usage: apply.py <dawn source root>
 """
@@ -422,5 +430,95 @@ insert_after(f"{VK}/VulkanFunctions.cpp", "    GET_INSTANCE_PROC(CreateDevice);\
              "    CreateDevice = AuroraCreateDevice(GetInstanceProcAddr, instance);\n")
 insert_after(f"{VK}/VulkanFunctions.cpp", "    GET_INSTANCE_PROC(EnumeratePhysicalDevices);\n",
              "    EnumeratePhysicalDevices = AuroraEnumeratePhysicalDevices(GetInstanceProcAddr, instance);\n")
+
+# ---------------------------------------------------------------------------------------------
+# Fragment density maps (aurora_fdm.inc, Aurora's aurora/dawn_fdm_abi.h): foveated eye rendering
+# through VK_EXT_fragment_density_map on dynamic rendering passes. Wiicompiled VR's patch, with
+# layered maps for the multiview eye pass. The VulkanInfo.h properties member goes after the
+# multiview one above, so both insertions stay recognisable on a second run.
+# ---------------------------------------------------------------------------------------------
+copy_in(here / "aurora_fdm.h", f"{VK}/aurora_fdm.h")
+copy_in(here / "aurora_fdm.inc", f"{VK}/aurora_fdm.inc")
+copy_in(repo / "extern/aurora/include/aurora/dawn_fdm_abi.h", f"{VK}/aurora_dawn_fdm_abi.h")
+backend_text = backend.read_text(encoding="utf-8")
+if '#include "aurora_fdm.inc"' not in backend_text:
+    backend.write_text(backend_text + '\n// PrimedGun: fragment density maps for the eye passes.\n'
+                       '#include "aurora_fdm.inc"\n', encoding="utf-8", newline="")
+
+insert_after(f"{VK}/VulkanExtensions.h", "    RasterizationOrderAttachmentAccess,\n",
+             "    FragmentDensityMap,\n")
+insert_after(f"{VK}/VulkanExtensions.cpp",
+             '    {DeviceExt::RasterizationOrderAttachmentAccess, "VK_EXT_rasterization_order_attachment_access"},\n',
+             '    {DeviceExt::FragmentDensityMap, "VK_EXT_fragment_density_map"},\n')
+insert_before(f"{VK}/VulkanExtensions.cpp", "            case DeviceExt::EnumCount:\n",
+              "            // Aurora only attaches maps to dynamic rendering passes (aurora_fdm.inc).\n"
+              "            case DeviceExt::FragmentDensityMap:\n"
+              "                hasDependencies = HasDep(DeviceExt::DynamicRendering);\n"
+              "                break;\n\n")
+
+insert_after(f"{VK}/VulkanInfo.h",
+             "    VkPhysicalDeviceExtendedDynamicStateFeaturesEXT extendedDynamicStateFeatures;\n",
+             "    VkPhysicalDeviceFragmentDensityMapFeaturesEXT fragmentDensityMapFeatures;\n")
+insert_after(f"{VK}/VulkanInfo.h", "    VkPhysicalDeviceMultiviewProperties multiviewProperties;\n",
+             "    VkPhysicalDeviceFragmentDensityMapPropertiesEXT fragmentDensityMapProperties;\n")
+insert_before(f"{VK}/VulkanInfo.cpp",
+              "    // Use vkGetPhysicalDevice{Features,Properties}2 if required to gather information about\n",
+              "    if (info.extensions[DeviceExt::FragmentDensityMap]) {\n"
+              "        featuresChain.Add(&info.fragmentDensityMapFeatures,\n"
+              "                          VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FRAGMENT_DENSITY_MAP_FEATURES_EXT);\n"
+              "        propertiesChain.Add(&info.fragmentDensityMapProperties,\n"
+              "                            VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FRAGMENT_DENSITY_MAP_PROPERTIES_EXT);\n"
+              "    }\n\n")
+
+insert_after(f"{VK}/DeviceVk.cpp", '#include "src/dawn/native/vulkan/DeviceVk.h"\n',
+             '#include "aurora_fdm.h"\n')
+insert_after(f"{VK}/DeviceVk.cpp", "    usedKnobs.extensions = mDeviceInfo.extensions;\n",
+             "    // Aurora: fragment density maps for its immersive eye passes, only on request\n"
+             "    // (aurora_fdm.inc).\n"
+             "    if (!AuroraFdmWanted(mDeviceInfo, IsToggleEnabled(Toggle::VulkanUseDynamicRendering) &&\n"
+             "                                          !HasFeature(Feature::DawnLoadResolveTexture))) {\n"
+             "        usedKnobs.extensions.set(DeviceExt::FragmentDensityMap, false);\n"
+             "    }\n")
+insert_after(f"{VK}/DeviceVk.cpp",
+             "        usedKnobs.extendedDynamicStateFeatures = mDeviceInfo.extendedDynamicStateFeatures;\n"
+             "        featuresChain.Add(&usedKnobs.extendedDynamicStateFeatures);\n"
+             "    }\n",
+             "\n"
+             "    if (usedKnobs.HasExt(DeviceExt::FragmentDensityMap)) {\n"
+             "        usedKnobs.fragmentDensityMapFeatures = mDeviceInfo.fragmentDensityMapFeatures;\n"
+             "        // Aurora's maps are immutable, read when a render pass is recorded.\n"
+             "        usedKnobs.fragmentDensityMapFeatures.fragmentDensityMapDynamic = VK_FALSE;\n"
+             "        featuresChain.Add(&usedKnobs.fragmentDensityMapFeatures);\n"
+             "    }\n")
+insert_after(f"{VK}/DeviceVk.cpp", "    mStaticSamplerCache.clear();\n",
+             "\n    AuroraFdmDestroy(this);\n")
+
+insert_after(f"{VK}/RenderPipelineVk.cpp", "        createInfo.renderPass = nullRenderPass;\n",
+             "\n"
+             "        // Aurora: any pipeline may draw in an eye pass with a fragment density map\n"
+             "        // (aurora_fdm.inc).\n"
+             "        if (device->GetDeviceInfo().HasExt(DeviceExt::FragmentDensityMap)) {\n"
+             "            createInfo.flags |= VK_PIPELINE_CREATE_RENDERING_FRAGMENT_DENSITY_MAP_ATTACHMENT_BIT_EXT;\n"
+             "        }\n")
+
+insert_after(f"{VK}/CommandBufferVk.cpp", '#include "src/dawn/native/vulkan/CommandBufferVk.h"\n',
+             '#include "aurora_fdm.h"\n')
+insert_before(f"{VK}/CommandBufferVk.cpp",
+              "    // TODO(crbug.com/463893794): Handle ExpandResolveTexture.\n",
+              "    // Aurora: the fragment density map bound to the first color attachment's view\n"
+              "    // (aurora_fdm.inc).\n"
+              "    VkRenderingFragmentDensityMapAttachmentInfoEXT fragmentDensityMap;\n"
+              "    if (attachmentMask[ColorAttachmentIndex(uint8_t(0))]) {\n"
+              "        const ::VkImageView densityMap = AuroraFdmViewFor(\n"
+              "            device, renderPass->colorAttachments[ColorAttachmentIndex(uint8_t(0))].view.Get());\n"
+              "        if (densityMap != VK_NULL_HANDLE) {\n"
+              "            fragmentDensityMap.sType =\n"
+              "                VK_STRUCTURE_TYPE_RENDERING_FRAGMENT_DENSITY_MAP_ATTACHMENT_INFO_EXT;\n"
+              "            fragmentDensityMap.pNext = renderInfo.pNext;\n"
+              "            fragmentDensityMap.imageView = densityMap;\n"
+              "            fragmentDensityMap.imageLayout = VK_IMAGE_LAYOUT_FRAGMENT_DENSITY_MAP_OPTIMAL_EXT;\n"
+              "            renderInfo.pNext = &fragmentDensityMap;\n"
+              "        }\n"
+              "    }\n\n")
 
 print(f"PrimedGun Dawn patches applied to {root}")

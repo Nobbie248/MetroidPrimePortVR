@@ -10,6 +10,7 @@
 #include "widgets.h"
 
 #include <QCheckBox>
+#include <QComboBox>
 #include <QLabel>
 #include <QPushButton>
 #include <QSignalBlocker>
@@ -49,6 +50,13 @@ void BuildPortConfigTab(TabContext& ctx, QTabWidget* tabs) {
       ->setToolTip(QObject::tr("Game units per metre; a larger value makes the world look smaller."));
   ctx.Check(layout, QObject::tr("Draw the world per eye"), "vr_immersive_replay",
             QObject::tr("Off shows the flat game image on the virtual screen."));
+  ctx.Combo(layout, QObject::tr("Foveated rendering (Quest)"), "vr_foveation",
+            {{QObject::tr("Off"), QStringLiteral("off")},
+             {QObject::tr("Low"), QStringLiteral("low")},
+             {QObject::tr("Medium"), QStringLiteral("medium")},
+             {QObject::tr("High"), QStringLiteral("high")}})
+      ->setToolTip(QObject::tr("Shades the edges of each eye in 2x2 (Low) or 4x4 (Medium, High) "
+                               "pixel blocks. From Off to a level takes a restart."));
   ctx.Check(layout, QObject::tr("Remove cinematic bars"), "vr_remove_cinematic_bars",
             QObject::tr("Keeps the morph ball and visor transitions full size in the headset."));
   ctx.Check(layout, QObject::tr("Sky at infinity"), "vr_sky_at_infinity",

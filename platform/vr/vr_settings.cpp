@@ -119,6 +119,27 @@ bool ParseRumbleHand(const std::string& value, RumbleHand& out) {
     return true;
 }
 
+const char* FoveationName(FoveationLevel level) {
+    switch (level) {
+    case FoveationLevel::Low: return "low";
+    case FoveationLevel::Medium: return "medium";
+    case FoveationLevel::High: return "high";
+    case FoveationLevel::Off: break;
+    }
+    return "off";
+}
+
+// Names, or aurora's level numbers.
+bool ParseFoveation(const std::string& value, FoveationLevel& out) {
+    const std::string name = Lower(value);
+    if (name == "off" || name == "0") out = FoveationLevel::Off;
+    else if (name == "low" || name == "1") out = FoveationLevel::Low;
+    else if (name == "medium" || name == "2") out = FoveationLevel::Medium;
+    else if (name == "high" || name == "3") out = FoveationLevel::High;
+    else return false;
+    return true;
+}
+
 // One row per field: its key in port_settings.ini (vr_<field>), how to parse a
 // value into the struct and how to print the struct's value.
 struct Field {
@@ -161,6 +182,8 @@ const Field kFields[] = {
     VR_BOOL(diagnostics_logging),
     VR_BOOL(immersive_replay),
     VR_BOOL(multiview),
+    Field{"vr_foveation", [](PortVrSettings& s, const std::string& v) { ParseFoveation(v, s.foveation); },
+          [](const PortVrSettings& s, std::ostream& o) { o << FoveationName(s.foveation); }},
     VR_BOOL(direct_present),
     VR_BOOL(pipelined_rendering),
     VR_BOOL(deindex_vertices),
@@ -284,6 +307,7 @@ void PushVrSettingsToAurora() noexcept {
     const PortVrSettings settings = GetVrSettings();
     aurora_set_stereo_immersive_replay(settings.immersive_replay);
     aurora_set_stereo_multiview(settings.multiview);
+    aurora_set_stereo_foveation(static_cast<uint32_t>(settings.foveation));
     aurora_set_gx_deindex_vertices(settings.deindex_vertices);
     aurora_set_stereo_mirror_view(AuroraMirrorView(settings.mirror_view));
 #if defined(MP_ENABLE_OPENXR)
@@ -367,6 +391,9 @@ void ApplyVrEnvironmentOverrides() noexcept {
     }
     if (const char* log = std::getenv("MP_VR_LOG"); log != nullptr && *log != '\0') {
         settings.diagnostics_logging = ParseBool(log);
+    }
+    if (const char* foveation = std::getenv("MP_FOVEATION"); foveation != nullptr && *foveation != '\0') {
+        ParseFoveation(foveation, settings.foveation);
     }
 }
 

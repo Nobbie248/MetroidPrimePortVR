@@ -257,3 +257,72 @@ pending; evidence for this change is stored in `build/chozo-culling/`. The APK
 was installed, but Quest's controller-required launch dialog prevented the
 game from starting. No GPU gain is measured yet. Guardian and proximity
 overrides were restored; `GET_PROPERTY` confirmed both disabled.
+
+## Fixed foveated rendering (2026-10-06)
+
+Wiicompiled VR's foveation ported (see `PORT_NOTES.md`, "VR: fixed foveated
+rendering on the Quest"): Aurora builds an RG8 fragment density map per eye and
+PrimedGun's patched Dawn attaches it to the eye passes through
+`VK_EXT_fragment_density_map` on dynamic rendering. Setting `vr_foveation`
+(`off`, `low`, `medium`, `high`; default `off`, see below); `MP_FOVEATION`
+overrides it for one run and is accepted as a launch extra.
+
+What to expect before measuring: at render scale 0.85 the plaza is per-draw
+bound (scale 0.6 against 1.0 moved App GPU only 27.7 to 30.3 ms above), so a
+density map saves little there. Wiicompiled measured no gain at 0.8 and 8 / 14 /
+22 % at 1.3. The gain to look for is at a higher render scale, where the saved
+pixels pay for sharper eyes at the same frame time.
+
+Method: the interleaved A/B of the sections above (`quest_ab.sh` style, 11 s
+windows, same GPU clock, `VrApi` `App=` of the game's PID, `LCnt=1` samples,
+`MP_FRAME_STATS` off for the final numbers). Change the level between windows
+from the F1 VR tab or `MP_FOVEATION=<0-3>` per launch (off to a level needs a
+launch, since the device decides). Check the image too (`quest_shot.sh`): at
+`high` the periphery shows 4x4 blocks and the centre stays sharp; at `low` the
+HUD digits, the minimap and the visor frame stay readable. Meta's `Fov=` field
+reports the runtime's own foveation and stays 0 here.
+
+Measured 2026-10-06 at the plaza (headset on the desk, so the pose is fixed;
+whole sessions, 30 s windows after a 10 s settle; `App=` and the GPU clock from
+the game PID's `VrApi` lines, DVFS having moved between 545 and 640 MHz):
+
+| Run | Level | Scale | App GPU ms | GPU MHz |
+| --- | --- | ---: | ---: | ---: |
+| off085a | off | 0.85 | 9.72 | 599 |
+| low085a | low | 0.85 | 10.46 | 599 |
+| low085b | low | 0.85 | 10.42 | 599 |
+| off085b | off | 0.85 | 10.45 | 545 |
+| off125 | off | 1.25 | 11.41 | 640 |
+| low125 | low | 1.25 | 12.12 | 640 |
+| med125 | medium | 1.25 | 12.21 | 640 |
+| high125 | high | 1.25 | 11.89 | 640 |
+
+A second series split the cost: `MP_FDM_DEVICE=1` gives the device the
+extension and the pipeline flag with the level off, `MP_FOVEATION_LAYERS=1`
+binds one shared map (each texel the finer of the two eyes') instead of the
+two-layer per-eye map.
+
+| Run | Configuration | App GPU ms | GPU MHz |
+| --- | --- | ---: | ---: |
+| off085c | off | 9.95 | 561 |
+| off085d | off | 10.33 | 545 |
+| flag085a | device flag only | 10.34 | 568 |
+| flag085b | device flag only | 9.91 | 599 |
+| low1l085a | low, one shared map | 10.19 | 599 |
+| low1l085b | low, one shared map | 10.17 | 599 |
+| low085c | low, per-eye 2-layer map | 10.39 | 599 |
+| low085d | low, per-eye 2-layer map | 10.41 | 603 |
+
+At 599 MHz: off 9.7, the pipeline flag alone 9.9, one shared map 10.2, the
+per-eye map 10.4 ms. The density map costs about 0.7 ms (7 %) and saves nothing,
+at 1.25 as at 0.85: the eye pass is bound by per-draw vertex fetch and binning,
+not by fragment shading, and a map on a non-subsampled image still stores full
+resolution tiles. The High screenshot (`build/foveation/quest_fov_high.jpg`)
+shows the coarse shading really applied (4x4 blocks on the visor frame and the
+walls, a sharp centre), so the mechanism works; the GPU has no pixel work to
+save here. The default is therefore `off`. Every replayed eye pass of a frame is
+foveated when it is on, splits included (passes are sealed for the render
+worker while the frame is still being recorded, so Wiicompiled's "single pass
+only" rule is not available at seal time); fill-heavy areas (water, fog, heat,
+snow) and split-heavy frames (thermal visor, a held charge shot) remain to be
+measured the same way before a level is worth recommending anywhere.

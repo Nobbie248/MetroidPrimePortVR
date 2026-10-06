@@ -5,8 +5,9 @@ Builds the Dawn that the Quest APK links: aurora's pinned Dawn with PrimedGun's 
 
 .DESCRIPTION
 The stock prebuilt Dawn has no Vulkan multiview, which the headset's eye rendering uses (one render
-pass draws both eyes), and cannot create its Vulkan device through OpenXR, which direct presentation
-uses (the eyes are copied straight into the runtime's swapchain images). This script downloads the
+pass draws both eyes), cannot create its Vulkan device through OpenXR, which direct presentation
+uses (the eyes are copied straight into the runtime's swapchain images), and has no fragment density
+maps, which foveated rendering attaches to the eye passes. This script downloads the
 Dawn source aurora pins
 (extern/aurora/cmake/AuroraDependencyVersions.cmake, AURORA_DAWN_REF on encounter/dawn), applies
 quest/dawn/apply.py, and builds it for Android arm64 with the NDK the way encounter/dawn's own
@@ -90,7 +91,8 @@ $patchScript = Join-Path $root 'dawn\apply.py'
 # Every file the patches consist of: quest/dawn and the ABI header apply.py copies in from aurora.
 # Line endings vary between checkouts; hash their text with LF only.
 $patchFiles = @(Get-ChildItem -LiteralPath (Join-Path $root 'dawn') -File | Sort-Object Name | ForEach-Object { $_.FullName }) +
-    @(Join-Path $repo 'extern\aurora\include\aurora\dawn_vulkan_abi.h')
+    @(Join-Path $repo 'extern\aurora\include\aurora\dawn_vulkan_abi.h') +
+    @(Join-Path $repo 'extern\aurora\include\aurora\dawn_fdm_abi.h')
 $patchHash = Get-TextSha256 (($patchFiles | ForEach-Object {
     (Split-Path -Leaf $_) + "`n" + [IO.File]::ReadAllText($_).Replace("`r`n", "`n")
 }) -join "`n")

@@ -158,6 +158,12 @@ void TestDefaultsMatchGame() {
   auto hand = [](PortVr::RumbleHand h) {
     return h == PortVr::RumbleHand::Both ? "both" : h == PortVr::RumbleHand::Left ? "left" : "right";
   };
+  auto foveation = [](PortVr::FoveationLevel f) {
+    return f == PortVr::FoveationLevel::Low      ? "low"
+           : f == PortVr::FoveationLevel::Medium ? "medium"
+           : f == PortVr::FoveationLevel::High   ? "high"
+                                                 : "off";
+  };
   const std::pair<const char*, std::string> expected[] = {
       {"vr_enabled", FormatBool(s.enabled)},
       {"vr_controller_mode", mode(s.controller_mode)},
@@ -166,6 +172,7 @@ void TestDefaultsMatchGame() {
       {"vr_world_scale", FormatFloat(s.world_scale)},
       {"vr_immersive_replay", FormatBool(s.immersive_replay)},
       {"vr_multiview", FormatBool(s.multiview)},
+      {"vr_foveation", foveation(s.foveation)},
       {"vr_direct_present", FormatBool(s.direct_present)},
       {"vr_pipelined_rendering", FormatBool(s.pipelined_rendering)},
       {"vr_deindex_vertices", FormatBool(s.deindex_vertices)},

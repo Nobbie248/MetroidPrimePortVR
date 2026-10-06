@@ -153,6 +153,7 @@ void log_stereo_frame_stats(const FramePacket& frame) {
   uint32_t efbPasses = 0;
   uint32_t eyePasses = 0;
   uint32_t monoSkipped = 0;
+  uint32_t foveated = 0;
   uint32_t copies = 0;
   uint32_t eyeCopies = 0;
   uint32_t discarded = 0;
@@ -160,6 +161,7 @@ void log_stereo_frame_stats(const FramePacket& frame) {
     efbPasses += pass.efb ? 1 : 0;
     eyePasses += pass.stereo.enabled ? 1 : 0;
     monoSkipped += pass.stereo.enabled && pass.stereo.skipMono ? 1 : 0;
+    foveated += pass.stereo.enabled && pass.stereo.foveated ? 1 : 0;
     copies += pass.resolveTarget ? 1 : 0;
     eyeCopies += pass.stereo.copyTargets[0] ? 1 : 0;
     discarded += pass.discardable ? 1 : 0;
@@ -178,12 +180,13 @@ void log_stereo_frame_stats(const FramePacket& frame) {
   const double encodeMs = perFrameMs(perf::g_encodeNs);
   const double submitMs = perFrameMs(perf::g_submitNs);
   const auto& uploads = resources().stats;
-  Log.info("stereo frame: {} passes ({} EFB, {} replayed per eye, {} eyes only, {} discarded), {} EFB copies "
+  Log.info("stereo frame: {} passes ({} EFB, {} replayed per eye, {} foveated, {} eyes only, {} discarded), "
+           "{} EFB copies "
            "({} taken per eye), {} draws (world {}, head-locked {}, head-locked 2D {}, fullscreen {}, sky {}, "
            "skipped {}), eye uniforms {:.2f} ms/frame ({} draws); per frame: fifo {:.2f} ms ({} KB), game waits "
            "for fifo {:.2f} ms ({} drains), encode {:.2f} ms, submit {:.2f} ms; uploads verts {} KB, indices {} KB, "
            "uniforms {} KB, storage {} KB, textures {} KB",
-           frame.renderPasses.size(), efbPasses, eyePasses, monoSkipped, discarded, copies, eyeCopies,
+           frame.renderPasses.size(), efbPasses, eyePasses, foveated, monoSkipped, discarded, copies, eyeCopies,
            g_recorder.drawCallCount, routes[AURORA_STEREO_ROUTE_WORLD], routes[AURORA_STEREO_ROUTE_HEAD_LOCKED],
            routes[AURORA_STEREO_ROUTE_HEAD_LOCKED_2D], routes[AURORA_STEREO_ROUTE_FULLSCREEN],
            routes[AURORA_STEREO_ROUTE_SKY], routes[AURORA_STEREO_ROUTE_SKIP], eyeUniformMs, eyeUniformDraws, fifoMs,
@@ -705,10 +708,14 @@ void stereo_seal_pass(FramePacket& frame, uint32_t passIndex) {
     if (!target.valid()) {
       return;
     }
+    // A foveated frame's eye pass renders through the foveated view of the
+    // same image (stereo_foveation.hpp); the copies keep the eye's own view.
+    const bool foveatedEye = !state.multiview && state.foveated && state.foveatedEyeColorViews[eye];
     pass.stereo.eyes[eye] = StereoEyePass{
-        .colorView = target.color.view,
+        .colorView = foveatedEye ? state.foveatedEyeColorViews[eye] : target.color.view,
         .resolveView = target.sampleCount > 1 ? target.resolved.view : wgpu::TextureView{},
         .depthView = target.depth.view,
+        .copySourceView = target.color.view,
         .size = {target.width, target.height, 1},
     };
   }
@@ -718,9 +725,13 @@ void stereo_seal_pass(FramePacket& frame, uint32_t passIndex) {
     if (!multiview.colorView || !multiview.depthView) {
       return;
     }
+    const bool foveated = state.foveated && state.foveatedMultiviewColorView;
     pass.stereo.multiview = true;
-    pass.stereo.multiviewColorView = multiview.colorView;
+    pass.stereo.multiviewColorView = foveated ? state.foveatedMultiviewColorView : multiview.colorView;
     pass.stereo.multiviewDepthView = multiview.depthView;
+    pass.stereo.foveated = foveated;
+  } else {
+    pass.stereo.foveated = state.foveated && state.foveatedEyeColorViews[0] && state.foveatedEyeColorViews[1];
   }
   pass.stereo.enabled = true;
   state.replayed = true;

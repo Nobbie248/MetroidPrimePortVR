@@ -5,10 +5,12 @@
 #include "gfx/recording.hpp"
 #include "gfx/render_worker.hpp"
 #include "gfx/stereo_eyes.hpp"
+#include "gfx/stereo_foveation.hpp"
 #include "gfx/stereo_multiview.hpp"
 #include "gfx/stereo_replay.hpp"
 #include "gfx/stereo_shadow.hpp"
 #include "gx/fifo.hpp"
+#include "webgpu/fdm.hpp"
 #include "webgpu/gpu.hpp"
 
 #include <aurora/gfx.h>
@@ -233,6 +235,12 @@ gfx::StereoFrameState begin_frame(uint64_t contentTag) noexcept {
   }
   state.immersive = true;
   state.multiview = multiview;
+  // Foveated eye passes, through the density maps' views of the targets
+  // (gfx/stereo_foveation.hpp).
+  const auto foveation = gfx::stereo_foveation::prepare(state.eyes, multiview);
+  state.foveated = foveation.foveated;
+  state.foveatedMultiviewColorView = foveation.multiviewColorView;
+  state.foveatedEyeColorViews = foveation.eyeColorViews;
   for (uint32_t eye = 0; eye < AURORA_STEREO_EYE_COUNT; ++eye) {
     const auto& target = gfx::stereo_eye_target(eye);
     const auto& output = target.output();
@@ -327,6 +335,7 @@ void shutdown() noexcept {
   for (auto& target : g_eyeTargets) {
     target = {};
   }
+  gfx::stereo_foveation::release();
   gfx::release_stereo_eye_targets();
   gfx::stereo_shadow::shutdown();
   stereo_overlay::shutdown();
@@ -461,9 +470,11 @@ void aurora_set_stereo_skip_copy_clears(bool enabled) { g_skipCopyClears.store(e
 
 void aurora_set_stereo_single_pass_eyes(bool enabled) { g_singlePassEyes.store(enabled, std::memory_order_relaxed); }
 
-void aurora_set_stereo_foveation(uint32_t /*level*/) {}
+void aurora_set_stereo_foveation(uint32_t level) { aurora::gfx::stereo_foveation::set_level(level); }
 
-bool aurora_stereo_foveation_available() { return false; }
+uint32_t aurora_get_stereo_foveation() { return aurora::gfx::stereo_foveation::level(); }
+
+bool aurora_stereo_foveation_available() { return aurora::webgpu::fdm::available(); }
 
 void aurora_set_stereo_hud_screen(bool enabled, float widthMeters, float distanceMeters) {
   g_hudScreenEnabled.store(enabled, std::memory_order_relaxed);

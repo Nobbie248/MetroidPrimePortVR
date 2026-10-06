@@ -71,6 +71,7 @@ if (AURORA_ENABLE_GX)
             lib/dawn/BackendBinding.cpp
             lib/dawn/TracyPlatform.cpp
             lib/gfx/stereo_eyes.cpp
+            lib/gfx/stereo_foveation.cpp
             lib/gfx/stereo_multiview.cpp
             lib/gfx/stereo_shadow.cpp
             lib/stereo_host.cpp
@@ -87,6 +88,8 @@ if (AURORA_ENABLE_GX)
     # Direct presentation for the Quest with PrimedGun's patched Dawn (the eyes copied straight
     # into the runtime's swapchain images on Dawn's queue). Stubs elsewhere.
     target_sources(aurora_core PRIVATE lib/webgpu/vulkan_direct_interop.cpp)
+    # Fragment density maps for foveated eye rendering, through the same patched Dawn. Stubs elsewhere.
+    target_sources(aurora_core PRIVATE lib/webgpu/fdm.cpp)
     if (ANDROID)
         target_link_libraries(aurora_core PRIVATE android)
     endif ()

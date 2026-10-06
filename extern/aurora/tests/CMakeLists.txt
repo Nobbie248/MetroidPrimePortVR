@@ -49,6 +49,17 @@ target_compile_definitions(os_time_tests PRIVATE AURORA TARGET_PC)
 target_link_libraries(os_time_tests PRIVATE fmt::fmt gtest gtest_main)
 gtest_discover_tests(os_time_tests)
 
+# The fixed foveation density maps (gfx/foveation.hpp, header-only).
+add_executable(foveation_tests
+  foveation_test.cpp
+)
+target_include_directories(foveation_tests PRIVATE
+  ../include
+  ../lib
+)
+target_link_libraries(foveation_tests PRIVATE gtest gtest_main)
+gtest_discover_tests(foveation_tests)
+
 if (AURORA_ENABLE_GX)
   # GX FIFO round-trip tests
   # Compile GX sources directly to avoid pulling in the full renderer/WebGPU runtime

@@ -19,6 +19,8 @@ namespace PortVr {
 enum class MirrorView : uint8_t { Normal, Both, Left, Right, None };
 enum class ControllerModeSetting : uint8_t { PrimedGun, Gamepad, None };
 enum class RumbleHand : uint8_t { Both, Left, Right };
+// aurora_set_stereo_foveation's levels, in order.
+enum class FoveationLevel : uint8_t { Off, Low, Medium, High };
 
 struct PortVrSettings {
     // --- headset renderer (Wiicompiled [vr]) ---
@@ -41,6 +43,14 @@ struct PortVrSettings {
     bool diagnostics_logging = false;  // [xr-diag]
     bool immersive_replay = true;      // draw the world per eye; off shows the mono image on the virtual screen
     bool multiview = true;             // Quest: both eyes in one Vulkan multiview render pass
+    // Quest: fixed foveated rendering of the eye passes (fragment density maps through
+    // PrimedGun's patched Dawn). Low shades fully within 30 degrees of each eye's forward
+    // direction and in 2x2 blocks beyond; Medium fully to 25, 2x2 to 40, 4x4 beyond; High 18
+    // and 34. The Vulkan device gets the maps, or not, when it is created, so Off to a level
+    // takes a restart; between levels and back to Off it is live. Off by default: at the
+    // Chozo plaza the maps cost about 0.7 ms of GPU time and save none, the eye pass being
+    // bound by its draws rather than its pixels (docs/CHOZO_PERFORMANCE.md).
+    FoveationLevel foveation = FoveationLevel::Off;
     // Quest: the session runs on Dawn's own Vulkan device and the eyes are copied straight into
     // its swapchain images (PrimedGun's patched Dawn); off shares them with a second device
     // through AHardwareBuffers. Taken when the headset starts.
@@ -169,7 +179,9 @@ bool ApplyVrSetting(const std::string& key, const std::string& value) noexcept;
 void WriteVrSettings(std::ostream& out);
 
 // Environment overrides for one run, read once at startup: MP_VR=0|1,
-// MP_VR_MIRROR=normal|both|left|right|none, MP_VR_LOG=1.
+// MP_VR_MIRROR=normal|both|left|right|none, MP_VR_LOG=1,
+// MP_FOVEATION=off|low|medium|high (or 0-3); MP_FDM_DEVICE=0|1 forces whether the Vulkan
+// device gets fragment density maps (platform/vr/openxr_integration.cpp).
 void ApplyVrEnvironmentOverrides() noexcept;
 
 } // namespace PortVr

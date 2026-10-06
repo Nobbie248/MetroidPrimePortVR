@@ -1,3 +1,87 @@
+## VR: fixed foveated rendering on the Quest (2026-10-06)
+
+The Quest's GPU shades every pixel of each eye at full rate although the
+headset's lenses blur the periphery. Wiicompiled VR shipped fixed foveated
+rendering for the same renderer, and that design is ported here.
+
+**Not `XR_FB_foveation`.** The runtime's density maps only shape render passes
+that draw into its swapchain images, and the eyes are drawn into Aurora's own
+targets and then blitted (direct presentation) or copied (AHardwareBuffer
+bridge) into the swapchain. So the map has to go on Aurora's eye passes, which
+stock Dawn cannot do.
+
+- **Dawn patch** (`quest/dawn/aurora_fdm.{h,inc}`, applied by `apply.py`;
+  `extern/aurora/include/aurora/dawn_fdm_abi.h` is the C ABI, version 2):
+  `VK_EXT_fragment_density_map` on Dawn's dynamic rendering path. Aurora
+  uploads an immutable RG8 map (raw `VkImage`, `FRAGMENT_DENSITY_MAP_OPTIMAL`,
+  read by the driver on the CPU when the pass is recorded, so it is usable only
+  once its upload has completed) and binds it to a texture view;
+  `RecordBeginDynamicRenderPass` chains the bound map into every pass whose
+  first colour attachment is that view. The extension is requested before the
+  device is created and then flags every render pipeline
+  (`VK_PIPELINE_CREATE_RENDERING_FRAGMENT_DENSITY_MAP_ATTACHMENT_BIT_EXT`), so
+  the choice is made per launch and the first launch with it on recompiles the
+  pipeline cache once. Version 2 adds layered maps: under multiview the eye
+  pass renders both eyes into one two-layer array view, and Vulkan takes a
+  density map with one layer per view (layer = view index).
+- **Aurora**: `lib/webgpu/fdm.{hpp,cpp}` wraps the ABI (stubs on every other
+  Dawn; the Quest build checks `AuroraDawnFdmVersion()` at runtime);
+  `lib/gfx/foveation.hpp` builds the map (Wiicompiled's rings: Low full within
+  30 degrees of the eye's forward direction and 2x2 beyond, Medium 25 / 40,
+  High 18 / 34; densities 255, 127 and 63 so a half cannot round back to one
+  pixel; each eye's map is centred on its own asymmetric frustum, towards the
+  nose); `lib/gfx/stereo_foveation.{hpp,cpp}` owns the per-target state: a
+  second, render-attachment-only view of the eye targets (an explicit
+  descriptor, since Dawn hands back the same object for every default view),
+  the bound map, and a key of size, level and the four tangents per eye in
+  hundredths. A new map replaces the bound one only once uploaded, so a live
+  level change never shows an unfoveated frame. `stereo_host::begin_frame`
+  prepares it after the targets; `stereo_seal_pass` makes the eye pass render
+  through the foveated view (the multiview array view, or one per eye) while
+  the copies taken from an eye keep the eye's own view
+  (`StereoEyePass::copySourceView`). Every replayed eye pass of an immersive
+  frame is foveated, splits included: Wiicompiled's "single render pass only"
+  rule cannot be applied here because passes are sealed and handed to the
+  render worker while the frame is still being recorded, and on Adreno a
+  world-sized eye pass is binned anyway, so a load under a density map reads
+  the same full-resolution tiles as one without. The virtual screen (menus,
+  cinematics), the blit, the mirror and the EFB copies are never foveated.
+  The targets release the maps before they are recreated (a binding keeps its
+  view, and so the old texture, alive).
+- **Setting** `vr_foveation` (`off`, `low`, `medium`, `high`; default `off`, see
+  the measurement below; the desktop has no path for it): F1 VR tab
+  "Foveated rendering (Quest)" (never disabled: a session started with it off
+  has no maps, yet the level chosen is the next start's), launcher Port Config,
+  `MP_FOVEATION=<level>` for one run (also an `am start --es` extra). Off to a
+  level takes a restart; between levels and back to off it is live.
+  `aurora_get_stereo_foveation` / `aurora_stereo_foveation_available` report it.
+- **Logs**: "Fragment density maps: enabled, AxB to CxD pixels per texel, using
+  32" at device creation (or why they are off), "Eye foveation low: 45x47
+  density map x2, 32 pixels per texel, for the 1428x1496 eyes" per rebuild, and
+  the `stereo frame:` statistics line counts the foveated passes. The `Fov=`
+  field of Meta's `VrApi` logcat line reports the runtime's own foveation and
+  stays 0: it is not an indicator here.
+- **Measured** (Quest 3, Chozo plaza save state, `docs/CHOZO_PERFORMANCE.md`
+  "Fixed foveated rendering"): the maps cost GPU time and save none. At
+  599 MHz, App GPU 9.7 ms off, 9.9 with the device extension and pipeline flag
+  alone, 10.2 with one shared map, 10.4 with the per-eye two-layer map; at
+  render scale 1.25, 11.4 off against 12.1 / 12.2 / 11.9 for low / medium /
+  high. Wiicompiled measured 8 to 22 % savings at 1.3 on Mario Kart; Prime's
+  eye pass is bound by per-draw vertex fetch and binning, not fragment
+  shading, and a map on a non-subsampled image still stores full tiles. The
+  High screenshot (`build/foveation/quest_fov_high.jpg`) shows the coarse
+  shading really applied (4x4 blocks on the visor frame and the walls, sharp
+  centre), so the mechanism works; there is no pixel work to save here. Hence
+  the default `off`; the setting stays for fill-heavy areas (water, fog, heat,
+  snow), to be measured the same way. Diagnostics for that: `MP_FDM_DEVICE=1`
+  gives the device the extension with the level off, `MP_FOVEATION_LAYERS=1`
+  binds one shared map (each texel the finer of the two eyes') instead of the
+  per-eye layers; both are accepted as launch extras.
+- Tests: `extern/aurora/tests/foveation_test.cpp` (`foveation_tests`, the map
+  generator at the port's eye size), the launcher's default row. Verified on
+  the headset: the patched Dawn rebuilt (`quest/Build-Quest.ps1`), the log
+  lines above, screenshots at low / high / off, no Vulkan or WebGPU errors.
+
 ## VR: the beam wheel's hover lights the HUD's beam box (2026-10-04)
 
 PrimedGun showed its beam wheel (hold the weapon hand's B, point the cannon up,

@@ -23,6 +23,7 @@
 #include "../gfx/render_worker.hpp"
 #include "../internal.hpp"
 #include "../window.hpp"
+#include "fdm.hpp"
 #include "gpu_prof.hpp"
 
 #ifdef WEBGPU_DAWN
@@ -1094,6 +1095,10 @@ bool initialize(AuroraBackend auroraBackend, bool allowCpu) {
             Log.warn("Device lost: {}", message);
           }
         });
+    // Foveated eye rendering (fdm.hpp): decided with the device, since the extension flags every
+    // render pipeline. Only the Quest's patched Dawn has it; elsewhere the request is a no-op.
+    fdm::request(g_config.xrInterop && g_config.xrFragmentDensityMap &&
+                 g_backendType == wgpu::BackendType::Vulkan);
     const auto future =
         g_adapter.RequestDevice(&deviceDescriptor, wgpu::CallbackMode::WaitAnyOnly,
                                 [](wgpu::RequestDeviceStatus status, wgpu::Device device, wgpu::StringView message) {
@@ -1114,6 +1119,7 @@ bool initialize(AuroraBackend auroraBackend, bool allowCpu) {
     g_device.SetLoggingCallback(wgpu_log);
   }
   g_queue = g_device.GetQueue();
+  fdm::device_created();
 
   const wgpu::Status status = g_surface.GetCapabilities(g_adapter, &g_surfaceCapabilities);
   if (status != wgpu::Status::Success) {

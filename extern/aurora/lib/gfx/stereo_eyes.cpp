@@ -1,5 +1,6 @@
 #include "stereo_eyes.hpp"
 
+#include "stereo_foveation.hpp"
 #include "stereo_multiview.hpp"
 #include "../internal.hpp"
 
@@ -61,6 +62,8 @@ bool ensure_multiview_targets(const std::array<StereoEyeParams, AURORA_STEREO_EY
       left.depth.format == depthFormat) {
     return true;
   }
+  // The density maps' bindings hold the old targets (stereo_foveation.hpp).
+  stereo_foveation::release();
   const auto color = make_layered(width, height, format,
                                   wgpu::TextureUsage::RenderAttachment | wgpu::TextureUsage::TextureBinding |
                                       wgpu::TextureUsage::CopySrc | wgpu::TextureUsage::CopyDst,
@@ -123,6 +126,7 @@ bool ensure_stereo_eye_targets(const std::array<StereoEyeParams, AURORA_STEREO_E
         target.color.format == format && target.depth.format == webgpu::g_graphicsConfig.depthFormat) {
       continue;
     }
+    stereo_foveation::release();
     target = {};
     target.color = webgpu::create_render_texture(width, height, sampleCount > 1);
     if (sampleCount > 1) {
@@ -146,6 +150,8 @@ const StereoEyeTarget& stereo_eye_target(uint32_t eye) noexcept { return g_eyeTa
 const StereoMultiviewTarget& stereo_multiview_target() noexcept { return g_multiviewTarget; }
 
 void release_stereo_eye_targets() noexcept {
+  // Before the targets go: a map's binding keeps its view, and so the texture, alive.
+  stereo_foveation::release();
   for (auto& target : g_eyeTargets) {
     target = {};
   }

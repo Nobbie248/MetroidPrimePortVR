@@ -134,6 +134,24 @@ void DrawVrDebugTab() {
       ImGui::TextDisabled("(Quest only)");
     }
   }
+  {
+    // In FoveationLevel's order. Never disabled: a session started with it off has no density
+    // maps, yet the level chosen here is the next start's.
+    static constexpr const char* kFoveationLevels[] = {"Off", "Low", "Medium", "High"};
+    int level = static_cast<int>(s.foveation);
+    if (ImGui::Combo("Foveated rendering (Quest)", &level, kFoveationLevels, 4)) {
+      s.foveation = static_cast<FoveationLevel>(level);
+      changed = true;
+    }
+    ImGui::SameLine();
+    if (aurora_stereo_foveation_available()) {
+      ImGui::TextDisabled("(live: the edges of each eye shade in 2x2 or 4x4 blocks)");
+    } else if (s.foveation == FoveationLevel::Off) {
+      ImGui::TextDisabled("(a level takes effect at the next start)");
+    } else {
+      ImGui::TextDisabled("(unavailable: not a Quest, or this session started with it off)");
+    }
+  }
 #if defined(__ANDROID__)
   changed |= ImGui::Checkbox("Direct to headset (takes effect at the next start)", &s.direct_present);
 #endif

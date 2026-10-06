@@ -25,6 +25,7 @@
 #include <cmath>
 #include <condition_variable>
 #include <cstdint>
+#include <cstdlib>
 #include <cstring>
 #include <memory>
 #include <mutex>
@@ -707,8 +708,13 @@ private:
         aurora_config.xrInterop = true;
 #if defined(__ANDROID__)
         // Foveated rendering: fragment density maps are decided with the device. They put a flag on
-        // every render pipeline, so a session launched with foveation off does without them.
-        aurora_config.xrFragmentDensityMap = false;
+        // every render pipeline, so a session launched with foveation off does without them, and a
+        // level chosen later applies at the next start. MP_FDM_DEVICE=0|1 forces the device's
+        // choice for one run, to price the pipeline flag apart from the maps themselves.
+        aurora_config.xrFragmentDensityMap = GetVrSettings().foveation != FoveationLevel::Off;
+        if (const char* force = std::getenv("MP_FDM_DEVICE"); force != nullptr && *force != '\0') {
+            aurora_config.xrFragmentDensityMap = *force == '1';
+        }
 #endif
 #if defined(_WIN32)
         if (kRequiredAuroraBackend != BACKEND_D3D12) return;

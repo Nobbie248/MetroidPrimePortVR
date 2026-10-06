@@ -563,7 +563,11 @@ void render(wgpu::CommandEncoder& cmd, FramePacket& frame, RenderPass& passInfo,
     const webgpu::gpu_prof::Zone zone{cmd, "Stereo eye copies"};
     for (uint32_t eye = 0; eye < AURORA_STEREO_EYE_COUNT; ++eye) {
       const auto& eyePass = passInfo.stereo.eyes[eye];
-      const auto& source = eyePass.resolveView ? eyePass.resolveView : eyePass.colorView;
+      // The eye's sampleable view: the pass may have rendered through a
+      // foveated, attachment-only view of the same image (stereo_foveation.hpp).
+      const auto& source = eyePass.resolveView      ? eyePass.resolveView
+                           : eyePass.copySourceView ? eyePass.copySourceView
+                                                    : eyePass.colorView;
       if (!source || !passInfo.stereo.copyTargets[eye]) {
         continue;
       }

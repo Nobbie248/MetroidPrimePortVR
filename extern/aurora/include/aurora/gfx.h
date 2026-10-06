@@ -55,8 +55,14 @@ uint32_t aurora_gx_draw_commands_issued(void);
 void aurora_set_stereo_stop_at_display_copy(bool enabled);
 void aurora_set_stereo_skip_copy_clears(bool enabled);
 void aurora_set_stereo_single_pass_eyes(bool enabled);
-// Foveated eyes (Quest, fragment density maps): unavailable on the desktop.
+// Fixed foveated rendering of the immersive eyes: 0 off, 1 low, 2 medium, 3
+// high (gfx/foveation.hpp's rings; menus on the virtual screen never are).
+// Live, but the Vulkan device only gets fragment density maps when
+// AuroraConfig::xrFragmentDensityMap asked for them at creation (the Quest
+// build's patched Dawn); aurora_stereo_foveation_available says whether this
+// session has them. Unavailable on the desktop.
 void aurora_set_stereo_foveation(uint32_t level);
+uint32_t aurora_get_stereo_foveation();
 bool aurora_stereo_foveation_available();
 // The virtual screen the immersive frame's 2D layer is folded onto, in metres.
 void aurora_set_stereo_hud_screen(bool enabled, float widthMeters, float distanceMeters);

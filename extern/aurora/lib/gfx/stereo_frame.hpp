@@ -67,6 +67,12 @@ struct StereoFrameState {
   // The eye passes are one Vulkan multiview pass each (stereo_multiview.hpp),
   // decided with the targets at begin.
   bool multiview = false;
+  // The eye passes render through these foveated views of the eye targets
+  // (stereo_foveation.hpp) instead of the targets' own: the multiview array
+  // view, or one per eye. Decided with the targets at begin.
+  bool foveated = false;
+  wgpu::TextureView foveatedMultiviewColorView;
+  std::array<wgpu::TextureView, AURORA_STEREO_EYE_COUNT> foveatedEyeColorViews{};
   bool replayed = false;  // at least one EFB pass was sealed with eye passes
   bool uniformsExhausted = false; // the uniform budget ran out: later draws are mono-only (logged once)
   uint64_t frameToken = 0;
@@ -86,9 +92,12 @@ namespace detail {
 // One eye's attachments for a replayed render pass. Views are copied in at
 // seal time so the worker never reads the target globals.
 struct StereoEyePass {
-  wgpu::TextureView colorView;
+  wgpu::TextureView colorView; // the pass's attachment: a foveated view when the frame is
   wgpu::TextureView resolveView;
   wgpu::TextureView depthView;
+  // The eye's own, sampleable view of the same image, which the copies taken
+  // from this eye read (a foveated view is a render attachment only).
+  wgpu::TextureView copySourceView;
   wgpu::Extent3D size{};
 };
 
@@ -102,6 +111,8 @@ struct StereoPassReplay {
   // copy follows it) on a headset that owns the display, so nothing reads its mono
   // image (recording.cpp finish(), stereo_host::headset_owns_display).
   bool skipMono = false;
+  // The eye passes run under a fragment density map (stereo_foveation.hpp).
+  bool foveated = false;
   // Both eyes in one Vulkan multiview render pass, into these views of the eye
   // targets' two layers (stereo_multiview.hpp); `eyes` then holds each layer's
   // own view, which the copies taken from an eye read.

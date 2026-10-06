@@ -8,6 +8,7 @@
 #include "__gx.h"
 #include "gx/pipeline.hpp"
 
+#include <array>
 #include <algorithm>
 #include <atomic>
 #include <bit>
@@ -196,6 +197,23 @@ TEST_F(GXDrawMergeTest, MapBatchModeSeparatesOrdinaryTriangles) {
   decode_fifo(capture_fifo());
   Draw(GX_TRIANGLES, 3);
   EXPECT_EQ(aurora::gfx::g_testDrawCount, 3u);
+}
+
+TEST_F(GXDrawMergeTest, AFullFrameStagingSkipsDrawsInsteadOfAborting) {
+  // The frame's staging is a mapped region of a fixed size (an area coming into view can
+  // fill it): what no longer fits is skipped for the frame, never pushed past its end.
+  std::array<u8, 64> backing{};
+  aurora::gfx::testing::stagedVerts = aurora::ByteBuffer{backing.data(), backing.size()};
+  Draw(GX_TRIANGLES, 3); // 12 bytes
+  EXPECT_EQ(aurora::gfx::g_testDrawCount, 1u);
+  Draw(GX_TRIANGLES, 30); // 120 more: neither merged nor drawn
+  EXPECT_EQ(aurora::gfx::g_testDrawCount, 1u);
+  EXPECT_EQ(aurora::gfx::g_testLastDraw.vtxCount, 3u);
+  g_gxState.dirty |= aurora::gx::DirtyPipeline;
+  Draw(GX_TRIANGLES, 30); // nor as a new draw
+  EXPECT_EQ(aurora::gfx::g_testDrawCount, 1u);
+  EXPECT_LE(aurora::gfx::testing::stagedVerts.size(), backing.size());
+  aurora::gfx::testing::stagedVerts = aurora::ByteBuffer{}; // owned again, off the stack array
 }
 
 TEST_F(GXDrawMergeTest, IndependentLinesAndPointsKeepOneQuadAndAppendInstances) {

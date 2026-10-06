@@ -284,6 +284,8 @@ public:
   [[nodiscard]] const uint8_t* data() const noexcept { return m_data; }
   [[nodiscard]] size_t size() const noexcept { return m_length; }
   [[nodiscard]] size_t capacity() const noexcept { return m_capacity; }
+  // False for a view of memory it does not own (a mapped staging region): it cannot grow.
+  [[nodiscard]] bool owned() const noexcept { return m_owned; }
   [[nodiscard]] bool empty() const noexcept { return m_length == 0; }
 
   void append(const void* data, size_t size) {
@@ -337,7 +339,10 @@ private:
 
   void resize(size_t size, bool zeroed) {
     if (size == 0) {
+      // Keep the capacity: dropping it to 0 would make a buffer that does not own its
+      // memory (a mapped staging region) abort on its next append.
       clear();
+      return;
     } else if (m_data == nullptr) {
       m_data = static_cast<uint8_t*>(zeroed ? calloc(1, size) : malloc(size));
       m_owned = true;

@@ -32,6 +32,7 @@
 #include <cstdint>
 #include <span>
 #include <memory>
+#include <optional>
 #include <vector>
 
 namespace aurora::gx::fifo {
@@ -357,10 +358,70 @@ void deindex_records(const DeindexPlan& plan, const u8* src, u32 count, u8* dst)
   }
 }
 
-// The records of a draw staged: resolved when the plan asks, else as they are.
-gfx::Range push_vertex_records(const DeindexPlan* plan, std::span<const u8> data, u32 vtxCount,
-                               size_t alignment) noexcept {
-  if (plan == nullptr || !plan->active) {
+// The frame's vertex and index staging are mapped regions of a fixed size (gfx/frame.cpp):
+// a push past their end aborts. What no longer fits is skipped for this frame and counted
+// (staging_report at the frame's end), and the geometry cache leaves the frame room for its
+// plain draws before uploading new surfaces (handle_cached_display_list).
+struct StagingShortfall {
+  u32 skippedDraws = 0;
+  u32 deferredUploads = 0;
+  u64 deferredBytes = 0;
+  size_t vertexUsed = 0;
+  size_t vertexCapacity = 0;
+  size_t indexUsed = 0;
+  size_t indexCapacity = 0;
+  u32 reports = 0;
+};
+StagingShortfall sStaging;
+
+bool staging_room(const ByteBuffer* buffer, size_t bytes, size_t reserve = 0) noexcept {
+  // No buffer (no frame recording: the push itself refuses) or a growable one (tests):
+  // no fixed end to keep to.
+  return buffer == nullptr || buffer->owned() ||
+         AURORA_ALIGN(buffer->size(), 4) + bytes + reserve <= buffer->capacity();
+}
+
+void note_skipped_draw() noexcept {
+  ++sStaging.skippedDraws;
+  if (const ByteBuffer* verts = gfx::staging_verts()) {
+    sStaging.vertexUsed = verts->size();
+    sStaging.vertexCapacity = verts->capacity();
+  }
+  if (const ByteBuffer* indices = gfx::staging_indices()) {
+    sStaging.indexUsed = indices->size();
+    sStaging.indexCapacity = indices->capacity();
+  }
+}
+
+// At the frame's end: what did not fit, logged now and then.
+void staging_report() noexcept {
+  if (sStaging.skippedDraws != 0 && (sStaging.reports < 20 || sStaging.reports % 300 == 0)) {
+    Log.warn("Frame staging full: {} draws skipped (vertices {} of {} KB, indices {} of {} KB)",
+             sStaging.skippedDraws, sStaging.vertexUsed >> 10, sStaging.vertexCapacity >> 10,
+             sStaging.indexUsed >> 10, sStaging.indexCapacity >> 10);
+  }
+  if (sStaging.deferredUploads != 0 && (sStaging.reports < 20 || sStaging.reports % 300 == 0)) {
+    Log.info("Geometry cache: {} new surfaces ({} KB) left for later frames, the frame's staging was full",
+             sStaging.deferredUploads, sStaging.deferredBytes >> 10);
+  }
+  if (sStaging.skippedDraws != 0 || sStaging.deferredUploads != 0) {
+    ++sStaging.reports;
+  }
+  const u32 reports = sStaging.reports;
+  sStaging = {};
+  sStaging.reports = reports;
+}
+
+// The records of a draw staged: resolved when the plan asks, else as they are. Empty when
+// the frame's vertex staging cannot hold them (the draw is skipped).
+std::optional<gfx::Range> push_vertex_records(const DeindexPlan* plan, std::span<const u8> data, u32 vtxCount,
+                                              size_t alignment) noexcept {
+  const bool resolve = plan != nullptr && plan->active;
+  if (!staging_room(gfx::staging_verts(), resolve ? static_cast<size_t>(vtxCount) * plan->dstStride : data.size())) {
+    note_skipped_draw();
+    return std::nullopt;
+  }
+  if (!resolve) {
     return gfx::push_verts(data.data(), data.size(), alignment);
   }
   static ByteBuffer resolved;
@@ -1125,11 +1186,18 @@ static void draw_prim(u8 cmd, GXPrimitive prim, GXVtxFmt fmt, u16 vtxCount, Byte
   if (!canMerge) {
     count_merge_breaks(formatDiffers || prim == GX_LINESTRIP, lastDraw == nullptr);
     const auto vertexData = reader.take(totalVtxBytes);
-    const gfx::Range vertRange = push_vertex_records(plan, vertexData, vtxCount, 4);
+    const auto vertRange = push_vertex_records(plan, vertexData, vtxCount, 4);
     if (perfOn) {
       gfx::perf::add(gfx::perf::g_fifoVertsTicks, t0, gfx::perf::tick());
     }
-    handle_draw_unmerged(prim, fmt, vtxCount, vertRange);
+    if (!vertRange || !staging_room(gfx::staging_indices(),
+                                    static_cast<size_t>(list_index_count(prim, vtxCount)) * sizeof(u16) + 4)) {
+      if (vertRange) {
+        note_skipped_draw();
+      }
+      return;
+    }
+    handle_draw_unmerged(prim, fmt, vtxCount, *vertRange);
     return;
   }
 
@@ -1144,46 +1212,55 @@ static void draw_prim(u8 cmd, GXPrimitive prim, GXVtxFmt fmt, u16 vtxCount, Byte
           "Non-consecutive vertex ranges ({} < {})", lastDraw->vertRange.offset + lastDraw->vertRange.size,
           verts->size());
     const u32 stagedBytes = deindex ? vtxCount * plan->dstStride : totalVtxBytes;
-    if (deindex) {
-      const gfx::perf::Bucket bucket{gfx::perf::g_fifoDeindexTicks, perfOn};
-      deindex_records(*plan, vertexData.data(), vtxCount, verts->append_uninitialized(stagedBytes));
-      if (perfOn) {
-        gfx::perf::g_fifoDeindexedVerts.fetch_add(vtxCount, std::memory_order_relaxed);
+    // This strip's records and, when indexed, its list indices (the first time, the previous
+    // draw's own as well): a strip the frame's staging cannot hold is skipped.
+    const size_t indexBytes =
+        lineMode != 0 ? 0
+                      : (static_cast<size_t>(list_index_count(prim, vtxCount)) + lastDraw->vtxCount) * sizeof(u16) + 4;
+    if (!staging_room(verts, stagedBytes) || !staging_room(indices, indexBytes)) {
+      note_skipped_draw();
+    } else {
+      if (deindex) {
+        const gfx::perf::Bucket bucket{gfx::perf::g_fifoDeindexTicks, perfOn};
+        deindex_records(*plan, vertexData.data(), vtxCount, verts->append_uninitialized(stagedBytes));
+        if (perfOn) {
+          gfx::perf::g_fifoDeindexedVerts.fetch_add(vtxCount, std::memory_order_relaxed);
+        }
+      } else if (totalVtxBytes > 0) {
+        std::memcpy(verts->append_uninitialized(totalVtxBytes), vertexData.data(), totalVtxBytes);
       }
-    } else if (totalVtxBytes > 0) {
-      std::memcpy(verts->append_uninitialized(totalVtxBytes), vertexData.data(), totalVtxBytes);
-    }
-    lastDraw->vertRange.size += stagedBytes;
-    if (lineMode != 0) {
-      // Keep the existing quad indices; instances address the appended points
-      // or independent pairs relative to the original draw's vertex start.
-      lastDraw->instanceCount += prim == GX_LINES ? vtxCount / 2 : vtxCount;
-    } else if (lastDraw->indexCount == 0 && prim != GX_TRIANGLES) {
-      // The previous draw's own triangles take their list indices first
-      const u32 count = list_index_count(GX_TRIANGLES, static_cast<u16>(lastDraw->vtxCount));
-      u32 offset = 0;
-      write_list_indices(reserve_staged_indices(*indices, count, true, offset), GX_TRIANGLES, 0,
-                         static_cast<u16>(lastDraw->vtxCount));
-      lastDraw->idxRange = gfx::Range{offset, static_cast<u32>(count * sizeof(u16))};
-      lastDraw->indexCount = count;
-    }
-    if (lineMode == 0 && lastDraw->indexCount != 0) {
-      const u32 count = list_index_count(prim, vtxCount);
-      const bool newRange = lastDraw->idxRange.size == 0;
-      u32 offset = 0;
-      u16* const out = reserve_staged_indices(*indices, count, newRange, offset);
-      write_list_indices(out, prim, static_cast<u16>(lastDraw->vtxCount), vtxCount);
-      if (newRange) {
+      lastDraw->vertRange.size += stagedBytes;
+      if (lineMode != 0) {
+        // Keep the existing quad indices; instances address the appended points
+        // or independent pairs relative to the original draw's vertex start.
+        lastDraw->instanceCount += prim == GX_LINES ? vtxCount / 2 : vtxCount;
+      } else if (lastDraw->indexCount == 0 && prim != GX_TRIANGLES) {
+        // The previous draw's own triangles take their list indices first
+        const u32 count = list_index_count(GX_TRIANGLES, static_cast<u16>(lastDraw->vtxCount));
+        u32 offset = 0;
+        write_list_indices(reserve_staged_indices(*indices, count, true, offset), GX_TRIANGLES, 0,
+                           static_cast<u16>(lastDraw->vtxCount));
         lastDraw->idxRange = gfx::Range{offset, static_cast<u32>(count * sizeof(u16))};
-      } else {
-        CHECK(lastDraw->idxRange.offset + lastDraw->idxRange.size == offset, "Non-consecutive index ranges ({} < {})",
-              lastDraw->idxRange.offset + lastDraw->idxRange.size, offset);
-        lastDraw->idxRange.size += static_cast<u32>(count * sizeof(u16));
+        lastDraw->indexCount = count;
       }
-      lastDraw->indexCount += count;
+      if (lineMode == 0 && lastDraw->indexCount != 0) {
+        const u32 count = list_index_count(prim, vtxCount);
+        const bool newRange = lastDraw->idxRange.size == 0;
+        u32 offset = 0;
+        u16* const out = reserve_staged_indices(*indices, count, newRange, offset);
+        write_list_indices(out, prim, static_cast<u16>(lastDraw->vtxCount), vtxCount);
+        if (newRange) {
+          lastDraw->idxRange = gfx::Range{offset, static_cast<u32>(count * sizeof(u16))};
+        } else {
+          CHECK(lastDraw->idxRange.offset + lastDraw->idxRange.size == offset, "Non-consecutive index ranges ({} < {})",
+                lastDraw->idxRange.offset + lastDraw->idxRange.size, offset);
+          lastDraw->idxRange.size += static_cast<u32>(count * sizeof(u16));
+        }
+        lastDraw->indexCount += count;
+      }
+      lastDraw->vtxCount += vtxCount;
+      ++merged;
     }
-    lastDraw->vtxCount += vtxCount;
-    ++merged;
 
     // The next command, when it is another strip of this kind
     if (cmd == 0 || reader.remaining() < 3 || reader.data()[reader.offset()] != cmd) {
@@ -1319,6 +1396,10 @@ static void draw_cached_geometry(GXVtxFmt fmt, const geometry_cache::Entry& entr
   const bool perfOn = gfx::perf::enabled();
   const auto t0 = gfx::perf::stamp(perfOn);
   const size_t bytes = entry.indices.size() * sizeof(u32);
+  if (!staging_room(gfx::staging_indices(), bytes)) {
+    note_skipped_draw();
+    return;
+  }
   if (!canMerge) {
     count_merge_breaks(formatDiffers, lastDraw == nullptr);
     const gfx::Range idxRange = gfx::push_indices(reinterpret_cast<const u8*>(entry.indices.data()), bytes, 4);
@@ -1344,9 +1425,6 @@ static void draw_cached_geometry(GXVtxFmt fmt, const geometry_cache::Entry& entr
   }
 }
 
-// A static world surface's display list (GX_AURORA_CALL_CACHED_DL), read where it
-// lives: drawn from the geometry cache, resolved into it first when new, or
-// processed in place when the cache cannot take it.
 // Whether a cached surface's records take native vertex input (gx/native_vertex.hpp)
 // depends only on what populate_pipeline_config lays its attributes out from: the
 // vertex descriptor, the format's attribute formats, the arrays' byte order and the
@@ -1434,6 +1512,9 @@ void clear_native_vertex_choices() noexcept {
   sNativeVertexMemo.choices.clear();
 }
 
+// A static world surface's display list (GX_AURORA_CALL_CACHED_DL), read where it
+// lives: drawn from the geometry cache, resolved into it first when new, or
+// processed in place when the cache cannot take it.
 static void handle_cached_display_list(ByteReader& reader) noexcept {
   const u32 set = reader.read<u32>();
   const auto address = static_cast<uintptr_t>(reader.read<u64>());
@@ -1472,6 +1553,16 @@ static void handle_cached_display_list(ByteReader& reader) noexcept {
     records.clear();
     indices.clear();
     if (!resolve_display_list(data, size, fmt, *plan, records, indices)) {
+      process_display_list_in_place(data, size);
+      return;
+    }
+    // New surfaces upload through the frame's vertex staging (gfx::queue_geometry_upload):
+    // a burst of them (an area coming into view) leaves a quarter of it to the frame's
+    // plain draws and is cached over the next frames, drawn in place meanwhile.
+    const ByteBuffer* const verts = gfx::staging_verts();
+    if (verts != nullptr && !staging_room(verts, records.size(), verts->owned() ? 0 : verts->capacity() / 4)) {
+      ++sStaging.deferredUploads;
+      sStaging.deferredBytes += records.size();
       process_display_list_in_place(data, size);
       return;
     }
@@ -1726,9 +1817,9 @@ void handle_aurora(ByteReader& reader) noexcept {
     const u32 totalVtxBytes = vtxCount * vtxSize;
     const auto vertexData = reader.take(totalVtxBytes);
     const DeindexPlan* const plan = g_gxState.deindexVertices ? &deindex_plan(fmt) : nullptr;
-    const gfx::Range vertRange = push_vertex_records(plan, vertexData, vtxCount, 4);
-    if (indexCount != 0) {
-      push_gx_draw(prim, fmt, vtxCount, vertRange, idxRange, indexCount);
+    const auto vertRange = push_vertex_records(plan, vertexData, vtxCount, 4);
+    if (indexCount != 0 && vertRange) {
+      push_gx_draw(prim, fmt, vtxCount, *vertRange, idxRange, indexCount);
     }
   } else if (subCmd == GX_AURORA_DEBUG_GROUP_PUSH) {
     auto label = reader.read_string();
@@ -1891,6 +1982,7 @@ void handle_aurora(ByteReader& reader) noexcept {
 }
 
 void clear_draw_cache() noexcept {
+  staging_report();
   // Uniform/vertex ranges belong to this frame, but texture bind groups do
   // not. Keep their descriptor cache warm; current_bind_group_entry() checks
   // the resource cache's lifetime before reusing an entry in a later frame.

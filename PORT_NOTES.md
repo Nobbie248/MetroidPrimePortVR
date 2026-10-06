@@ -34,6 +34,9 @@ screen no longer leaves room for an in-eye panel, which nothing draws any more.
 - Resets, EXIT GAME and the save-state actions need a second click within six
   seconds.
 - Every opening starts on LAYOUT.
+- CALIBRATION and CONTROL turn pages with PREVIOUS and NEXT buttons under the
+  rows, with the page number between them. This replaces PrimedGun's PAGE row
+  at the top of the list (the user's request, after the first headset test).
 - "LONGER HELD PRESS FOR VR MENU" (one second) and "MENU REQUIRES HAND NEAR
   HEAD" (the visor gesture's zone) work as in PrimedGun.
 

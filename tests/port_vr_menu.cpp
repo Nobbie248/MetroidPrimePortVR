@@ -108,17 +108,33 @@ void TestImage() {
   Check(At(rows, 54, RowTextY(kCalibrationTab, 1) - 4) == 0x80FFB030u, "unselected row accent");
   Check(At(rows, 790 + 2, RowTextY(kCalibrationTab, 2) + 6) == 0xFFFFB030u, "minus sign");
   Check(ViewKey(calibration, settings, 1, false) != ViewKey(calibration, settings, 1, true), "notice in the key");
+  // Page 1 has NEXT and no PREVIOUS; page 2 the other way round.
+  const auto accent = [](const Pixels& p, int button_x) { return At(p, button_x + 1, kPageButtonY + 10); };
+  Check(accent(rows, kNextButtonX) == 0x80FFB030u && accent(rows, kPreviousButtonX) == 0xD0100804u,
+        "page 1 buttons");
+  calibration.calibration_page = 1;
+  const Pixels second = BuildPixels(calibration, settings, 1, false);
+  Check(accent(second, kPreviousButtonX) == 0x80FFB030u && accent(second, kNextButtonX) == 0xD0100804u,
+        "page 2 buttons");
+  Check(ViewKey(calibration, settings, 1, false) != ViewKey(State{calibration.tab}, settings, 1, false),
+        "page in the key");
+  // Tabs without pages have no buttons.
+  State movement{};
+  movement.tab = kMovementTab;
+  Check(accent(BuildPixels(movement, settings, 1, false), kNextButtonX) == 0xD0100804u, "no buttons without pages");
 }
 
 void TestRows() {
   State s{};
   Check(ItemCount(s) == 0, "layout has no rows");
   s.tab = kCalibrationTab;
-  Check(ItemCount(s) == 13, "calibration page 1");
+  Check(ItemCount(s) == 12, "calibration page 1");
   s.calibration_page = 1;
-  Check(ItemCount(s) == 13, "calibration page 2");
+  Check(ItemCount(s) == 12, "calibration page 2");
   s.tab = kControlTab;
-  Check(ItemCount(s) == 9, "control page 1");
+  Check(ItemCount(s) == 8, "control page 1");
+  s.control_page = 1;
+  Check(ItemCount(s) == 8, "control page 2");
   s.tab = kMovementTab;
   Check(ItemCount(s) == 11, "movement");
   s.tab = kTexturesTab;
@@ -132,8 +148,9 @@ void TestRows() {
   State calibration{};
   calibration.tab = kCalibrationTab;
   const auto rows = BuildRows(calibration, settings, 1);
-  Check(rows.size() == 13 && std::strcmp(rows[11].label, "CULLING CONE") == 0 && rows[11].value == "115.00",
-        "PrimedGun's culling cone text");
+  Check(rows.size() == 12 && std::strcmp(rows[0].label, "CUTSCENE CINEMA SCREEN") == 0 &&
+            std::strcmp(rows[10].label, "CULLING CONE") == 0 && rows[10].value == "115.00",
+        "PrimedGun's rows without the PAGE row, and its culling cone text");
   Check(SnapTurnStep(45, 1) == 60 && SnapTurnStep(90, 1) == 90 && SnapTurnStep(30, -1) == 30, "snap turn steps");
 }
 
@@ -153,37 +170,53 @@ void TestClicks() {
   Check(s.tab == kCalibrationTab, "calibration tab");
 
   // Numeric: right half up, left half down.
-  Click(s, v, kPlusX, RowY(kCalibrationTab, 2), now, actions);
-  Check(s.selected == 2 && Near(v.metroid_hud_distance, 0.80f), "HUD distance up");
-  Click(s, v, kMinusX, RowY(kCalibrationTab, 2), now, actions);
+  Click(s, v, kPlusX, RowY(kCalibrationTab, 1), now, actions);
+  Check(s.selected == 1 && Near(v.metroid_hud_distance, 0.80f), "HUD distance up");
+  Click(s, v, kMinusX, RowY(kCalibrationTab, 1), now, actions);
   Check(Near(v.metroid_hud_distance, 0.75f), "HUD distance down");
   // Toggle anywhere else on the row.
-  Click(s, v, kLabelX, RowY(kCalibrationTab, 1), now, actions);
+  Click(s, v, kLabelX, RowY(kCalibrationTab, 0), now, actions);
   Check(!v.cinematic_screen_enabled, "cinema screen toggle");
   // HUD VERTICAL keeps up and down apart.
-  Click(s, v, kMinusX, RowY(kCalibrationTab, 4), now, actions);
+  Click(s, v, kMinusX, RowY(kCalibrationTab, 3), now, actions);
   Check(Near(v.metroid_hud_offset_down, 0.01f) && Near(v.metroid_hud_offset_up, 0.0f), "HUD vertical split");
 
-  // PAGE: a click on the row turns the page; SAMUS ARM PRESET is on page 2.
-  Click(s, v, kLabelX, RowY(kCalibrationTab, 0), now, actions);
-  Check(s.calibration_page == 1, "page turn");
-  Click(s, v, kLabelX, RowY(kCalibrationTab, 10), now, actions);
+  // Pages: PREVIOUS does nothing on page 1, NEXT turns to page 2 (and lets go
+  // of a pending reset), NEXT does nothing there.
+  const float page_y = static_cast<float>(kPageButtonY) + 14.0f;
+  const float previous_x = static_cast<float>(kPreviousButtonX) + 100.0f;
+  const float next_x = static_cast<float>(kNextButtonX) + 100.0f;
+  Click(s, v, previous_x, page_y, now, actions);
+  Check(s.calibration_page == 0, "no page before the first");
+  Click(s, v, kLabelX, RowY(kCalibrationTab, 11), now, actions);
+  Check(s.reset_confirm == kResetTargeting, "reset targeting armed");
+  Click(s, v, next_x, page_y, now, actions);
+  Check(s.calibration_page == 1 && s.reset_confirm == kNoReset, "next page");
+  Click(s, v, next_x, page_y, now, actions);
+  Check(s.calibration_page == 1, "no page after the last");
+  Click(s, v, 512.0f, page_y, now, actions);
+  Check(s.calibration_page == 1, "the page number is not a button");
+  // SAMUS ARM PRESET is on page 2.
+  Click(s, v, kLabelX, RowY(kCalibrationTab, 9), now, actions);
   Check(Near(v.model_offset_y, -0.3f) && Near(v.rot_offset_y, 20.0f) && Near(v.rot_offset_z, -90.0f),
         "Samus arm preset");
 
   // RESET CALIBRATION takes two clicks within six seconds.
-  Click(s, v, kLabelX, RowY(kCalibrationTab, 8), now, actions);
+  Click(s, v, kLabelX, RowY(kCalibrationTab, 7), now, actions);
   Check(s.reset_confirm == kResetCalibration && Near(v.rot_offset_z, -90.0f), "reset armed");
   now += 7.0;
   Refresh(s, now);
   Check(s.reset_confirm == kNoReset, "confirmation expires");
-  Click(s, v, kLabelX, RowY(kCalibrationTab, 8), now, actions);
-  Click(s, v, kLabelX, RowY(kCalibrationTab, 8), now + 1.0, actions);
+  Click(s, v, kLabelX, RowY(kCalibrationTab, 7), now, actions);
+  Click(s, v, kLabelX, RowY(kCalibrationTab, 7), now + 1.0, actions);
   Check(s.reset_confirm == kNoReset && Near(v.rot_offset_z, 0.0f) && Near(v.model_offset_y, 0.0f),
         "reset confirmed");
   // DETACH VR MENU FROM HAND.
-  Click(s, v, kLabelX, RowY(kCalibrationTab, 11), now, actions);
+  Click(s, v, kLabelX, RowY(kCalibrationTab, 10), now, actions);
   Check(v.vr_menu_floating, "detach toggle");
+  // PREVIOUS goes back to page 1.
+  Click(s, v, previous_x, page_y, now, actions);
+  Check(s.calibration_page == 0, "previous page");
 
   // SAVE SETTINGS shows the notice; RESET ALL keeps the renderer's settings.
   Click(s, v, 150.0f, 120.0f, now, actions);
@@ -201,8 +234,14 @@ void TestClicks() {
   // Control: RUMBLE TARGET cycles BOTH -> LEFT -> RIGHT.
   Click(s, v, 22.0f + 166.0f * 2 + 10.0f, 80.0f, now, actions);
   Check(v.rumble_hand == RumbleHand::Right, "rumble default");
-  Click(s, v, kLabelX, RowY(kControlTab, 3), now, actions);
+  Click(s, v, kLabelX, RowY(kControlTab, 2), now, actions);
   Check(v.rumble_hand == RumbleHand::Both, "rumble cycles");
+  // The control tab's second page: VISOR GESTURE, then back.
+  Click(s, v, next_x, page_y, now, actions);
+  Click(s, v, kLabelX, RowY(kControlTab, 2), now, actions);
+  Check(s.control_page == 1 && !v.xr_dpad_enabled, "visor gesture on control page 2");
+  Click(s, v, previous_x, page_y, now, actions);
+  Check(s.control_page == 0, "control page 1 again");
   // Movement: SNAP TURN ANGLE steps through PrimedGun's choices.
   Click(s, v, 22.0f + 166.0f * 3 + 10.0f, 80.0f, now, actions);
   Click(s, v, kPlusX, RowY(kMovementTab, 9), now, actions);

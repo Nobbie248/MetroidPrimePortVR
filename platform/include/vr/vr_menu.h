@@ -22,6 +22,10 @@
 //   (right half). A click anywhere else on a row toggles, cycles or runs it.
 // - Resets, EXIT GAME and the save-state actions take a second click within
 //   six seconds. PrimedGun counted that in 60 Hz frames; here it is seconds.
+//
+// One departure from PrimedGun: the two-page tabs (CALIBRATION, CONTROL) turn
+// pages with PREVIOUS and NEXT buttons under the rows, where PrimedGun had a
+// PAGE row at the top of the list.
 
 #pragma once
 
@@ -175,6 +179,13 @@ inline constexpr uint32_t kCalibrationFirstPageItems = 12;
 inline constexpr uint32_t kCalibrationTotalItems = 24;
 inline constexpr uint32_t kControlFirstPageItems = 8;
 inline constexpr uint32_t kControlTotalItems = 16;
+// The two-page tabs' PREVIOUS (left) and NEXT (right) buttons, under the
+// longest list and clear of the bottom bar, the page number between them.
+inline constexpr int kPageButtonY = 458;
+inline constexpr int kPageButtonWidth = 220;
+inline constexpr int kPageButtonHeight = 28;
+inline constexpr int kPreviousButtonX = 52;
+inline constexpr int kNextButtonX = 52 + 920 - kPageButtonWidth; // right-aligned with the rows
 inline constexpr uint32_t kMovementItems = 11;
 inline constexpr uint32_t kCannonSlotCount = 6; // DEFAULT, SLOT 1-4, CUSTOM
 inline constexpr uint32_t kStateActionRows = 4;
@@ -239,28 +250,30 @@ public:
 
 // --- Rows ---
 
+// A row's place in its tab's whole list, both pages together (PrimedGun's
+// numbering, which its settings and resets are keyed on).
 inline int CalibrationActualIndex(const State& s, uint32_t local) {
-    if (local == 0) {
-        return -1;
-    }
-    return s.calibration_page == 0 ? static_cast<int>(local - 1)
-                                   : static_cast<int>(kCalibrationFirstPageItems + local - 1);
+    return static_cast<int>(s.calibration_page == 0 ? local : kCalibrationFirstPageItems + local);
 }
 
 inline int ControlActualIndex(const State& s, uint32_t local) {
-    if (local == 0) {
-        return -1;
-    }
-    return s.control_page == 0 ? static_cast<int>(local - 1) : static_cast<int>(kControlFirstPageItems + local - 1);
+    return static_cast<int>(s.control_page == 0 ? local : kControlFirstPageItems + local);
+}
+
+inline bool HasPages(uint32_t tab) { return tab == kCalibrationTab || tab == kControlTab; }
+
+// The page a two-page tab shows (0 for the others).
+inline uint32_t Page(const State& s) {
+    return s.tab == kCalibrationTab ? s.calibration_page : s.tab == kControlTab ? s.control_page : 0;
 }
 
 inline uint32_t ItemCount(const State& s) {
     switch (s.tab) {
     case kCalibrationTab:
-        return s.calibration_page == 0 ? kCalibrationFirstPageItems + 1
-                                       : kCalibrationTotalItems - kCalibrationFirstPageItems + 1;
+        return s.calibration_page == 0 ? kCalibrationFirstPageItems
+                                       : kCalibrationTotalItems - kCalibrationFirstPageItems;
     case kControlTab:
-        return s.control_page == 0 ? kControlFirstPageItems + 1 : kControlTotalItems - kControlFirstPageItems + 1;
+        return s.control_page == 0 ? kControlFirstPageItems : kControlTotalItems - kControlFirstPageItems;
     case kMovementTab:
         return kMovementItems;
     case kTexturesTab:
@@ -299,16 +312,10 @@ inline int RowFromTextureY(uint32_t tab, float texture_y, uint32_t item_count) {
 inline bool RowIsNumeric(const State& s, uint32_t index) {
     switch (s.tab) {
     case kCalibrationTab: {
-        if (index == 0) {
-            return true;
-        }
         const int actual = CalibrationActualIndex(s, index);
         return (actual >= 1 && actual <= 6) || actual == 10 || (actual >= 12 && actual <= 17);
     }
     case kControlTab: {
-        if (index == 0) {
-            return true;
-        }
         const int actual = ControlActualIndex(s, index);
         return actual == 3 || actual == 9 || (actual >= 11 && actual <= 14);
     }
@@ -346,7 +353,6 @@ inline std::vector<Row> BuildRows(const State& s, const PortVrSettings& v, int s
     std::vector<Row> rows;
     switch (s.tab) {
     case kCalibrationTab:
-        rows.push_back({"PAGE", s.calibration_page == 0 ? "1/2" : "2/2"});
         if (s.calibration_page == 0) {
             rows.push_back({"CUTSCENE CINEMA SCREEN", OnOff(v.cinematic_screen_enabled)});
             rows.push_back({"HUD DISTANCE", FloatText(v.metroid_hud_distance, 2)});
@@ -377,7 +383,6 @@ inline std::vector<Row> BuildRows(const State& s, const PortVrSettings& v, int s
         }
         break;
     case kControlTab:
-        rows.push_back({"PAGE", s.control_page == 0 ? "1/2" : "2/2"});
         if (s.control_page == 0) {
             rows.push_back({"RIGHT HAND", OnOff(v.use_right_hand)});
             rows.push_back({"RUMBLE", OnOff(v.rumble_enabled)});
@@ -558,6 +563,19 @@ inline Pixels BuildPixels(const State& s, const PortVrSettings& v, int state_slo
             const char* value = rows[static_cast<size_t>(i)].value.c_str();
             DrawString(pixels, width, height, value, value_x + (170 - TextWidth(value, 2)) / 2, y, 2, 0xFFFFF0C8u);
         }
+        if (HasPages(s.tab)) {
+            // Only the button that leads somewhere; the page number between them.
+            const uint32_t page = Page(s);
+            if (page > 0) {
+                draw_button("PREVIOUS", kPreviousButtonX, kPageButtonY, kPageButtonWidth);
+            }
+            if (page + 1 < kPageCount) {
+                draw_button("NEXT", kNextButtonX, kPageButtonY, kPageButtonWidth);
+            }
+            const std::string number = "PAGE " + std::to_string(page + 1) + "/" + std::to_string(kPageCount);
+            DrawString(pixels, width, height, number.c_str(), (width - TextWidth(number.c_str(), 2)) / 2,
+                       kPageButtonY + 7, 2, 0xFFD8C0A0u);
+        }
     }
     DrawPointerSprites(pixels);
     return pixels;
@@ -569,6 +587,7 @@ inline std::string ViewKey(const State& s, const PortVrSettings& v, int state_sl
     std::string key;
     key.reserve(512);
     key += static_cast<char>('0' + s.tab);
+    key += static_cast<char>('0' + Page(s));
     key += static_cast<char>('0' + s.reset_confirm);
     key += saved_notice ? '1' : '0';
     if (s.tab != kLayoutTab) {
@@ -772,10 +791,6 @@ inline void Adjust(State& s, PortVrSettings& v, int direction) {
     };
     switch (s.tab) {
     case kCalibrationTab:
-        if (s.selected == 0) {
-            SetCalibrationPage(s, direction < 0 ? s.calibration_page + kPageCount - 1 : s.calibration_page + 1);
-            return;
-        }
         switch (CalibrationActualIndex(s, s.selected)) {
         case 1:
             step(v.metroid_hud_distance, 0.05f, 0.1f, 3.0f);
@@ -829,10 +844,6 @@ inline void Adjust(State& s, PortVrSettings& v, int direction) {
         }
         break;
     case kControlTab:
-        if (s.selected == 0) {
-            SetControlPage(s, direction < 0 ? s.control_page + kPageCount - 1 : s.control_page + 1);
-            return;
-        }
         switch (ControlActualIndex(s, s.selected)) {
         case 3:
             step(v.rumble_intensity, 0.05f, 0.0f, 1.0f);
@@ -894,10 +905,6 @@ inline void Activate(State& s, PortVrSettings& v, double now, Actions& actions) 
 
     switch (s.tab) {
     case kCalibrationTab: {
-        if (s.selected == 0) {
-            SetCalibrationPage(s, s.calibration_page + 1);
-            return;
-        }
         switch (CalibrationActualIndex(s, s.selected)) {
         case 0:
             v.cinematic_screen_enabled = !v.cinematic_screen_enabled;
@@ -954,10 +961,6 @@ inline void Activate(State& s, PortVrSettings& v, double now, Actions& actions) 
         return;
     }
     case kControlTab: {
-        if (s.selected == 0) {
-            SetControlPage(s, s.control_page + 1);
-            return;
-        }
         switch (ControlActualIndex(s, s.selected)) {
         case 0:
             v.use_right_hand = !v.use_right_hand;
@@ -1108,6 +1111,28 @@ inline void Click(State& s, PortVrSettings& v, float x, float y, double now, Act
             ClearConfirmations(s);
             s.tab = static_cast<uint32_t>(tab);
             s.selected = 0;
+        }
+        return;
+    }
+    if (HasPages(s.tab) && y >= static_cast<float>(kPageButtonY) &&
+        y <= static_cast<float>(kPageButtonY + kPageButtonHeight)) {
+        const auto on = [x](int button_x) {
+            return x >= static_cast<float>(button_x) && x <= static_cast<float>(button_x + kPageButtonWidth);
+        };
+        const uint32_t page = Page(s);
+        uint32_t turned = page;
+        if (on(kPreviousButtonX) && page > 0) {
+            turned = page - 1;
+        } else if (on(kNextButtonX) && page + 1 < kPageCount) {
+            turned = page + 1;
+        }
+        if (turned != page) {
+            ClearConfirmations(s);
+            if (s.tab == kCalibrationTab) {
+                SetCalibrationPage(s, turned);
+            } else {
+                SetControlPage(s, turned);
+            }
         }
         return;
     }

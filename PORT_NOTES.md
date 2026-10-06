@@ -1,3 +1,34 @@
+## Renderer: a full frame of vertices no longer aborts the game (2026-10-07)
+
+A Quest play session crashed after a door load. The crash was a SIGABRT in
+`ByteBuffer::append`, called from `push_verts` on the FIFO thread. A
+virtual-screen transition had filled the frame's 5 MiB of vertex staging
+(4.6 MiB used) before one large draw. That staging is mapped memory, which
+cannot grow, so the append aborted.
+
+- **Guard.** The FIFO processor now checks for room before it stages vertices
+  or indices. A draw that does not fit is skipped and logged as "Frame staging
+  full" (the first 20 such frames, then every 300th). New geometry-cache surfaces
+  wait for a later frame when less than a quarter of the vertex staging would
+  remain. `ByteBuffer::resize(0)` now keeps the capacity. Before, an empty
+  append dropped it to 0, and the next append on mapped memory aborted.
+- **Room.** A frame now holds at least 10 MiB of vertices
+  (`MinVertexBufferSize`), so the transition fits and nothing is skipped. Mods
+  with room geometry still scale from 5 MiB, so their buffers keep their
+  sizes. `aurora_get_frame_buffer_scale` reports the scale it was given
+  instead of inferring it from the vertex size. The cost is about 30 MiB of
+  memory: 5 MiB in each of the five staging buffers and in the device buffer.
+
+Validation: 236 FIFO tests pass, including a new one that fills a fixed
+staging buffer. The 42 port tests pass. After the guard, a Quest walkthrough
+through the loading zone that crashed did not crash. The log showed one draw
+skipped during the transition frames; the 10 MiB floor is meant to remove
+that, and the zone has not been walked through again since. Two same-sitting
+5 MiB/10 MiB Quest runs at the Chozo plaza (scale 0.85, 72 Hz, 492 MHz) gave
+App GPU 6.36/6.39 ms vs 6.39/6.40 ms. FIFO and encode times were equal, with
+no staging warnings. App GPU varies 5.7-6.4 ms between sessions at the same
+clocks, so compare builds in one sitting.
+
 ## VR: the VR menu's CONFIG and DEBUG tabs (2026-10-06)
 
 Two tabs of the port's own join PrimedGun's six in the headset's VR menu:

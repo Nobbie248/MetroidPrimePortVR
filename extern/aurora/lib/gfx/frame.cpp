@@ -411,12 +411,13 @@ void initialize() {
     uint32_t scale = std::max<uint32_t>(g_config.frameBufferScale, 1);
     for (;; --scale) {
       g_bufferSizes = {
-          .vertex = VertexBufferSize * scale,
+          .vertex = std::max(VertexBufferSize * scale, MinVertexBufferSize),
           .uniform = scale > 1 ? UniformBufferSize * 2 : UniformBufferSize,
           // Not scaled: the heaviest room measured drew 0.1 MiB of indices, and each
           // scaled MiB here costs one per staging buffer plus the device copy.
           .index = IndexBufferSize,
           .storage = StorageBufferSize * scale,
+          .scale = scale,
       };
       if (scale == 1 || (g_bufferSizes.vertex <= maxBinding && g_bufferSizes.storage <= maxBinding &&
                          g_bufferSizes.staging() <= maxBuffer)) {
@@ -789,6 +790,6 @@ float calculate_fps() noexcept {
 const AuroraStats* aurora_get_stats() { return &aurora::gfx::detail::resources().stats; }
 
 uint32_t aurora_get_frame_buffer_scale() {
-  return static_cast<uint32_t>(aurora::gfx::frame_buffer_sizes().vertex / aurora::gfx::VertexBufferSize);
+  return aurora::gfx::frame_buffer_sizes().scale;
 }
 float aurora_get_fps() { return aurora::gfx::calculate_fps(); }

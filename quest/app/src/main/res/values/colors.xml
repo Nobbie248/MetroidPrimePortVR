@@ -1,5 +1,31 @@
 <?xml version="1.0" encoding="utf-8"?>
+<!-- SPDX-License-Identifier: GPL-3.0-or-later -->
+<!-- PrimedGun's launcher palette (res/values/primedgun_colors.xml in PrimedGun's Quest launcher,
+     Copyright 2026 PrimedGun Project, GPL-2.0-or-later), which mirrors the stylesheet of the Qt
+     window, so the Quest panel reads as the same application. -->
 <resources>
-    <!-- PrimedGun's launcher background (primedgun_colors.xml in PrimedGun's Android app). -->
     <color name="primedgun_background">#101215</color>
+    <color name="primedgun_panel">#121519</color>
+    <color name="primedgun_panel_border">#353A43</color>
+    <color name="primedgun_control">#242A33</color>
+    <color name="primedgun_control_border">#343C49</color>
+    <color name="primedgun_control_pressed">#303844</color>
+    <color name="primedgun_control_disabled">#1F2126</color>
+    <color name="primedgun_primary_control">#263342</color>
+    <color name="primedgun_primary_control_border">#3E4C5F</color>
+    <color name="primedgun_tab">#20262D</color>
+    <color name="primedgun_tab_selected">#34404B</color>
+    <color name="primedgun_text">#EDF0F4</color>
+    <color name="primedgun_text_muted">#858B94</color>
+    <color name="primedgun_text_disabled">#666D76</color>
+    <!-- QLabel#PrimedGunTag in the PC launcher (launcher/ui/style.h): "not active yet". -->
+    <color name="primedgun_tag">#6D737C</color>
+    <!-- Border/indicator orange and the brighter orange used for section titles and pressed text. -->
+    <color name="primedgun_accent">#C2802E</color>
+    <color name="primedgun_accent_text">#F0A12A</color>
+    <color name="primedgun_bad">#FF5B45</color>
+    <color name="primedgun_good">#38D86F</color>
+    <color name="primedgun_start">#20783B</color>
+    <color name="primedgun_separator">#444955</color>
+    <color name="primedgun_ripple">#33F0A12A</color>
 </resources>

@@ -40,6 +40,26 @@ object QuestStorage {
         runCatching { lastErrorFile(context).delete() }
     }
 
+    /** The game's own log (MP_LOG_FILE), rewritten at every start. */
+    fun gameLog(context: Context): File = File(userFolder(context), "metroid_prime_port.log")
+
+    /** The game's settings, which the launcher edits between runs. */
+    fun settingsFile(context: Context): File = File(userFolder(context), "port_settings.ini")
+
+    /** The memory card the game mounts (DolphinCMemoryCardSys: <user>/USA/Card A). */
+    fun cardFolder(context: Context): File = File(userFolder(context), "USA/Card A")
+
+    /**
+     * A memory card the launcher picked, which the game imports into [cardFolder] at
+     * its next start (PortGci::ImportPending), then reports in [importReportFile].
+     */
+    fun pendingImportFolder(context: Context): File = File(userFolder(context), "primedgun/pending_import")
+
+    fun importReportFile(context: Context): File = File(userFolder(context), "primedgun/import_report.txt")
+
+    /** The cannon texture slots the APK carries, unpacked by the launcher. */
+    fun shippedCannonLibrary(context: Context): File = File(context.filesDir, "cannon_textures")
+
     /**
      * Null when [file] holds Metroid Prime (USA) disc 0 revision 0, else what is
      * wrong with it. The disc header is read where launcher/core/disc_probe.cpp
@@ -56,6 +76,16 @@ object QuestStorage {
         } catch (e: Exception) {
             return "The game disc cannot be read: ${e.message}"
         }
+        // WBFS keeps disc slot 0's header copy at its second hard-disk sector
+        // (launcher/core/disc_probe.cpp); without a readable one, the game checks
+        // the mounted disc.
+        if (read >= 4 && probe.startsWith("WBFS")) {
+            val sectorShift = if (read > 12) probe[8].toInt() and 0xFF else 0
+            if (sectorShift !in 9..14 || probe[12].toInt() == 0 || read < (1 shl sectorShift) + 8) {
+                return null
+            }
+            return checkHeader(probe, 1 shl sectorShift)
+        }
         val headerOffset = when {
             read >= 4 && (probe.startsWith("RVZ\u0001") || probe.startsWith("WIA\u0001")) -> WIA_DISC_HEADER_OFFSET
             read >= 4 && probe.startsWith("CISO") -> if (probe[8].toInt() != 0) CISO_DATA_OFFSET else -1
@@ -64,9 +94,13 @@ object QuestStorage {
         if (headerOffset < 0 || read < headerOffset + 8) {
             return "The game disc is truncated or not a GameCube disc image."
         }
-        val gameId = String(probe, headerOffset, 6, Charsets.US_ASCII)
-        val disc = probe[headerOffset + 6].toInt()
-        val revision = probe[headerOffset + 7].toInt()
+        return checkHeader(probe, headerOffset)
+    }
+
+    private fun checkHeader(probe: ByteArray, offset: Int): String? {
+        val gameId = String(probe, offset, 6, Charsets.US_ASCII)
+        val disc = probe[offset + 6].toInt()
+        val revision = probe[offset + 7].toInt()
         return when {
             gameId != "GM8E01" || disc != 0 -> "The selected disc is not Metroid Prime (USA) (game id $gameId)."
             revision != 0 -> "The selected disc is revision $revision; PrimedGun v2 needs revision 0 (1.00)."

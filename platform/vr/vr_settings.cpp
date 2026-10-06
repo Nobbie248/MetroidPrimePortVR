@@ -331,6 +331,9 @@ void PushVrSettingsToAurora() noexcept {
     // The pacing thread asks the runtime again when this changes.
     OpenXRSetDisplayRefreshRate(settings.display_refresh_rate);
     OpenXRSetLeanBackDegrees(settings.lean_back_degrees);
+    // The session's copy was taken when it was built, which can be before the
+    // settings file's vr_passthrough line was read; nothing else passes it on.
+    OpenXRSetPassthrough(settings.passthrough);
 }
 
 void ResetVrCalibrationOffsets() noexcept {

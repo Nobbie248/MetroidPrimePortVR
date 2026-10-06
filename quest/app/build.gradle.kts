@@ -15,6 +15,7 @@ val generatedJava = layout.buildDirectory.dir("generated/sdlJava")
 val generatedAssets = layout.buildDirectory.dir("generated/portAssets")
 val generatedLicenses = layout.buildDirectory.dir("generated/licenses")
 val generatedRes = layout.buildDirectory.dir("generated/launcherRes")
+val generatedCannonAssets = layout.buildDirectory.dir("generated/cannonAssets")
 
 // The native build. The first list is upstream's phone build (android/app/build.gradle,
 // cmakeArguments): keep it in step, Build-Quest.ps1 warns when upstream's changes.
@@ -38,6 +39,8 @@ val questCmakeArguments = listOf(
     // OpenSSL's Android build needs make and a Unix PATH. Without it the Quest
     // build refuses Archipelago's wss:// servers and the Remastered NSP import.
     "-DMP_ALLOW_NO_TLS=ON",
+    // The launcher panel's native half (launcher/jni): the PC launcher's core.
+    "-DMP_BUILD_QUEST_LAUNCHER=ON",
 )
 // PrimedGun's patched Dawn (quest/Build-QuestDawn.ps1: Vulkan multiview, so one render
 // pass draws both eyes), as the package Build-Quest.ps1 passes with -PquestDawnPackage;
@@ -116,7 +119,7 @@ android {
         externalNativeBuild {
             cmake {
                 arguments += upstreamCmakeArguments + questCmakeArguments + dawnCmakeArguments
-                targets += "metroid_prime_port"
+                targets += listOf("metroid_prime_port", "primedgun_launcher")
             }
         }
     }
@@ -147,12 +150,14 @@ android {
 
     buildFeatures {
         buildConfig = true
+        viewBinding = true
     }
 
     sourceSets.named("main") {
         java.srcDir(generatedJava)
         assets.srcDir(generatedAssets)
         assets.srcDir(generatedLicenses)
+        assets.srcDir(generatedCannonAssets)
         res.srcDir(generatedRes)
     }
 
@@ -232,6 +237,16 @@ val syncPortAssets by tasks.registering(Sync::class) {
     from(File(portRoot, "assets/initial_pipeline_cache.db"))
 }
 
+// PrimedGun's cannon texture slots, which the launcher unpacks and seeds into the
+// user folder (launcher/core/cannon_textures.h), as the PC build copies them next
+// to PrimedGun.exe.
+val syncCannonTextures by tasks.registering(Sync::class) {
+    into(generatedCannonAssets)
+    from(File(portRoot, "launcher/data/cannon_textures")) {
+        into("cannon_textures")
+    }
+}
+
 // The PC launcher's pictures, under names Android resources accept.
 val syncLauncherRes by tasks.registering(Sync::class) {
     into(generatedRes)
@@ -265,7 +280,7 @@ val syncLicenseNotices by tasks.registering(Sync::class) {
 }
 
 tasks.named("preBuild") {
-    dependsOn(syncSdlJava, checkSdlVersion, syncPortAssets, syncLauncherRes)
+    dependsOn(syncSdlJava, checkSdlVersion, syncPortAssets, syncCannonTextures, syncLauncherRes)
 }
 // The fetched packages' notices exist only after the native build has fetched them.
 tasks.named("syncLicenseNotices") {
@@ -273,4 +288,16 @@ tasks.named("syncLicenseNotices") {
 }
 tasks.matching { it.name.matches(Regex("""merge\w*Assets""")) || it.name.lowercase().contains("lint") }.configureEach {
     dependsOn(syncLicenseNotices)
+}
+
+// The launcher panel (PrimedGun's Quest launcher widgets); the game activity uses
+// none of these.
+dependencies {
+    implementation("androidx.core:core-ktx:1.17.0")
+    implementation("androidx.appcompat:appcompat:1.7.1")
+    implementation("androidx.fragment:fragment-ktx:1.8.9")
+    implementation("androidx.recyclerview:recyclerview:1.4.0")
+    implementation("androidx.lifecycle:lifecycle-runtime-ktx:2.9.4")
+    implementation("com.google.android.material:material:1.13.0")
+    implementation("org.jetbrains.kotlinx:kotlinx-coroutines-android:1.10.2")
 }

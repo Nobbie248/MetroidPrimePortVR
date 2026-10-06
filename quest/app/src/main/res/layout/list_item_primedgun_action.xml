@@ -1,0 +1,13 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- SPDX-License-Identifier: GPL-3.0-or-later -->
+<!-- From PrimedGun's Quest launcher (res/layout/list_item_primedgun_action.xml, Copyright 2026 PrimedGun Project,
+     GPL-2.0-or-later). -->
+<Button xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:tools="http://schemas.android.com/tools"
+    android:id="@+id/primedgun_action_button"
+    style="@style/PrimedGunButton"
+    android:layout_width="match_parent"
+    android:layout_height="wrap_content"
+    android:layout_marginTop="4dp"
+    android:layout_marginBottom="4dp"
+    tools:text="Reset Controller" />

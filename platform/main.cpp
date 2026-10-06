@@ -27,6 +27,7 @@
 #include "port_room_geo.h"
 #include "port_importers.h"
 #include "port_remastered_import.h"
+#include "port_gci.h"
 
 #include <SDL3/SDL_dialog.h>
 #include <SDL3/SDL_events.h>
@@ -827,6 +828,21 @@ int main(int argc, char** argv) {
     // before anything has a file of the old one open.
     if (PortRemastered::ApplyPendingImport()) {
         PortLog::Write("metroid_prime_port: installed the imported Remastered models\n");
+    }
+    // PortVr: a memory card the Quest launcher handed over goes into the card
+    // before the game mounts it, in the folder DolphinCMemoryCardSys picks.
+    {
+#if defined(__ANDROID__)
+        const std::string cardBase = PortPaths::UserFolder();
+#else
+        const std::string cardBase = PortPaths::CardFolder();
+#endif
+        const std::filesystem::path user = PortGci::PathFromString(PortPaths::UserFolder());
+        const std::filesystem::path card = PortGci::PathFromString(cardBase) / "USA" / "Card A";
+        if (!cardBase.empty() && PortGci::ImportPending(user, card)) {
+            PortLog::Write("metroid_prime_port: imported the memory card the launcher left in %s\n",
+                           PortGci::PathString(user / "primedgun" / "pending_import").c_str());
+        }
     }
     PortMods::Initialize();
 

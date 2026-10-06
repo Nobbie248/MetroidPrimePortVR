@@ -1,13 +1,17 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 package org.primedgun.v2
 
+import android.content.BroadcastReceiver
 import android.content.Context
+import android.content.Intent
+import android.content.IntentFilter
 import android.os.Bundle
 import android.os.Handler
 import android.os.Looper
 import android.os.Process
 import android.system.Os
 import android.util.Log
+import androidx.core.content.ContextCompat
 import java.io.File
 import java.io.FileOutputStream
 import java.io.IOException
@@ -29,9 +33,21 @@ import org.libsdl.app.SDLSurface
  *  - MP_VR=1 whatever the settings say, and MP_LOG_FILE=1 for the log file.
  *
  * It runs in its own `:game` process, which ends with it: SDLActivity cannot be
- * created twice in one process, and the OpenXR device must not start twice.
+ * created twice in one process, and the OpenXR device must not start twice. The
+ * launcher (launcher.LauncherActivity) starts it with Play, and its Stop sends
+ * [ACTION_STOP_GAME], which finishes it as the headset's Quit does.
  */
 class PrimedGunVrActivity : SDLActivity() {
+
+    private val stopReceiver = object : BroadcastReceiver() {
+        override fun onReceive(context: Context, intent: Intent) {
+            Log.i(TAG, "The launcher asked the game to stop")
+            if (!isFinishing) {
+                finish()
+            }
+        }
+    }
+    private var stopReceiverRegistered = false
 
     override fun getLibraries(): Array<String> = arrayOf("metroid_prime_port")
 
@@ -64,6 +80,10 @@ class PrimedGunVrActivity : SDLActivity() {
 
         super.onCreate(savedInstanceState)
 
+        // Only this app's launcher can send it (an explicit, package-scoped broadcast).
+        ContextCompat.registerReceiver(this, stopReceiver, IntentFilter(ACTION_STOP_GAME), ContextCompat.RECEIVER_NOT_EXPORTED)
+        stopReceiverRegistered = true
+
         if (mBrokenLibraries) {
             // SDLActivity reports this in a dialog, which the headset never shows.
             QuestStorage.writeLastError(this, "The game library could not be loaded on this headset.")
@@ -95,6 +115,10 @@ class PrimedGunVrActivity : SDLActivity() {
     }
 
     override fun onDestroy() {
+        if (stopReceiverRegistered) {
+            unregisterReceiver(stopReceiver)
+            stopReceiverRegistered = false
+        }
         // SDLActivity sends the quit event and waits a second for SDL_main before it
         // tears SDL's Java side down. The game's own teardown (the OpenXR session,
         // Aurora's device, the settings file) can take longer, so give it a head start.
@@ -161,11 +185,13 @@ class PrimedGunVrActivity : SDLActivity() {
         }
     }
 
-    private companion object {
-        const val TAG = "PrimedGunVr"
-        const val QUIT_GRACE_MS = 3000L
+    companion object {
+        /** The launcher's Stop. */
+        const val ACTION_STOP_GAME = "org.primedgun.v2.action.STOP_GAME"
+        private const val TAG = "PrimedGunVr"
+        private const val QUIT_GRACE_MS = 3000L
         // The game's per-run switches an adb start may pass as string extras.
-        val TEST_ENVIRONMENT =
+        private val TEST_ENVIRONMENT =
             listOf("MP_BOOT_WORLD", "MP_FAST_BOOT", "MP_VR_LOG", "MP_LOAD_STATE", "MP_FRAME_STATS", "MP_SORT_OPAQUE", "MP_MINIMAP_BATCH", "MP_SURFACE_CULL", "MP_MONO_SHADOW", "MP_GEOMETRY_CACHE", "MP_FOVEATION", "MP_FDM_DEVICE", "MP_FOVEATION_LAYERS", "MP_NATIVE_VERTICES")
     }
 }

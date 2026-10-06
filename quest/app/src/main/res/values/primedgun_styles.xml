@@ -1,0 +1,130 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- SPDX-License-Identifier: GPL-3.0-or-later -->
+<!-- From PrimedGun's Quest launcher (res/values/primedgun_styles.xml, Copyright 2026 PrimedGun
+     Project, GPL-2.0-or-later), on Material 3's dark theme instead of Dolphin's. -->
+<!-- The PrimedGun launcher keeps the Qt window's fixed dark look. Colours come from colors.xml. -->
+<resources>
+    <style name="Theme.PrimedGun.Main" parent="Theme.Material3.Dark.NoActionBar">
+        <item name="colorPrimary">@color/primedgun_accent_text</item>
+        <item name="colorOnPrimary">@color/primedgun_background</item>
+        <item name="colorPrimaryContainer">@color/primedgun_accent</item>
+        <item name="colorOnPrimaryContainer">@color/primedgun_text</item>
+        <item name="colorSecondary">@color/primedgun_accent_text</item>
+        <item name="colorOnSecondary">@color/primedgun_background</item>
+        <item name="colorSecondaryContainer">@color/primedgun_control</item>
+        <item name="colorOnSecondaryContainer">@color/primedgun_text</item>
+        <item name="colorTertiary">@color/primedgun_accent_text</item>
+        <item name="colorOnTertiary">@color/primedgun_background</item>
+        <item name="colorTertiaryContainer">@color/primedgun_control</item>
+        <item name="colorOnTertiaryContainer">@color/primedgun_text</item>
+        <item name="android:colorBackground">@color/primedgun_background</item>
+        <item name="colorOnBackground">@color/primedgun_text</item>
+        <item name="colorSurface">@color/primedgun_panel</item>
+        <item name="colorOnSurface">@color/primedgun_text</item>
+        <item name="colorSurfaceVariant">@color/primedgun_control</item>
+        <item name="colorOnSurfaceVariant">@color/primedgun_text_muted</item>
+        <item name="colorSurfaceContainerLowest">@color/primedgun_background</item>
+        <item name="colorSurfaceContainerLow">@color/primedgun_background</item>
+        <item name="colorSurfaceContainer">@color/primedgun_panel</item>
+        <item name="colorSurfaceContainerHigh">@color/primedgun_panel</item>
+        <item name="colorSurfaceContainerHighest">@color/primedgun_control</item>
+        <item name="colorOutline">@color/primedgun_panel_border</item>
+        <item name="colorOutlineVariant">@color/primedgun_separator</item>
+        <item name="colorOnSurfaceInverse">@color/primedgun_background</item>
+        <item name="colorSurfaceInverse">@color/primedgun_text</item>
+        <item name="colorPrimaryInverse">@color/primedgun_accent</item>
+        <item name="android:textColorPrimary">@color/primedgun_text</item>
+        <item name="android:textColorSecondary">@color/primedgun_text_muted</item>
+        <item name="android:fontFamily">monospace</item>
+        <item name="android:windowBackground">@color/primedgun_background</item>
+        <item name="android:statusBarColor">@color/primedgun_background</item>
+        <item name="android:navigationBarColor">@color/primedgun_background</item>
+        <item name="materialAlertDialogTheme">@style/PrimedGunMaterialDialog</item>
+        <item name="popupTheme">@style/ThemeOverlay.Material3.Dark</item>
+        <item name="sliderStyle">@style/PrimedGunSlider</item>
+    </style>
+
+    <!-- Dolphin's DolphinSlider, which PrimedGun's launcher inherited: the value shows beside
+         the title, so no bubble while dragging, and no tick dots (hundreds of steps). -->
+    <style name="PrimedGunSlider" parent="Widget.Material3.Slider">
+        <item name="tickVisibilityMode">hidden</item>
+        <item name="labelBehavior">gone</item>
+    </style>
+
+    <style name="PrimedGunMaterialDialog" parent="ThemeOverlay.Material3.MaterialAlertDialog">
+        <item name="colorPrimary">@color/primedgun_accent_text</item>
+        <item name="colorSurface">@color/primedgun_panel</item>
+        <item name="colorSurfaceContainerHigh">@color/primedgun_panel</item>
+        <item name="colorOnSurface">@color/primedgun_text</item>
+        <item name="colorOnSurfaceVariant">@color/primedgun_text_muted</item>
+        <item name="android:fontFamily">monospace</item>
+    </style>
+
+    <!-- MainWindow's QPushButton: flat, bordered, orange when pressed, grey when disabled. -->
+    <style name="PrimedGunButton" parent="Widget.Material3.Button.TextButton">
+        <item name="android:background">@drawable/primedgun_control_background</item>
+        <item name="backgroundTint">@null</item>
+        <item name="android:textColor">@color/primedgun_button_text</item>
+        <item name="android:textAllCaps">false</item>
+        <item name="android:textSize">14sp</item>
+        <item name="android:fontFamily">monospace</item>
+        <item name="android:minHeight">48dp</item>
+        <item name="android:insetTop">0dp</item>
+        <item name="android:insetBottom">0dp</item>
+        <item name="android:paddingStart">16dp</item>
+        <item name="android:paddingEnd">16dp</item>
+        <item name="iconTint">@color/primedgun_button_text</item>
+        <item name="rippleColor">@color/primedgun_ripple</item>
+    </style>
+
+    <style name="PrimedGunButton.Primary">
+        <item name="android:background">@drawable/primedgun_primary_control_background</item>
+    </style>
+
+    <style name="PrimedGunButton.Small">
+        <item name="android:minHeight">40dp</item>
+        <item name="android:minWidth">56dp</item>
+        <item name="android:paddingStart">12dp</item>
+        <item name="android:paddingEnd">12dp</item>
+    </style>
+
+    <!-- QLabel#PrimedGunSection -->
+    <style name="PrimedGunSectionLabel" parent="Widget.AppCompat.TextView">
+        <item name="android:textColor">@color/primedgun_accent_text</item>
+        <item name="android:textSize">14sp</item>
+        <item name="android:fontFamily">monospace</item>
+    </style>
+
+    <!-- QLabel#PrimedGunMuted -->
+    <style name="PrimedGunMutedLabel" parent="Widget.AppCompat.TextView">
+        <item name="android:textColor">@color/primedgun_text_muted</item>
+        <item name="android:textSize">13sp</item>
+        <item name="android:fontFamily">monospace</item>
+    </style>
+
+    <!-- QLabel#PrimedGunTag (launcher/ui/style.h): a setting the game saves but does not use yet. -->
+    <style name="PrimedGunTag" parent="Widget.AppCompat.TextView">
+        <item name="android:text">@string/primedgun_not_active_yet</item>
+        <item name="android:textColor">@color/primedgun_tag</item>
+        <item name="android:textSize">12sp</item>
+        <item name="android:textStyle">italic</item>
+        <item name="android:fontFamily">monospace</item>
+        <item name="android:maxLines">1</item>
+    </style>
+
+    <style name="PrimedGunLabel" parent="Widget.AppCompat.TextView">
+        <item name="android:textColor">@color/primedgun_text</item>
+        <item name="android:textSize">14sp</item>
+        <item name="android:fontFamily">monospace</item>
+    </style>
+
+    <style name="PrimedGunToolbarTitle" parent="TextAppearance.Material3.TitleMedium">
+        <item name="android:textColor">@color/primedgun_text</item>
+        <item name="android:fontFamily">monospace</item>
+    </style>
+
+    <style name="PrimedGunTabText" parent="TextAppearance.Material3.TitleSmall">
+        <item name="android:fontFamily">monospace</item>
+        <item name="android:textAllCaps">false</item>
+    </style>
+</resources>

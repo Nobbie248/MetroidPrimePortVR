@@ -5,6 +5,7 @@
 #include <cctype>
 #include <cstring>
 #include <fstream>
+#include <string>
 #include <vector>
 
 namespace PrimedGunLauncher {
@@ -67,7 +68,23 @@ DiscInfo ProbeDiscBytes(std::string_view extension, const uint8_t* data, size_t 
     }
     return FromHeader(data + kCisoDataOffset);
   }
-  if (extension == ".wbfs") {
+  // WBFS, known by its magic or by its name in any case (the Quest launcher
+  // passes a picked document's extension as the name has it). Disc slot 0's
+  // header copy starts at the second hard-disk sector (2^data[8] bytes); when
+  // the slot is used and that copy is within reach it is checked, else the
+  // image is taken on trust and checked once mounted.
+  std::string ext(extension);
+  for (char& c : ext) {
+    c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+  }
+  const bool wbfsMagic = size >= 4 && std::memcmp(data, "WBFS", 4) == 0;
+  if (ext == ".wbfs" || wbfsMagic) {
+    if (wbfsMagic && size > 12 && data[8] >= 9 && data[8] <= 14 && data[12] != 0) {
+      const size_t header = size_t{1} << data[8];
+      if (header + 8 <= size) {
+        return FromHeader(data + header);
+      }
+    }
     DiscInfo info;
     info.check = DiscCheck::Unverified;
     return info;

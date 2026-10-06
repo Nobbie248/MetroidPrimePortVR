@@ -4,6 +4,7 @@
 
 #include <algorithm>
 #include <atomic>
+#include <cctype>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -141,6 +142,15 @@ bool MoveAside(const fs::path& file, std::string& error) {
 void AddError(Report& report, std::string error) {
   ++report.skipped;
   report.errors.push_back(std::move(error));
+}
+
+// The extension in any case: a save copied through a case-insensitive disk
+// can come back as .GCI.
+std::string LowerExtension(const fs::path& path) {
+  std::string ext = PathString(path.extension());
+  std::transform(ext.begin(), ext.end(), ext.begin(),
+                 [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+  return ext;
 }
 
 } // namespace
@@ -361,7 +371,7 @@ std::vector<fs::path> GameFiles(const fs::path& folder) {
   std::error_code ec;
   for (const auto& entry : fs::directory_iterator(folder, ec)) {
     Header header;
-    if (entry.is_regular_file(ec) && entry.path().extension() == ".gci" &&
+    if (entry.is_regular_file(ec) && LowerExtension(entry.path()) == ".gci" &&
         ReadHeader(entry.path(), header) && IsGameFile(header)) {
       files.push_back(entry.path());
     }
@@ -388,6 +398,90 @@ Report ImportFolder(const fs::path& source, const fs::path& folder) {
   }
   InstallSet(report, folder, set);
   return report;
+}
+
+bool ImportPending(const fs::path& userFolder, const fs::path& folder) {
+  const fs::path base = userFolder / "primedgun";
+  const fs::path pending = base / "pending_import";
+  // Claimed by renaming it first, so the import reads exactly one complete set
+  // (the launcher renames a finished set into place) and a set staged meanwhile
+  // waits for the next start instead of being half read or read twice. A claim
+  // left by an import that never finished is taken up again, unless a newer
+  // set replaced it.
+  const fs::path claimed = base / "pending_import.claimed";
+  // An imported claim is renamed here before it is deleted, so a delete that
+  // fails half way can never be taken for an unfinished claim and imported
+  // again over newer progress.
+  const fs::path done = base / "pending_import.done";
+  std::error_code ec;
+  fs::remove_all(done, ec);
+  ec.clear();
+  bool havePending = false;
+  for (const auto& entry : fs::directory_iterator(pending, ec)) {
+    std::error_code fileEc;
+    if (entry.is_regular_file(fileEc)) {
+      havePending = true;
+      break;
+    }
+  }
+  ec.clear();
+  if (havePending) {
+    fs::remove_all(claimed, ec);
+    fs::rename(pending, claimed, ec);
+    if (ec) {
+      return false;
+    }
+  } else if (!fs::is_directory(claimed, ec)) {
+    return false;
+  }
+  std::vector<fs::path> gciFiles;
+  std::vector<fs::path> images;
+  for (const auto& entry : fs::directory_iterator(claimed, ec)) {
+    std::error_code fileEc;
+    if (!entry.is_regular_file(fileEc)) {
+      continue;
+    }
+    const std::string ext = LowerExtension(entry.path());
+    if (ext == ".gci") {
+      gciFiles.push_back(entry.path());
+    } else if (ext == ".raw" || ext == ".gcp") {
+      images.push_back(entry.path());
+    }
+  }
+  if (gciFiles.empty() && images.empty()) {
+    fs::remove_all(claimed, ec);
+    return false;
+  }
+  std::sort(images.begin(), images.end());
+
+  Report total;
+  const auto add = [&total](const Report& report) {
+    total.copied += report.copied;
+    total.replaced += report.replaced;
+    total.skipped += report.skipped;
+    total.errors.insert(total.errors.end(), report.errors.begin(), report.errors.end());
+  };
+  if (!gciFiles.empty()) {
+    add(ImportFolder(claimed, folder));
+  }
+  const fs::path scratch = base / "import_scratch";
+  for (const fs::path& image : images) {
+    add(ImportFile(image, folder, scratch));
+  }
+  fs::remove_all(scratch, ec);
+  std::error_code cleanEc;
+  fs::rename(claimed, done, cleanEc);
+  if (cleanEc) {
+    total.errors.push_back("could not retire " + PathString(claimed) + ": " + cleanEc.message() +
+                           "; remove it before the next start");
+  } else {
+    fs::remove_all(done, cleanEc);
+  }
+
+  const std::string text = total.Summary("Imported") + "\nCard: " + PathString(folder) + "\n";
+  std::ofstream report(base / "import_report.txt", std::ios::binary | std::ios::trunc);
+  report << text;
+  return true;
 }
 
 Report ExportFolder(const fs::path& folder, const fs::path& dest) {

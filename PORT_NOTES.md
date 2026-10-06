@@ -81,6 +81,96 @@ confirmed the look, the pointing, live changes and the game's input while the
 menu is open. The log shows `OpenXR VR menu layer ready` and no menu errors.
 The PC (D3D12) path is not tested in a headset yet.
 
+## VR: the PrimedGun launcher on the Quest (2026-10-06)
+
+The Quest APK now opens on PrimedGun's launcher, a 2D Horizon OS panel. The
+game, `PrimedGunVrActivity`, is no longer in the library; the panel's Play
+starts it. The panel is PrimedGun's Quest launcher (its Kotlin rows, layouts,
+palette and strings) with the PC launcher's tabs and keys: Setup, Controller,
+Calibration, Cannon Textures, Layout, Port Config and About. Settings the game
+saves but does not read yet carry the same "not active yet" tag as on the PC.
+
+**One core for both launchers.** `launcher/jni` builds `libprimedgun_launcher.so`
+(`-DMP_BUILD_QUEST_LAUNCHER=ON`) from `launcher/core`. The panel therefore edits
+`port_settings.ini` with the PC launcher's key table, `SettingsModel` and
+line-preserving file editor. It applies cannon slots and reads `PrimedGun.ini`
+with the same code. Only strings, numbers and arrays cross JNI. The library has
+no SDL or Aurora.
+
+**Game process.** The game keeps its own `:game` process.
+- Play saves pending edits, re-applies a cannon slot whose files went missing,
+  and starts the game.
+- The tabs lock while the process lives, because the game rewrites the whole
+  file as it exits. The file is read again once the process is gone.
+- Stop sends a package-scoped broadcast that finishes the game, as Quit does.
+  Pressing Stop again after 10 s ends the process.
+- `last_error.txt` (why a start failed) is shown when the panel returns.
+
+**Select Game** copies the picked image to `<user>/disc.iso` in a `dataSync`
+foreground service. The game process cannot open the picker's document.
+- The PC launcher's disc check runs on the image's first 0x8008 bytes before
+  the copy. The extension is lower-cased, and a WBFS image is known by its
+  magic. A WBFS image is checked by the header copy of disc slot 0, which sits
+  at its second hard-disk sector.
+- The copy goes to `disc.iso.part`, which must be as long as the provider says.
+  It must also pass the game's own check (`QuestStorage.checkDisc`) before it
+  replaces the disc in use.
+- A copy's result is kept until the Setup tab has shown it.
+- A `.part` left by a killed process is removed at the next start.
+
+**Memory card transfer.** On a headset the player picks a card (`.raw`, `.gcp`,
+`.gci`), a `PrimedGun.ini`, or the zip that PrimedGun's Export User Data writes.
+- **From a zip:** the raw card comes first (`MemoryCardA.USA[.<blocks>].raw`), as
+  the PC search ranks it. The GCI folder is used only when it holds Metroid
+  Prime saves. Entry names without the UTF-8 flag are read as Latin-1.
+- **The hand-over:** the panel cannot read a raw card, because `port_gci.cpp`
+  uses Aurora's card code, which is built on SDL.
+  - The panel copies a set into `primedgun/pending_import.tmp` and renames it
+    to `pending_import`.
+  - At boot, before the card mounts, `PortGci::ImportPending` claims the folder
+    by renaming it to `pending_import.claimed`. The import reads only that
+    claimed set. A set staged meanwhile waits for the next start.
+  - The `.gci` files form one save set, in any case of extension; each raw image
+    is one set too.
+  - An imported claim is renamed to `.done` before it is deleted. A failed
+    cleanup therefore never re-imports old saves over newer progress. A claim
+    left by a crash is taken up again.
+  - The import writes `primedgun/import_report.txt`, which the panel shows.
+- **Staging** runs at process level, like the disc copy. Play is refused until
+  it ends.
+- **Old settings** become unsaved edits, as on the PC. They are saved at once
+  if the panel is no longer in front.
+
+**Port Config on the Quest** leaves out VR on/off, the mirror, fullscreen and
+VSync. It adds the refresh rate, the performance level, passthrough,
+foveation, and the renderer switches the PC reaches through F1 (multiview,
+direct presentation, pipelined rendering, indexed vertices, `[xr-diag]`).
+
+**Game fix found on the way.** `vr_passthrough` never reached the OpenXR session.
+Its copy was taken when the session object was built, which can be before the
+file's line is read, and nothing called `OpenXRSetPassthrough`.
+`PushVrSettingsToAurora` now passes it on with the refresh rate and lean-back.
+
+Validation:
+- **Review.** Three rounds of review, each finding checked by an independent
+  skeptic. They found 26 defects, all fixed here: a recursion crash in the
+  Setup tab, the passthrough setting, the zip card priority, a disc copy that
+  could replace a good disc, the hand-over's atomicity and others.
+- **PC tests.** build/vr passes 41/41 port tests, with new cases for the
+  hand-over (A and B together, `.GCI`, an unfinished claim) and for WBFS.
+- **Core tests on the headset.** `port_launcher_tests`, cross-compiled with the
+  NDK, passes on a Quest 3.
+- **Quest 3, driven over adb.**
+  - All seven tabs open.
+  - The "not active yet" tags match the key table.
+  - Save writes only the changed key into the VR block.
+  - Cannon Slot 1 and Default apply.
+  - Play then boots the game, which imports a staged card through the claim.
+  - The panel brought forward is locked; Stop ends the game in about 1 s and the
+    panel unlocks.
+- **Not tested on the headset.** Select Game and Transfer open the system file
+  picker, which adb cannot drive.
+
 ## Renderer: native vertex input experiment (2026-10-06)
 
 Native vertex input makes supported resident world geometry use the GPU's

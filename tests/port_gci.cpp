@@ -176,6 +176,48 @@ int main() {
           "stale B dropped from the raw card");
   }
 
+  // The Quest launcher's hand-over: the .gci files left in pending_import are
+  // one save set (B is not moved aside by A), then they are gone and a report
+  // is written; an empty folder is nothing to do.
+  {
+    const fs::path user = root / "user";
+    const fs::path pending = user / "primedgun" / "pending_import";
+    const fs::path card = user / "USA" / "Card A";
+    fs::create_directories(pending);
+    fs::create_directories(card);
+    Write(card / "01-GM8E-MetroidPrime A.gci", MakeGci("GM8E", "MetroidPrime A", 2, 0x10));
+    Check(!PortGci::ImportPending(user, card), "nothing pending");
+    Write(pending / "01-GM8E-MetroidPrime A.gci", MakeGci("GM8E", "MetroidPrime A", 2, 0x20));
+    Write(pending / "01-GM8E-MetroidPrime B.gci", MakeGci("GM8E", "MetroidPrime B", 2, 0x30));
+    Write(pending / "notes.txt", {'x'});
+    Check(PortGci::ImportPending(user, card), "pending set imported");
+    Check(PortGci::GameFiles(card).size() == 2, "both pending files in the card");
+    Check(Read(card / "01-GM8E-MetroidPrime A.gci")[64] == 0x20, "pending A replaced the old A");
+    Check(CountGci(pending) == 0, "pending files removed");
+    const auto report = Read(user / "primedgun" / "import_report.txt");
+    Check(std::string(report.begin(), report.end()).rfind("Imported 2 save files", 0) == 0,
+          "import report written");
+    Check(!PortGci::ImportPending(user, card), "nothing pending afterwards");
+    Check(!fs::exists(pending) && !fs::exists(user / "primedgun" / "pending_import.claimed") &&
+              !fs::exists(user / "primedgun" / "pending_import.done"),
+          "the claimed folder is gone");
+
+    // An upper-case .GCI is a save like any other.
+    fs::create_directories(pending);
+    Write(pending / "01-GM8E-MetroidPrime B.GCI", MakeGci("GM8E", "MetroidPrime B", 2, 0x40));
+    Check(PortGci::ImportPending(user, card), "upper-case .GCI imported");
+    Check(PortGci::GameFiles(card).size() == 1 && Read(card / "01-GM8E-MetroidPrime B.gci")[64] == 0x40,
+          "the .GCI save replaced the set");
+
+    // A claim left by an import that never finished is taken up at the next start.
+    const fs::path claimed = user / "primedgun" / "pending_import.claimed";
+    fs::create_directories(claimed);
+    Write(claimed / "01-GM8E-MetroidPrime A.gci", MakeGci("GM8E", "MetroidPrime A", 2, 0x50));
+    Check(PortGci::ImportPending(user, card), "an unfinished claim is imported");
+    Check(Read(card / "01-GM8E-MetroidPrime A.gci")[64] == 0x50 && !fs::exists(claimed),
+          "the unfinished claim's save is in the card");
+  }
+
   fs::remove_all(root, ec);
   if (sFailures == 0) {
     std::puts("port_gci tests passed");

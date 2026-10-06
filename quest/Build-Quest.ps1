@@ -140,8 +140,10 @@ Add-Type -AssemblyName System.IO.Compression.FileSystem
 $archive = [IO.Compression.ZipFile]::OpenRead($apk.FullName)
 try {
     $game = @($archive.Entries | Where-Object { $_.FullName -eq 'lib/arm64-v8a/libmetroid_prime_port.so' }) | Select-Object -First 1
+    $launcher = @($archive.Entries | Where-Object { $_.FullName -eq 'lib/arm64-v8a/libprimedgun_launcher.so' }) | Select-Object -First 1
 } finally { $archive.Dispose() }
 if (-not $game) { throw "The APK has no lib/arm64-v8a/libmetroid_prime_port.so" }
+if (-not $launcher) { throw "The APK has no lib/arm64-v8a/libprimedgun_launcher.so (the launcher panel's native half)" }
 Write-Host ("APK: {0} ({1:N1} MB; game library {2:N1} MB)" -f $apk.FullName, ($apk.Length / 1MB), ($game.Length / 1MB))
 
 $aapt2 = Get-ChildItem -Path (Join-Path $sdkRoot 'build-tools') -Directory -ErrorAction SilentlyContinue |

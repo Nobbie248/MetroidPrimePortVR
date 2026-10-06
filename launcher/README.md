@@ -63,3 +63,38 @@ import, and the cannon pack.
   - It imports the Metroid Prime saves into the game's card (`USA/Card A`) with
     `platform/port_gci.cpp`.
   - It loads the old `PrimedGun.ini` settings as unsaved changes.
+
+## The Quest launcher
+
+The Quest APK (`quest/`) opens on the same launcher, as a 2D Horizon OS panel:
+PrimedGun's Quest launcher (its Kotlin widgets, layouts and palette) with the
+tabs of this one. The panel is `quest/app/src/main/java/org/primedgun/v2/launcher/`.
+Its native half, `jni/` (`libprimedgun_launcher.so`, built with
+`-DMP_BUILD_QUEST_LAUNCHER=ON`), puts `core/` behind JNI. Both launchers therefore
+edit `port_settings.ini` with the same key table and line-preserving editor,
+and both apply cannon slots with the same code.
+
+Where the Quest panel differs:
+
+- **Game.** It runs in its own process (`PrimedGunVrActivity`, `:game`).
+  - Play saves pending edits and starts it.
+  - The tabs lock while that process lives. The settings are read again once
+    it is gone.
+  - Stop sends a broadcast that finishes the game. Pressing Stop again after
+    10 seconds ends the process.
+- **Select Game** copies the picked image to `disc.iso` in the user folder,
+  `/sdcard/Android/data/org.primedgun.v2/files`. It does this in a foreground
+  service, because the game process cannot open the picker's document. The
+  disc check runs on the image's first bytes before the copy.
+- **Transfer** takes a picked file: a card (`.raw`, `.gcp`, `.gci`),
+  `PrimedGun.ini`, or the zip that PrimedGun's Export User Data writes.
+  - The panel cannot read a raw card itself; `port_gci.cpp` needs SDL. So the
+    card waits in `primedgun/pending_import`.
+  - The game imports it at its next start, before the card mounts
+    (`PortGci::ImportPending`). It writes `primedgun/import_report.txt`, which
+    the panel shows afterwards.
+- **Port Config** leaves out the PC-only keys: VR on/off, the mirror,
+  fullscreen and VSync. It shows the Quest headset keys instead:
+  - refresh rate, performance level, passthrough and foveation;
+  - the renderer switches the PC reaches through F1.
+- Settings the game does not read yet carry the same "not active yet" tag.

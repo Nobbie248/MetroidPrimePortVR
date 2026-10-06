@@ -66,6 +66,15 @@ Report ImportFile(const std::filesystem::path& source, const std::filesystem::pa
 // Imports every Metroid Prime file from another GCI folder (a Dolphin card).
 Report ImportFolder(const std::filesystem::path& source, const std::filesystem::path& folder);
 
+// The Quest launcher's hand-over: it cannot read a raw card itself, so it
+// leaves the player's pick in <user>/primedgun/pending_import, and this, run at
+// boot before the card mounts, imports it into `folder`. The folder is claimed
+// by a rename first, then the .gci files in it are one save set and each .raw /
+// .gcp image is one too; the folder is removed afterwards, and
+// <user>/primedgun/import_report.txt says what happened, for the launcher to
+// show. False when nothing was waiting.
+bool ImportPending(const std::filesystem::path& userFolder, const std::filesystem::path& folder);
+
 // Metroid Prime's .gci files in a GCI folder, sorted by disk name.
 std::vector<std::filesystem::path> GameFiles(const std::filesystem::path& folder);
 // Copies them into another GCI folder (Dolphin's, or any directory).

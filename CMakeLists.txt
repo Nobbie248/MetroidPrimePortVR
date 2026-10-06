@@ -52,6 +52,9 @@ set(MP_OPENXR_SDK_DIR "" CACHE PATH
 # PrimedGun's launcher (launcher/): a Qt 6 window beside the game. Needs Qt on
 # CMAKE_PREFIX_PATH.
 option(MP_BUILD_LAUNCHER "Build the PrimedGun Qt launcher (PrimedGun.exe)" OFF)
+# Its Quest counterpart's native half (launcher/jni, libprimedgun_launcher.so),
+# for the panel app in quest/.
+option(MP_BUILD_QUEST_LAUNCHER "Build the Quest launcher's JNI library" OFF)
 option(MP_ANDROID_NOD_STUB "Use a non-functional nod stub for Android build probes" OFF)
 
 # The decompiled game/engine sources and the port code around them are written
@@ -428,11 +431,14 @@ install(FILES ${CMAKE_CURRENT_SOURCE_DIR}/LICENSE
     DESTINATION ${CMAKE_INSTALL_DATADIR}/licenses/metroid-prime-port)
 
 # The launcher's Qt-free core is also what port_launcher_tests checks.
-if(MP_BUILD_TESTS OR MP_BUILD_LAUNCHER)
+if(MP_BUILD_TESTS OR MP_BUILD_LAUNCHER OR MP_BUILD_QUEST_LAUNCHER)
     add_subdirectory(launcher/core)
 endif()
 if(MP_BUILD_LAUNCHER)
     add_subdirectory(launcher)
+endif()
+if(MP_BUILD_QUEST_LAUNCHER)
+    add_subdirectory(launcher/jni)
 endif()
 
 if(MP_BUILD_TESTS)

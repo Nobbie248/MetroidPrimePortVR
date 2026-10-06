@@ -1,0 +1,348 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- SPDX-License-Identifier: GPL-3.0-or-later -->
+<!-- From PrimedGun's Quest launcher (res/values/primedgun_strings.xml, Copyright 2026 PrimedGun
+     Project, GPL-2.0-or-later), for the native port: the PC launcher's (launcher/ui) wording
+     where the two v2 launchers do the same thing, PrimedGun's where v2 does what it did. -->
+<resources>
+    <string name="primedgun_title">PrimedGun</string>
+    <string name="primedgun_window_title">PrimedGun %1$s</string>
+    <string name="primedgun_credit">By Nobbie and iChris4   %1$s</string>
+    <!-- launcher/ui/tab_context.cpp TagFor: a setting the game saves but does not use yet. -->
+    <string name="primedgun_not_active_yet">not active yet</string>
+
+    <!-- Tabs -->
+    <string name="primedgun_tab_setup">Setup</string>
+    <string name="primedgun_tab_controller">Controller</string>
+    <string name="primedgun_tab_calibration">Calibration</string>
+    <string name="primedgun_tab_cannon_textures">Cannon Textures</string>
+    <string name="primedgun_tab_layout">Layout</string>
+    <string name="primedgun_tab_port_config">Port Config</string>
+    <string name="primedgun_tab_about">About</string>
+
+    <!-- Shared controls -->
+    <string name="primedgun_minus">−</string>
+    <string name="primedgun_plus">+</string>
+    <string name="primedgun_decrease">Decrease</string>
+    <string name="primedgun_increase">Increase</string>
+    <string name="primedgun_slider">Value</string>
+    <string name="primedgun_ok">OK</string>
+    <string name="primedgun_cancel">Cancel</string>
+    <string name="primedgun_yes">Yes</string>
+    <string name="primedgun_no">No</string>
+    <string name="primedgun_close">Close</string>
+    <string name="primedgun_remove">Remove</string>
+    <string name="primedgun_error">Error</string>
+    <string name="primedgun_reset_all">Reset All</string>
+    <string name="primedgun_reset_all_done">All PrimedGun settings reset</string>
+    <string name="primedgun_reset_all_confirmation">Reset every PrimedGun setting to its default? Use Save Settings afterwards to keep the reset.</string>
+    <string name="primedgun_save_settings">Save Settings</string>
+    <string name="primedgun_settings_saved">Settings saved</string>
+    <string name="primedgun_settings_save_failed">Could not write port_settings.ini:\n%1$s</string>
+    <string name="primedgun_settings_unreadable">Could not read the settings file:\n%1$s</string>
+    <string name="primedgun_unsaved_changes">Unsaved changes</string>
+    <string name="primedgun_unsaved_changed_on_disk">Unsaved; changed on disk</string>
+
+    <!-- Setup tab -->
+    <string name="primedgun_section_setup">Setup</string>
+    <string name="primedgun_setup_notes">Setup Notes</string>
+    <string name="primedgun_setup_notes_text">• Use Select Game to pick your Metroid Prime NTSC Revision 0 (1.0) disc image (ISO, NKit ISO, RVZ or CISO). PrimedGun copies it into its own folder, so the file you picked can be deleted afterwards. Then press Play: the game opens in the immersive VR view and this window returns when you exit.\n\n• Check the Layout tab for controller bindings.\n\n• To bring over your PrimedGun saves and settings, use Transfer PrimedGun Memory Card / Settings and pick your old memory card (.raw or .gcp), your old PrimedGun.ini, or the zip that PrimedGun\'s Export User Data writes.\n\n• Save states do not carry over from PrimedGun on Dolphin. Make sure to save normally before you transfer.\n\n• Once in game, click the right stick to set your height.\n\n• Try to stay in the centre of your play space and face forward, this mod is not roomscaled.\n\n• Settings are locked while the game runs. Change them here before pressing Play.\n\n• Use Save Settings after changing PrimedGun options; Play saves them too.</string>
+    <string name="primedgun_selected_game">Selected: %1$s</string>
+    <string name="primedgun_select_game_note">Select Metroid Prime NTSC Revision 0 (1.0).</string>
+    <string name="primedgun_wrong_game">Wrong game</string>
+    <string name="primedgun_wrong_revision">Wrong revision</string>
+    <string name="primedgun_game_unreadable_short">Cannot read file</string>
+    <string name="primedgun_select_game">Select Game...</string>
+    <string name="primedgun_select_game_title">Select Game</string>
+    <string name="primedgun_play">Play</string>
+    <string name="primedgun_running">Running</string>
+    <string name="primedgun_stop">Stop</string>
+    <string name="primedgun_running_locked">Running. Settings are locked until the game closes.</string>
+    <string name="primedgun_stopping">Stopping...</string>
+    <string name="primedgun_force_stop_offered">The game has not closed yet. Stop again ends it at once.</string>
+    <string name="primedgun_launch_failed">The game could not be started.</string>
+    <string name="primedgun_game_error">The game stopped:\n%1$s</string>
+    <string name="primedgun_game_options">Game Options...</string>
+    <string name="primedgun_show_user_folder">User Folder</string>
+    <string name="primedgun_show_card_folder">Memory Card Folder</string>
+    <string name="primedgun_show_last_log">Last Run Log</string>
+    <string name="primedgun_forget_game">Remove Game Copy (%1$.1f GB)</string>
+    <string name="primedgun_forget_game_confirmation">Remove PrimedGun\'s copy of the game disc? Select Game copies it in again. Saves and settings are kept.</string>
+    <string name="primedgun_user_folder_message">PrimedGun keeps its settings, memory card, texture packs and logs in:\n%1$s\n\nFrom a computer over USB, this is Android/data/org.primedgun.v2/files on the headset.</string>
+    <string name="primedgun_card_folder_message">The memory card is the GCI folder:\n%1$s\n\nSaves an import replaced are kept in its _replaced folder.</string>
+    <string name="primedgun_last_log_title">Last run (%1$s)</string>
+    <string name="primedgun_no_log">No log yet: it is written while the game runs.</string>
+    <string name="primedgun_samus_art">Samus</string>
+
+    <!-- Select Game: the copy into the user folder -->
+    <string name="primedgun_disc_copy_channel">Game disc</string>
+    <string name="primedgun_disc_copy_title">Copying the game disc</string>
+    <string name="primedgun_disc_copying">%1$d%%</string>
+    <string name="primedgun_disc_checking">Checking %1$s...</string>
+    <string name="primedgun_disc_copying_name">Copying %1$s: %2$d%%</string>
+    <string name="primedgun_disc_copied">%1$s is ready. Press Play.</string>
+    <string name="primedgun_disc_unsupported_format">%1$s is not in a format the game reads. Use an ISO, NKit ISO, RVZ or CISO image (not GCZ).</string>
+    <string name="primedgun_disc_unreadable">%1$s cannot be read.</string>
+    <string name="primedgun_disc_wrong_game">The selected file is not Metroid Prime (USA) (game id %1$s).</string>
+    <string name="primedgun_disc_wrong_revision">The selected disc is revision %1$s; PrimedGun v2 needs revision 0 (1.00).</string>
+    <string name="primedgun_disc_copy_failed">The game disc could not be copied: %1$s</string>
+
+    <!-- Transfer old memory card / settings -->
+    <string name="primedgun_section_memory_card">Memory Card</string>
+    <string name="primedgun_transfer_old_save">Transfer PrimedGun Memory Card / Settings</string>
+    <string name="primedgun_transfer_title">Transfer Old Memory Card</string>
+    <string name="primedgun_transfer_running">Stop the game before transferring a memory card save.</string>
+    <string name="primedgun_transfer_prompt">Transfer old save game.</string>
+    <string name="primedgun_transfer_prompt_detail">Pick the memory card file (.raw, .gcp or .gci) from your old PrimedGun install, its PrimedGun.ini, or the zip PrimedGun\'s Export User Data writes, which holds both. The game takes the save into its memory card at its next start and keeps the saves it replaces. Save states are not transferred.</string>
+    <string name="primedgun_transfer">Transfer</string>
+    <string name="primedgun_transfer_wrong_extension">Pick a memory card (.raw, .gcp or .gci), a PrimedGun.ini, or an exported user data .zip.</string>
+    <string name="primedgun_transfer_wrong_settings_file">PrimedGun\'s settings are in PrimedGun.ini.</string>
+    <string name="primedgun_transfer_copy_failed">Could not read the selected file: %1$s</string>
+    <string name="primedgun_transfer_nothing_found">No PrimedGun settings were found in:\n%1$s</string>
+    <string name="primedgun_transfer_zip_empty">%1$s holds no Metroid Prime memory card (GC/MemoryCardA.USA.raw or GC/USA/Card A) and no PrimedGun settings (Config/PrimedGun.ini).</string>
+    <string name="primedgun_transfer_card_staged">Old memory card taken from:\n%1$s\n\nThe game imports it into its memory card the next time you press Play, and keeps the saves it replaces in USA/Card A/_replaced.</string>
+    <string name="primedgun_transfer_zip_no_card">No Metroid Prime memory card (GC/MemoryCardA.USA.raw or GC/USA/Card A) was found in %1$s, so no save was transferred.</string>
+    <string name="primedgun_transfer_staging">Reading the transfer...</string>
+    <string name="primedgun_transfer_pending">An old memory card is waiting: the game imports it the next time you press Play.</string>
+    <string name="primedgun_transfer_import_settings_prompt">Also import your old PrimedGun settings? Pick the PrimedGun.ini from the Config folder of the old install.</string>
+    <string name="primedgun_transfer_import_settings">Import Settings</string>
+    <string name="primedgun_transfer_skip">Skip</string>
+    <string name="primedgun_transfer_settings_done">\n\nPrimedGun settings transferred from:\n%1$s\nUse Save Settings to keep them.</string>
+    <string name="primedgun_transfer_settings_failed">\n\nNo PrimedGun settings were found in:\n%1$s</string>
+    <string name="primedgun_transfer_settings_skipped">\n\nPrimedGun settings were not imported.</string>
+    <string name="primedgun_import_report">Old memory card transferred:\n%1$s</string>
+
+    <!-- Controller tab -->
+    <string name="primedgun_section_controller_mapping">Controller Mapping</string>
+    <string name="primedgun_reset_controller">Reset Controller</string>
+    <string name="primedgun_right_hand">Right hand</string>
+    <string name="primedgun_left_hand">Left hand</string>
+    <string name="primedgun_vr_menu_hold_left_stick">Longer held press for VR menu</string>
+    <string name="primedgun_vr_menu_requires_head_zone">VR menu requires controller near head to activate</string>
+    <string name="primedgun_combat_jump_use_primary_button">Use A button for jump</string>
+    <string name="primedgun_beam_wheel_hud_highlight">Beam wheel lights the HUD beam box</string>
+    <string name="primedgun_beam_wheel_hud_highlight_note">While B holds the beam wheel open, the beam the cannon points at has its box on the HUD lit.</string>
+
+    <string name="primedgun_section_rumble_grip">Rumble / Grip Inputs</string>
+    <string name="primedgun_rumble">Rumble</string>
+    <string name="primedgun_rumble_target">Rumble target</string>
+    <string name="primedgun_rumble_both">Both</string>
+    <string name="primedgun_rumble_left_only">Left only</string>
+    <string name="primedgun_rumble_right_only">Right only</string>
+    <string name="primedgun_grip_inputs_enabled">Use grip input</string>
+    <string name="primedgun_grip_inputs_use_trackpad">Use touchpad for PrimedGun grip inputs (Index users)</string>
+    <string name="primedgun_grip_inputs_use_trackpad_note">Use Index touchpad pressure for map and missiles. When off, squeeze the grips. Other controller types use their normal grips.</string>
+    <string name="primedgun_rumble_intensity">Rumble intensity</string>
+
+    <string name="primedgun_section_dpad">D-pad</string>
+    <string name="primedgun_dpad_enabled">Enable visor gesture input</string>
+    <string name="primedgun_dpad_head_radius">Head radius</string>
+    <string name="primedgun_dpad_head_y_below">Below head</string>
+    <string name="primedgun_dpad_deadzone">Stick deadzone</string>
+
+    <string name="primedgun_section_directional_movement">Directional Movement</string>
+    <string name="primedgun_movement_enabled">Left stick strafe movement</string>
+    <string name="primedgun_left_stick">Left stick</string>
+    <string name="primedgun_right_stick">Right stick</string>
+    <string name="primedgun_controller_direction">Controller direction</string>
+    <string name="primedgun_hmd_direction">HMD direction</string>
+    <string name="primedgun_movement_deadzone">Movement deadzone</string>
+    <string name="primedgun_movement_speed">Movement speed</string>
+    <string name="primedgun_movement_accel">Movement acceleration</string>
+    <string name="primedgun_movement_air_accel">Air acceleration</string>
+    <string name="primedgun_look_yaw_sensitivity">Look yaw sensitivity</string>
+    <string name="primedgun_look_yaw_sensitivity_note">The native build applies values up to 1.0 so far.</string>
+    <string name="primedgun_snap_turn">Snap turn</string>
+    <string name="primedgun_snap_turn_note">The native build so far only turns off smooth turning on the look stick; the snap rotation itself is not in yet.</string>
+    <string name="primedgun_snap_turn_angle">Snap turn angle</string>
+    <string name="primedgun_snap_turn_30">30 degrees</string>
+    <string name="primedgun_snap_turn_45">45 degrees</string>
+    <string name="primedgun_snap_turn_60">60 degrees</string>
+    <string name="primedgun_snap_turn_90">90 degrees</string>
+
+    <!-- Calibration tab -->
+    <string name="primedgun_section_in_headset_display">In-headset Display</string>
+    <string name="primedgun_vr_overlays_enabled">In-headset overlays</string>
+    <string name="primedgun_height_prompt_enabled">Show height prompt</string>
+    <string name="primedgun_cinematic_screen_enabled">Show cutscenes on cinema screen</string>
+    <string name="primedgun_vr_menu_floating">Detach VR menu from hand</string>
+    <string name="primedgun_game_menu_screen_enabled">Detach game menu and map from view</string>
+    <string name="primedgun_visor_helmet_enabled">Enable visor helmet</string>
+    <string name="primedgun_visor_helmet_note">Allows user to turn helmet back on in the pause menu</string>
+    <string name="primedgun_position_marker_enabled">Show floor position marker</string>
+
+    <string name="primedgun_section_culling">Culling</string>
+    <string name="primedgun_frustum_culling_enabled">Enable frustum culling</string>
+    <string name="primedgun_frustum_culling_degrees">Culling cone</string>
+
+    <string name="primedgun_section_hud">HUD</string>
+    <string name="primedgun_reset_hud">Reset HUD</string>
+    <string name="primedgun_hud_distance">HUD distance</string>
+    <string name="primedgun_hud_size">HUD size</string>
+    <string name="primedgun_hud_vertical">HUD vertical</string>
+    <string name="primedgun_hud_horizontal">HUD horizontal</string>
+
+    <string name="primedgun_section_targeting">Targeting</string>
+    <string name="primedgun_reset_targeting">Reset Targeting</string>
+    <string name="primedgun_target_distance">Target distance</string>
+    <string name="primedgun_target_radius">Target radius</string>
+
+    <string name="primedgun_section_offset_tuning">Offset Tuning</string>
+    <string name="primedgun_reset_calibration">Reset Calibration</string>
+
+    <string name="primedgun_section_position">Position</string>
+    <string name="primedgun_offset_left_right">Left / right</string>
+    <string name="primedgun_offset_forward_back">Forward / back</string>
+    <string name="primedgun_offset_up_down">Up / down</string>
+
+    <string name="primedgun_section_rotation">Rotation</string>
+    <string name="primedgun_pitch_offset">Pitch offset</string>
+    <string name="primedgun_yaw_offset">Yaw offset</string>
+    <string name="primedgun_roll_offset">Roll offset</string>
+
+    <string name="primedgun_section_presets">Presets</string>
+    <string name="primedgun_preset_default_arm">Default arm preset</string>
+    <string name="primedgun_preset_samus_arm">Samus arm preset</string>
+
+    <!-- Cannon Textures tab -->
+    <string name="primedgun_section_custom_cannon_textures">Custom Cannon Textures</string>
+    <string name="primedgun_cannon_note">PrimedGun keeps its cannon texture slots in its own folder and applies one by copying it into the game\'s user texture pack. Default removes the PrimedGun override so any installed HD texture pack can supply the cannon textures.</string>
+    <string name="primedgun_cannon_slot_default">Default</string>
+    <string name="primedgun_cannon_slot_custom">Custom</string>
+    <string name="primedgun_cannon_slot_n">Slot %1$d</string>
+    <string name="primedgun_cannon_selected_slot_files">Selected Slot Files</string>
+    <string name="primedgun_cannon_texture_a">Cannon texture A</string>
+    <string name="primedgun_cannon_texture_b">Cannon texture B</string>
+    <string name="primedgun_cannon_shine_mask">Shine mask</string>
+    <string name="primedgun_cannon_preview">Texture preview</string>
+    <string name="primedgun_cannon_no_preview">No preview</string>
+    <string name="primedgun_cannon_import">Import...</string>
+    <string name="primedgun_cannon_default_no_override">Default: no PrimedGun override</string>
+    <string name="primedgun_cannon_no_texture_imported">No texture imported</string>
+    <string name="primedgun_cannon_default_active">Default is active. PrimedGun cannon overrides are clear.</string>
+    <string name="primedgun_cannon_slot_active">%1$s is active.</string>
+    <string name="primedgun_cannon_default_selected">Default selected. Click Apply to use it.</string>
+    <string name="primedgun_cannon_slot_selected">%1$s selected. Click Apply to use it.</string>
+    <string name="primedgun_cannon_default_applied">Default applied. Installed HD texture packs can supply the cannon.</string>
+    <string name="primedgun_cannon_slot_applied">Applied %1$s. The game uses it from its next start.</string>
+    <string name="primedgun_cannon_apply_failed">Could not apply %1$s: %2$s</string>
+    <string name="primedgun_cannon_imported">Imported texture for %1$s. Click Apply to use it.</string>
+    <string name="primedgun_cannon_choose_custom">Choose Custom before importing a texture.</string>
+    <string name="primedgun_cannon_png_or_dds">Cannon textures must be PNG or DDS files.</string>
+    <string name="primedgun_cannon_copy_failed">Could not copy the selected texture into the slot.</string>
+    <string name="primedgun_cannon_apply">Apply</string>
+    <string name="primedgun_cannon_remove_shine">Remove Shine</string>
+    <string name="primedgun_cannon_restore_shine">Restore Shine</string>
+    <string name="primedgun_cannon_slot_folder">Slot Folder</string>
+    <string name="primedgun_cannon_active_pack">Active Pack</string>
+    <string name="primedgun_cannon_slot_folder_message">Cannon texture slots live in:\n%1$s</string>
+    <string name="primedgun_cannon_active_pack_message">The managed cannon texture pack is at:\n%1$s</string>
+    <string name="primedgun_cannon_choose_slot_remove_shine">Choose Slot 1-4 or Custom before applying Remove Shine.</string>
+    <string name="primedgun_cannon_choose_slot_restore_shine">Choose Slot 1-4 or Custom before restoring shine.</string>
+    <string name="primedgun_cannon_remove_shine_applied">Applied %1$s with Remove Shine.</string>
+    <string name="primedgun_cannon_restore_shine_applied">Restored shine for %1$s. Cannon base textures are unchanged.</string>
+
+    <!-- Layout tab -->
+    <string name="primedgun_section_controller_layout">Controller Layout</string>
+    <string name="primedgun_controller_layout_description">Quest Touch controller bindings</string>
+
+    <!-- Port Config tab: launcher/ui/port_config_tab.cpp and the F1 overlay's VR tab -->
+    <string name="primedgun_section_port_config">Port Config</string>
+    <string name="primedgun_port_config_note">The native port\'s own settings on the Quest. They take effect the next time the game starts.</string>
+    <string name="primedgun_section_vr_headset">VR Headset</string>
+    <string name="primedgun_controller_mode">Control scheme</string>
+    <string name="primedgun_controller_mode_primedgun">PrimedGun</string>
+    <string name="primedgun_controller_mode_gamepad">Gamepad</string>
+    <string name="primedgun_controller_mode_none">None</string>
+    <string name="primedgun_controller_mode_note">PrimedGun: the controllers drive the game with PrimedGun\'s layout. Gamepad: they act as a plain gamepad. None: a paired gamepad plays.</string>
+    <string name="primedgun_render_scale">Headset render scale</string>
+    <string name="primedgun_render_scale_note">Of the eye size the headset recommends. 0.85 is PrimedGun\'s Quest size.</string>
+    <string name="primedgun_refresh_rate">Display refresh rate</string>
+    <string name="primedgun_refresh_rate_default">Headset default</string>
+    <string name="primedgun_refresh_rate_72">72 Hz</string>
+    <string name="primedgun_refresh_rate_80">80 Hz</string>
+    <string name="primedgun_refresh_rate_90">90 Hz</string>
+    <string name="primedgun_refresh_rate_120">120 Hz</string>
+    <string name="primedgun_refresh_rate_note">The nearest rate the headset offers. Higher rates cost CPU and GPU time in proportion.</string>
+    <string name="primedgun_performance_level">Performance level</string>
+    <string name="primedgun_performance_boost">Boost</string>
+    <string name="primedgun_performance_sustained_high">Sustained high</string>
+    <string name="primedgun_performance_sustained_low">Sustained low</string>
+    <string name="primedgun_performance_power_savings">Power savings</string>
+    <string name="primedgun_performance_default">Headset default</string>
+    <string name="primedgun_performance_level_note">The CPU and GPU clocks the game asks the headset for.</string>
+    <string name="primedgun_foveation">Foveated rendering</string>
+    <string name="primedgun_foveation_off">Off</string>
+    <string name="primedgun_foveation_low">Low</string>
+    <string name="primedgun_foveation_medium">Medium</string>
+    <string name="primedgun_foveation_high">High</string>
+    <string name="primedgun_foveation_note">Shades the edges of each eye in 2x2 (Low) or 4x4 (Medium, High) pixel blocks. In the rooms measured so far it costs more GPU time than it saves.</string>
+    <string name="primedgun_passthrough">Passthrough around menus</string>
+    <string name="primedgun_passthrough_note">Shows your room around the virtual screen while menus and cutscenes are on it.</string>
+    <string name="primedgun_world_scale">World scale</string>
+    <string name="primedgun_world_scale_note">Game units per metre; a larger value makes the world look smaller.</string>
+    <string name="primedgun_immersive_replay">Draw the world per eye</string>
+    <string name="primedgun_immersive_replay_note">Off shows the flat game image on the virtual screen.</string>
+    <string name="primedgun_remove_cinematic_bars">Remove cinematic bars</string>
+    <string name="primedgun_remove_cinematic_bars_note">Keeps the morph ball and visor transitions full size in the headset.</string>
+    <string name="primedgun_sky_at_infinity">Sky at infinity</string>
+    <string name="primedgun_sky_at_infinity_note">Draws the sky with the head\'s rotation only, so planets and stars look far away.</string>
+    <string name="primedgun_space_warp">Space warp</string>
+    <string name="primedgun_space_warp_note">The distortion around charged shots (also Flickerbats, Chozo Ghosts and Metroid Prime).</string>
+    <string name="primedgun_scan_zoom">Scan window zoom</string>
+    <string name="primedgun_scan_zoom_note">Off, the scan visor\'s window shows the view behind it unmagnified, keeping its frame.</string>
+    <string name="primedgun_screen_distance">Virtual screen distance</string>
+    <string name="primedgun_screen_distance_note">Metres; menus and cutscenes hang on this screen.</string>
+    <string name="primedgun_screen_width">Virtual screen width</string>
+    <string name="primedgun_screen_width_note">Metres.</string>
+    <string name="primedgun_lean_back">Lean back</string>
+    <string name="primedgun_lean_back_note">Degrees, for playing seated or lying back.</string>
+
+    <string name="primedgun_section_display">Display</string>
+    <string name="primedgun_msaa">MSAA</string>
+    <string name="primedgun_msaa_off">Off</string>
+    <string name="primedgun_msaa_4x">4x</string>
+    <string name="primedgun_anisotropy">Anisotropic filtering</string>
+    <string name="primedgun_anisotropy_1x">1x</string>
+    <string name="primedgun_anisotropy_2x">2x</string>
+    <string name="primedgun_anisotropy_4x">4x</string>
+    <string name="primedgun_anisotropy_8x">8x</string>
+    <string name="primedgun_anisotropy_16x">16x</string>
+    <string name="primedgun_auto_render_scale">Auto render scale (native)</string>
+    <string name="primedgun_auto_render_scale_note">The internal EFB follows the game\'s window, 1280x720 on the Quest.</string>
+    <string name="primedgun_efb_scale">EFB scale</string>
+    <string name="primedgun_efb_scale_note">Scales the internal EFB, which the virtual screen and the visor effects show; higher values use more GPU memory.</string>
+
+    <string name="primedgun_section_advanced">Advanced</string>
+    <string name="primedgun_advanced_note">The renderer\'s own switches, which the PC reaches through the F1 overlay. The defaults are the measured best on a Quest 3.</string>
+    <string name="primedgun_multiview">Multiview eyes</string>
+    <string name="primedgun_multiview_note">Both eyes in one render pass.</string>
+    <string name="primedgun_direct_present">Direct to headset</string>
+    <string name="primedgun_direct_present_note">The eyes go straight into the headset\'s images; off, through shared buffers on a second device.</string>
+    <string name="primedgun_pipelined_rendering">Pipelined rendering</string>
+    <string name="primedgun_pipelined_rendering_note">More throughput, one frame of latency.</string>
+    <string name="primedgun_deindex_vertices">Resolve indexed vertices</string>
+    <string name="primedgun_deindex_vertices_note">On the CPU, which also keeps the world\'s geometry on the GPU between frames.</string>
+    <string name="primedgun_diagnostics_logging">Diagnostics logging</string>
+    <string name="primedgun_diagnostics_logging_note">[xr-diag] timings in the log. They cost throughput; leave off to compare performance.</string>
+
+    <!-- About tab: launcher/ui/about_tab.cpp, in PrimedGun's Quest wording. The credits mirror
+         the Credits section of PrimedGun's README.md; keep the two in step. -->
+    <string name="primedgun_section_about">PrimedGun</string>
+    <string name="primedgun_about_summary">Metroid Prime as a native VR game, built on the Metroid Prime decompilation\'s native port.</string>
+    <string name="primedgun_about_version">Version: %1$s</string>
+    <string name="primedgun_about_build">Build: %1$s, revision %2$s</string>
+    <string name="primedgun_about_game">Supported game: Metroid Prime NTSC-U Revision 0 (1.0), game ID GM8E01</string>
+    <string name="primedgun_about_user_folder">User folder: %1$s</string>
+    <string name="primedgun_about_license">The PrimedGun launcher is free software, licensed under the GNU GPL version 3 or later.</string>
+    <string name="primedgun_section_useful_info">Useful Information</string>
+    <string name="primedgun_about_useful_info_text">• Leave the game with Quit in the Quest menu, or with Stop on the Setup tab. The game saves its settings as it exits.\n\n• The first start after an update compiles shaders in the background; later starts are faster.\n\n• Your memory card is in USA/Card A and your settings in port_settings.ini, in the user folder shown above.</string>
+    <string name="primedgun_section_links">Links</string>
+    <string name="primedgun_about_github">PrimedGun on GitHub</string>
+    <string name="primedgun_about_discord">Dolphin VR Discord</string>
+    <string name="primedgun_about_discord_note">For further enhancements to your VR experience, join the Dolphin VR Discord.</string>
+    <string name="primedgun_about_no_browser">No browser available. Visit %1$s</string>
+    <string name="primedgun_section_credits">Credits</string>
+    <string name="primedgun_about_credits_text">• Created by Nobbie.\n\n• Huge thank you to iChris4, who made Dolphin ReduX for PC and Quest, ported PrimedGun to the Quest, and early on helped fix the visor effects and ported the Metroid Prime override from the old Dolphin Hydra.\n\n• Thank you to the Metroid Prime modding community for the resources and research that helped make this possible.\n\n• Development references include the Metroid Prime decompilation project, Metaforce, and PrimeHack. Codex was used to assist with debugging, system integration, and iterative development.\n\n• Thank you to the Dolphin team.\n\n• Thank you to the early testers: GeekyGami, Lucaspec72, TorchRing, detective_yoshi, PHA3ESH1FTGAMES, retrovideogamer, Samevi, Mochu, VideoGameEsoterica and VRified Games.\n\n• Thank you to budwheizzah for helping test the Quest version.</string>
+    <string name="primedgun_section_native_port">Native Port</string>
+    <string name="primedgun_about_native_port_text">• PrimedGun v2 runs on a native build of the Metroid Prime decompilation (PrimeDecomp), through Odran\'s MetroidPrimePort, drawn by Aurora.\n\n• Its OpenXR stereo rendering, head tracking and PrimedGun controls build on the OpenXR work from Wiicompiled VR.</string>
+</resources>

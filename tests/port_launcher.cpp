@@ -373,6 +373,24 @@ void TestDiscProbe(const fs::path& root) {
   Check(ProbeDiscBytes(".ciso", ciso.data(), ciso.size()).check == DiscCheck::WrongRevision,
         "a CISO image keeps the disc header at 0x8000");
 
+  std::vector<uint8_t> wbfs(0x200, 0);
+  std::memcpy(wbfs.data(), "WBFS", 4);
+  std::vector<uint8_t> plain(0x200, 0);
+  Check(ProbeDiscBytes(".WBFS", plain.data(), plain.size()).check == DiscCheck::Unverified,
+        "an upper-case .WBFS is taken on trust like .wbfs");
+  Check(ProbeDiscBytes(".iso", wbfs.data(), wbfs.size()).check == DiscCheck::Unverified,
+        "a WBFS image is known by its magic whatever its name");
+  std::vector<uint8_t> trilogy(0x400, 0);
+  std::memcpy(trilogy.data(), "WBFS", 4);
+  trilogy[8] = 9;  // 512-byte sectors: disc 0's header copy at 0x200
+  trilogy[12] = 1; // disc slot 0 used
+  std::memcpy(trilogy.data() + 0x200, "R3ME01", 6);
+  Check(ProbeDiscBytes(".wbfs", trilogy.data(), trilogy.size()).check == DiscCheck::WrongGame,
+        "a WBFS image of another game is refused by its header copy");
+  std::memcpy(trilogy.data() + 0x200, "GM8E01", 6);
+  Check(ProbeDiscBytes(".wbfs", trilogy.data(), trilogy.size()).check == DiscCheck::Ok,
+        "a WBFS image of the right disc passes");
+
   Check(ProbeDisc(root / "game.gcz").check == DiscCheck::UnsupportedFormat,
         ".gcz is not a format the port opens");
   Check(IsSupportedDiscExtension("Metroid Prime (USA).nkit.iso"), "NKit's .nkit.iso is an .iso");

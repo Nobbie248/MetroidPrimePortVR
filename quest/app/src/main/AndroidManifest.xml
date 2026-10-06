@@ -9,6 +9,10 @@
     <uses-permission android:name="android.permission.VIBRATE" />
     <!-- The Archipelago client's WebSocket (ws:// only in this build). -->
     <uses-permission android:name="android.permission.INTERNET" />
+    <!-- Select Game copies the disc image in a foreground service that keeps the CPU awake. -->
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_DATA_SYNC" />
+    <uses-permission android:name="android.permission.WAKE_LOCK" />
 
     <queries>
         <provider android:authorities="org.khronos.openxr.runtime_broker;org.khronos.openxr.system_runtime_broker" />
@@ -53,6 +57,32 @@
              CPU level less, -1 the reverse. The eye passes are GPU-bound; the CPU has room. -->
         <meta-data android:name="com.oculus.trade_cpu_for_gpu_amount" android:value="1" />
 
+        <!-- The launcher panel (PrimedGun's Quest launcher): settings, the game disc, Play.
+             The library starts it; Play starts the game below. -->
+        <activity
+            android:name=".launcher.LauncherActivity"
+            android:configChanges="keyboard|keyboardHidden|navigation|orientation|screenLayout|screenSize|smallestScreenSize|uiMode|density"
+            android:exported="true"
+            android:resizeableActivity="true"
+            android:theme="@style/Theme.PrimedGun.Main">
+            <!-- Horizon OS panel size. -->
+            <layout
+                android:defaultWidth="1024dp"
+                android:defaultHeight="640dp"
+                android:minWidth="760dp"
+                android:minHeight="520dp" />
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN" />
+                <category android:name="android.intent.category.LAUNCHER" />
+            </intent-filter>
+        </activity>
+
+        <!-- Copies the picked disc image into the user folder (launcher process). -->
+        <service
+            android:name=".launcher.DiscCopyService"
+            android:exported="false"
+            android:foregroundServiceType="dataSync" />
+
         <!-- The game. Its own process, which PrimedGunVrActivity ends when the game
              closes: SDLActivity cannot be created twice in one process, and the
              OpenXR device must not start twice. Every configuration change is
@@ -71,12 +101,12 @@
             <property
                 android:name="android.window.PROPERTY_XR_ACTIVITY_START_MODE"
                 android:value="XR_ACTIVITY_START_MODE_FULL_SPACE_UNMANAGED" />
+            <!-- No library entry: the launcher's Play starts it. Still exported, so adb
+                 can start it directly (Run-Quest.ps1). -->
             <intent-filter>
                 <action android:name="android.intent.action.MAIN" />
                 <category android:name="com.oculus.intent.category.VR" />
                 <category android:name="android.intent.category.DEFAULT" />
-                <!-- Until the launcher panel exists, the library starts the game directly. -->
-                <category android:name="android.intent.category.LAUNCHER" />
             </intent-filter>
         </activity>
     </application>

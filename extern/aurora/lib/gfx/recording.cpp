@@ -5,6 +5,7 @@
 
 #include "encoding.hpp"
 #include "frame.hpp"
+#include "geometry_buffer.hpp"
 #include "resource_cache.hpp"
 
 #include "clear.hpp"
@@ -127,6 +128,15 @@ std::atomic<uint32_t> g_fifoUniformBuilds{0};
 std::atomic<uint32_t> g_mergeBreaks[BreakCount]{};
 std::atomic<uint64_t> g_fifoDeindexTicks{0};
 std::atomic<uint32_t> g_fifoDeindexedVerts{0};
+std::atomic<uint32_t> g_fifoCachedDlCalls{0};
+std::atomic<uint64_t> g_fifoCachedDlBytes{0};
+std::atomic<uint64_t> g_fifoCachedDlVertBytes{0};
+std::atomic<uint64_t> g_fifoCachedDlIndexBytes{0};
+std::atomic<uint32_t> g_fifoCachedDlVerts{0};
+std::atomic<uint32_t> g_fifoGeometryHits{0};
+std::atomic<uint32_t> g_fifoGeometryMisses{0};
+std::atomic<uint32_t> g_geometryEntries{0};
+std::atomic<uint64_t> g_geometryResidentBytes{0};
 std::atomic<uint64_t> g_drainWaitNs{0};
 std::atomic<uint32_t> g_drainCalls{0};
 bool enabled() noexcept { return g_stereoDiagnostics.load(std::memory_order_relaxed); }
@@ -216,6 +226,18 @@ void log_stereo_frame_stats(const FramePacket& frame) {
   const double pushMs = bucketMs(perf::g_fifoPushTicks);
   const double deindexMs = bucketMs(perf::g_fifoDeindexTicks);
   const uint32_t deindexedVerts = perFrame(perf::g_fifoDeindexedVerts);
+  const auto perFrameKb = [](std::atomic<uint64_t>& bytes) {
+    return bytes.exchange(0, std::memory_order_relaxed) / 600 / 1024;
+  };
+  const uint32_t cachedDlCalls = perFrame(perf::g_fifoCachedDlCalls);
+  const uint64_t cachedDlKb = perFrameKb(perf::g_fifoCachedDlBytes);
+  const uint64_t cachedDlVertKb = perFrameKb(perf::g_fifoCachedDlVertBytes);
+  const uint64_t cachedDlIndexKb = perFrameKb(perf::g_fifoCachedDlIndexBytes);
+  const uint32_t cachedDlVerts = perFrame(perf::g_fifoCachedDlVerts);
+  const uint32_t geometryHits = perFrame(perf::g_fifoGeometryHits);
+  const uint32_t geometryMisses = perFrame(perf::g_fifoGeometryMisses);
+  const uint32_t geometryEntries = perf::g_geometryEntries.load(std::memory_order_relaxed);
+  const uint64_t geometryMb = perf::g_geometryResidentBytes.load(std::memory_order_relaxed) >> 20;
   std::array<uint32_t, perf::BreakCount> breaks{};
   for (size_t i = 0; i < breaks.size(); ++i) {
     breaks[i] = perFrame(perf::g_mergeBreaks[i]);
@@ -223,10 +245,12 @@ void log_stereo_frame_stats(const FramePacket& frame) {
   Log.info("fifo processor per frame: xf {:.2f} ms ({} loads), bp {:.2f} ms ({} loads), cp {:.2f} ms, aurora {:.2f} "
            "ms; draws {} merged + {} pushed: verts {:.2f} ms, pipeline {:.2f} ms ({} builds), bind groups {:.2f} ms "
            "({} builds, {} cache misses, resolve {:.2f} ms), uniform {:.2f} ms ({} builds), push {:.2f} ms; "
-           "de-indexing {:.2f} ms ({} vertices); tick {:.3f} GHz",
+           "de-indexing {:.2f} ms ({} vertices); in-place dl {} calls ({} KB): {} KB of records ({} de-indexed "
+           "vertices), {} KB of indices; geometry cache {} hits, {} misses ({} entries, {} MiB); tick {:.3f} GHz",
            xfMs, xfLoads, bpMs, bpLoads, cpMs, auroraMs, merged, pushed, vertsMs, pipelineMs, pipelineBuilds, bindsMs,
            bindGroupBuilds, bindGroupMisses, resolveMs, uniformMs, uniformBuilds, pushMs, deindexMs, deindexedVerts,
-           ticksPerNs);
+           cachedDlCalls, cachedDlKb, cachedDlVertKb, cachedDlVerts, cachedDlIndexKb, geometryHits, geometryMisses,
+           geometryEntries, geometryMb, ticksPerNs);
   Log.info("new draws per frame, by what kept them from joining the last one: pipeline state {}, textures {}, "
            "uniform data {}, immediates {}, vertex format or primitive kind {}, no draw to join {}",
            breaks[perf::BreakPipeline], breaks[perf::BreakTextures], breaks[perf::BreakUniform],
@@ -373,6 +397,7 @@ StagingHighWater current_high_water(const FramePacket& frame) noexcept {
       .storage = static_cast<uint32_t>(frame.storage.size()),
       .textureUpload = static_cast<uint32_t>(frame.textureUpload.size()),
       .textureUploadCount = frame.textureUploads.size(),
+      .geometryUploadCount = frame.geometryUploads.size(),
   };
 }
 
@@ -392,6 +417,10 @@ FrameOp capture_frame_op(FramePacket& frame, FrameOpType type, uint32_t index) {
   op.textureUploads.reserve(op.highWater.textureUploadCount);
   for (size_t i = 0; i < op.highWater.textureUploadCount; ++i) {
     op.textureUploads.push_back(&frame.textureUploads[i]);
+  }
+  op.geometryUploads.reserve(op.highWater.geometryUploadCount);
+  for (size_t i = 0; i < op.highWater.geometryUploadCount; ++i) {
+    op.geometryUploads.push_back(&frame.geometryUploads[i]);
   }
   return op;
 }
@@ -1611,6 +1640,17 @@ Range push_indices(const uint8_t* data, size_t length, size_t alignment) {
 }
 
 ByteBuffer* staging_verts() noexcept { return g_recorder.active() ? &current_frame_packet().verts : nullptr; }
+
+void queue_geometry_upload(uint32_t offset, const uint8_t* data, uint32_t size) {
+  if (!check_recording("queue_geometry_upload") || size == 0) {
+    return;
+  }
+  // Through this frame's vertex staging: the frame worker copies it on to the
+  // geometry buffer before the frame's next op (encoding.cpp).
+  auto& frame = current_frame_packet();
+  const Range range = push(frame.verts, data, size, 4);
+  frame.geometryUploads.push_back(GeometryUpload{.src = range.offset, .dst = offset, .size = size});
+}
 
 ByteBuffer* staging_indices() noexcept { return g_recorder.active() ? &current_frame_packet().indices : nullptr; }
 

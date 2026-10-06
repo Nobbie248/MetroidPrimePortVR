@@ -12,7 +12,11 @@ void bind_gx_uniform(const wgpu::RenderPassEncoder& pass, const wgpu::BindGroup&
 // The same for a GX draw's texture bind group (group 2, by its cache reference) and
 // its index buffer range: consecutive draws of one model share both.
 void bind_gx_textures(const wgpu::RenderPassEncoder& pass, BindGroupRef bindGroup);
-void bind_gx_indices(const wgpu::RenderPassEncoder& pass, const wgpu::Buffer& buffer, uint64_t offset, uint64_t size);
+void bind_gx_indices(const wgpu::RenderPassEncoder& pass, const wgpu::Buffer& buffer, uint64_t offset, uint64_t size,
+                     wgpu::IndexFormat format = wgpu::IndexFormat::Uint16);
+// Group 0: the frame's vertex buffer, or the geometry cache's (geometry_buffer.hpp)
+// for a draw of cached geometry.
+void bind_gx_geometry(const wgpu::RenderPassEncoder& pass, bool cached);
 
 namespace detail {
 void encode_op(wgpu::CommandEncoder& encoder, FramePacket& frame, const FrameOp& op);

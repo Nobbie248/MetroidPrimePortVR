@@ -22,6 +22,9 @@ struct DrawData {
   // in the left and right eye passes, staged along with the mono uniform.
   // UINT32_MAX leaves the draw out of that eye.
   std::array<uint32_t, 2> stereoUniformOffset{UINT32_MAX, UINT32_MAX};
+  // The draw reads the geometry cache's buffer (gfx/geometry_buffer.hpp) with 32-bit
+  // indices absolute into it (gx/geometry_cache.hpp), vtxStart 0.
+  bool cachedGeometry = false;
   // ... and the texture bind groups, when the draw samples an EFB copy taken
   // per eye; zero binds the mono group. Under multiview (gfx/stereo_multiview.hpp)
   // [0] is the multiview pipeline's bind group, of 2D array views.

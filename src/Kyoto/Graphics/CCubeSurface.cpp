@@ -6,6 +6,7 @@
 #include <string.h>
 #ifdef TARGET_PC
 #include <dolphin/gx/GXExtra.h>
+#include <stdlib.h>
 #endif
 
 const CVector3f CCubeSurface::skDefaultNormal(1.f, 0.f, 0.f);
@@ -88,10 +89,26 @@ bool CCubeSurface::PortBaseIndices(uint* out) const {
   return true;
 }
 
+// Port: a static world model's surface draws as cached geometry: the FIFO processor
+// reads the display list where it lives and, once the cache is in, keeps the resolved
+// vertices on the GPU across frames. MP_GEOMETRY_CACHE=0 draws every surface the plain way.
+void CCubeSurface::PortCallDisplayList() const {
+  static const bool enabled = [] {
+    const char* value = getenv("MP_GEOMETRY_CACHE");
+    return value == nullptr || value[0] != '0';
+  }();
+  const CCubeModel* parent = x0_data->mParent;
+  if (enabled && parent != nullptr && parent->PortCacheableGeometry()) {
+    CGX::CallCachedDisplayList(parent->PortGeometrySet(), GetDisplayList(), GetDisplayListSize());
+  } else {
+    CGX::CallDisplayList(GetDisplayList(), GetDisplayListSize());
+  }
+}
+
 void CCubeSurface::CallDisplayList() const {
   uint bases[kPB_Count];
   if (!PortBaseIndices(bases)) {
-    CGX::CallDisplayList(GetDisplayList(), GetDisplayListSize());
+    PortCallDisplayList();
     return;
   }
   // The bases stay set in Aurora until changed, so reset them after the draw:
@@ -104,7 +121,7 @@ void CCubeSurface::CallDisplayList() const {
   for (int i = GX_VA_TEX1; i <= GX_VA_TEX7; ++i) {
     GXSetArrayBaseIndex(static_cast< GXAttr >(i), bases[kPB_UV]);
   }
-  CGX::CallDisplayList(GetDisplayList(), GetDisplayListSize());
+  PortCallDisplayList();
   for (int i = GX_VA_POS; i <= GX_VA_TEX7; ++i) {
     if (i != GX_VA_CLR1) {
       GXSetArrayBaseIndex(static_cast< GXAttr >(i), 0);

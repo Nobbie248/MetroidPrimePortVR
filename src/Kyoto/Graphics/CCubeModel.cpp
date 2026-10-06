@@ -103,6 +103,9 @@ void CCubeModel::SetStaticArraysCurrent() const {
 }
 
 void CCubeModel::SetArraysCurrent() const {
+#ifdef TARGET_PC
+  mPortOwnArrays = true;
+#endif
   CGX::SetArray(GX_VA_POS, x0_instance.GetVertexPointer(), x0_instance.GetVertexSize(),
                 sizeof(CVector3f));
   const int stride = (x41_visorFlags & 1) ? sizeof(short) * 3 : sizeof(CVector3f);
@@ -120,6 +123,9 @@ void CCubeModel::SetSkinningArraysCurrent(const float* positions, const float* n
   }
   // The skinned workspaces reuse the same pointer each frame, so force the
   // backend to drop its cached copy or the new vertex data is never uploaded.
+#ifdef TARGET_PC
+  mPortOwnArrays = false;
+#endif
   CGX::ClearArray(GX_VA_POS);
   CGX::ClearArray(GX_VA_NRM);
   CGraphics::sRenderState.SetVtxState(positions, normals,

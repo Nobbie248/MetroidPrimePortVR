@@ -11,6 +11,7 @@
 #include <cstring>
 
 #include "../gfx/depth_peek.hpp"
+#include "geometry_cache.hpp"
 #include "../gfx/probe.hpp"
 #include "../gfx/recording.hpp"
 #include "../gfx/stereo_shadow.hpp"
@@ -567,6 +568,7 @@ u8 line_mode_for_prim(GXPrimitive prim) noexcept {
 
 static void handle_draw(u8 cmd, ByteReader& reader) noexcept;
 static void handle_aurora(ByteReader& reader) noexcept;
+static void handle_cached_display_list(ByteReader& reader) noexcept;
 
 ProcessResult process(const u8* data, u32 size) noexcept {
   ZoneScoped;
@@ -653,6 +655,12 @@ ProcessResult process(const u8* data, u32 size) noexcept {
     }
 
     case GX_AURORA: {
+      // A cached display list's draws count under their own buckets, not this one.
+      if (reader.remaining() >= 2 && read_bits<u16>(reader.data() + reader.offset()) == GX_AURORA_CALL_CACHED_DL) {
+        reader.skip(2);
+        handle_cached_display_list(reader);
+        break;
+      }
       const gfx::perf::Bucket bucket{gfx::perf::g_fifoAuroraTicks, perfOn};
       handle_aurora(reader);
       break;
@@ -695,6 +703,31 @@ ProcessResult process(const u8* data, u32 size) noexcept {
     }
   }
   return {size, false};
+}
+
+// A static world surface's display list the geometry cache cannot take (no
+// de-indexing, not a pure surface, no room): processed where it lives, like FIFO
+// bytes, and counted (perf_counters.hpp g_fifoCachedDl*).
+static void process_display_list_in_place(const u8* data, u32 size) noexcept {
+  const bool perfOn = gfx::perf::enabled();
+  const ByteBuffer* const verts = perfOn ? gfx::staging_verts() : nullptr;
+  const ByteBuffer* const indices = perfOn ? gfx::staging_indices() : nullptr;
+  const size_t vertBytes0 = verts != nullptr ? verts->size() : 0;
+  const size_t indexBytes0 = indices != nullptr ? indices->size() : 0;
+  const u32 deindexed0 = perfOn ? gfx::perf::g_fifoDeindexedVerts.load(std::memory_order_relaxed) : 0;
+  process(data, size);
+  if (perfOn) {
+    gfx::perf::g_fifoCachedDlCalls.fetch_add(1, std::memory_order_relaxed);
+    gfx::perf::g_fifoCachedDlBytes.fetch_add(size, std::memory_order_relaxed);
+    if (verts != nullptr) {
+      gfx::perf::g_fifoCachedDlVertBytes.fetch_add(verts->size() - vertBytes0, std::memory_order_relaxed);
+    }
+    if (indices != nullptr) {
+      gfx::perf::g_fifoCachedDlIndexBytes.fetch_add(indices->size() - indexBytes0, std::memory_order_relaxed);
+    }
+    gfx::perf::g_fifoCachedDlVerts.fetch_add(
+        gfx::perf::g_fifoDeindexedVerts.load(std::memory_order_relaxed) - deindexed0, std::memory_order_relaxed);
+  }
 }
 
 [[noreturn]] static void handle_draw_overrun(size_t totalVtxBytes, const ByteReader& reader) noexcept {
@@ -768,8 +801,8 @@ static u8 staged_multiview_mode(const DrawCache& cache) noexcept {
   return mode;
 }
 
-static void push_gx_draw(GXPrimitive prim, GXVtxFmt fmt, u16 vtxCount, gfx::Range vertRange, gfx::Range idxRange,
-                         u32 numIndices) noexcept {
+static void push_gx_draw(GXPrimitive prim, GXVtxFmt fmt, u32 vtxCount, gfx::Range vertRange, gfx::Range idxRange,
+                         u32 numIndices, bool cachedGeometry = false) noexcept {
   auto& state = g_gxState;
   auto& cache = sDrawCache;
   const bool perfOn = gfx::perf::enabled();
@@ -908,6 +941,7 @@ static void push_gx_draw(GXPrimitive prim, GXVtxFmt fmt, u16 vtxCount, gfx::Rang
       .bindGroups = cache.bindGroups,
       .dstAlpha = state.dstAlpha,
       .stereoUniformOffset = cache.stereoUniformOffsets,
+      .cachedGeometry = cachedGeometry,
       .stereoTextureBindGroup = cache.stereoBindGroups,
       .multiviewPipeline = multiviewPipeline,
   });
@@ -1066,7 +1100,8 @@ static void draw_prim(u8 cmd, GXPrimitive prim, GXVtxFmt fmt, u16 vtxCount, Byte
   auto* lastDraw = cleanState ? gfx::get_last_draw_command<DrawData>() : nullptr;
   ByteBuffer* const verts = lastDraw != nullptr ? gfx::staging_verts() : nullptr;
   ByteBuffer* const indices = lastDraw != nullptr ? gfx::staging_indices() : nullptr;
-  const bool canMerge = lastDraw != nullptr && (lineMode != 0 || lastDraw->instanceCount == 1) &&
+  const bool canMerge = lastDraw != nullptr && !lastDraw->cachedGeometry &&
+                        (lineMode != 0 || lastDraw->instanceCount == 1) &&
                         lastDraw->immediateData.currentPnMtx == g_gxState.currentPnMtx && verts != nullptr &&
                         indices != nullptr && lastDraw->vtxCount + vtxCount <= UINT16_MAX &&
                         (prim != GX_LINES || (lastDraw->vtxCount % 2 == 0 && vtxCount % 2 == 0)) &&
@@ -1158,6 +1193,190 @@ static void draw_prim(u8 cmd, GXPrimitive prim, GXVtxFmt fmt, u16 vtxCount, Byte
     gfx::perf::add(gfx::perf::g_fifoVertsTicks, t0, gfx::perf::tick());
     gfx::perf::g_fifoDrawsMerged.fetch_add(merged, std::memory_order_relaxed);
   }
+}
+
+// The layout a cached surface's records are resolved with (geometry_cache::Key::layout):
+// the format, the arrays and where each attribute lands.
+static u64 deindex_plan_hash(const DeindexPlan& plan) noexcept {
+  u64 hash = 1469598103934665603ull;
+  const auto mix = [&hash](u64 value) {
+    hash ^= value;
+    hash *= 1099511628211ull;
+  };
+  mix(plan.fmt);
+  mix(plan.srcStride);
+  mix(plan.dstStride);
+  mix(plan.count);
+  for (u32 i = 0; i < plan.count; ++i) {
+    const auto& a = plan.attrs[i];
+    mix(reinterpret_cast<uintptr_t>(a.data));
+    mix(a.size);
+    mix(a.stride);
+    mix(a.base);
+    mix(a.srcOffset);
+    mix(a.dstOffset);
+    mix(a.bytes);
+    mix(a.indexSize);
+    mix(a.indices);
+  }
+  return hash;
+}
+
+// A primitive's triangle-list indices, 32-bit, from vertex `base` on.
+static void append_list_indices(std::vector<u32>& out, GXPrimitive prim, u32 base, u16 vtxCount) noexcept {
+  switch (prim) {
+  case GX_QUADS:
+    for (u32 v = 0; v + 4 <= vtxCount; v += 4) {
+      out.insert(out.end(), {base + v, base + v + 1, base + v + 2, base + v + 2, base + v + 3, base + v});
+    }
+    break;
+  case GX_TRIANGLES:
+    for (u32 v = 0; v + 3 <= vtxCount; v += 3) {
+      out.insert(out.end(), {base + v, base + v + 1, base + v + 2});
+    }
+    break;
+  case GX_TRIANGLEFAN:
+    for (u32 v = 2; v < vtxCount; ++v) {
+      out.insert(out.end(), {base, base + v - 1, base + v});
+    }
+    break;
+  case GX_TRIANGLESTRIP:
+    for (u32 v = 2; v < vtxCount; ++v) {
+      if ((v & 1) == 0) {
+        out.insert(out.end(), {base + v - 2, base + v - 1, base + v});
+      } else {
+        out.insert(out.end(), {base + v - 1, base + v - 2, base + v});
+      }
+    }
+    break;
+  default:
+    break;
+  }
+}
+
+// A display list resolved for the cache: its draws' records de-indexed one after the
+// other (deindex_records), their triangle-list indices from the first record. False
+// when it holds anything but triangle draws of `fmt`.
+static bool resolve_display_list(const u8* data, u32 size, GXVtxFmt fmt, const DeindexPlan& plan,
+                                 ByteBuffer& records, std::vector<u32>& indices) noexcept {
+  u32 vertexCount = 0;
+  size_t pos = 0;
+  while (pos < size) {
+    const u8 cmd = data[pos];
+    if (cmd == CP_CMD_NOP) {
+      ++pos;
+      continue;
+    }
+    if ((cmd & 0x80) == 0 || (cmd & CP_VAT_MASK) != fmt || size - pos < 3) {
+      return false;
+    }
+    const auto prim = static_cast<GXPrimitive>(cmd & CP_OPCODE_MASK);
+    if (prim != GX_QUADS && prim != GX_TRIANGLES && prim != GX_TRIANGLESTRIP && prim != GX_TRIANGLEFAN) {
+      return false;
+    }
+    const u16 count = read_bits<u16>(data + pos + 1);
+    const size_t bytes = static_cast<size_t>(count) * plan.srcStride;
+    pos += 3;
+    if (bytes > size - pos) {
+      return false;
+    }
+    if (count != 0) {
+      deindex_records(plan, data + pos, count, records.append_uninitialized(static_cast<size_t>(count) * plan.dstStride));
+      append_list_indices(indices, prim, vertexCount, count);
+      vertexCount += count;
+    }
+    pos += bytes;
+  }
+  return vertexCount != 0 && !indices.empty();
+}
+
+// A cached surface's draw: its indices into the frame's index staging, joined to the
+// last draw when that one reads the cache under the same state (draw_prim's rules,
+// without the vertex staging: the records are in the geometry buffer, vtxStart 0).
+static void draw_cached_geometry(GXVtxFmt fmt, const geometry_cache::Entry& entry) noexcept {
+  constexpr GXPrimitive prim = GX_TRIANGLES;
+  if (g_gxState.dirty != 0 || fmt != sDrawCache.lastDrawFmt) {
+    reconcile_merge_state(prim, fmt);
+  }
+  // The immediates do not matter: vtxStart is 0 and the arrays are in the records.
+  const u32 drawDirty = g_gxState.dirty & ~DirtyImmediates;
+  const bool formatDiffers = fmt != sDrawCache.lastDrawFmt || sDrawCache.lineMode != 0;
+  auto* lastDraw = drawDirty == 0 && !formatDiffers ? gfx::get_last_draw_command<DrawData>() : nullptr;
+  ByteBuffer* const indices = gfx::staging_indices();
+  const bool canMerge = lastDraw != nullptr && lastDraw->cachedGeometry && lastDraw->instanceCount == 1 &&
+                        lastDraw->immediateData.currentPnMtx == g_gxState.currentPnMtx && indices != nullptr;
+  const bool perfOn = gfx::perf::enabled();
+  const auto t0 = gfx::perf::stamp(perfOn);
+  const size_t bytes = entry.indices.size() * sizeof(u32);
+  if (!canMerge) {
+    count_merge_breaks(formatDiffers, lastDraw == nullptr);
+    const gfx::Range idxRange = gfx::push_indices(reinterpret_cast<const u8*>(entry.indices.data()), bytes, 4);
+    if (perfOn) {
+      gfx::perf::add(gfx::perf::g_fifoVertsTicks, t0, gfx::perf::tick());
+    }
+    push_gx_draw(prim, fmt, entry.vertexCount, gfx::Range{0, entry.bytes}, idxRange,
+                 static_cast<u32>(entry.indices.size()), true);
+    return;
+  }
+  g_gxState.dirty &= ~DirtyImmediates;
+  CHECK(lastDraw->idxRange.offset + lastDraw->idxRange.size == indices->size(),
+        "Non-consecutive index ranges ({} < {})", lastDraw->idxRange.offset + lastDraw->idxRange.size,
+        indices->size());
+  std::memcpy(indices->append_uninitialized(bytes), entry.indices.data(), bytes);
+  lastDraw->idxRange.size += static_cast<u32>(bytes);
+  lastDraw->indexCount += static_cast<u32>(entry.indices.size());
+  lastDraw->vtxCount += entry.vertexCount;
+  gfx::detail::increment_merged_draw_count(1);
+  if (perfOn) {
+    gfx::perf::add(gfx::perf::g_fifoVertsTicks, t0, gfx::perf::tick());
+    gfx::perf::g_fifoDrawsMerged.fetch_add(1, std::memory_order_relaxed);
+  }
+}
+
+// A static world surface's display list (GX_AURORA_CALL_CACHED_DL), read where it
+// lives: drawn from the geometry cache, resolved into it first when new, or
+// processed in place when the cache cannot take it.
+static void handle_cached_display_list(ByteReader& reader) noexcept {
+  const u32 set = reader.read<u32>();
+  const auto address = static_cast<uintptr_t>(reader.read<u64>());
+  const u32 size = reader.read<u32>();
+  if (address == 0 || size == 0) {
+    return;
+  }
+  const auto* const data = reinterpret_cast<const u8*>(address);
+  // The records' layout follows the first draw's format
+  size_t first = 0;
+  while (first < size && data[first] == CP_CMD_NOP) {
+    ++first;
+  }
+  const bool deindex = g_gxState.deindexVertices && first < size && (data[first] & 0x80) != 0;
+  const auto fmt = static_cast<GXVtxFmt>(deindex ? data[first] & CP_VAT_MASK : 0);
+  const DeindexPlan* const plan = deindex ? &deindex_plan(fmt) : nullptr;
+  if (plan == nullptr || !plan->active || gfx::staging_indices() == nullptr) {
+    process_display_list_in_place(data, size);
+    return;
+  }
+  const geometry_cache::Key key{.set = set, .address = static_cast<u64>(address), .layout = deindex_plan_hash(*plan)};
+  const geometry_cache::Entry* entry = geometry_cache::find(key);
+  if (entry == nullptr) {
+    static ByteBuffer records;
+    static std::vector<u32> indices;
+    records.clear();
+    indices.clear();
+    if (!resolve_display_list(data, size, fmt, *plan, records, indices)) {
+      process_display_list_in_place(data, size);
+      return;
+    }
+    entry = geometry_cache::insert(key, plan->dstStride, {records.data(), records.size()}, indices);
+    if (entry == nullptr) {
+      process_display_list_in_place(data, size);
+      return;
+    }
+    gfx::perf::g_fifoGeometryMisses.fetch_add(1, std::memory_order_relaxed);
+  } else {
+    gfx::perf::g_fifoGeometryHits.fetch_add(1, std::memory_order_relaxed);
+  }
+  draw_cached_geometry(fmt, *entry);
 }
 
 static void handle_draw(u8 cmd, ByteReader& reader) noexcept {
@@ -1549,7 +1768,11 @@ void handle_aurora(ByteReader& reader) noexcept {
     }
   }
 
-  else {
+  else if (subCmd == GX_AURORA_CALL_CACHED_DL) {
+    handle_cached_display_list(reader);
+  } else if (subCmd == GX_AURORA_FREE_GEOMETRY_SET) {
+    geometry_cache::free_set(reader.read<u32>());
+  } else {
     Log.error("Unknown Aurora subcommand: {:04X}", subCmd);
   }
 }
@@ -1579,6 +1802,7 @@ void reset_draw_cache() noexcept {
   // Initialization/shutdown can replace layouts and default texture views.
   sBindGroupCache.clear();
   sDrawCache = {};
+  geometry_cache::clear();
 }
 
 } // namespace aurora::gx::fifo

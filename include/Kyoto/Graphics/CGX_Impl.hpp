@@ -10,6 +10,9 @@
 #include "dolphin/gx/GXGeometry.h"
 #include "dolphin/gx/GXLighting.h"
 #include "dolphin/gx/GXTev.h"
+#ifdef TARGET_PC
+#include "dolphin/gx/GXAurora.h"
+#endif
 
 #ifndef CGX_INLINE
 #define CGX_INLINE inline
@@ -341,6 +344,15 @@ CGX_INLINE void CGX::CallDisplayList(const void* ptr, size_t size) {
   }
   GXCallDisplayList(ptr, size);
 }
+
+#ifdef TARGET_PC
+CGX_INLINE void CGX::CallCachedDisplayList(uint set, const void* ptr, size_t size) {
+  if (sGXState.x4c_chanFlags != 0) {
+    FlushState();
+  }
+  AuroraCallCachedDisplayList(set, ptr, static_cast< u32 >(size));
+}
+#endif
 
 CGX_INLINE void CGX::Begin(GXPrimitive prim, GXVtxFmt fmt, ushort numVtx) {
   if (sGXState.x4c_chanFlags != 0) {

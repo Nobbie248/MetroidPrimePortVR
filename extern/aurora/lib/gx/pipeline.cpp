@@ -37,7 +37,9 @@ void render(const DrawData& data, const wgpu::RenderPassEncoder& pass) {
   pass.SetImmediates(0, &data.immediateData, sizeof(data.immediateData));
   gfx::bind_gx_uniform(pass, resources.uniformBindGroup, data.uniformRange.offset);
   gfx::bind_gx_textures(pass, data.bindGroups.textureBindGroup);
-  gfx::bind_gx_indices(pass, resources.indexBuffer, data.idxRange.offset, data.idxRange.size);
+  gfx::bind_gx_geometry(pass, data.cachedGeometry);
+  gfx::bind_gx_indices(pass, resources.indexBuffer, data.idxRange.offset, data.idxRange.size,
+                       data.cachedGeometry ? wgpu::IndexFormat::Uint32 : wgpu::IndexFormat::Uint16);
   if (data.dstAlpha != UINT32_MAX) {
     const wgpu::Color color{0.f, 0.f, 0.f, data.dstAlpha / 255.f};
     pass.SetBlendConstant(&color);
@@ -73,7 +75,9 @@ void render_eye(const DrawData& data, const wgpu::RenderPassEncoder& pass, uint3
   const gfx::BindGroupRef textureBindGroup =
       data.stereoTextureBindGroup[eye] ? data.stereoTextureBindGroup[eye] : data.bindGroups.textureBindGroup;
   gfx::bind_gx_textures(pass, textureBindGroup);
-  gfx::bind_gx_indices(pass, resources.indexBuffer, data.idxRange.offset, data.idxRange.size);
+  gfx::bind_gx_geometry(pass, data.cachedGeometry);
+  gfx::bind_gx_indices(pass, resources.indexBuffer, data.idxRange.offset, data.idxRange.size,
+                       data.cachedGeometry ? wgpu::IndexFormat::Uint32 : wgpu::IndexFormat::Uint16);
   if (data.dstAlpha != UINT32_MAX) {
     const wgpu::Color color{0.f, 0.f, 0.f, data.dstAlpha / 255.f};
     pass.SetBlendConstant(&color);
@@ -101,7 +105,9 @@ void render_multiview(const DrawData& data, const wgpu::RenderPassEncoder& pass)
   // element 0 when the eye mask is 0).
   gfx::bind_gx_uniform(pass, resources.multiviewUniformBindGroup, uniformOffset);
   gfx::bind_gx_textures(pass, data.stereoTextureBindGroup[0]);
-  gfx::bind_gx_indices(pass, resources.indexBuffer, data.idxRange.offset, data.idxRange.size);
+  gfx::bind_gx_geometry(pass, data.cachedGeometry);
+  gfx::bind_gx_indices(pass, resources.indexBuffer, data.idxRange.offset, data.idxRange.size,
+                       data.cachedGeometry ? wgpu::IndexFormat::Uint32 : wgpu::IndexFormat::Uint16);
   if (data.dstAlpha != UINT32_MAX) {
     const wgpu::Color color{0.f, 0.f, 0.f, data.dstAlpha / 255.f};
     pass.SetBlendConstant(&color);

@@ -78,6 +78,8 @@ if (AURORA_ENABLE_GX)
     # FIFO/command processor (encoder + decoder)
     ../lib/gx/fifo.cpp
     ../lib/gx/command_processor.cpp
+    ../lib/gx/geometry_cache.cpp
+    gx_geometry_cache_test.cpp
     ../lib/gx/regs.cpp
     ../lib/thread.cpp
     # Display list reader/optimizer

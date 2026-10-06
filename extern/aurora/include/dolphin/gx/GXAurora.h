@@ -221,6 +221,18 @@ extern "C" {
  */
 #define GX_AURORA_MAP_BATCH 0x0053
 
+/**
+ * A static world surface's display list, read where it lives by the FIFO processor instead of being copied
+ * into the FIFO: u32 geometry set (nonzero, one per CCubeRenderer area list item), u64 address, u32 byte
+ * size. The display list and the arrays it indexes stay valid until the set is freed.
+ */
+#define GX_AURORA_CALL_CACHED_DL 0x0054
+/**
+ * Frees a geometry set (u32): nothing of it is drawn afterwards, and the FIFO processor drops what it
+ * kept for the set.
+ */
+#define GX_AURORA_FREE_GEOMETRY_SET 0x0055
+
 
 /*
  * Debug marker stuff
@@ -277,6 +289,14 @@ void GXSetViewportRender(f32 left, f32 top, f32 wd, f32 ht, f32 nearz, f32 farz)
 void AuroraSetStereoDrawRoute(u32 route);
 
 void AuroraSetMapBatch(u8 enabled);
+
+/**
+ * Draws a static world surface's display list as part of geometry set `set` (GX_AURORA_CALL_CACHED_DL): the
+ * FIFO processor reads it in place, so the data must outlive the set (AuroraFreeGeometrySet). Flushes pending
+ * state like GXCallDisplayList.
+ */
+void AuroraCallCachedDisplayList(u32 set, const void* data, u32 nbytes);
+void AuroraFreeGeometrySet(u32 set);
 
 /**
  * The plane in front of the head that AURORA_STEREO_ROUTE_HEAD_LOCKED_2D lays orthographic draws on and takes EFB

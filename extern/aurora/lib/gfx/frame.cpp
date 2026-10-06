@@ -1,4 +1,5 @@
 #include "frame.hpp"
+#include "geometry_buffer.hpp"
 
 #include "depth_peek.hpp"
 #include "pipeline_cache.hpp"
@@ -558,6 +559,7 @@ void initialize() {
     }
   }
 
+  initialize_geometry_buffer();
   gx::initialize();
 #ifdef AURORA_ENABLE_RMLUI
   rmlui::initialize_pipeline();
@@ -584,6 +586,7 @@ void shutdown() {
   tex_palette_conv::shutdown();
   texture_replacement::shutdown();
   gx::shutdown();
+  shutdown_geometry_buffer();
 #ifdef AURORA_ENABLE_RMLUI
   rmlui::shutdown_pipeline();
 #endif

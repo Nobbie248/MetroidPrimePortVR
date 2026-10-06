@@ -63,4 +63,26 @@ void GXCallDisplayList(const void* data, u32 nbytes) {
   aurora::gx::fifo::publish();
 }
 
+void AuroraCallCachedDisplayList(u32 set, const void* data, u32 nbytes) {
+  ++aurora::gx::g_drawCommandsIssued;
+  if (__gx->dirtyState != 0) {
+    __GXSetDirtyState();
+  }
+  if (*reinterpret_cast<u32*>(&__gx->vNum) != 0) {
+    __GXSendFlushPrim();
+  }
+  // The display list stays where it is: the FIFO carries its address.
+  GX_WRITE_AURORA(GX_AURORA_CALL_CACHED_DL);
+  GX_WRITE_U32(set);
+  GX_WRITE_U64(reinterpret_cast<u64>(data));
+  GX_WRITE_U32(nbytes);
+  aurora::gx::fifo::publish();
+}
+
+void AuroraFreeGeometrySet(u32 set) {
+  GX_WRITE_AURORA(GX_AURORA_FREE_GEOMETRY_SET);
+  GX_WRITE_U32(set);
+  aurora::gx::fifo::publish();
+}
+
 }

@@ -163,6 +163,11 @@ public:
   static void SetStandardTevColorAlphaOp(GXTevStageID stageId);
 
   static void CallDisplayList(const void* ptr, size_t size);
+#ifdef TARGET_PC
+  // Port: a static world surface's display list, drawn as part of a geometry set
+  // (AuroraCallCachedDisplayList).
+  static void CallCachedDisplayList(uint set, const void* ptr, size_t size);
+#endif
   static void Begin(GXPrimitive prim, GXVtxFmt fmt, ushort numVtx);
   static void End();
   static void ResetGXStates();

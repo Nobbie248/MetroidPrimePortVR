@@ -215,6 +215,19 @@ Range push_indices(const uint8_t* data, size_t length, size_t alignment) {
   return testing::mergeDraws ? stage_test_bytes(testing::stagedIndices, data, length, alignment) : Range{};
 }
 Range push_uniform(const uint8_t* data, size_t length) { return {}; }
+// --- The geometry buffer (gfx/geometry_buffer.hpp): the uploads kept for inspection ---
+namespace testing {
+struct GeometryUploadRecord {
+  uint32_t offset;
+  std::vector<uint8_t> bytes;
+};
+std::vector<GeometryUploadRecord> geometryUploads;
+uint64_t geometryCapacity = 1u << 20;
+} // namespace testing
+uint64_t geometry_buffer_capacity() noexcept { return testing::geometryCapacity; }
+void queue_geometry_upload(uint32_t offset, const uint8_t* data, uint32_t size) {
+  testing::geometryUploads.push_back({offset, std::vector<uint8_t>(data, data + size)});
+}
 Range push_storage(const uint8_t* data, size_t length) { return {}; }
 
 Vec2<uint32_t> get_render_target_size() noexcept { return {640, 480}; }
@@ -451,6 +464,15 @@ std::atomic<uint32_t> g_fifoUniformBuilds{0};
 std::atomic<uint32_t> g_mergeBreaks[BreakCount]{};
 std::atomic<uint64_t> g_fifoDeindexTicks{0};
 std::atomic<uint32_t> g_fifoDeindexedVerts{0};
+std::atomic<uint32_t> g_fifoCachedDlCalls{0};
+std::atomic<uint64_t> g_fifoCachedDlBytes{0};
+std::atomic<uint64_t> g_fifoCachedDlVertBytes{0};
+std::atomic<uint64_t> g_fifoCachedDlIndexBytes{0};
+std::atomic<uint32_t> g_fifoCachedDlVerts{0};
+std::atomic<uint32_t> g_fifoGeometryHits{0};
+std::atomic<uint32_t> g_fifoGeometryMisses{0};
+std::atomic<uint32_t> g_geometryEntries{0};
+std::atomic<uint64_t> g_geometryResidentBytes{0};
 std::atomic<uint64_t> g_drainWaitNs{0};
 std::atomic<uint32_t> g_drainCalls{0};
 }

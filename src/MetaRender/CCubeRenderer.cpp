@@ -42,6 +42,9 @@
 #include "dolphin/gx/GXGeometry.h"
 #include "dolphin/gx/GXStruct.h"
 #include "dolphin/gx/GXVert.h"
+#ifdef TARGET_PC
+#include "dolphin/gx/GXAurora.h"
+#endif
 #include "dolphin/os.h"
 #include "dolphin/types.h"
 #include "rstl/algorithm.hpp"
@@ -474,6 +477,15 @@ void CCubeRenderer::AddStaticGeometry(const rstl::vector< CMetroidModelInstance 
             it->GetBoundingBox(), it->GetFlags(), false, i, it->GetVertexSize(), it->GetNormalSize(),
             it->GetColorSize(), it->GetTCSize(), it->GetPackedTCSize()));
       }
+#ifdef TARGET_PC
+      // Port: one geometry set per area list item, for the cached draws of its
+      // surfaces (CCubeSurface::PortCallDisplayList); RemoveStaticGeometry frees it.
+      static uint sPortGeometrySets = 0;
+      const uint set = ++sPortGeometrySets;
+      for (int i = 0; i < models->size(); ++i) {
+        models->at(i).get()->PortSetGeometrySet(set);
+      }
+#endif
     }
     x1c_areaListItems.push_back(CAreaListItem(geometry, octTree, textures, models, areaIdx));
     GXInvalidateVtxCache();
@@ -493,6 +505,12 @@ CCubeRenderer::FindStaticGeometry(const rstl::vector< CMetroidModelInstance >* g
 void CCubeRenderer::RemoveStaticGeometry(const rstl::vector< CMetroidModelInstance >* geometry) {
   AUTO(search, FindStaticGeometry(geometry));
   if (search != x1c_areaListItems.end()) {
+#ifdef TARGET_PC
+    // Port: the set's cached geometry goes with it.
+    if (!search->GetModelList()->empty()) {
+      AuroraFreeGeometrySet(search->GetModelList()->front().get()->PortGeometrySet());
+    }
+#endif
     x1c_areaListItems.erase(search);
   }
 }

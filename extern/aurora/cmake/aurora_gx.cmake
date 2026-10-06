@@ -3,6 +3,7 @@ add_library(aurora_gx STATIC
         lib/gfx/depth_peek.cpp
         lib/gfx/encoding.cpp
         lib/gfx/frame.cpp
+        lib/gfx/geometry_buffer.cpp
         lib/gfx/pipeline_cache.cpp
         lib/gfx/probe.cpp
         lib/gfx/recording.cpp
@@ -17,6 +18,7 @@ add_library(aurora_gx STATIC
         lib/gfx/texture_replacement.cpp
         lib/gx/attr_fmt.cpp
         lib/gx/command_processor.cpp
+        lib/gx/geometry_cache.cpp
         lib/gx/regs.cpp
         lib/gx/dl.cpp
         lib/gx/fifo.cpp

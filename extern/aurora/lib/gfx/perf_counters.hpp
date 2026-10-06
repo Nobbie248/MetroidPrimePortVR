@@ -49,6 +49,20 @@ extern std::atomic<uint32_t> g_mergeBreaks[BreakCount];
 // Vertex de-indexing on the FIFO processor (GXState::deindexVertices)
 extern std::atomic<uint64_t> g_fifoDeindexTicks;
 extern std::atomic<uint32_t> g_fifoDeindexedVerts;
+// Static world surfaces drawn through GX_AURORA_CALL_CACHED_DL: the calls, the
+// display list bytes read in place, the vertex and index bytes staged for them
+// and the vertices de-indexed for them.
+extern std::atomic<uint32_t> g_fifoCachedDlCalls;
+extern std::atomic<uint64_t> g_fifoCachedDlBytes;
+extern std::atomic<uint64_t> g_fifoCachedDlVertBytes;
+extern std::atomic<uint64_t> g_fifoCachedDlIndexBytes;
+extern std::atomic<uint32_t> g_fifoCachedDlVerts;
+// The geometry cache (gx/geometry_cache.hpp): surfaces found and resolved per window,
+// and what it holds (gauges).
+extern std::atomic<uint32_t> g_fifoGeometryHits;
+extern std::atomic<uint32_t> g_fifoGeometryMisses;
+extern std::atomic<uint32_t> g_geometryEntries;
+extern std::atomic<uint64_t> g_geometryResidentBytes;
 // The game thread blocked in gx::fifo::drain() for the FIFO processor, and
 // how many drains it asked for.
 extern std::atomic<uint64_t> g_drainWaitNs;

@@ -104,6 +104,12 @@ public:
 
   CCubeMaterial GetMaterialByIndex(const int idx) const;
 #ifdef TARGET_PC
+  // Port: the static geometry set this model belongs to (CCubeRenderer::AddStaticGeometry),
+  // 0 for any other model, and whether its surfaces may draw as cached geometry: its own
+  // arrays are current (SetArraysCurrent), not a skinning workspace.
+  uint PortGeometrySet() const { return mPortGeometrySet; }
+  void PortSetGeometrySet(uint set) { mPortGeometrySet = set; }
+  bool PortCacheableGeometry() const { return mPortGeometrySet != 0 && mPortOwnArrays; }
   void PortSetPBRMaterial(const int idx) const;
   // The material's record (see the definition) with the neutral values where it has
   // none; returns how many floats the record holds, 0 without one.
@@ -143,6 +149,10 @@ private:
   bool x40_25_visible : 1;
   uchar x41_visorFlags;
   int x44_idx;
+#ifdef TARGET_PC
+  uint mPortGeometrySet = 0;
+  mutable bool mPortOwnArrays = false;
+#endif
 
   static bool sUsingPackedLightmaps;
 };

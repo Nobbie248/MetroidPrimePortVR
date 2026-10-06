@@ -1,6 +1,7 @@
 #include "encoding.hpp"
 
 #include "frame.hpp"
+#include "geometry_buffer.hpp"
 
 #include "clear.hpp"
 #include "depth_peek.hpp"
@@ -47,6 +48,9 @@ uint32_t g_currentUniformOffset = 0;
 BindGroupRef g_currentTextures = 0;
 uint64_t g_currentIndexOffset = UINT64_MAX;
 uint64_t g_currentIndexSize = 0;
+wgpu::IndexFormat g_currentIndexFormat = wgpu::IndexFormat::Uint16;
+// ... and group 0: the frame's vertex buffer (0), the geometry cache's (1), unknown (-1).
+int8_t g_currentGeometry = -1;
 
 // After a draw of another kind, which binds what it needs itself.
 void forget_gx_binds() {
@@ -54,6 +58,13 @@ void forget_gx_binds() {
   g_currentTextures = 0;
   g_currentIndexOffset = UINT64_MAX;
   g_currentIndexSize = 0;
+  g_currentGeometry = -1;
+}
+
+// A pass's group 0 at its start: the frame's buffers.
+void bind_frame_geometry(const wgpu::RenderPassEncoder& pass) {
+  pass.SetBindGroup(0, resources().staticBindGroup);
+  g_currentGeometry = 0;
 }
 
 // At a pass's start and end, and after a draw that may bind state of its own.
@@ -94,7 +105,7 @@ void render_stereo_eye_pass_commands(const wgpu::RenderPassEncoder& pass, Render
                            ? static_cast<float>(eyePass.size.height) / static_cast<float>(sourceSize.height)
                            : 1.f;
   forget_bound_state();
-  pass.SetBindGroup(0, resources().staticBindGroup);
+  bind_frame_geometry(pass);
   pass.SetBindGroup(2, multiview ? gx::g_emptyMultiviewTextureBindGroup : gx::g_emptyTextureBindGroup);
 
   for (auto& cmd : passInfo.commands) {
@@ -336,7 +347,7 @@ void render_pass(const wgpu::RenderPassEncoder& pass, FramePacket& frame, Render
   bool hasScissor = false;
 
   // Bind bind group for the whole pass
-  pass.SetBindGroup(0, resources().staticBindGroup);
+  bind_frame_geometry(pass);
   pass.SetBindGroup(2, gx::g_emptyTextureBindGroup);
 
   for (auto& cmd : passInfo.commands) {
@@ -383,7 +394,7 @@ void render_pass(const wgpu::RenderPassEncoder& pass, FramePacket& frame, Render
     case CommandType::CustomDraw: {
       render_custom_draw(cmd.data.customDraw, pass, passInfo);
       forget_bound_state();
-      pass.SetBindGroup(0, resources().staticBindGroup);
+      bind_frame_geometry(pass);
       pass.SetBindGroup(2, gx::g_emptyTextureBindGroup);
       if (hasViewport) {
         apply_viewport(pass, currentViewport);
@@ -637,6 +648,13 @@ void copy_staging_to_high_water(wgpu::CommandEncoder& cmd, FramePacket& frame, c
   copy_staging_buffer_range(cmd, frame, frame.copied.indices, highWater.indices, IndexStagingOffset, res.indexBuffer);
   copy_staging_buffer_range(cmd, frame, frame.copied.storage, highWater.storage, StorageStagingOffset,
                             res.storageBuffer);
+  // The geometry cache's new blocks, from the vertex staging to its own buffer
+  for (size_t i = frame.copied.geometryUploadCount; i < op.geometryUploads.size(); ++i) {
+    const auto& upload = *op.geometryUploads[i];
+    cmd.CopyBufferToBuffer(staging_buffer(frame.stagingBuffer), VertexStagingOffset + upload.src,
+                           detail::geometry_buffer(), upload.dst, upload.size);
+  }
+  frame.copied.geometryUploadCount = op.geometryUploads.size();
 
   if constexpr (UseTextureBuffer) {
     for (size_t i = frame.copied.textureUploadCount; i < op.textureUploads.size(); ++i) {
@@ -713,12 +731,22 @@ void bind_gx_textures(const wgpu::RenderPassEncoder& pass, BindGroupRef bindGrou
 }
 
 void bind_gx_indices(const wgpu::RenderPassEncoder& pass, const wgpu::Buffer& buffer, uint64_t offset,
-                     uint64_t size) {
-  if (offset == g_currentIndexOffset && size == g_currentIndexSize) {
+                     uint64_t size, wgpu::IndexFormat format) {
+  if (offset == g_currentIndexOffset && size == g_currentIndexSize && format == g_currentIndexFormat) {
     return;
   }
-  pass.SetIndexBuffer(buffer, wgpu::IndexFormat::Uint16, offset, size);
+  pass.SetIndexBuffer(buffer, format, offset, size);
   g_currentIndexOffset = offset;
   g_currentIndexSize = size;
+  g_currentIndexFormat = format;
+}
+
+void bind_gx_geometry(const wgpu::RenderPassEncoder& pass, bool cached) {
+  const int8_t wanted = cached ? 1 : 0;
+  if (wanted == g_currentGeometry) {
+    return;
+  }
+  pass.SetBindGroup(0, cached ? detail::geometry_bind_group() : resources().staticBindGroup);
+  g_currentGeometry = wanted;
 }
 } // namespace aurora::gfx

@@ -13,6 +13,7 @@
 #if defined(MP_ENABLE_OPENXR)
 #include "cannon_textures.h"
 #include "port_debug.h"
+#include "port_log_file.h"
 #include "port_paths.h"
 #include "port_savestate.h"
 #include "port_textures.h"
@@ -20,6 +21,7 @@
 #include "vr/openxr_settings_panel.h"
 
 #include <aurora/aurora.h>
+#include <aurora/gfx.h>
 
 #include <SDL3/SDL_events.h>
 #include <SDL3/SDL_filesystem.h>
@@ -121,6 +123,26 @@ public:
         return true;
     }
 
+    // DEBUG: the F1 overlay's Debug tab, which persists the audio switches the
+    // same way (the settings file is marked dirty).
+    void FullHealth() override { PortDebug::CheatFullHealth(); }
+    void GrantEverything() override { PortDebug::CheatGrantEverything(); }
+    void SetInvulnerable(bool on) override { PortDebug::SetInvulnerable(on); }
+    void SetStreamedAudio(bool on) override {
+        PortDebug::SetAiAudioEnabled(on);
+        PortDebug::MarkVrSettingsDirty();
+    }
+    void SetMusyxAudio(bool on) override {
+        PortDebug::SetMusyxAudioEnabled(on);
+        PortDebug::MarkVrSettingsDirty();
+    }
+    void SetLogFile(bool on) override {
+        PortDebug::SetLogFile(on);
+        if (on) {
+            PortLogFile::Start();
+        }
+    }
+
     // After the click's settings are stored: the requested save, then the exit
     // the way closing the window exits (the F1 overlay's Exit game).
     void Flush() {
@@ -148,13 +170,70 @@ private:
     bool m_exit = false;
 };
 
+// The game's frame rate, from its own frames: aurora_get_fps counts the
+// window's presents, which a standalone headset (the only display) never makes.
+struct FrameRate {
+    uint64_t frames = 0;
+    uint64_t counted = 0;
+    double since = 0.0;
+    float fps = 0.0f;
+
+    void Tick(double now) noexcept {
+        ++frames;
+        if (since == 0.0) {
+            since = now;
+            counted = frames;
+            return;
+        }
+        if (const double elapsed = now - since; elapsed >= 0.5) {
+            fps = static_cast<float>(static_cast<double>(frames - counted) / elapsed);
+            since = now;
+            counted = frames;
+        }
+    }
+};
+
 struct Menu {
+    FrameRate rate;
     VrMenu::State state;
     GameActions actions;
     bool was_open = false;
     // What the image Aurora has shows (VrMenu::ViewKey); empty when it has none.
     std::string shown;
+    // DEBUG's readouts, sampled twice a second so the image is not redrawn every frame.
+    VrMenu::View readouts;
+    double readouts_at = 0.0;
 };
+
+// What the menu shows besides its own state and the settings.
+VrMenu::View BuildView(Menu& menu, const PortVrSettings& settings, double now) {
+    if (now >= menu.readouts_at) {
+        menu.readouts_at = now + 0.5;
+        const OpenXRFrameTiming timing = OpenXRGetFrameTiming();
+        menu.readouts.headset_hz = timing.headset_hz;
+        menu.readouts.headset_fps = timing.rendered_fps;
+        menu.readouts.game_fps = menu.rate.fps;
+        const AuroraStats* stats = aurora_get_stats();
+        menu.readouts.draws = stats != nullptr ? stats->drawCallCount : 0;
+    }
+    VrMenu::View view = menu.readouts;
+    view.state_slot = menu.actions.StateSlot();
+#if defined(__ANDROID__)
+    view.standalone = true;
+#endif
+    view.foveation_live = aurora_stereo_foveation_available();
+    view.in_game = PortDebug::StateManager() != nullptr;
+    view.invulnerable = PortDebug::Invulnerable();
+    view.streamed_audio = PortDebug::AiAudioEnabled();
+    view.musyx_audio = PortDebug::MusyxAudioEnabled();
+    // The setting: a log started for this run by MP_LOG_FILE goes on until it ends.
+    view.log_file = PortDebug::LogFile();
+    // The eye size the chosen render scale gives, at once when it changes.
+    const OpenXREyeResolution eye = OpenXRGetEyeResolution(settings.render_scale);
+    view.eye_width = eye.scaled_width;
+    view.eye_height = eye.scaled_height;
+    return view;
+}
 
 Menu& TheMenu() {
     static Menu menu;
@@ -167,6 +246,9 @@ Menu& TheMenu() {
 void VrMenuUpdate() noexcept {
 #if defined(MP_ENABLE_OPENXR)
     Menu& menu = TheMenu();
+    const double now = NowSeconds();
+    // Every game frame, so the rate is current when the menu opens.
+    menu.rate.Tick(now);
     if (!OpenXRIsRunning() || !OpenXRSettingsPanelOpen()) {
         if (menu.was_open) {
             menu.was_open = false;
@@ -176,32 +258,33 @@ void VrMenuUpdate() noexcept {
         }
         return;
     }
-    const double now = NowSeconds();
     if (!menu.was_open) {
         menu.was_open = true;
         VrMenu::Open(menu.state);
     }
 
     PortVrSettings settings = GetVrSettings();
+    VrMenu::View view = BuildView(menu, settings, now);
     const OpenXRSettingsPanelPointer pointer = OpenXRTakeSettingsPanelPointer();
     VrMenu::Refresh(menu.state, now);
     if (pointer.valid) {
-        VrMenu::Hover(menu.state, pointer.y);
+        VrMenu::Hover(menu.state, view, pointer.y);
     }
     if (pointer.clicks > 0 && pointer.click_valid) {
-        VrMenu::Click(menu.state, settings, pointer.click_x, pointer.click_y, now, menu.actions);
+        VrMenu::Click(menu.state, settings, view, pointer.click_x, pointer.click_y, now, menu.actions);
         // Live, as in PrimedGun; the file is written by SAVE SETTINGS, EXIT
         // GAME, or whenever the port next saves its settings.
         SetVrSettings(settings);
         menu.actions.Flush();
+        // What the click changed outside the settings (a cheat, a switch, the slot).
+        view = BuildView(menu, settings, now);
     }
 
-    const int slot = menu.actions.StateSlot();
     const bool notice = now < menu.state.saved_notice_until;
-    std::string key = VrMenu::ViewKey(menu.state, settings, slot, notice);
+    std::string key = VrMenu::ViewKey(menu.state, settings, view, notice);
     if (key != menu.shown) {
         menu.shown = std::move(key);
-        const VrMenu::Pixels pixels = VrMenu::BuildPixels(menu.state, settings, slot, notice);
+        const VrMenu::Pixels pixels = VrMenu::BuildPixels(menu.state, settings, view, notice);
         aurora_set_stereo_panel_image(pixels.data(), VrMenu::kWidth, VrMenu::kImageHeight);
     }
 #endif

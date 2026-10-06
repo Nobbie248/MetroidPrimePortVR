@@ -4254,6 +4254,34 @@ void GrantItem(CPlayerState& ps, CPlayerState::EItemType type, int amount, int c
   ps.SetPickup(type, amount);
 }
 
+CPlayerState* CheatPlayerState() {
+  return sStateManager != nullptr ? sStateManager->PlayerState() : nullptr;
+}
+
+bool CheatFullHealth() {
+  CPlayerState* ps = CheatPlayerState();
+  if (ps == nullptr) {
+    return false;
+  }
+  ps->HealthInfo()->SetHP(ps->CalculateHealth());
+  return true;
+}
+
+bool CheatGrantEverything() {
+  CPlayerState* ps = CheatPlayerState();
+  if (ps == nullptr) {
+    return false;
+  }
+  for (int i = CPlayerState::kIT_PowerBeam; i < CPlayerState::kIT_Max; ++i) {
+    GrantItem(*ps, static_cast< CPlayerState::EItemType >(i), 1, 1);
+  }
+  GrantItem(*ps, CPlayerState::kIT_Missiles, 250, 250);
+  GrantItem(*ps, CPlayerState::kIT_PowerBombs, 8, 8);
+  GrantItem(*ps, CPlayerState::kIT_EnergyTanks, 14, 14);
+  ps->HealthInfo()->SetHP(ps->CalculateHealth());
+  return true;
+}
+
 void DrawCheats() {
   CStateManager* mgr = sStateManager;
   if (mgr == nullptr) {
@@ -4268,17 +4296,11 @@ void DrawCheats() {
 
   ImGui::Text("Health: %.0f / %.0f", ps->HealthInfo()->GetHP(), ps->CalculateHealth());
   if (ImGui::Button("Full health")) {
-    ps->HealthInfo()->SetHP(ps->CalculateHealth());
+    CheatFullHealth();
   }
   ImGui::SameLine();
   if (ImGui::Button("Grant everything")) {
-    for (int i = CPlayerState::kIT_PowerBeam; i < CPlayerState::kIT_Max; ++i) {
-      GrantItem(*ps, static_cast< CPlayerState::EItemType >(i), 1, 1);
-    }
-    GrantItem(*ps, CPlayerState::kIT_Missiles, 250, 250);
-    GrantItem(*ps, CPlayerState::kIT_PowerBombs, 8, 8);
-    GrantItem(*ps, CPlayerState::kIT_EnergyTanks, 14, 14);
-    ps->HealthInfo()->SetHP(ps->CalculateHealth());
+    CheatGrantEverything();
   }
   bool invulnerable = Invulnerable();
   if (ImGui::Checkbox("Invulnerable", &invulnerable)) {

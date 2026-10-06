@@ -1,7 +1,8 @@
 // PrimedGun's VR menu (platform/include/vr/vr_menu.h and the controls in
 // openxr_settings_panel.h): the image keeps PrimedGun's pixels and byte order,
 // clicks land where PrimedGun's hit boxes put them, the two-press actions
-// expire, and the panel, laser and hit dot hang where PrimedGun put them.
+// expire, and the panel, laser and hit dot hang where PrimedGun put them. The
+// port's own CONFIG and DEBUG tabs fit the strip and change what they show.
 
 #include "vr/openxr_settings_panel.h"
 #include "vr/vr_menu.h"
@@ -51,6 +52,12 @@ public:
     cannon = s;
     return true;
   }
+  void FullHealth() override { ++healed; }
+  void GrantEverything() override { ++granted; }
+  void SetInvulnerable(bool on) override { invulnerable = on ? 1 : 0; }
+  void SetStreamedAudio(bool on) override { streamed = on ? 1 : 0; }
+  void SetMusyxAudio(bool on) override { musyx = on ? 1 : 0; }
+  void SetLogFile(bool on) override { log = on ? 1 : 0; }
 
   int saves = 0;
   int exits = 0;
@@ -60,6 +67,12 @@ public:
   int newest = 0;
   int oldest = 0;
   int cannon = -1;
+  int healed = 0;
+  int granted = 0;
+  int invulnerable = -1;
+  int streamed = -1;
+  int musyx = -1;
+  int log = -1;
 };
 
 // The middle of row `index`'s hit band, and of its value box's halves.
@@ -67,11 +80,17 @@ float RowY(uint32_t tab, uint32_t index) { return static_cast<float>(RowTextY(ta
 constexpr float kLabelX = 200.0f;
 constexpr float kMinusX = 800.0f;
 constexpr float kPlusX = 920.0f;
+// Inside a tab, and its label's middle.
+float TabX(uint32_t tab) { return static_cast<float>(TabRect(tab).x) + 10.0f; }
+constexpr float kTabY = 80.0f;
+const float kPageY = static_cast<float>(kPageButtonY) + 14.0f;
+const float kPreviousX = static_cast<float>(kPreviousButtonX) + 100.0f;
+const float kNextX = static_cast<float>(kNextButtonX) + 100.0f;
 
 void TestImage() {
   const State state{};
   const PortVrSettings settings{};
-  const Pixels pixels = BuildPixels(state, settings, 1, false);
+  const Pixels pixels = BuildPixels(state, settings, View{}, false);
   Check(pixels.size() == static_cast<size_t>(kWidth) * kImageHeight, "image size");
   Check(At(pixels, 2, 250) == 0xD0100804u, "panel background");
   Check(At(pixels, 500, 5) == 0xE0FFB030u && At(pixels, 500, 507) == 0xE0FFB030u, "top and bottom bars");
@@ -82,8 +101,9 @@ void TestImage() {
   Check(bytes[0] == 0x30 && bytes[1] == 0xB0 && bytes[2] == 0xFF && bytes[3] == 0xE0, "RGBA byte order");
   // 'P' of the title, scale 4, top-left cell lit.
   Check(At(pixels, 49, 29) == 0xFFFFD8A0u, "title text");
-  // LAYOUT is the active tab: bright underline; CALIBRATION's is dim.
-  Check(At(pixels, 30, 100) == 0xFFFFB030u && At(pixels, 195, 100) == 0x604A2C12u, "tab underlines");
+  // LAYOUT is the active tab: bright underline; the next one's is dim.
+  Check(At(pixels, TabRect(0).x + 5, 100) == 0xFFFFB030u && At(pixels, TabRect(1).x + 5, 100) == 0x604A2C12u,
+        "tab underlines");
   // The layout page's help line in PrimedGun's lime.
   bool lime = false;
   for (int x = 80; x < 950 && !lime; ++x) {
@@ -103,51 +123,51 @@ void TestImage() {
   State calibration{};
   calibration.tab = kCalibrationTab;
   calibration.selected = 2;
-  const Pixels rows = BuildPixels(calibration, settings, 1, false);
+  const Pixels rows = BuildPixels(calibration, settings, View{}, false);
   Check(At(rows, 54, RowTextY(kCalibrationTab, 2)) == 0xFFFFB030u, "selected row accent");
   Check(At(rows, 54, RowTextY(kCalibrationTab, 1) - 4) == 0x80FFB030u, "unselected row accent");
   Check(At(rows, 790 + 2, RowTextY(kCalibrationTab, 2) + 6) == 0xFFFFB030u, "minus sign");
-  Check(ViewKey(calibration, settings, 1, false) != ViewKey(calibration, settings, 1, true), "notice in the key");
+  Check(ViewKey(calibration, settings, View{}, false) != ViewKey(calibration, settings, View{}, true), "notice in the key");
   // Page 1 has NEXT and no PREVIOUS; page 2 the other way round.
   const auto accent = [](const Pixels& p, int button_x) { return At(p, button_x + 1, kPageButtonY + 10); };
   Check(accent(rows, kNextButtonX) == 0x80FFB030u && accent(rows, kPreviousButtonX) == 0xD0100804u,
         "page 1 buttons");
   calibration.calibration_page = 1;
-  const Pixels second = BuildPixels(calibration, settings, 1, false);
+  const Pixels second = BuildPixels(calibration, settings, View{}, false);
   Check(accent(second, kPreviousButtonX) == 0x80FFB030u && accent(second, kNextButtonX) == 0xD0100804u,
         "page 2 buttons");
-  Check(ViewKey(calibration, settings, 1, false) != ViewKey(State{calibration.tab}, settings, 1, false),
+  Check(ViewKey(calibration, settings, View{}, false) != ViewKey(State{calibration.tab}, settings, View{}, false),
         "page in the key");
   // Tabs without pages have no buttons.
   State movement{};
   movement.tab = kMovementTab;
-  Check(accent(BuildPixels(movement, settings, 1, false), kNextButtonX) == 0xD0100804u, "no buttons without pages");
+  Check(accent(BuildPixels(movement, settings, View{}, false), kNextButtonX) == 0xD0100804u, "no buttons without pages");
 }
 
 void TestRows() {
   State s{};
-  Check(ItemCount(s) == 0, "layout has no rows");
+  Check(ItemCount(s, View{}) == 0, "layout has no rows");
   s.tab = kCalibrationTab;
-  Check(ItemCount(s) == 12, "calibration page 1");
+  Check(ItemCount(s, View{}) == 12, "calibration page 1");
   s.calibration_page = 1;
-  Check(ItemCount(s) == 12, "calibration page 2");
+  Check(ItemCount(s, View{}) == 12, "calibration page 2");
   s.tab = kControlTab;
-  Check(ItemCount(s) == 8, "control page 1");
+  Check(ItemCount(s, View{}) == 8, "control page 1");
   s.control_page = 1;
-  Check(ItemCount(s) == 8, "control page 2");
+  Check(ItemCount(s, View{}) == 8, "control page 2");
   s.tab = kMovementTab;
-  Check(ItemCount(s) == 11, "movement");
+  Check(ItemCount(s, View{}) == 11, "movement");
   s.tab = kTexturesTab;
-  Check(ItemCount(s) == 6, "textures");
+  Check(ItemCount(s, View{}) == 6, "textures");
   s.tab = kStatesTab;
-  Check(ItemCount(s) == 12, "states");
+  Check(ItemCount(s, View{}) == 12, "states");
   Check(RowTextY(kStatesTab, 4) == 146 + 4 * 22 + 18, "state slots sit lower");
   Check(RowFromTextureY(kCalibrationTab, 160.0f, 13) == 1 && RowFromTextureY(kCalibrationTab, 100.0f, 13) == -1,
         "row hit band");
   const PortVrSettings settings{};
   State calibration{};
   calibration.tab = kCalibrationTab;
-  const auto rows = BuildRows(calibration, settings, 1);
+  const auto rows = BuildRows(calibration, settings, View{});
   Check(rows.size() == 12 && std::strcmp(rows[0].label, "CUTSCENE CINEMA SCREEN") == 0 &&
             std::strcmp(rows[10].label, "CULLING CONE") == 0 && rows[10].value == "115.00",
         "PrimedGun's rows without the PAGE row, and its culling cone text");
@@ -157,122 +177,284 @@ void TestRows() {
 void TestClicks() {
   RecordingActions actions;
   PortVrSettings v{};
+  const View view{};
   State s{};
   Open(s);
   double now = 100.0;
 
   // Tabs: inside a tab switches; the gap between two does not.
-  Click(s, v, 22.0f + 166.0f * 2 + 10.0f, 80.0f, now, actions);
+  Click(s, v, view, TabX(kControlTab), kTabY, now, actions);
   Check(s.tab == kControlTab && s.selected == 0, "tab click");
-  Click(s, v, 22.0f + 150.0f + 8.0f, 80.0f, now, actions);
+  Click(s, v, view, static_cast<float>(TabRect(0).x + TabRect(0).w) + 4.0f, kTabY, now, actions);
   Check(s.tab == kControlTab, "tab gap ignored");
-  Click(s, v, 22.0f + 166.0f + 10.0f, 80.0f, now, actions);
+  Click(s, v, view, TabX(kCalibrationTab), kTabY, now, actions);
   Check(s.tab == kCalibrationTab, "calibration tab");
 
   // Numeric: right half up, left half down.
-  Click(s, v, kPlusX, RowY(kCalibrationTab, 1), now, actions);
+  Click(s, v, view, kPlusX, RowY(kCalibrationTab, 1), now, actions);
   Check(s.selected == 1 && Near(v.metroid_hud_distance, 0.80f), "HUD distance up");
-  Click(s, v, kMinusX, RowY(kCalibrationTab, 1), now, actions);
+  Click(s, v, view, kMinusX, RowY(kCalibrationTab, 1), now, actions);
   Check(Near(v.metroid_hud_distance, 0.75f), "HUD distance down");
   // Toggle anywhere else on the row.
-  Click(s, v, kLabelX, RowY(kCalibrationTab, 0), now, actions);
+  Click(s, v, view, kLabelX, RowY(kCalibrationTab, 0), now, actions);
   Check(!v.cinematic_screen_enabled, "cinema screen toggle");
   // HUD VERTICAL keeps up and down apart.
-  Click(s, v, kMinusX, RowY(kCalibrationTab, 3), now, actions);
+  Click(s, v, view, kMinusX, RowY(kCalibrationTab, 3), now, actions);
   Check(Near(v.metroid_hud_offset_down, 0.01f) && Near(v.metroid_hud_offset_up, 0.0f), "HUD vertical split");
 
   // Pages: PREVIOUS does nothing on page 1, NEXT turns to page 2 (and lets go
   // of a pending reset), NEXT does nothing there.
-  const float page_y = static_cast<float>(kPageButtonY) + 14.0f;
-  const float previous_x = static_cast<float>(kPreviousButtonX) + 100.0f;
-  const float next_x = static_cast<float>(kNextButtonX) + 100.0f;
-  Click(s, v, previous_x, page_y, now, actions);
+  Click(s, v, view, kPreviousX, kPageY, now, actions);
   Check(s.calibration_page == 0, "no page before the first");
-  Click(s, v, kLabelX, RowY(kCalibrationTab, 11), now, actions);
+  Click(s, v, view, kLabelX, RowY(kCalibrationTab, 11), now, actions);
   Check(s.reset_confirm == kResetTargeting, "reset targeting armed");
-  Click(s, v, next_x, page_y, now, actions);
+  Click(s, v, view, kNextX, kPageY, now, actions);
   Check(s.calibration_page == 1 && s.reset_confirm == kNoReset, "next page");
-  Click(s, v, next_x, page_y, now, actions);
+  Click(s, v, view, kNextX, kPageY, now, actions);
   Check(s.calibration_page == 1, "no page after the last");
-  Click(s, v, 512.0f, page_y, now, actions);
+  Click(s, v, view, 512.0f, kPageY, now, actions);
   Check(s.calibration_page == 1, "the page number is not a button");
   // SAMUS ARM PRESET is on page 2.
-  Click(s, v, kLabelX, RowY(kCalibrationTab, 9), now, actions);
+  Click(s, v, view, kLabelX, RowY(kCalibrationTab, 9), now, actions);
   Check(Near(v.model_offset_y, -0.3f) && Near(v.rot_offset_y, 20.0f) && Near(v.rot_offset_z, -90.0f),
         "Samus arm preset");
 
   // RESET CALIBRATION takes two clicks within six seconds.
-  Click(s, v, kLabelX, RowY(kCalibrationTab, 7), now, actions);
+  Click(s, v, view, kLabelX, RowY(kCalibrationTab, 7), now, actions);
   Check(s.reset_confirm == kResetCalibration && Near(v.rot_offset_z, -90.0f), "reset armed");
   now += 7.0;
   Refresh(s, now);
   Check(s.reset_confirm == kNoReset, "confirmation expires");
-  Click(s, v, kLabelX, RowY(kCalibrationTab, 7), now, actions);
-  Click(s, v, kLabelX, RowY(kCalibrationTab, 7), now + 1.0, actions);
+  Click(s, v, view, kLabelX, RowY(kCalibrationTab, 7), now, actions);
+  Click(s, v, view, kLabelX, RowY(kCalibrationTab, 7), now + 1.0, actions);
   Check(s.reset_confirm == kNoReset && Near(v.rot_offset_z, 0.0f) && Near(v.model_offset_y, 0.0f),
         "reset confirmed");
   // DETACH VR MENU FROM HAND.
-  Click(s, v, kLabelX, RowY(kCalibrationTab, 10), now, actions);
+  Click(s, v, view, kLabelX, RowY(kCalibrationTab, 10), now, actions);
   Check(v.vr_menu_floating, "detach toggle");
   // PREVIOUS goes back to page 1.
-  Click(s, v, previous_x, page_y, now, actions);
+  Click(s, v, view, kPreviousX, kPageY, now, actions);
   Check(s.calibration_page == 0, "previous page");
 
   // SAVE SETTINGS shows the notice; RESET ALL keeps the renderer's settings.
-  Click(s, v, 150.0f, 120.0f, now, actions);
+  Click(s, v, view, 150.0f, 120.0f, now, actions);
   Check(actions.saves == 1 && s.saved_notice_until > now, "save settings");
   v.render_scale = 1.5f;
   v.metroid_hud_size = 2.0f;
   v.patch_cannon_rotation = false;
-  Click(s, v, 400.0f, 120.0f, now, actions);
+  Click(s, v, view, 400.0f, 120.0f, now, actions);
   Check(Near(v.metroid_hud_size, 2.0f), "reset all armed");
-  Click(s, v, 400.0f, 120.0f, now, actions);
+  Click(s, v, view, 400.0f, 120.0f, now, actions);
   Check(Near(v.metroid_hud_size, 0.75f) && Near(v.render_scale, 1.5f) && !v.patch_cannon_rotation &&
             !v.vr_menu_floating,
         "reset all");
 
   // Control: RUMBLE TARGET cycles BOTH -> LEFT -> RIGHT.
-  Click(s, v, 22.0f + 166.0f * 2 + 10.0f, 80.0f, now, actions);
+  Click(s, v, view, TabX(kControlTab), kTabY, now, actions);
   Check(v.rumble_hand == RumbleHand::Right, "rumble default");
-  Click(s, v, kLabelX, RowY(kControlTab, 2), now, actions);
+  Click(s, v, view, kLabelX, RowY(kControlTab, 2), now, actions);
   Check(v.rumble_hand == RumbleHand::Both, "rumble cycles");
   // The control tab's second page: VISOR GESTURE, then back.
-  Click(s, v, next_x, page_y, now, actions);
-  Click(s, v, kLabelX, RowY(kControlTab, 2), now, actions);
+  Click(s, v, view, kNextX, kPageY, now, actions);
+  Click(s, v, view, kLabelX, RowY(kControlTab, 2), now, actions);
   Check(s.control_page == 1 && !v.xr_dpad_enabled, "visor gesture on control page 2");
-  Click(s, v, previous_x, page_y, now, actions);
+  Click(s, v, view, kPreviousX, kPageY, now, actions);
   Check(s.control_page == 0, "control page 1 again");
   // Movement: SNAP TURN ANGLE steps through PrimedGun's choices.
-  Click(s, v, 22.0f + 166.0f * 3 + 10.0f, 80.0f, now, actions);
-  Click(s, v, kPlusX, RowY(kMovementTab, 9), now, actions);
+  Click(s, v, view, TabX(kMovementTab), kTabY, now, actions);
+  Click(s, v, view, kPlusX, RowY(kMovementTab, 9), now, actions);
   Check(v.snap_turn_degrees == 60, "snap turn angle");
 
   // Textures: a slot is applied, then marked.
-  Click(s, v, 22.0f + 166.0f * 4 + 10.0f, 80.0f, now, actions);
-  Click(s, v, kLabelX, RowY(kTexturesTab, 2), now, actions);
+  Click(s, v, view, TabX(kTexturesTab), kTabY, now, actions);
+  Click(s, v, view, kLabelX, RowY(kTexturesTab, 2), now, actions);
   Check(actions.cannon == 2 && v.cannon_texture_slot == 2, "cannon slot");
 
   // States: a slot row selects; LOAD STATE takes two clicks.
-  Click(s, v, 22.0f + 166.0f * 5 + 10.0f, 80.0f, now, actions);
-  Click(s, v, kLabelX, RowY(kStatesTab, 4 + 2), now, actions);
+  Click(s, v, view, TabX(kStatesTab), kTabY, now, actions);
+  Click(s, v, view, kLabelX, RowY(kStatesTab, 4 + 2), now, actions);
   Check(actions.slot == 3 && v.vr_state_slot == 3, "state slot");
-  Click(s, v, kLabelX, RowY(kStatesTab, 0), now, actions);
+  Click(s, v, view, kLabelX, RowY(kStatesTab, 0), now, actions);
   Check(actions.loaded == 0 && s.state_confirm == kLoadState, "load armed");
-  Click(s, v, kLabelX, RowY(kStatesTab, 0), now, actions);
+  Click(s, v, view, kLabelX, RowY(kStatesTab, 0), now, actions);
   Check(actions.loaded == 3 && s.state_confirm == kNoStateAction, "load confirmed");
 
   // EXIT GAME, from any tab: two clicks.
-  Click(s, v, 860.0f, 40.0f, now, actions);
+  Click(s, v, view, 860.0f, 40.0f, now, actions);
   Check(actions.exits == 0 && s.reset_confirm == kExitGame, "exit armed");
-  Click(s, v, 860.0f, 40.0f, now, actions);
+  Click(s, v, view, 860.0f, 40.0f, now, actions);
   Check(actions.exits == 1, "exit confirmed");
 
   // Hover selects; opening goes back to LAYOUT.
   s.tab = kCalibrationTab;
-  Hover(s, RowY(kCalibrationTab, 5));
+  Hover(s, view, RowY(kCalibrationTab, 5));
   Check(s.selected == 5, "hover selects");
   Open(s);
   Check(s.tab == kLayoutTab && s.selected == 0, "opens on layout");
+}
+
+void TestTabs() {
+  // Eight tabs in PrimedGun's strip, in order, apart, each holding its label.
+  for (uint32_t tab = 0; tab < kTabCount; ++tab) {
+    const Rect rect = TabRect(tab);
+    Check(rect.y == 64 && rect.h == 38, "tab row");
+    Check(rect.w >= TextWidth(kTabLabels[tab], 2) + 16, "label fits its tab");
+    if (tab > 0) {
+      const Rect before = TabRect(tab - 1);
+      Check(rect.x >= before.x + before.w + kTabGap, "tabs apart");
+    }
+  }
+  Check(TabRect(0).x >= 22 && TabRect(kTabCount - 1).x + TabRect(kTabCount - 1).w <= 1002, "inside the strip");
+  Check(std::strcmp(kTabLabels[kPortConfigTab], "CONFIG") == 0 && kPortConfigTab == kLayoutTab + 1 &&
+            std::strcmp(kTabLabels[kDebugTab], "DEBUG") == 0 && kDebugTab == kTabCount - 1,
+        "CONFIG next to LAYOUT, DEBUG last");
+}
+
+void TestConfig() {
+  RecordingActions actions;
+  PortVrSettings v{};
+  View pc{};
+  View quest{};
+  quest.standalone = true;
+  double now = 50.0;
+
+  // Each platform its rows: the PC's mirror, the Quest's own switches.
+  const auto has = [](const View& view, PortItem item) {
+    const PortList list = PortItems(view);
+    for (uint32_t i = 0; i < list.count; ++i) {
+      if (list.items[i] == item) {
+        return true;
+      }
+    }
+    return false;
+  };
+  Check(has(pc, PortItem::MirrorView) && !has(pc, PortItem::Foveation) && !has(pc, PortItem::Passthrough),
+        "PC rows");
+  Check(!has(quest, PortItem::MirrorView) && has(quest, PortItem::Foveation) &&
+            has(quest, PortItem::PerformanceLevel) && has(quest, PortItem::DirectPresent),
+        "Quest rows");
+  Check(PageCount(kPortConfigTab, pc) == 2 && PageCount(kPortConfigTab, quest) == 2, "two pages each");
+
+  State s{};
+  Click(s, v, pc, TabX(kPortConfigTab), kTabY, now, actions);
+  Check(s.tab == kPortConfigTab && ItemCount(s, pc) == kRowsPerPage, "config tab");
+  // RENDER SCALE: -/+ by 0.05 within the settings' bounds.
+  Click(s, v, pc, kPlusX, RowY(kPortConfigTab, 0), now, actions);
+  Check(Near(v.render_scale, 1.05f), "render scale up");
+  Click(s, v, pc, kMinusX, RowY(kPortConfigTab, 0), now, actions);
+  Click(s, v, pc, kMinusX, RowY(kPortConfigTab, 0), now, actions);
+  Check(Near(v.render_scale, 0.95f), "render scale down");
+  v.render_scale = kVrRenderScaleMax;
+  Click(s, v, pc, kPlusX, RowY(kPortConfigTab, 0), now, actions);
+  Check(Near(v.render_scale, kVrRenderScaleMax), "render scale bound");
+  // EYE RESOLUTION reads out the chosen scale's eye size and takes no click.
+  View sized = pc;
+  sized.eye_width = 1428;
+  sized.eye_height = 1496;
+  State shown = s;
+  const auto rows = BuildRows(shown, v, sized);
+  Check(rows[1].value == "1428X1496" && BuildRows(shown, v, pc)[1].value == "UNKNOWN", "eye resolution");
+  const PortVrSettings before = v;
+  Click(s, v, pc, kLabelX, RowY(kPortConfigTab, 1), now, actions);
+  Check(v.render_scale == before.render_scale, "readout takes no click");
+  // REFRESH RATE: the value box steps and stops at the ends, the row cycles on.
+  Click(s, v, pc, kMinusX, RowY(kPortConfigTab, 2), now, actions);
+  Check(v.display_refresh_rate == 0.0f, "refresh rate stops at DEFAULT");
+  Click(s, v, pc, kPlusX, RowY(kPortConfigTab, 2), now, actions);
+  Check(v.display_refresh_rate == 72.0f, "refresh rate up");
+  Click(s, v, pc, kLabelX, RowY(kPortConfigTab, 2), now, actions);
+  Check(v.display_refresh_rate == 80.0f && BuildRows(s, v, pc)[2].value == "80 HZ", "refresh rate cycles");
+  // A switch.
+  Click(s, v, pc, kLabelX, RowY(kPortConfigTab, 5), now, actions);
+  Check(!v.remove_cinematic_bars, "cinematic bars switch");
+
+  // Page 2 ends with RESET CONFIG, two clicks; it leaves PrimedGun's settings alone.
+  Click(s, v, pc, kNextX, kPageY, now, actions);
+  Check(s.port_page == 1 && ItemCount(s, pc) == 6, "config page 2");
+  v.metroid_hud_size = 2.0f;
+  Click(s, v, pc, kLabelX, RowY(kPortConfigTab, 5), now, actions);
+  Check(s.reset_confirm == kResetPortConfig && Near(v.render_scale, kVrRenderScaleMax), "reset config armed");
+  Click(s, v, pc, kLabelX, RowY(kPortConfigTab, 5), now, actions);
+  Check(Near(v.render_scale, PortVrSettings{}.render_scale) && v.display_refresh_rate == 0.0f &&
+            v.remove_cinematic_bars && Near(v.metroid_hud_size, 2.0f),
+        "reset config");
+
+  // The Quest: foveation waits for the next start without density maps.
+  State q{};
+  q.tab = kPortConfigTab;
+  Check(BuildRows(q, v, quest)[3].label == std::string("FOVEATION - NEXT START"), "foveation next start");
+  View live = quest;
+  live.foveation_live = true;
+  Check(BuildRows(q, v, live)[3].label == std::string("FOVEATION"), "foveation live");
+  Click(q, v, quest, kPlusX, RowY(kPortConfigTab, 3), now, actions);
+  Check(v.foveation == FoveationLevel::Low, "foveation up");
+  Click(q, v, quest, kLabelX, RowY(kPortConfigTab, 4), now, actions);
+  Check(v.performance_level == "sustained_high" && BuildRows(q, v, quest)[4].value == "SUSTAINED HIGH",
+        "performance level cycles");
+  Click(q, v, quest, kLabelX, RowY(kPortConfigTab, 5), now, actions);
+  Check(!v.passthrough, "passthrough switch");
+}
+
+void TestDebug() {
+  RecordingActions actions;
+  PortVrSettings v{};
+  View view{};
+  double now = 10.0;
+  State s{};
+  Click(s, v, view, TabX(kDebugTab), kTabY, now, actions);
+  Check(s.tab == kDebugTab && ItemCount(s, view) == kDebugItems, "debug tab");
+  // No game: the cheats say so and do nothing.
+  Check(BuildRows(s, v, view)[0].value == "NO GAME", "no game");
+  Click(s, v, view, kLabelX, RowY(kDebugTab, 0), now, actions);
+  Check(actions.healed == 0, "no cheat without a game");
+  view.in_game = true;
+  Click(s, v, view, kLabelX, RowY(kDebugTab, 0), now, actions);
+  Check(actions.healed == 1, "full health");
+  // GRANT EVERYTHING takes two clicks.
+  Click(s, v, view, kLabelX, RowY(kDebugTab, 1), now, actions);
+  Check(actions.granted == 0 && s.reset_confirm == kGrantEverything, "grant armed");
+  Click(s, v, view, kLabelX, RowY(kDebugTab, 1), now, actions);
+  Check(actions.granted == 1, "grant confirmed");
+  // The switches flip what the view shows.
+  view.invulnerable = true;
+  Click(s, v, view, kLabelX, RowY(kDebugTab, 2), now, actions);
+  Check(actions.invulnerable == 0, "invulnerable off");
+  Click(s, v, view, kLabelX, RowY(kDebugTab, 3), now, actions);
+  Click(s, v, view, kLabelX, RowY(kDebugTab, 4), now, actions);
+  Click(s, v, view, kLabelX, RowY(kDebugTab, 5), now, actions);
+  Check(actions.streamed == 0 && actions.musyx == 0 && actions.log == 1, "audio and log switches");
+  Click(s, v, view, kLabelX, RowY(kDebugTab, 6), now, actions);
+  Check(v.diagnostics_logging, "xr diagnostics switch");
+  // Readouts.
+  view.headset_hz = 90.0f;
+  view.headset_fps = 89.94f;
+  view.draws = 1234;
+  const auto rows = BuildRows(s, v, view);
+  Check(rows[7].value == "90 HZ" && rows[8].value == "89.9" && rows[9].value == "UNKNOWN" && rows[10].value == "1234",
+        "readouts");
+  Check(PageCount(kDebugTab, view) == 1, "one page");
+
+  // The frame rate beside the title, on every tab; nothing while it is unknown.
+  State layout{};
+  const PortVrSettings settings{};
+  const auto title_row_lit = [](const Pixels& p) {
+    for (int y = 34; y < 48; ++y) {
+      for (int x = kFpsX; x < 570; ++x) {
+        if (At(p, x, y) == 0xFFD8C0A0u) {
+          return true;
+        }
+      }
+    }
+    return false;
+  };
+  View unknown{};
+  Check(!title_row_lit(BuildPixels(layout, settings, unknown, false)) && FpsText(unknown).empty(), "no rate yet");
+  View measured{};
+  measured.game_fps = 119.6f;
+  Check(FpsText(measured) == "120 FPS" && kFpsX + TextWidth("120 FPS", 2) <= 570, "rate text fits");
+  Check(title_row_lit(BuildPixels(layout, settings, measured, false)), "rate drawn on LAYOUT");
+  Check(!title_row_lit(BuildPixels(layout, settings, measured, true)), "SETTINGS SAVED takes its place");
+  Check(ViewKey(layout, settings, measured, false) != ViewKey(layout, settings, unknown, false), "rate in the key");
 }
 
 void TestPlacement() {
@@ -426,6 +608,9 @@ int main() {
   TestImage();
   TestRows();
   TestClicks();
+  TestTabs();
+  TestConfig();
+  TestDebug();
   TestPlacement();
   TestControls();
   std::puts("vr menu tests passed");

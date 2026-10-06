@@ -639,6 +639,8 @@ public:
         display_refresh_rate_.store(std::clamp(hz, 0.0f, 144.0f), std::memory_order_relaxed);
     }
 
+    void ReapplyPerformanceLevel() noexcept { performance_level_dirty_.store(true, std::memory_order_release); }
+
     OpenXREyeResolution EyeResolution(float scale) const noexcept {
         OpenXREyeResolution resolution{};
         std::lock_guard lock(eye_view_mutex_);
@@ -950,6 +952,9 @@ private:
             if (session_active &&
                 display_refresh_rate_.load(std::memory_order_relaxed) != applied_display_refresh_rate_) {
                 ApplyDisplayRefreshRate();
+            }
+            if (session_active && performance_level_dirty_.exchange(false, std::memory_order_acq_rel)) {
+                ApplyPerformanceLevel();
             }
             if (session_active != session_was_active_) {
                 session_was_active_ = session_active;
@@ -2081,6 +2086,8 @@ private:
     // Pacing thread only: the rate last asked for (-1 forces a request), and
     // whether the runtime accepted one this session.
     float applied_display_refresh_rate_ = -1.0f;
+    // The performance level setting changed while a session ran (OpenXRReapplyPerformanceLevel).
+    std::atomic_bool performance_level_dirty_{false};
     bool display_refresh_rate_requested_ = false;
     // The left eye for OpenXRGetEyeResolution: the runtime's description of it, set while a
     // session runs, and the size it is rendered at now (0 without a session).
@@ -2232,6 +2239,12 @@ void OpenXRSetDisplayRefreshRate(float hz) noexcept {
     OpenXRIntegration::Get().SetDisplayRefreshRate(hz);
 #else
     (void)hz;
+#endif
+}
+
+void OpenXRReapplyPerformanceLevel() noexcept {
+#if MP_OPENXR_GRAPHICS_BACKEND
+    OpenXRIntegration::Get().ReapplyPerformanceLevel();
 #endif
 }
 

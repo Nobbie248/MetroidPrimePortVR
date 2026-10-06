@@ -82,6 +82,11 @@ void OpenXRSetRenderScale(float scale) noexcept;
 // when this changes; 0 leaves the runtime's own. Callable from any thread.
 void OpenXRSetDisplayRefreshRate(float hz) noexcept;
 
+// Asks the runtime for the vr_performance_level setting again now; otherwise it is
+// asked for at each session start (XR_EXT_performance_settings). Callable from
+// any thread.
+void OpenXRReapplyPerformanceLevel() noexcept;
+
 // The left eye's image size: width x height is what the headset is shown now,
 // scaled_width x scaled_height what `scale` gives on this headset. All zero
 // while no OpenXR session runs.

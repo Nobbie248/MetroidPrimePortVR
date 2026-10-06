@@ -331,6 +331,21 @@ void PushVrSettingsToAurora() noexcept {
     // The pacing thread asks the runtime again when this changes.
     OpenXRSetDisplayRefreshRate(settings.display_refresh_rate);
     OpenXRSetLeanBackDegrees(settings.lean_back_degrees);
+    // The eyes are rebuilt at a new scale as the backend next prepares them, so the
+    // headset's VR menu can change it in play.
+    OpenXRSetRenderScale(settings.render_scale);
+    {
+        // Asked for again only when it changed, not with every other setting.
+        static std::string pushed_level;
+        std::lock_guard lock(Mutex());
+        if (settings.performance_level != pushed_level) {
+            const bool first = pushed_level.empty();
+            pushed_level = settings.performance_level;
+            if (!first) {
+                OpenXRReapplyPerformanceLevel();
+            }
+        }
+    }
     // The session's copy was taken when it was built, which can be before the
     // settings file's vr_passthrough line was read; nothing else passes it on.
     OpenXRSetPassthrough(settings.passthrough);

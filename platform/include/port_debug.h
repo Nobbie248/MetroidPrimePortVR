@@ -305,6 +305,11 @@ std::string CardExportDolphin();
 // Cheat: the player takes no damage (F1 > Debug > cheats, MP_GODMODE, console `god`).
 bool Invulnerable();
 void SetInvulnerable(bool enabled);
+// Cheats: Samus's energy back to full; every item, full missiles, power bombs and energy
+// tanks (F1 > Debug > cheats, the headset's VR menu). False, doing nothing, with no game
+// running. Main thread.
+bool CheatFullHealth();
+bool CheatGrantEverything();
 // Write the log to <user folder>/metroid_prime_port.log (port_log_file.h). MP_LOG_FILE=1
 // turns it on for one run without changing the setting.
 bool LogFile();

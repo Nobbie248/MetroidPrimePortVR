@@ -1,3 +1,57 @@
+## VR: the VR menu's CONFIG and DEBUG tabs (2026-10-06)
+
+Two tabs of the port's own join PrimedGun's six in the headset's VR menu:
+CONFIG, next to LAYOUT, and DEBUG, last. Eight tabs do not fit PrimedGun's
+150-pixel tabs, so each tab is as wide as its label plus 12 pixels a side. The
+strip is centred in PrimedGun's.
+
+The game's frame rate shows beside the title on every tab ("90 FPS"). For the
+three seconds of SETTINGS SAVED, the notice takes its place. It
+counts the game's own frames (`CGraphics::EndScene`) rather than using
+`aurora_get_fps`, which counts the desktop window's presents. A Quest has no
+window, so that read 0 there.
+
+**CONFIG** holds the launcher's Port Config VR settings and the renderer
+switches the F1 VR tab has. It spans two pages.
+
+| Group | Rows |
+|---|---|
+| Both platforms | RENDER SCALE, EYE RESOLUTION (a readout), REFRESH RATE, WORLD SCALE, DRAW THE WORLD PER EYE, REMOVE CINEMATIC BARS, SKY AT INFINITY, SPACE WARP, SCAN WINDOW ZOOM, SCREEN DISTANCE, SCREEN WIDTH, LEAN BACK, PIPELINED RENDERING, INDEXED VERTICES ON CPU, LOOK TO SCAN, BEAM WHEEL HUD HIGHLIGHT, RESET CONFIG |
+| Quest only | FOVEATION, PERFORMANCE LEVEL, PASSTHROUGH, MULTIVIEW EYES, DIRECT TO HEADSET |
+| PC only | WINDOW SHOWS (the mirror) |
+
+- EYE RESOLUTION shows the eye size the chosen scale gives (`OpenXRGetEyeResolution`).
+- Choices get the value box's -/+, which stop at the ends; a click elsewhere on
+  the row cycles on.
+- Two rows are labelled "NEXT START": DIRECT TO HEADSET always, and FOVEATION
+  when the session started without density maps.
+- RESET CONFIG takes two clicks and leaves PrimedGun's settings alone.
+
+**DEBUG** holds what of the F1 Debug tab works in the headset, plus live
+readouts:
+- FULL HEALTH, and GRANT EVERYTHING (two clicks). Both read "NO GAME" outside
+  a game.
+- INVULNERABLE, STREAMED AUDIO, MUSYX AUDIO, WRITE THE LOG TO A FILE, and XR
+  DIAGNOSTICS LOG.
+- Readouts: headset refresh, new frames to the headset, game frames per second,
+  draws per frame. They are sampled twice a second, so the image is redrawn at
+  most that often.
+- The free camera and the modding tools need a pad and the desktop, and stay in
+  F1.
+- `PortDebug::CheatFullHealth` and `CheatGrantEverything` now hold the F1
+  buttons' code, for both callers.
+
+**Live from the menu.**
+- Render scale changes reach the headset at once. `PushVrSettingsToAurora` now
+  calls `OpenXRSetRenderScale`, and the backends rebuild the eyes at the new
+  size.
+- A changed performance level is asked for again on the pacing thread
+  (`OpenXRReapplyPerformanceLevel`), not only at the next session.
+
+**Tests.** `port_vr_menu_tests` adds the tab strip, both platforms' CONFIG rows
+and pages, the steps, the choices, the readout and the reset. It also covers
+DEBUG's cheats, two-press grant, switches and readouts.
+
 ## VR: PrimedGun's in-headset menu (2026-10-06)
 
 PrimedGun's VR settings menu now opens in the headset, the way PrimedGun opened

@@ -106,4 +106,10 @@ bool VrLookToScanHoldsFacing(const CStateManager& mgr) noexcept;
 // and its base forward offset), in world units; zero when not tracked.
 CVector3f VrCannonModelOffsetWorld() noexcept;
 
+// PrimedGun's VR menu (vr/vr_menu.h), once per presented frame from
+// CGraphics::EndScene: while it is open in the headset, applies the laser's
+// hover and clicks and hands Aurora the menu's image when it changes
+// (vr_menu.cpp). Nothing without OpenXR.
+void VrMenuUpdate() noexcept;
+
 } // namespace PortVr

@@ -14,7 +14,9 @@
 #include "vr/openxr_controller_snapshot.h"
 #include "vr/openxr_diagnostics.h"
 #include "vr/openxr_screen_math.h"
+#include "vr/vr_menu.h"
 #include "vr/vr_settings.h"
+#include "vr/vr_visor_dpad.h"
 
 #include <SDL3/SDL_gamepad.h>
 #include <SDL3/SDL_joystick.h>
@@ -295,6 +297,13 @@ Sint16 ToTrigger(float value) noexcept {
 screen_math::Pose ToPose(const XrPosef& pose) noexcept {
     return {{pose.position.x, pose.position.y, pose.position.z},
             {pose.orientation.x, pose.orientation.y, pose.orientation.z, pose.orientation.w}};
+}
+
+XrPosef ToXrPose(const screen_math::Pose& pose) noexcept {
+    XrPosef xr{};
+    xr.orientation = {pose.orientation[0], pose.orientation[1], pose.orientation[2], pose.orientation[3]};
+    xr.position = {pose.position[0], pose.position[1], pose.position[2]};
+    return xr;
 }
 
 OpenXRPoseState ToPoseState(const XrPosef& pose, bool valid) noexcept {
@@ -707,7 +716,8 @@ void OpenXRInput::Destroy() {
     m_convert_now_to_xr_time = nullptr;
     m_panel_controls.Reset();
     m_last_input_time = 0;
-    m_panel_select_held = false;
+    m_menu_placement = {};
+    m_floating_valid = false;
     m_created = false;
     m_runtime = nullptr;
 }
@@ -719,8 +729,8 @@ void OpenXRInput::Idle() {
     // The panel stays as it was; only what the controllers were holding is forgotten.
     m_panel_controls.Reset();
     m_last_input_time = 0;
-    m_panel_select_held = false;
-    OpenXRPublishSettingsPanelPointer(false, 0.0f, 0.0f, false, 0.0f);
+    m_menu_placement = {};
+    OpenXRPublishSettingsPanelPointer(false, 0.0f, 0.0f, false);
     OpenXRInputSnapshot idle{};
     OpenXRPublishInputSnapshot(idle);
     StopRumble();
@@ -728,9 +738,8 @@ void OpenXRInput::Idle() {
     Relay().Publish({});
 }
 
-void OpenXRInput::Sync(XrTime predicted_display_time, const OpenXRPointerScreen& screen,
-                       const OpenXRPointerScreen& settings_panel) {
-    (void)screen; // The game picture's rectangle; the PrimedGun menu pointer will use it.
+void OpenXRInput::Sync(XrTime predicted_display_time, const OpenXRPointerScreen& screen, bool panel_available) {
+    (void)screen; // The game picture's rectangle, for a pointer on the game's own menus.
     if (!m_created || m_runtime == nullptr) {
         return;
     }
@@ -850,17 +859,34 @@ void OpenXRInput::Sync(XrTime predicted_display_time, const OpenXRPointerScreen&
     if (Injected("a")) {
         panel_hands[1].primary = true;
     }
-    // The game thread may open or close the panel too; only a change made here
+    // The game thread may open or close the menu too; only a change made here
     // is written back.
     const bool was_open = OpenXRSettingsPanelOpen();
     bool open = was_open;
     const OpenXRControllerMode mode = OpenXRGetControllerMode();
-    const settings_panel::Frame panel = m_panel_controls.Update(panel_hands, open, dt_seconds, mode);
-    // While the panel has the controllers, and always when they are nothing to
+    const PortVrSettings settings = GetVrSettings();
+    settings_panel::ToggleOptions options;
+    options.allowed = panel_available && settings.vr_overlays_enabled;
+    options.panel_hand = settings.use_right_hand ? 0u : 1u;
+    options.long_press = settings.vr_menu_hold_left_stick;
+    options.needs_head_zone = settings.vr_menu_requires_head_zone;
+    if (options.needs_head_zone && !was_open) {
+        // PrimedGun's LeftControllerNearHead: the panel hand's aim pose in the
+        // visor gesture's zone.
+        screen_math::Pose head{};
+        screen_math::Pose hand{};
+        options.hand_near_head =
+            Locate(m_runtime->ViewSpace(), input_time, head) &&
+            Locate(m_aim_spaces[options.panel_hand], input_time, hand) &&
+            VisorDpad::HandNearHead(hand.position, head.position, settings.xr_dpad_head_radius,
+                                    settings.xr_dpad_head_y_below);
+    }
+    const settings_panel::Frame panel = m_panel_controls.Update(panel_hands, open, dt_seconds, mode, options);
+    // While the menu has the controllers, and always when they are nothing to
     // the game, the game sees them idle.
     const bool withheld = panel.withheld || mode == OpenXRControllerMode::None;
-    // Pointer first: the game thread reads it as soon as it sees the panel open.
-    PublishSettingsPanel(input_time, settings_panel, panel);
+    // Pointer first: the game thread reads it as soon as it sees the menu open.
+    PlaceMenu(input_time, panel, settings);
     if (open != was_open) {
         OpenXRSetSettingsPanelOpen(open);
     }
@@ -910,40 +936,89 @@ void OpenXRInput::Sync(XrTime predicted_display_time, const OpenXRPointerScreen&
     UpdateRumble();
 }
 
-// The pointing hand's aim ray against the whole panel, in canvas pixels, with a
-// short tick in that hand when a selection starts.
-void OpenXRInput::PublishSettingsPanel(XrTime input_time, const OpenXRPointerScreen& panel,
-                                       const settings_panel::Frame& frame) {
+bool OpenXRInput::Locate(XrSpace space, XrTime time, screen_math::Pose& pose) const {
+    if (space == XR_NULL_HANDLE) {
+        return false;
+    }
+    XrSpaceLocation location{XR_TYPE_SPACE_LOCATION};
+    if (XR_FAILED(xrLocateSpace(space, m_runtime->AppSpace(), time, &location)) ||
+        (location.locationFlags & kPoseValidFlags) != kPoseValidFlags) {
+        return false;
+    }
+    pose = ToPose(location.pose);
+    return true;
+}
+
+// PrimedGun's menu placement (UpdateVrMenu): on the off hand's grip, or, when
+// detached, latched 2.7 m ahead of the head as it opens. The cannon hand's aim
+// ray picks the canvas point (texture pixels) and draws the laser, with a
+// short tick in that hand when a click starts.
+void OpenXRInput::PlaceMenu(XrTime input_time, const settings_panel::Frame& frame, const PortVrSettings& settings) {
+    m_menu_placement = {};
     if (!frame.open) {
-        // Nothing may still read as held when the panel next opens.
-        m_panel_select_held = false;
-        OpenXRPublishSettingsPanelPointer(false, 0.0f, 0.0f, false, 0.0f);
+        m_floating_valid = false;
+        OpenXRPublishSettingsPanelPointer(false, 0.0f, 0.0f, false);
         return;
     }
-    bool valid = false;
-    std::array<float, 2> point{};
-    const XrSpace aim_space = m_aim_spaces[frame.pointing_hand];
-    if (panel.valid && aim_space != XR_NULL_HANDLE) {
-        XrSpaceLocation location{XR_TYPE_SPACE_LOCATION};
-        if (XR_SUCCEEDED(xrLocateSpace(aim_space, m_runtime->AppSpace(), input_time, &location)) &&
-            (location.locationFlags & kPoseValidFlags) == kPoseValidFlags) {
-            screen_math::Screen target{};
-            target.pose = ToPose(panel.pose);
-            target.half_width = panel.half_width_meters;
-            target.half_height = panel.half_height_meters;
-            const ScreenHit hit = screen_math::RaycastScreen(ToPose(location.pose), target);
-            if (hit.valid) {
-                valid = true;
-                point = settings_panel::CanvasPoint(hit);
-            }
+    screen_math::Pose head{};
+    const bool head_valid = Locate(m_runtime->ViewSpace(), input_time, head);
+
+    screen_math::Pose panel{};
+    float width = 0.0f;
+    float height = 0.0f;
+    if (settings.vr_menu_floating) {
+        // Latched when it opens, or when it is detached while open.
+        if (!m_floating_valid && head_valid) {
+            m_floating_valid = VrMenu::FloatingPoseFromHead(head, m_floating_pose);
+        }
+        if (m_floating_valid) {
+            panel = m_floating_pose;
+            width = VrMenu::kFloatingWidth;
+            height = VrMenu::kFloatingHeight;
+        }
+    } else {
+        m_floating_valid = false;
+        const uint32_t hand = settings.use_right_hand ? 0u : 1u;
+        screen_math::Pose grip{};
+        if (Locate(m_grip_spaces[hand], input_time, grip) || Locate(m_aim_spaces[hand], input_time, grip)) {
+            panel = VrMenu::PanelPoseFromGrip(grip);
+            width = VrMenu::kWristWidth;
+            height = VrMenu::kWristHeight;
         }
     }
-    if (frame.select && !m_panel_select_held) {
+    const bool placed = width > 0.0f;
+
+    screen_math::Pose aim{};
+    const bool aim_valid = Locate(m_aim_spaces[frame.pointing_hand], input_time, aim);
+    VrMenu::PointerHit hit{};
+    if (placed && aim_valid) {
+        hit = VrMenu::HitPanel(panel, width, height, aim);
+    }
+    if (frame.clicked) {
         constexpr XrDuration kTickNs = 15'000'000;
         ApplyHaptic(frame.pointing_hand, 0.35f, kTickNs);
     }
-    m_panel_select_held = frame.select;
-    OpenXRPublishSettingsPanelPointer(valid, point[0], point[1], frame.select, frame.wheel);
+    OpenXRPublishSettingsPanelPointer(hit.valid, hit.x * static_cast<float>(VrMenu::kWidth),
+                                      hit.y * static_cast<float>(VrMenu::kMenuHeight), frame.clicked);
+
+    if (!placed) {
+        return;
+    }
+    m_menu_placement.placed = true;
+    m_menu_placement.pose = ToXrPose(panel);
+    m_menu_placement.width_meters = width;
+    m_menu_placement.height_meters = height;
+    if (aim_valid) {
+        const float length = hit.valid ? hit.distance : VrMenu::kPointerMaxDistance;
+        const screen_math::Vec3 eye = head_valid ? head.position : panel.position;
+        m_menu_placement.laser = true;
+        m_menu_placement.laser_pose = ToXrPose(VrMenu::LaserPose(aim, length, eye));
+        m_menu_placement.laser_length_meters = length;
+        if (hit.valid) {
+            m_menu_placement.dot = true;
+            m_menu_placement.dot_pose = ToXrPose(VrMenu::DotPose(panel, aim, hit.distance));
+        }
+    }
 }
 
 void OpenXRInput::PublishSnapshot(XrTime input_time, const std::array<HandInputs, kHands>& hands,

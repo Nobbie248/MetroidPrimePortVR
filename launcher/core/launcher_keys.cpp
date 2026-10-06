@@ -51,8 +51,8 @@ constexpr KeyInfo kKeys[] = {
     {"vr_diagnostics_logging", K::Bool, "0"},
     // Controller
     {"vr_use_right_hand", K::Bool, "1"},
-    {"vr_vr_menu_hold_left_stick", K::Bool, "0", 0, 0, 0, false},
-    {"vr_vr_menu_requires_head_zone", K::Bool, "0", 0, 0, 0, false},
+    {"vr_vr_menu_hold_left_stick", K::Bool, "0"},
+    {"vr_vr_menu_requires_head_zone", K::Bool, "0"},
     {"vr_combat_jump_use_primary_button", K::Bool, "0"},
     {"vr_beam_wheel_hud_highlight", K::Bool, "1"},
     {"vr_rumble_enabled", K::Bool, "1"},
@@ -77,10 +77,10 @@ constexpr KeyInfo kKeys[] = {
     {"vr_snap_turn_enabled", K::Bool, "0"},
     {"vr_snap_turn_degrees", K::Int, "45", 30.0f, 90.0f, 15.0f, false},
     // Calibration
-    {"vr_vr_overlays_enabled", K::Bool, "1", 0, 0, 0, false},
+    {"vr_vr_overlays_enabled", K::Bool, "1"},
     {"vr_height_prompt_enabled", K::Bool, "1", 0, 0, 0, false},
     {"vr_cinematic_screen_enabled", K::Bool, "1"},
-    {"vr_vr_menu_floating", K::Bool, "0", 0, 0, 0, false},
+    {"vr_vr_menu_floating", K::Bool, "0"},
     {"vr_game_menu_screen_enabled", K::Bool, "1"},
     {"vr_visor_helmet_enabled", K::Bool, "0", 0, 0, 0, false},
     {"vr_position_marker_enabled", K::Bool, "1", 0, 0, 0, false},

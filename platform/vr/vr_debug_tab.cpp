@@ -3,6 +3,9 @@
 #include "vr/vr_debug_tab.h"
 
 #include "vr/openxr_integration.h"
+#if defined(MP_ENABLE_OPENXR)
+#include "vr/openxr_settings_panel.h"
+#endif
 #include "vr/prime_vr_policy.h"
 #include "vr/vr_pad.h"
 #include "vr/vr_settings.h"
@@ -272,6 +275,25 @@ void DrawVrDebugTab() {
   changed |= ImGui::SliderFloat("Screen width", &s.screen_width_meters, 0.5f, 6.f, "%.2f m");
   changed |= ImGui::Checkbox("Cinematics on the screen", &s.cinematic_screen_enabled);
   changed |= ImGui::Checkbox("Pause, map and logbook on the screen", &s.game_menu_screen_enabled);
+
+  ImGui::SeparatorText("VR menu (PrimedGun's settings in the headset)");
+  changed |= ImGui::Checkbox("VR menu", &s.vr_overlays_enabled);
+  ImGui::TextWrapped("Click the off hand's thumbstick (the left one unless left-handed) or its menu button to open "
+                     "or close it. The cannon hand's laser points and its trigger or A clicks; the game keeps "
+                     "running, without the controllers, while it is open.");
+  changed |= ImGui::Checkbox("Detach it from the hand (floats 2.7 m ahead)", &s.vr_menu_floating);
+  changed |= ImGui::Checkbox("Open it with a one-second press", &s.vr_menu_hold_left_stick);
+  changed |= ImGui::Checkbox("Open it only with the hand next to the head", &s.vr_menu_requires_head_zone);
+#if defined(MP_ENABLE_OPENXR)
+  {
+    bool menu_open = OpenXRSettingsPanelOpen();
+    ImGui::BeginDisabled(!running || !s.vr_overlays_enabled);
+    if (ImGui::Checkbox("Show it in the headset now", &menu_open)) {
+      OpenXRSetSettingsPanelOpen(menu_open);
+    }
+    ImGui::EndDisabled();
+  }
+#endif
 
   ImGui::SeparatorText("Diagnostics");
   changed |= ImGui::Checkbox("[xr-diag] logging", &s.diagnostics_logging);

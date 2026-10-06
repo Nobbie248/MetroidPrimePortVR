@@ -1018,9 +1018,9 @@ private:
             // virtual all round, and the cameras are paused for it.
             presentation.passthrough =
                 !immersive && passthrough_.load(std::memory_order_relaxed);
-            // The settings panel gets a compositor layer of its own while it is
-            // open, and Aurora leaves it out of the eyes. A backend that could
-            // not make that layer has the panel drawn into the eyes instead.
+            // PrimedGun's VR menu gets compositor layers of its own while it is
+            // open. A backend that could not make them cannot show it, and the
+            // menu then never opens.
             const bool panel_layer = backend_->PanelLayerAvailable();
             aurora_set_stereo_panel_layer(panel_layer);
             presentation.panel.requested = panel_layer && OpenXRSettingsPanelOpen();
@@ -1108,15 +1108,14 @@ private:
             // before FinishFrame submits a layer built from it.
             ServiceRecenterRequest();
             UpdateVirtualScreenPose(frame);
-            const OpenXRPointerScreen panel_screen = SettingsPanelScreen(frame, policy, immersive);
-            PlacePanelLayer(frame, panel_screen);
             if (input_ != nullptr) {
                 const diagnostics::ScopedStage input_timer(diagnostics::Stage::InputSync);
                 // After the screen is placed, so the pointer aims at this
                 // frame's screen rather than the previous one's.
                 input_->Sync(frame.xr_frame.predicted_display_time, PointerScreen(frame, policy, immersive),
-                             panel_screen);
+                             panel_layer);
             }
+            PlacePanelLayer(frame);
 
             if (!frame.expects_gpu_submission) {
                 if (!backend_->FinishFrame(frame, false)) {
@@ -1303,13 +1302,12 @@ private:
         // The head pose this packet was located with places the screens and aims the pointer.
         ServiceRecenterRequest();
         UpdateVirtualScreenPose(packet);
-        const OpenXRPointerScreen panel_screen = SettingsPanelScreen(packet, policy, immersive);
-        PlacePanelLayer(packet, panel_screen);
         if (input_ != nullptr) {
             const diagnostics::ScopedStage input_timer(diagnostics::Stage::InputSync);
             input_->Sync(packet.xr_frame.predicted_display_time, PointerScreen(packet, policy, immersive),
-                         panel_screen);
+                         backend_->PanelLayerAvailable());
         }
+        PlacePanelLayer(packet);
         if (!packet.expects_gpu_submission) {
             // Nothing to render (no rendering requested or no tracking): keep the compositor fed.
             return KeepAlive();
@@ -1440,13 +1438,12 @@ private:
         // The head pose this packet was located with places the screens and aims the pointer.
         ServiceRecenterRequest();
         UpdateVirtualScreenPose(packet);
-        const OpenXRPointerScreen panel_screen = SettingsPanelScreen(packet, policy, immersive);
-        PlacePanelLayer(packet, panel_screen);
         if (input_ != nullptr) {
             const diagnostics::ScopedStage input_timer(diagnostics::Stage::InputSync);
             input_->Sync(packet.xr_frame.predicted_display_time, PointerScreen(packet, policy, immersive),
-                         panel_screen);
+                         backend_->PanelLayerAvailable());
         }
+        PlacePanelLayer(packet);
         {
             const diagnostics::ScopedStage publish_timer(diagnostics::Stage::Publish);
             std::lock_guard lock(published_mutex_);
@@ -1775,36 +1772,25 @@ private:
         return screen;
     }
 
-    // The settings panel's rectangle: centred on the same screen, a fixed
-    // fraction of its width, the way Aurora lays it over the eyes
-    // (aurora_imgui_set_stereo_overlay). Unlike the pointer's picture it is
-    // there in a race even when the 2D layer is not on the screen.
-    OpenXRPointerScreen SettingsPanelScreen(const OpenXRBackendFrame& frame, const PrimeVRPolicySnapshot& policy,
-                                            bool immersive) const noexcept {
-        OpenXRPointerScreen screen{};
-        const float screen_width =
-            immersive ? policy.config.screen_width_meters : std::max(0.25f, frame.presentation.quad_width_meters);
-        if (!(screen_width > 0.0f) ||
-            !(immersive ? RaceScreenPose(frame, policy, screen.pose) : MenuScreenPose(frame, screen.pose))) {
-            return screen;
-        }
-        const std::array<float, 2> extents = settings_panel::HalfExtents(screen_width);
-        screen.half_width_meters = extents[0];
-        screen.half_height_meters = extents[1];
-        screen.valid = true;
-        return screen;
-    }
-
-    // The settings panel's layer hangs exactly where its pointer hits are
-    // tested, the rectangle it used to cover in the eyes.
-    static void PlacePanelLayer(OpenXRBackendFrame& frame, const OpenXRPointerScreen& screen) noexcept {
+    // The VR menu's layers hang where the input layer placed the menu this
+    // frame (on the off hand, or floating) and aimed the laser, the same poses
+    // its pointer hits were tested against.
+    void PlacePanelLayer(OpenXRBackendFrame& frame) const noexcept {
         OpenXRPanelLayer& panel = frame.presentation.panel;
-        panel.placed = panel.requested && screen.valid;
-        if (panel.placed) {
-            panel.pose = screen.pose;
-            panel.width_meters = 2.0f * screen.half_width_meters;
-            panel.height_meters = 2.0f * screen.half_height_meters;
+        const OpenXRMenuPlacement menu = input_ != nullptr ? input_->MenuPlacement() : OpenXRMenuPlacement{};
+        panel.placed = panel.requested && menu.placed;
+        if (!panel.placed) {
+            panel.laser = panel.dot = false;
+            return;
         }
+        panel.pose = menu.pose;
+        panel.width_meters = menu.width_meters;
+        panel.height_meters = menu.height_meters;
+        panel.laser = menu.laser;
+        panel.laser_pose = menu.laser_pose;
+        panel.laser_length_meters = menu.laser_length_meters;
+        panel.dot = menu.dot;
+        panel.dot_pose = menu.dot_pose;
     }
 
     // Centre of the race's 2D screen. ViewFromBase maps a point p of the

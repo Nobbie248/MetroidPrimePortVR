@@ -7,7 +7,9 @@
 #include "vr/openxr_controller_snapshot.h"
 #include "vr/openxr_hand_inputs.h"
 #include "vr/openxr_runtime.h"
+#include "vr/openxr_screen_math.h"
 #include "vr/openxr_settings_panel.h"
+#include "vr/vr_settings.h"
 
 #include <array>
 #include <cstdint>
@@ -23,6 +25,20 @@ struct OpenXRPointerScreen {
     XrPosef pose{{0.0f, 0.0f, 0.0f, 1.0f}, {0.0f, 0.0f, 0.0f}};
     float half_width_meters = 0.0f;
     float half_height_meters = 0.0f;
+};
+
+// Where PrimedGun's VR menu and its pointer are this frame, for the menu's
+// quad layers (openxr_backend.h OpenXRPanelLayer).
+struct OpenXRMenuPlacement {
+    bool placed = false;
+    XrPosef pose{{0.0f, 0.0f, 0.0f, 1.0f}, {0.0f, 0.0f, 0.0f}};
+    float width_meters = 0.0f;
+    float height_meters = 0.0f;
+    bool laser = false;
+    XrPosef laser_pose{{0.0f, 0.0f, 0.0f, 1.0f}, {0.0f, 0.0f, 0.0f}};
+    float laser_length_meters = 0.0f;
+    bool dot = false;
+    XrPosef dot_pose{{0.0f, 0.0f, 0.0f, 1.0f}, {0.0f, 0.0f, 0.0f}};
 };
 
 // What the controllers are to the game, from the VR settings.
@@ -54,11 +70,12 @@ OpenXRControllerMode OpenXRGetControllerMode() noexcept;
 // Reality and HTC Vive profiles, and khr/simple_controller so an unknown
 // runtime still offers a select, a menu and something to point with.
 //
-// The settings panel (openxr_settings_panel.h): the off hand's thumbstick click
-// or menu button opens and closes it (both thumbsticks clicked together as a
-// gamepad). While it is open, and until every button has been released after it
-// closes, the game sees idle controllers: the pointer and the triggers belong
-// to the panel.
+// PrimedGun's VR menu (openxr_settings_panel.h, vr_menu.h): the off hand's
+// thumbstick click or menu button opens and closes it (both thumbsticks clicked
+// together as a gamepad). It hangs on the off hand, or floats ahead when
+// detached, and the cannon hand's laser points at it. While it is open, and
+// until every button has been released after it closes, the game sees idle
+// controllers: the laser and the triggers belong to the menu.
 //
 // Haptics: the game's rumble request (OpenXRSetRumble, from the PrimedGun pad's
 // port 0 motor or the virtual gamepad's rumble) is applied every frame to the
@@ -85,10 +102,13 @@ public:
 
     // xrSyncActions + state reads, then publishes the snapshot (and the virtual
     // gamepad in Gamepad mode). predicted_display_time is the frame's XrTime;
-    // screen is where the game picture is this frame (kept for the menu
-    // pointer), settings_panel where the settings panel is.
-    void Sync(XrTime predicted_display_time, const OpenXRPointerScreen& screen,
-              const OpenXRPointerScreen& settings_panel);
+    // screen is where the game picture is this frame (kept for a future menu
+    // pointer). panel_available says whether the backend can show the VR menu;
+    // without it the menu never opens.
+    void Sync(XrTime predicted_display_time, const OpenXRPointerScreen& screen, bool panel_available);
+
+    // Where the last Sync placed the VR menu and its pointer.
+    const OpenXRMenuPlacement& MenuPlacement() const noexcept { return m_menu_placement; }
 
     // Publishes an idle snapshot and stops the haptics, for frames without
     // focused input.
@@ -109,8 +129,12 @@ private:
     void DestroyPoseSpaces();
     void LoadInputClock();
     XrTime InputSampleTime(XrTime predicted_display_time) const;
-    void PublishSettingsPanel(XrTime input_time, const OpenXRPointerScreen& panel,
-                              const settings_panel::Frame& frame);
+    // Locates `space` in the application space at `time`; false unless both
+    // its position and orientation are valid.
+    bool Locate(XrSpace space, XrTime time, screen_math::Pose& pose) const;
+    // Places the VR menu, aims the pointer hand's laser at it and publishes the
+    // pointer for the game thread.
+    void PlaceMenu(XrTime input_time, const settings_panel::Frame& frame, const PortVrSettings& settings);
     // The snapshot for the game thread: `hands` as the game may see them (idle
     // while withheld), poses located at input_time.
     void PublishSnapshot(XrTime input_time, const std::array<HandInputs, kHands>& hands,
@@ -148,7 +172,10 @@ private:
     PFN_xrVoidFunction m_convert_now_to_xr_time = nullptr;
     settings_panel::Controls m_panel_controls;
     XrTime m_last_input_time = 0;
-    bool m_panel_select_held = false;
+    OpenXRMenuPlacement m_menu_placement{};
+    // "DETACH VR MENU FROM HAND": where the menu was latched when it opened.
+    bool m_floating_valid = false;
+    screen_math::Pose m_floating_pose{};
     bool m_haptics_active[kHands]{};
     uint64_t m_profile_serial = 0;
     std::array<std::string, kHands> m_profile_names{};

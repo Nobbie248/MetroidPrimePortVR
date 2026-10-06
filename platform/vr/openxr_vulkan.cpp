@@ -976,8 +976,8 @@ public:
     // panel's layer.
     bool EndFrameWithPanel(const OpenXRBackendFrame& frame, const XrCompositionLayerBaseHeader* scene) {
         const auto& panel = frame.presentation.panel;
-        XrCompositionLayerQuad panel_quad{};
-        const XrCompositionLayerBaseHeader* layers[3] = {};
+        std::array<XrCompositionLayerQuad, kOpenXRPanelMaxLayers> panel_quads{};
+        const XrCompositionLayerBaseHeader* layers[2 + kOpenXRPanelMaxLayers] = {};
         uint32_t count = 0;
         if (const XrCompositionLayerBaseHeader* passthrough = passthrough_.Layer();
             passthrough != nullptr && (frame.presentation.mode == OpenXRFrameMode::VirtualScreen ||
@@ -986,8 +986,11 @@ public:
         }
         layers[count++] = scene;
         if (retained_panel_valid_ && panel.requested && panel.placed) {
-            panel_quad = OpenXRPanelQuadLayer(panel, runtime_->AppSpace(), retained_panel_swapchain_.handle);
-            layers[count++] = reinterpret_cast<const XrCompositionLayerBaseHeader*>(&panel_quad);
+            const uint32_t quads =
+                OpenXRPanelQuadLayers(panel, runtime_->AppSpace(), retained_panel_swapchain_.handle, panel_quads);
+            for (uint32_t i = 0; i < quads; ++i) {
+                layers[count++] = reinterpret_cast<const XrCompositionLayerBaseHeader*>(&panel_quads[i]);
+            }
         }
         return runtime_->EndFrame(active_frame_, layers, count);
     }
@@ -1386,7 +1389,7 @@ private:
                 DestroyPanelSwapchains();
                 panel_layer_failed_ = true;
                 Log(OpenXRLogLevel::Warning,
-                    "the settings panel's shared buffers could not be allocated; drawing it into the eyes");
+                    "the VR menu's shared buffers could not be allocated; it cannot be shown");
                 return false;
             }
         }
@@ -2105,7 +2108,7 @@ private:
     }
 
     // The settings panel's swapchain pair, made the first time the panel opens.
-    // A failure is logged once and the panel is drawn into the eyes again.
+    // A failure is logged once and the VR menu stays closed: it has no other way into the headset.
     bool EnsurePanelSwapchains() {
         if (panel_swapchains_ready_) {
             return true;
@@ -2117,12 +2120,12 @@ private:
             CreateSwapchain(retained_panel_swapchain_, kOpenXRPanelLayerWidth, kOpenXRPanelLayerHeight,
                             "settings panel")) {
             panel_swapchains_ready_ = true;
-            Log(OpenXRLogLevel::Info, "OpenXR settings panel layer ready");
+            Log(OpenXRLogLevel::Info, "OpenXR VR menu layer ready");
             return true;
         }
         DestroyPanelSwapchains();
         panel_layer_failed_ = true;
-        Log(OpenXRLogLevel::Warning, "the settings panel could not get its own OpenXR layer; drawing it into the eyes");
+        Log(OpenXRLogLevel::Warning, "the VR menu could not get its own OpenXR layer; it cannot be shown");
         return false;
     }
 

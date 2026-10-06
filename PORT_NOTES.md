@@ -1,3 +1,86 @@
+## VR: PrimedGun's in-headset menu (2026-10-06)
+
+PrimedGun's VR settings menu now opens in the headset, the way PrimedGun opened
+it. The trigger is a click of the off hand's thumbstick (the left one unless
+left-handed) or that hand's menu button. The other stick's click stays "SET
+HEIGHT", as on the menu's own Layout page. The game keeps running, and the
+controllers are withheld from it until everything is released after the menu
+closes.
+
+**The same image.** `platform/include/vr/vr_menu.h` is PrimedGun's
+`PrimedGunOverlayCommon.h` raster: a 1024x512 canvas drawn on the CPU with its
+5x7 bitmap font and solid rectangles that replace alpha. PrimedGun's colour
+constants are kept unchanged. They read like amber hex (`0xE0FFB030`), but
+PrimedGun uploaded the little-endian words into an RGBA8 swapchain, so the
+headset showed `#30B0FF`. The port uploads the same bytes, so the menu is the
+blue one players saw. The `?` of "ARE YOU SURE?" is still missing (the font has
+no glyph for it) and the culling cone still reads "115.00".
+
+**Placement and pointer.** The menu is a quad layer on the off hand's grip
+(1.05 x 0.72 m, PrimedGun's offset), or 4 x 2 m latched 2.7 m ahead when
+"DETACH VR MENU FROM HAND" is on. The cannon hand's laser (8 mm, warm yellow,
+up to 8 m) and its 2 cm hit dot are two more quads. They are cut from a sprite
+strip below the canvas in the same swapchain image (1024x560), so no backend
+needed a new swapchain. PrimedGun laid the laser ribbon flat in the
+controller's frame; here it turns about the ray to face the head, so it never
+shows edge-on. The quads use straight alpha, as PrimedGun's did. The virtual
+screen no longer leaves room for an in-eye panel, which nothing draws any more.
+
+**Behaviour.** This is PrimedGun's `UpdateVrMenu`, `AdjustVrMenuSetting` and
+`ActivateVrMenuSelection`:
+- The row under the laser is selected.
+- The trigger or A clicks. A numeric row's value box steps the value down on
+  its left half and up on its right half.
+- Resets, EXIT GAME and the save-state actions need a second click within six
+  seconds.
+- Every opening starts on LAYOUT.
+- "LONGER HELD PRESS FOR VR MENU" (one second) and "MENU REQUIRES HAND NEAR
+  HEAD" (the visor gesture's zone) work as in PrimedGun.
+
+Changes apply live. SAVE SETTINGS writes `port_settings.ini` now; otherwise the
+file is written whenever the port next saves. EXIT GAME saves and quits the way
+the F1 overlay's Exit game does.
+
+**Port mappings.**
+- STATES drives `PortSaveState`. It shows 8 slots, PrimedGun's Dolphin had 10.
+- LOAD NEWEST loads the slot saved last. SAVE OLDEST saves into the first empty
+  slot, else the one saved longest ago.
+- TEXTURES applies the launcher's cannon slots (`launcher/core/cannon_textures`,
+  now linked into the game) and reloads the user texture pack.
+
+Thirteen rows change settings the port saves but does not read yet. These are
+the launcher's "not active yet" keys:
+- Calibration tab: VISOR HELMET, HEIGHT PROMPT, FLOOR POSITION MARKER, HUD
+  VERTICAL and HUD HORIZONTAL.
+- Movement tab: LEFT STICK STRAFE, MOVEMENT DIRECTION, MOVEMENT DEADZONE,
+  MOVEMENT SPEED, MOVEMENT ACCELERATION, AIR ACCELERATION and SNAP TURN ANGLE.
+
+**Threads.**
+- The XR pacing thread opens and closes the menu (`settings_panel::Controls`).
+  It also places the menu and aims the laser (`OpenXRInput::PlaceMenu`), and
+  publishes the hit point with a click counter, so a click survives a
+  game-thread stall.
+- The game thread runs the menu from `CGraphics::EndScene`
+  (`PortVr::VrMenuUpdate`, `platform/vr/vr_menu.cpp`). It rasterises the image
+  only when its text changes, then hands it over with
+  `aurora_set_stereo_panel_image`.
+- Aurora's frame worker uploads the image into the panel layer's image
+  (`stereo_overlay::layer_source`), swizzled for a BGRA swapchain.
+
+**Settings and tests.**
+- The menu's own settings (`vr_vr_overlays_enabled`, `vr_vr_menu_floating`,
+  `vr_vr_menu_hold_left_stick` and `vr_vr_menu_requires_head_zone`) lost their
+  "not active yet" tag.
+- They are also in the F1 VR tab, with "Show it in the headset now".
+- `port_vr_menu_tests` covers the image's pixels and byte order, the hit boxes,
+  the two-press actions, the panel, laser and dot poses, and the open/close
+  rules.
+
+**Headset result** (Quest 3, direct presentation, 32-minute session): the user
+confirmed the look, the pointing, live changes and the game's input while the
+menu is open. The log shows `OpenXR VR menu layer ready` and no menu errors.
+The PC (D3D12) path is not tested in a headset yet.
+
 ## Renderer: native vertex input experiment (2026-10-06)
 
 Native vertex input makes supported resident world geometry use the GPU's

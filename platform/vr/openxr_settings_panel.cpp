@@ -31,21 +31,27 @@ bool OpenXRSettingsPanelOpen() noexcept {
     return settings_panel_bridge::g_open.load(std::memory_order_acquire);
 }
 
-void OpenXRPublishSettingsPanelPointer(bool valid, float x, float y, bool select, float wheel) noexcept {
+void OpenXRPublishSettingsPanelPointer(bool valid, float x, float y, bool clicked) noexcept {
     auto& published = settings_panel_bridge::Published();
     std::lock_guard lock(published.mutex);
-    published.pointer.valid = valid;
-    published.pointer.x = x;
-    published.pointer.y = y;
-    published.pointer.select = select;
-    published.pointer.wheel += wheel;
+    OpenXRSettingsPanelPointer& pointer = published.pointer;
+    pointer.valid = valid;
+    pointer.x = x;
+    pointer.y = y;
+    if (clicked) {
+        ++pointer.clicks;
+        pointer.click_valid = valid;
+        pointer.click_x = x;
+        pointer.click_y = y;
+    }
 }
 
 OpenXRSettingsPanelPointer OpenXRTakeSettingsPanelPointer() noexcept {
     auto& published = settings_panel_bridge::Published();
     std::lock_guard lock(published.mutex);
     OpenXRSettingsPanelPointer pointer = published.pointer;
-    published.pointer.wheel = 0.0f;
+    published.pointer.clicks = 0;
+    published.pointer.click_valid = false;
     return pointer;
 }
 

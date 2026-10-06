@@ -5,6 +5,7 @@
 
 #include "port_debug.h"
 #include "vr/prime_vr_policy.h"
+#include "vr/vr_view.h"
 
 // Tracks whether an Aurora frame is currently open. GXInit (CGraphics::Startup)
 // submits register writes the Aurora worker processes, so a frame must be open
@@ -843,6 +844,8 @@ void CGraphics::EndScene() {
   VISetPreRetraceCallback(VideoPreCallback);
   VISetPostRetraceCallback(VideoPostCallback);
   GXFlush();
+  // PortVr: PrimedGun's VR menu, while it is open in the headset.
+  PortVr::VrMenuUpdate();
   // Port: draw the debug overlay before Aurora freezes this frame's draw data.
   if (s_auroraFrameOpen) {
     PortDebug::DrawUI();

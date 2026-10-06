@@ -45,25 +45,35 @@ enum class OpenXRSubmissionStatus {
     ShuttingDown,
 };
 
-// The headset settings panel as a compositor quad layer of its own, over the
-// eyes or the menu screen, so the eye resolution never limits its text. Its
-// image is rendered with the frame's eyes (Aurora's panel stereo target) into a
-// swapchain of the panel canvas's own size. Nothing is allocated or copied
-// until the panel first opens, and nothing is submitted while it is closed.
+// PrimedGun's VR menu (openxr_settings_panel.h) as compositor quad layers of
+// its own, over the eyes or the menu screen, as PrimedGun showed it. Its image
+// is copied in with the frame's eyes (Aurora's panel stereo target) into a
+// swapchain of the menu image's own size; the laser and the hit dot are two
+// more quads cut from that image's sprite strip. Nothing is allocated or
+// copied until the menu first opens, and nothing is submitted while it is
+// closed.
 struct OpenXRPanelLayer {
     // The frame renders the panel's image: set by the pacing thread when the
     // panel is open, cleared by a backend that could not provide the layer.
     bool requested = false;
-    // Where it hangs in the application space, once the head pose is known.
+    // Where it hangs in the application space, once the hand or head pose is known.
     bool placed = false;
     XrPosef pose{{0.0f, 0.0f, 0.0f, 1.0f}, {0.0f, 0.0f, 0.0f}};
     float width_meters = 0.0f;
     float height_meters = 0.0f;
+    // The pointer hand's laser, from its aim pose to the menu (or 8 m out).
+    bool laser = false;
+    XrPosef laser_pose{{0.0f, 0.0f, 0.0f, 1.0f}, {0.0f, 0.0f, 0.0f}};
+    float laser_length_meters = 0.0f;
+    // The dot where the laser meets the menu.
+    bool dot = false;
+    XrPosef dot_pose{{0.0f, 0.0f, 0.0f, 1.0f}, {0.0f, 0.0f, 0.0f}};
 };
 
-// The panel image's size, which is the settings panel canvas's.
+// The panel image's size: the menu canvas and its sprite strip.
 inline constexpr uint32_t kOpenXRPanelLayerWidth = static_cast<uint32_t>(kSettingsPanelWidthPixels);
 inline constexpr uint32_t kOpenXRPanelLayerHeight = static_cast<uint32_t>(kSettingsPanelHeightPixels);
+inline constexpr uint32_t kOpenXRPanelMaxLayers = 3;
 
 // How many more pacing cycles an eye swapchain pair replaced by a new render
 // resolution lives on before it is destroyed. The pair was last shown by the
@@ -75,29 +85,42 @@ inline constexpr uint32_t kOpenXRPanelLayerHeight = static_cast<uint32_t>(kSetti
 // so this many later frames have replaced the pair's picture by then.
 inline constexpr uint32_t kOpenXRRetiredSwapchainCycles = 8;
 
-// The panel's layer, submitted after (so over) the scene's.
-inline XrCompositionLayerQuad OpenXRPanelQuadLayer(const OpenXRPanelLayer& panel, XrSpace space,
-                                                   XrSwapchain swapchain) noexcept {
-    XrCompositionLayerQuad quad{XR_TYPE_COMPOSITION_LAYER_QUAD};
-    // ImGui leaves premultiplied colour in the cleared panel image.
-    quad.layerFlags = XR_COMPOSITION_LAYER_BLEND_TEXTURE_SOURCE_ALPHA_BIT;
-    quad.space = space;
-    quad.eyeVisibility = XR_EYE_VISIBILITY_BOTH;
-    quad.subImage.swapchain = swapchain;
-    quad.subImage.imageRect = {{0, 0},
-                               {static_cast<int32_t>(kOpenXRPanelLayerWidth),
-                                static_cast<int32_t>(kOpenXRPanelLayerHeight)}};
-    quad.subImage.imageArrayIndex = 0;
-    quad.pose = panel.pose;
-    quad.size = {panel.width_meters, panel.height_meters};
-    return quad;
+// The menu's layers, submitted after (so over) the scene's: the menu, then its
+// laser, then the hit dot. They all read the same swapchain image, each its
+// own rectangle of it (VrMenu::kLaserRect, kDotRect). Returns how many of
+// `quads` it filled.
+inline uint32_t OpenXRPanelQuadLayers(const OpenXRPanelLayer& panel, XrSpace space, XrSwapchain swapchain,
+                                      std::array<XrCompositionLayerQuad, kOpenXRPanelMaxLayers>& quads) noexcept {
+    const auto make = [&](const XrPosef& pose, const VrMenu::Rect& rect, XrExtent2Df size) {
+        XrCompositionLayerQuad quad{XR_TYPE_COMPOSITION_LAYER_QUAD};
+        // PrimedGun's menu image holds straight (unpremultiplied) alpha.
+        quad.layerFlags =
+            XR_COMPOSITION_LAYER_BLEND_TEXTURE_SOURCE_ALPHA_BIT | XR_COMPOSITION_LAYER_UNPREMULTIPLIED_ALPHA_BIT;
+        quad.space = space;
+        quad.eyeVisibility = XR_EYE_VISIBILITY_BOTH;
+        quad.subImage.swapchain = swapchain;
+        quad.subImage.imageRect = {{rect.x, rect.y}, {rect.w, rect.h}};
+        quad.subImage.imageArrayIndex = 0;
+        quad.pose = pose;
+        quad.size = size;
+        return quad;
+    };
+    uint32_t count = 0;
+    quads[count++] = make(panel.pose, {0, 0, VrMenu::kWidth, VrMenu::kMenuHeight},
+                          {panel.width_meters, panel.height_meters});
+    if (panel.laser) {
+        quads[count++] = make(panel.laser_pose, VrMenu::kLaserRect, {VrMenu::kLaserWidth, panel.laser_length_meters});
+    }
+    if (panel.dot) {
+        quads[count++] = make(panel.dot_pose, VrMenu::kDotRect, {VrMenu::kDotSize, VrMenu::kDotSize});
+    }
+    return count;
 }
 
 // The part of the virtual screen's image that holds anything. Aurora
 // letterboxes the desktop snapshot into that eye-sized image exactly like this
-// (webgpu::calculate_present_viewport_for_aspect) and, when the settings panel
-// is drawn into the eyes, centres it at kSettingsPanelWidthFraction of the
-// width; the rest is black. An unknown content_aspect (0) keeps the whole image.
+// (webgpu::calculate_present_viewport_for_aspect); the rest is black. An
+// unknown content_aspect (0) keeps the whole image.
 inline XrRect2Di OpenXRVirtualScreenContentRect(uint32_t width, uint32_t height, float content_aspect) noexcept {
     XrRect2Di rect{{0, 0}, {static_cast<int32_t>(width), static_cast<int32_t>(height)}};
     if (width == 0 || height == 0 || !(content_aspect > 0.0f)) {
@@ -112,15 +135,9 @@ inline XrRect2Di OpenXRVirtualScreenContentRect(uint32_t width, uint32_t height,
             width, std::max<uint32_t>(1u, static_cast<uint32_t>(std::lround(static_cast<double>(height) *
                                                                             static_cast<double>(content_aspect)))));
     }
-    const uint32_t panel_width = std::min<uint32_t>(
-        width, static_cast<uint32_t>(std::ceil(static_cast<double>(width) * kSettingsPanelWidthFraction)));
-    const uint32_t panel_height = std::min<uint32_t>(
-        height, static_cast<uint32_t>(std::ceil(static_cast<double>(panel_width) * kSettingsPanelHeightPixels /
-                                                kSettingsPanelWidthPixels)));
-    const uint32_t shown_width = std::max(content_width, panel_width);
-    const uint32_t shown_height = std::max(content_height, panel_height);
-    rect.offset = {static_cast<int32_t>((width - shown_width) / 2), static_cast<int32_t>((height - shown_height) / 2)};
-    rect.extent = {static_cast<int32_t>(shown_width), static_cast<int32_t>(shown_height)};
+    rect.offset = {static_cast<int32_t>((width - content_width) / 2),
+                   static_cast<int32_t>((height - content_height) / 2)};
+    rect.extent = {static_cast<int32_t>(content_width), static_cast<int32_t>(content_height)};
     return rect;
 }
 

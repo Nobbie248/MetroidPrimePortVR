@@ -239,6 +239,12 @@ void aurora_notify_stereo_frame();
 // Shows the headset settings panel as the OpenXR backend's own compositor quad
 // layer instead of drawing it into the eyes. Any thread.
 void aurora_set_stereo_panel_layer(bool enabled);
+// The headset panel layer's image: width x height RGBA8 pixels (bytes R, G, B,
+// A, straight alpha), copied before this returns and uploaded by the frame
+// worker into the image it hands the panel layer. The layer shows it only at
+// exactly the size it asks for; anything else, or null, leaves it transparent.
+// Any thread; call it when the image changes, not every frame.
+void aurora_set_stereo_panel_image(const void* rgba8, uint32_t width, uint32_t height);
 // Relocates the recorded camera for the frame about to be sealed: a row-major
 // affine 3x4 from the recorded view space to the anchored view space. Latched
 // by the next aurora_end_frame*() and then cleared; null disables it.

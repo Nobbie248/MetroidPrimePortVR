@@ -110,7 +110,7 @@ void DrawVrDebugTab() {
   changed |= ImGui::Checkbox("Enable the headset (takes effect at the next start)", &s.enabled);
   changed |= ImGui::Checkbox("Immersive replay", &s.immersive_replay);
   changed |= ImGui::Checkbox("Pipelined rendering (more throughput, one frame of latency)", &s.pipelined_rendering);
-  changed |= ImGui::Checkbox("Resolve indexed vertices on the CPU (the Quest's GPU)", &s.deindex_vertices);
+  changed |= ImGui::Checkbox("Resolve indexed vertices on the CPU (and keep world geometry on the GPU)", &s.deindex_vertices);
   {
     // In MirrorView's order: Normal, Both, Left, Right, None.
     static constexpr const char* kWindowViews[] = {"the flat image", "both eyes", "left eye", "right eye",

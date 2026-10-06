@@ -462,6 +462,9 @@ struct GXState {
   // in the vertex shader instead of an index fetch and a dependent array fetch,
   // which stalls the Quest's GPU. The pipeline config describes the resolved layout.
   bool deindexVertices = false;
+  // Only resident, supported static world records use native vertex attributes.
+  bool nativeVertices = false;
+  bool nativeVertexInputRequested = false;
 
   // Shadow registers
   std::array<u32, 0x100> bpRegCache = [] {
@@ -558,7 +561,8 @@ struct ShaderConfig {
   // of loading it for each vertex (on the Quest's Adreno, the vertex fetch stall
   // dominated the eye passes).
   u8 currentPnMtx = 0;
-  std::array<u8, 2> pad2{};
+  u8 nativeVertices = false;
+  std::array<u8, 1> pad2{};
   std::array<AttrConfig, MaxVtxAttr> attrs;
   std::array<TevSwap, MaxTevSwap> tevSwapTable;
   std::array<TevStage, MaxTevStages> tevStages;

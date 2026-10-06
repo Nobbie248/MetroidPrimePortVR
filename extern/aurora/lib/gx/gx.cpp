@@ -401,6 +401,7 @@ void populate_pipeline_config(PipelineConfig& config, GXPrimitive primitive, GXV
   config.shaderConfig.fogRangeEnabled = g_gxState.fog.rangeEnabled;
   config.shaderConfig.pbr = g_gxState.pbr;
   config.shaderConfig.sdf = g_gxState.sdf;
+  config.shaderConfig.nativeVertices = g_gxState.nativeVertices;
   config.shaderConfig.mapBatch = g_gxState.mapBatch && primitive == GX_TRIANGLES;
   config.shaderConfig.mapCull = config.shaderConfig.mapBatch ? g_gxState.cullMode : GX_CULL_NONE;
   u8 vtxOffset = 0;
@@ -627,6 +628,10 @@ std::array<gfx::BindGroupRef, 2> build_stereo_bind_groups(const ShaderInfo& info
 }
 
 void initialize() noexcept {
+  // Native vertex input for resident world geometry, on unless MP_NATIVE_VERTICES=0.
+  const char* nativeInput = std::getenv("MP_NATIVE_VERTICES");
+  g_gxState.nativeVertexInputRequested = nativeInput == nullptr || nativeInput[0] != '0';
+  Log.info("Native cached vertex input: {}", g_gxState.nativeVertexInputRequested);
   {
     std::array<wgpu::BindGroupLayoutEntry, MaxTextures * 2 + 2 + gfx::probe::VolumeTextures> textureEntries;
     // The PBR environment probe (GX_AURORA_COPY_PROBE_FACE)

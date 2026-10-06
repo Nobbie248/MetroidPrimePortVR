@@ -35,7 +35,7 @@ void initialize_geometry_buffer() {
                             ~static_cast<uint64_t>(3);
   const wgpu::BufferDescriptor descriptor{
       .label = "Geometry cache buffer",
-      .usage = wgpu::BufferUsage::Storage | wgpu::BufferUsage::CopyDst,
+      .usage = wgpu::BufferUsage::Storage | wgpu::BufferUsage::Vertex | wgpu::BufferUsage::CopyDst,
       .size = capacity,
   };
   g_buffer = webgpu::g_device.CreateBuffer(&descriptor);

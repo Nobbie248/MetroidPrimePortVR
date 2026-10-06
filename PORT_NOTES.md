@@ -1,3 +1,32 @@
+## Renderer: native vertex input experiment (2026-10-06)
+
+Native vertex input makes supported resident world geometry use the GPU's
+vertex-input stage instead of loading and decoding its attributes from a
+storage buffer in the vertex shader. It is on by default for play testing;
+`MP_NATIVE_VERTICES=0` (also a Quest launch extra) keeps the storage path.
+Wider-area and Quest 2 validation are still pending.
+
+The geometry cache converts numeric components to little-endian once on a
+miss. Attribute offsets, aligned record stride, absolute indices, surface
+batching and draw order stay the same. Native float/integer formats and RGBA8
+colours preserve the existing fixed-point scaling. Matrix-index bytes are
+extracted from aligned integer attributes. Unsupported layouts (including NBT
+and packed colours) retain the resident storage path; dynamic geometry, lines
+and the map batch retain their existing paths. Cache keys distinguish the two
+encodings. Mono, per-eye and multiview pipelines all support native input.
+
+Validation: Windows and Quest builds, 235 FIFO tests, 19 renderer tests and
+41 port tests pass. A desktop D3D12 Chozo run exercised 37-38 native draws per
+steady frame without shader validation errors. The installed Quest 3 build
+passed a visual check in both eyes at the saved Chozo plaza. Same-APK
+off/on/off/on runs at scale 0.85 and 599 MHz averaged **9.60 ms -> 5.12 ms App
+GPU time (46.6% less)**, with the same 715 draws (600 world); 515 world draws
+used native input. Vertex instructions fell about 52% and the reported vertex
+fetch stall metric fell from 67.8% to 33.3%. All runs sustained 72 Hz.
+Detailed logs, matched CPU/memory-clock subsets and screenshots are described
+in `docs/CHOZO_PERFORMANCE.md`. Quest 2 and area transitions remain untested.
+Temporary device overrides were restored.
+
 ## VR: fixed foveated rendering on the Quest (2026-10-06)
 
 The Quest's GPU shades every pixel of each eye at full rate although the

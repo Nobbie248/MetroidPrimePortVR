@@ -61,6 +61,7 @@ extern std::atomic<uint32_t> g_fifoCachedDlVerts;
 // and what it holds (gauges).
 extern std::atomic<uint32_t> g_fifoGeometryHits;
 extern std::atomic<uint32_t> g_fifoGeometryMisses;
+extern std::atomic<uint32_t> g_fifoNativeDraws;
 extern std::atomic<uint32_t> g_geometryEntries;
 extern std::atomic<uint64_t> g_geometryResidentBytes;
 // The game thread blocked in gx::fifo::drain() for the FIFO processor, and

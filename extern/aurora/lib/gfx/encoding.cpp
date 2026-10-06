@@ -51,6 +51,8 @@ uint64_t g_currentIndexSize = 0;
 wgpu::IndexFormat g_currentIndexFormat = wgpu::IndexFormat::Uint16;
 // ... and group 0: the frame's vertex buffer (0), the geometry cache's (1), unknown (-1).
 int8_t g_currentGeometry = -1;
+// ... and vertex buffer 0, the geometry cache's buffer for native vertex input (null when unknown).
+WGPUBuffer g_currentVertexBuffer = nullptr;
 
 // After a draw of another kind, which binds what it needs itself.
 void forget_gx_binds() {
@@ -59,6 +61,7 @@ void forget_gx_binds() {
   g_currentIndexOffset = UINT64_MAX;
   g_currentIndexSize = 0;
   g_currentGeometry = -1;
+  g_currentVertexBuffer = nullptr;
 }
 
 // A pass's group 0 at its start: the frame's buffers.
@@ -743,6 +746,15 @@ void bind_gx_indices(const wgpu::RenderPassEncoder& pass, const wgpu::Buffer& bu
   g_currentIndexOffset = offset;
   g_currentIndexSize = size;
   g_currentIndexFormat = format;
+}
+
+void bind_gx_native_vertices(const wgpu::RenderPassEncoder& pass) {
+  const auto& buffer = detail::geometry_buffer();
+  if (buffer.Get() == g_currentVertexBuffer) {
+    return;
+  }
+  pass.SetVertexBuffer(0, buffer);
+  g_currentVertexBuffer = buffer.Get();
 }
 
 void bind_gx_geometry(const wgpu::RenderPassEncoder& pass, bool cached) {

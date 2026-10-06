@@ -183,6 +183,7 @@ if (AURORA_ENABLE_GX)
 
   add_executable(gfx_recording_tests
     gfx_recording_test.cpp
+    native_vertex_test.cpp
     render_target_layout_test.cpp
   )
   target_include_directories(gfx_recording_tests PRIVATE

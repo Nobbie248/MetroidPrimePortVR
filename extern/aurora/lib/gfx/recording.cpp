@@ -135,6 +135,7 @@ std::atomic<uint64_t> g_fifoCachedDlIndexBytes{0};
 std::atomic<uint32_t> g_fifoCachedDlVerts{0};
 std::atomic<uint32_t> g_fifoGeometryHits{0};
 std::atomic<uint32_t> g_fifoGeometryMisses{0};
+std::atomic<uint32_t> g_fifoNativeDraws{0};
 std::atomic<uint32_t> g_geometryEntries{0};
 std::atomic<uint64_t> g_geometryResidentBytes{0};
 std::atomic<uint64_t> g_drainWaitNs{0};
@@ -239,6 +240,8 @@ void log_stereo_frame_stats(const FramePacket& frame) {
   const uint32_t cachedDlVerts = perFrame(perf::g_fifoCachedDlVerts);
   const uint32_t geometryHits = perFrame(perf::g_fifoGeometryHits);
   const uint32_t geometryMisses = perFrame(perf::g_fifoGeometryMisses);
+  const uint32_t nativeDraws = perFrame(perf::g_fifoNativeDraws);
+  Log.info("native vertex input: {} draws per frame", nativeDraws);
   const uint32_t geometryEntries = perf::g_geometryEntries.load(std::memory_order_relaxed);
   const uint64_t geometryMb = perf::g_geometryResidentBytes.load(std::memory_order_relaxed) >> 20;
   std::array<uint32_t, perf::BreakCount> breaks{};

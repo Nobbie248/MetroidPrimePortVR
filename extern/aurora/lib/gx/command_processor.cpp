@@ -12,6 +12,7 @@
 
 #include "../gfx/depth_peek.hpp"
 #include "geometry_cache.hpp"
+#include "native_vertex.hpp"
 #include "../gfx/probe.hpp"
 #include "../gfx/recording.hpp"
 #include "../gfx/stereo_shadow.hpp"
@@ -801,6 +802,13 @@ static u8 staged_multiview_mode(const DrawCache& cache) noexcept {
   return mode;
 }
 
+static void select_native_vertices(bool native) noexcept {
+  if (g_gxState.nativeVertices != native) {
+    g_gxState.nativeVertices = native;
+    g_gxState.dirty |= DirtyPipeline;
+  }
+}
+
 static void push_gx_draw(GXPrimitive prim, GXVtxFmt fmt, u32 vtxCount, gfx::Range vertRange, gfx::Range idxRange,
                          u32 numIndices, bool cachedGeometry = false) noexcept {
   auto& state = g_gxState;
@@ -942,11 +950,13 @@ static void push_gx_draw(GXPrimitive prim, GXVtxFmt fmt, u32 vtxCount, gfx::Rang
       .dstAlpha = state.dstAlpha,
       .stereoUniformOffset = cache.stereoUniformOffsets,
       .cachedGeometry = cachedGeometry,
+      .nativeVertices = cache.config.shaderConfig.nativeVertices != 0,
       .stereoTextureBindGroup = cache.stereoBindGroups,
       .multiviewPipeline = multiviewPipeline,
   });
   if (perfOn) {
     const auto t3 = gfx::perf::tick();
+    gfx::perf::count(gfx::perf::g_fifoNativeDraws, state.nativeVertices);
     gfx::perf::add(gfx::perf::g_fifoPipelineTicks, t0, tA);
     gfx::perf::add(gfx::perf::g_fifoBindsTicks, tA, t1);
     gfx::perf::add(gfx::perf::g_fifoUniformTicks, t1, t2);
@@ -1054,6 +1064,7 @@ static void reconcile_merge_state(GXPrimitive prim, GXVtxFmt fmt) noexcept {
 // merge along; 0 for a draw delivered otherwise (GX_AURORA_DRAW_SIZED).
 static void draw_prim(u8 cmd, GXPrimitive prim, GXVtxFmt fmt, u16 vtxCount, ByteReader& reader) noexcept {
   ZoneScoped;
+  select_native_vertices(false);
   u32 vtxSize;
   if (g_gxState.lastVtxFmt == fmt)
     LIKELY { vtxSize = g_gxState.lastVtxSize; }
@@ -1336,6 +1347,93 @@ static void draw_cached_geometry(GXVtxFmt fmt, const geometry_cache::Entry& entr
 // A static world surface's display list (GX_AURORA_CALL_CACHED_DL), read where it
 // lives: drawn from the geometry cache, resolved into it first when new, or
 // processed in place when the cache cannot take it.
+// Whether a cached surface's records take native vertex input (gx/native_vertex.hpp)
+// depends only on what populate_pipeline_config lays its attributes out from: the
+// vertex descriptor, the format's attribute formats, the arrays' byte order and the
+// de-indexing and map-batch modes. Thousands of cached display lists a frame share a
+// handful of these, so the decision is made once per combination.
+struct NativeVertexInputs {
+  std::array<u8, GX_VA_TEX7 + 1> type{};
+  std::array<u8, GX_VA_TEX7 + 1> cnt{};
+  std::array<u8, GX_VA_TEX7 + 1> comp{};
+  std::array<u8, GX_VA_TEX7 + 1> frac{};
+  std::array<u8, GX_VA_TEX7 + 1> le{};
+  u8 fmt = 0;
+  u8 deindex = 0;
+  u8 mapBatch = 0;
+  u8 pad = 0;
+
+  bool operator==(const NativeVertexInputs& rhs) const { return std::memcmp(this, &rhs, sizeof(*this)) == 0; }
+};
+static_assert(std::has_unique_object_representations_v<NativeVertexInputs>);
+struct NativeVertexChoice {
+  bool native = false;
+  u32 vtxStride = 0;
+  u64 layoutSalt = 0;    // into the geometry cache key's layout when native
+  ShaderConfig source{}; // its attributes and stride, for native_vertex::convert
+};
+struct NativeVertexMemo {
+  NativeVertexInputs last{};
+  const NativeVertexChoice* lastChoice = nullptr;
+  absl::flat_hash_map<u64, std::pair<NativeVertexInputs, NativeVertexChoice>> choices;
+};
+NativeVertexMemo sNativeVertexMemo;
+
+static NativeVertexInputs native_vertex_inputs(GXVtxFmt fmt) noexcept {
+  NativeVertexInputs in;
+  const auto& vtxFmt = g_gxState.vtxFmts[fmt];
+  for (int i = GX_VA_PNMTXIDX; i <= GX_VA_TEX7; ++i) {
+    const auto type = g_gxState.vtxDesc[i];
+    in.type[i] = static_cast<u8>(type);
+    if (type == GX_NONE) {
+      continue;
+    }
+    const auto& attrFmt = vtxFmt.attrs[i];
+    in.cnt[i] = static_cast<u8>(attrFmt.cnt);
+    in.comp[i] = static_cast<u8>(attrFmt.type);
+    in.frac[i] = attrFmt.frac;
+    in.le[i] = type != GX_DIRECT && g_gxState.arrays[i].le ? 1 : 0;
+  }
+  in.fmt = static_cast<u8>(fmt);
+  in.deindex = g_gxState.deindexVertices ? 1 : 0;
+  in.mapBatch = g_gxState.mapBatch ? 1 : 0;
+  return in;
+}
+
+static const NativeVertexChoice& native_vertex_choice(GXVtxFmt fmt) noexcept {
+  auto& memo = sNativeVertexMemo;
+  const NativeVertexInputs inputs = native_vertex_inputs(fmt);
+  if (memo.lastChoice != nullptr && inputs == memo.last) {
+    return *memo.lastChoice;
+  }
+  const u64 hash = xxh3_hash(inputs);
+  auto it = memo.choices.find(hash);
+  if (it == memo.choices.end() || !(it->second.first == inputs)) {
+    PipelineConfig source{};
+    populate_pipeline_config(source, GX_TRIANGLES, fmt);
+    NativeVertexChoice choice;
+    choice.native = native_vertex::layout(source.shaderConfig).valid;
+    choice.vtxStride = source.shaderConfig.vtxStride;
+    if (choice.native) {
+      choice.layoutSalt = xxh3_hash(source.shaderConfig.attrs) ^ 0x4e41544956455631ull;
+      choice.source.attrs = source.shaderConfig.attrs;
+      choice.source.vtxStride = source.shaderConfig.vtxStride;
+    }
+    // A hash collision replaces the other combination; it is decided again when it returns.
+    it = memo.choices.insert_or_assign(hash, std::pair{inputs, choice}).first;
+  }
+  // Only this function inserts, and it re-points the last choice after doing so: the
+  // pointer never outlives a rehash of the map's values.
+  memo.last = inputs;
+  memo.lastChoice = &it->second.second;
+  return *memo.lastChoice;
+}
+
+void clear_native_vertex_choices() noexcept {
+  sNativeVertexMemo.lastChoice = nullptr;
+  sNativeVertexMemo.choices.clear();
+}
+
 static void handle_cached_display_list(ByteReader& reader) noexcept {
   const u32 set = reader.read<u32>();
   const auto address = static_cast<uintptr_t>(reader.read<u64>());
@@ -1356,7 +1454,17 @@ static void handle_cached_display_list(ByteReader& reader) noexcept {
     process_display_list_in_place(data, size);
     return;
   }
-  const geometry_cache::Key key{.set = set, .address = static_cast<u64>(address), .layout = deindex_plan_hash(*plan)};
+  bool native = false;
+  u64 layoutHash = deindex_plan_hash(*plan);
+  if (g_gxState.nativeVertexInputRequested) {
+    const NativeVertexChoice& choice = native_vertex_choice(fmt);
+    native = choice.native && choice.vtxStride == plan->dstStride;
+    if (native) {
+      // Numeric encoding and source byte order affect the converted bytes too.
+      layoutHash ^= choice.layoutSalt;
+    }
+  }
+  const geometry_cache::Key key{.set = set, .address = static_cast<u64>(address), .layout = layoutHash};
   const geometry_cache::Entry* entry = geometry_cache::find(key);
   if (entry == nullptr) {
     static ByteBuffer records;
@@ -1364,6 +1472,10 @@ static void handle_cached_display_list(ByteReader& reader) noexcept {
     records.clear();
     indices.clear();
     if (!resolve_display_list(data, size, fmt, *plan, records, indices)) {
+      process_display_list_in_place(data, size);
+      return;
+    }
+    if (native && !native_vertex::convert(native_vertex_choice(fmt).source, {records.data(), records.size()})) {
       process_display_list_in_place(data, size);
       return;
     }
@@ -1376,6 +1488,7 @@ static void handle_cached_display_list(ByteReader& reader) noexcept {
   } else {
     gfx::perf::g_fifoGeometryHits.fetch_add(1, std::memory_order_relaxed);
   }
+  select_native_vertices(native);
   draw_cached_geometry(fmt, *entry);
 }
 
@@ -1803,6 +1916,7 @@ void reset_draw_cache() noexcept {
   sBindGroupCache.clear();
   sDrawCache = {};
   geometry_cache::clear();
+  clear_native_vertex_choices();
 }
 
 } // namespace aurora::gx::fifo

@@ -326,3 +326,103 @@ worker while the frame is still being recorded, so Wiicompiled's "single pass
 only" rule is not available at seal time); fill-heavy areas (water, fog, heat,
 snow) and split-heavy frames (thermal visor, a held charge shot) remain to be
 measured the same way before a level is worth recommending anywhere.
+
+## Native vertex input experiment (2026-10-06)
+
+The resident geometry cache avoids repeated CPU resolution and uploads, but
+its vertex shaders still fetch byte-addressed storage data. The native
+vertex input path (on by default; `MP_NATIVE_VERTICES=0` turns it off) uses
+native vertex attributes for supported cached surfaces. The same resident buffer gains Vertex usage; offsets, strides,
+absolute indices and batching remain unchanged. Numeric byte order is
+converted once, on cache insertion. Unsupported layouts continue through
+the resident storage path, and dynamic draws are unaffected.
+
+`MP_FRAME_STATS=1` reports `native vertex input: N draws per frame` alongside
+the existing draw and geometry-cache statistics. Both switches are accepted
+as Quest activity string extras. A restart selects the input path.
+
+Validation completed:
+
+- Windows game and release Quest APK built; APK installed on the Quest 3.
+- 235 FIFO tests, 19 renderer tests, 41 port tests passed, including cache
+  conversion/reuse, unchanged merging, native/dynamic transitions, fallback,
+  endian conversion, fixed-point formats and shader generation in all four
+  mono/stereo modes.
+- Desktop D3D12 real-disc Chozo boot with isolated settings: 37-38 native
+  draws per steady frame, no shader validation errors. This is a functional
+  GPU smoke test, not a substitute for Quest timing or headset visual checks.
+
+Quest validation completed after the controller dialog was dismissed:
+
+- Both settings produced 715 draws (600 world, 83 head-locked, 26 sky, 6
+  skipped), the same two EFB passes and one eye replay, with foveation off.
+- Native input covered 515 world draws per frame. Both had 1,744 geometry
+  cache hits and zero steady-state misses; upload sizes were identical.
+- No shader or pipeline validation errors. The user confirmed world textures,
+  lighting, shadows and HUD looked correct in both eyes. Device screenshots
+  (`native-input.png`, `storage-input.png`, `native-final.png`) agree; animated
+  foliage and the gun are not at the same animation phase.
+
+Timing method: same installed APK, slot 1, headset resting at a fixed pose,
+scale 0.85 (1428x1496 per eye), 72 Hz, multiview, `MP_FOVEATION=0`. Launch
+`org.primedgun.v2/.PrimedGunVrActivity` with `MP_BOOT_WORLD=83F6FF6F`,
+`MP_LOAD_STATE=1`, and `MP_NATIVE_VERTICES=0` / `1`. The diagnostic extra
+`MP_FRAME_STATS` was omitted entirely for timings. Each launch settled for
+25 seconds before a 30-second window; only game-PID `VrApi` samples with
+`LCnt=1`, scale 0.85 and target 72 Hz were accepted. Temporary
+`debug.oculus.gpuLevel=5` and `debug.oculus.cpuLevel=3` overrides requested
+consistent levels ([Meta system-property documentation](https://developers.meta.com/vr/documentation/native/android/ts-systemproperties/));
+all accepted samples reported GPU 599 MHz. CPU and memory could still change,
+so matching subsets were checked below. Guardian and proximity overrides
+were used during profiling. All overrides were restored afterwards.
+
+| Run, in order | Native input | Samples | App GPU ms, mean | Min-max ms | GPU MHz |
+| --- | --- | ---: | ---: | ---: | ---: |
+| storage-a | off | 31 | 9.593 | 9.51-9.79 | 599 |
+| native-a | on | 31 | 5.188 | 4.88-5.73 | 599 |
+| storage-b | off | 32 | 9.599 | 9.55-9.71 | 599 |
+| native-b | on | 31 | 5.060 | 4.81-5.66 | 599 |
+
+Combined: **9.596 -> 5.124 ms**, **4.472 ms / 46.6% less GPU time**.
+Both paths sustained native 72 Hz; the benefit is GPU headroom. Matching CPU
+1651 MHz and memory 2092 MHz samples gives 9.592 ms off (25 samples) against
+5.142 ms on (39 samples), a 46.4% reduction. At CPU 1651 / memory 1708 MHz,
+the corresponding means are 9.593 ms (31) and 5.034 ms (10). The gain persists
+when those clocks match too.
+
+Separate eight-second `ovrgpuprofiler --realtime` captures, taken outside the
+timing windows, returned six samples each:
+
+| Whole-device counter | Storage | Native |
+| --- | ---: | ---: |
+| Vertex fetch stall | 67.8% | 33.3% |
+| Vertex instructions / second | 5.299 billion | 2.546 billion |
+| Time shading vertices | 19.9% | 8.4% |
+| Global memory load instructions | 10.065 million | 5.526 million |
+| Global buffer data read bandwidth | 111.7 MB/s | 51.5 MB/s |
+
+These counters include compositor work; they are attribution evidence, not
+per-pass measurements. The instruction and buffer-read reductions support
+removing vertex-side storage decoding as the source of the gain.
+
+Evidence and capture/summary scripts are under `build/native-vertex/`
+(ignored); `results.json` and `timing-samples.json` contain numeric summaries
+independent of the local CSV number format. The running Quest test has native
+input enabled. No Quest 2 frame rate is inferred from the Quest 3 result.
+
+Follow-up (2026-10-06): native input is now on by default for play testing
+(`MP_NATIVE_VERTICES=0` keeps the storage path). Review measurements with
+`MP_FRAME_STATS=1` found the native path costing the FIFO thread +0.87 ms a
+frame at the plaza (5.9 -> 7.0 ms; the game's wait on it +0.75 ms): every
+cached display list, hits included, rebuilt a pipeline config, checked the
+native layout and hashed its attributes. The decision now depends only on
+the attribute inputs (vertex descriptor, the format's attribute formats,
+array byte order, de-index and map-batch modes) and is memoized per
+combination (`native_vertex_choice`, cleared by `reset_draw_cache` and the
+geometry-cache tests). Each native draw also re-bound vertex buffer 0; the
+pass now skips that bind when the buffer is already bound
+(`bind_gx_native_vertices`). Alternating Quest runs (2 rounds, 40 s each):
+storage 9.80 / 9.82 ms App GPU at 599 MHz, FIFO 5.94 / 5.86 ms; native
+6.41 / 6.37 ms at 492 MHz, FIFO 6.35 / 6.39 ms. The FIFO overhead is down to
+about +0.47 ms; what remains is likely the pipeline switching between native
+cached draws and plain draws.

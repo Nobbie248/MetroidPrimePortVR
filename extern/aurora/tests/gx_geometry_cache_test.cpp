@@ -4,6 +4,7 @@
 
 #include "gx_test_common.hpp"
 #include "__gx.h"
+#include "gx/command_processor.hpp"
 #include "gx/geometry_cache.hpp"
 #include "gx/pipeline.hpp"
 
@@ -11,6 +12,10 @@
 #include <cstring>
 
 using aurora::gx::g_gxState;
+
+namespace aurora::gx::testing {
+extern ShaderConfig nativeVertexSource;
+}
 
 namespace aurora::gfx {
 extern gx::DrawData g_testLastDraw;
@@ -57,10 +62,15 @@ protected:
     aurora::gfx::testing::geometryUploads.clear();
     aurora::gfx::testing::geometryCapacity = 1u << 20;
     aurora::gx::geometry_cache::clear();
+    aurora::gx::fifo::clear_native_vertex_choices();
   }
 
   void TearDown() override {
+    aurora::gx::testing::nativeVertexSource = {};
+    g_gxState.nativeVertexInputRequested = false;
+    g_gxState.nativeVertices = false;
     aurora::gx::geometry_cache::clear();
+    aurora::gx::fifo::clear_native_vertex_choices();
     aurora::gfx::testing::mergeDraws = false;
     g_gxState.deindexVertices = false;
     g_gxState.vtxDesc[GX_VA_POS] = GX_NONE;
@@ -71,6 +81,13 @@ protected:
   }
 
   // A display list of one triangle draw (format 0) of these position indices
+  static void enable_native_input() {
+    g_gxState.nativeVertexInputRequested = true;
+    auto& source = aurora::gx::testing::nativeVertexSource;
+    source.vtxStride = 12;
+    source.attrs[GX_VA_POS] = {.attrType = GX_DIRECT, .cnt = 3, .compType = GX_F32, .le = false};
+  }
+
   static std::vector<u8> display_list(std::initializer_list<u8> indices, GXPrimitive prim = GX_TRIANGLES) {
     std::vector<u8> bytes{static_cast<u8>(prim), 0, static_cast<u8>(indices.size())};
     bytes.insert(bytes.end(), indices.begin(), indices.end());
@@ -141,10 +158,14 @@ TEST_F(GXGeometryCacheTest, SurfacesOfOneStateMergeWhereverTheirBlocksAre) {
 }
 
 TEST_F(GXGeometryCacheTest, AStateChangeStartsANewDraw) {
-  call(1, display_list({0, 1, 2}));
+  // Both lists stay alive: a cached surface is identified by its address, which a
+  // freed temporary would hand on to the next list.
+  const auto first = display_list({0, 1, 2});
+  const auto second = display_list({1, 2, 3});
+  call(1, first);
   g_gxState.currentPnMtx = 3;
   g_gxState.dirty |= aurora::gx::DirtyPipeline;
-  call(1, display_list({1, 2, 3}));
+  call(1, second);
   EXPECT_EQ(aurora::gfx::g_testDrawCount, 2u);
   EXPECT_EQ(aurora::gfx::g_testLastDraw.indexCount, 3u);
   EXPECT_EQ(staged_indices(aurora::gfx::g_testLastDraw), (std::vector<u32>{3, 4, 5}));
@@ -162,10 +183,66 @@ TEST_F(GXGeometryCacheTest, CachedAndPlainDrawsDoNotJoin) {
   EXPECT_EQ(aurora::gfx::testing::geometryUploads.size(), 1u);
 }
 
-TEST_F(GXGeometryCacheTest, FreeingTheSetDropsItsEntriesAndReusesTheirBlocks) {
+TEST_F(GXGeometryCacheTest, NativeRecordsConvertOnceAndKeepSurfaceBatching) {
+  enable_native_input();
+  const auto first = display_list({0, 1, 2});
+  const auto second = display_list({3, 2, 1, 0}, GX_TRIANGLESTRIP);
+  call(1, first);
+  call(1, second);
+  call(1, first);
+  const auto& uploads = aurora::gfx::testing::geometryUploads;
+  ASSERT_EQ(uploads.size(), 2u);
+  auto expected = resolved({0, 1, 2});
+  for (size_t i = 0; i < expected.size(); i += 4) { std::reverse(expected.begin() + i, expected.begin() + i + 4); }
+  EXPECT_EQ(uploads[0].bytes, expected);
+  EXPECT_EQ(uploads[1].offset, 36u);
+  EXPECT_EQ(aurora::gfx::g_testDrawCount, 1u);
+  const auto& draw = aurora::gfx::g_testLastDraw;
+  EXPECT_TRUE(draw.cachedGeometry);
+  EXPECT_TRUE(draw.nativeVertices);
+  EXPECT_EQ(staged_indices(draw), (std::vector<u32>{0, 1, 2, 3, 4, 5, 5, 4, 6, 0, 1, 2}));
+}
+
+TEST_F(GXGeometryCacheTest, NativeModeNeverLeaksIntoDynamicDrawsOrAliasesPlainCacheEntries) {
   const auto list = display_list({0, 1, 2});
   call(1, list);
-  call(2, display_list({1, 2, 3}));
+  EXPECT_FALSE(aurora::gfx::g_testLastDraw.nativeVertices);
+  enable_native_input();
+  call(1, list);
+  EXPECT_EQ(aurora::gx::geometry_cache::stats().entries, 2u);
+  EXPECT_EQ(aurora::gfx::g_testDrawCount, 2u);
+  EXPECT_TRUE(aurora::gfx::g_testLastDraw.nativeVertices);
+  decode_fifo({static_cast<u8>(GX_TRIANGLES), 0, 3, 2, 0, 1});
+  EXPECT_EQ(aurora::gfx::g_testDrawCount, 3u);
+  EXPECT_FALSE(aurora::gfx::g_testLastDraw.nativeVertices);
+  EXPECT_FALSE(aurora::gfx::g_testLastDraw.cachedGeometry);
+  EXPECT_EQ(aurora::gfx::testing::pushedVerts, resolved({2, 0, 1}));
+  call(1, list);
+  EXPECT_EQ(aurora::gfx::g_testDrawCount, 4u);
+  EXPECT_TRUE(aurora::gfx::g_testLastDraw.nativeVertices);
+  EXPECT_EQ(aurora::gfx::testing::geometryUploads.size(), 2u);
+  g_gxState.nativeVertexInputRequested = false;
+  call(1, list);
+  EXPECT_FALSE(aurora::gfx::g_testLastDraw.nativeVertices);
+  EXPECT_EQ(aurora::gfx::testing::geometryUploads.size(), 2u);
+  EXPECT_EQ(staged_indices(aurora::gfx::g_testLastDraw), (std::vector<u32>{0, 1, 2}));
+}
+
+TEST_F(GXGeometryCacheTest, UnsupportedNativeLayoutStillUsesTheResidentStoragePath) {
+  enable_native_input();
+  aurora::gx::testing::nativeVertexSource.attrs[GX_VA_POS].cnt = 9;
+  call(1, display_list({0, 1, 2}));
+  EXPECT_TRUE(aurora::gfx::g_testLastDraw.cachedGeometry);
+  EXPECT_FALSE(aurora::gfx::g_testLastDraw.nativeVertices);
+  ASSERT_EQ(aurora::gfx::testing::geometryUploads.size(), 1u);
+  EXPECT_EQ(aurora::gfx::testing::geometryUploads[0].bytes, resolved({0, 1, 2}));
+}
+
+TEST_F(GXGeometryCacheTest, FreeingTheSetDropsItsEntriesAndReusesTheirBlocks) {
+  const auto list = display_list({0, 1, 2});
+  const auto other = display_list({1, 2, 3});
+  call(1, list);
+  call(2, other);
   EXPECT_EQ(aurora::gx::geometry_cache::stats().entries, 2u);
   AuroraFreeGeometrySet(1);
   decode_fifo(capture_fifo());
@@ -192,9 +269,11 @@ TEST_F(GXGeometryCacheTest, AListWithOtherCommandsDrawsInPlace) {
 
 TEST_F(GXGeometryCacheTest, AFullBufferDrawsInPlace) {
   aurora::gfx::testing::geometryCapacity = 40;
-  call(1, display_list({0, 1, 2}));
+  const auto first = display_list({0, 1, 2});
+  const auto second = display_list({1, 2, 3});
+  call(1, first);
   EXPECT_EQ(aurora::gfx::testing::geometryUploads.size(), 1u);
-  call(1, display_list({1, 2, 3}));
+  call(1, second);
   EXPECT_EQ(aurora::gfx::testing::geometryUploads.size(), 1u);
   EXPECT_EQ(aurora::gfx::g_testDrawCount, 2u);
   EXPECT_FALSE(aurora::gfx::g_testLastDraw.cachedGeometry);
@@ -206,9 +285,13 @@ TEST_F(GXGeometryCacheTest, BlocksSitAtMultiplesOfTheirStride) {
   const std::vector<u8> records12(24, 1);
   const std::vector<u8> records20(40, 2);
   const std::vector<u32> indices{0, 1, 2};
-  const Entry* a = insert({1, 1, 1}, 12, records12, indices);
-  const Entry* b = insert({1, 2, 1}, 20, records20, indices);
-  const Entry* c = insert({1, 3, 1}, 12, records12, indices);
+  ASSERT_NE(insert({1, 1, 1}, 12, records12, indices), nullptr);
+  ASSERT_NE(insert({1, 2, 1}, 20, records20, indices), nullptr);
+  ASSERT_NE(insert({1, 3, 1}, 12, records12, indices), nullptr);
+  // Looked up after all three: an insertion may grow the map and move its entries.
+  const Entry* a = find({1, 1, 1});
+  const Entry* b = find({1, 2, 1});
+  const Entry* c = find({1, 3, 1});
   ASSERT_NE(a, nullptr);
   ASSERT_NE(b, nullptr);
   ASSERT_NE(c, nullptr);

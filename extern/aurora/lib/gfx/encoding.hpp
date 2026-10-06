@@ -17,6 +17,8 @@ void bind_gx_indices(const wgpu::RenderPassEncoder& pass, const wgpu::Buffer& bu
 // Group 0: the frame's vertex buffer, or the geometry cache's (geometry_buffer.hpp)
 // for a draw of cached geometry.
 void bind_gx_geometry(const wgpu::RenderPassEncoder& pass, bool cached);
+// Vertex buffer 0 for native vertex input: the geometry cache's buffer, unless the pass has it bound.
+void bind_gx_native_vertices(const wgpu::RenderPassEncoder& pass);
 
 namespace detail {
 void encode_op(wgpu::CommandEncoder& encoder, FramePacket& frame, const FrameOp& op);

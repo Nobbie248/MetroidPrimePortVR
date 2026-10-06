@@ -7,6 +7,7 @@
 #include "../webgpu/gpu.hpp"
 
 #include "gx_fmt.hpp"
+#include "native_vertex.hpp"
 #include "shader_info.hpp"
 
 #include <tracy/Tracy.hpp>
@@ -25,6 +26,18 @@ wgpu::RenderPipeline create_pipeline(const PipelineConfig& config) {
   const auto label =
       fmt::format("GX Pipeline {:x} shader {:x}", xxh3_hash(config, static_cast<HashType>(gfx::ShaderType::GX)),
                   xxh3_hash(config.shaderConfig));
+  if (config.shaderConfig.nativeVertices) {
+    const auto native = native_vertex::layout(config.shaderConfig);
+    CHECK(native.valid, "Unsupported native vertex layout reached pipeline creation");
+    // Dawn versions used by desktop and Quest declare these fields in different orders.
+    wgpu::VertexBufferLayout buffer{};
+    buffer.arrayStride = config.shaderConfig.vtxStride;
+    buffer.stepMode = wgpu::VertexStepMode::Vertex;
+    buffer.attributeCount = native.count;
+    buffer.attributes = native.attributes.data();
+    const std::array buffers{buffer};
+    return build_pipeline(config, buffers, shader, label.c_str());
+  }
   return build_pipeline(config, {}, shader, label.c_str());
 }
 
@@ -38,6 +51,9 @@ void render(const DrawData& data, const wgpu::RenderPassEncoder& pass) {
   gfx::bind_gx_uniform(pass, resources.uniformBindGroup, data.uniformRange.offset);
   gfx::bind_gx_textures(pass, data.bindGroups.textureBindGroup);
   gfx::bind_gx_geometry(pass, data.cachedGeometry);
+  if (data.nativeVertices) {
+    gfx::bind_gx_native_vertices(pass);
+  }
   gfx::bind_gx_indices(pass, resources.indexBuffer, data.idxRange.offset, data.idxRange.size,
                        data.cachedGeometry ? wgpu::IndexFormat::Uint32 : wgpu::IndexFormat::Uint16);
   if (data.dstAlpha != UINT32_MAX) {
@@ -76,6 +92,9 @@ void render_eye(const DrawData& data, const wgpu::RenderPassEncoder& pass, uint3
       data.stereoTextureBindGroup[eye] ? data.stereoTextureBindGroup[eye] : data.bindGroups.textureBindGroup;
   gfx::bind_gx_textures(pass, textureBindGroup);
   gfx::bind_gx_geometry(pass, data.cachedGeometry);
+  if (data.nativeVertices) {
+    gfx::bind_gx_native_vertices(pass);
+  }
   gfx::bind_gx_indices(pass, resources.indexBuffer, data.idxRange.offset, data.idxRange.size,
                        data.cachedGeometry ? wgpu::IndexFormat::Uint32 : wgpu::IndexFormat::Uint16);
   if (data.dstAlpha != UINT32_MAX) {
@@ -106,6 +125,9 @@ void render_multiview(const DrawData& data, const wgpu::RenderPassEncoder& pass)
   gfx::bind_gx_uniform(pass, resources.multiviewUniformBindGroup, uniformOffset);
   gfx::bind_gx_textures(pass, data.stereoTextureBindGroup[0]);
   gfx::bind_gx_geometry(pass, data.cachedGeometry);
+  if (data.nativeVertices) {
+    gfx::bind_gx_native_vertices(pass);
+  }
   gfx::bind_gx_indices(pass, resources.indexBuffer, data.idxRange.offset, data.idxRange.size,
                        data.cachedGeometry ? wgpu::IndexFormat::Uint32 : wgpu::IndexFormat::Uint16);
   if (data.dstAlpha != UINT32_MAX) {

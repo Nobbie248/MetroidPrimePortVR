@@ -124,8 +124,14 @@ void set_render_scissor(const gfx::ClipRect& scissor) noexcept { g_gxState.rende
 
 // --- Shader/pipeline stubs ---
 namespace aurora::gx {
+namespace testing {
+ShaderConfig nativeVertexSource{};
+}
 void populate_pipeline_config(PipelineConfig& config, GXPrimitive primitive, GXVtxFmt fmt) noexcept {
   config = {};
+  config.shaderConfig.attrs = testing::nativeVertexSource.attrs;
+  config.shaderConfig.vtxStride = testing::nativeVertexSource.vtxStride;
+  config.shaderConfig.nativeVertices = g_gxState.nativeVertices;
   config.cullMode = g_gxState.cullMode;
   config.shaderConfig.currentPnMtx = g_gxState.currentPnMtx;
   config.shaderConfig.mapBatch = g_gxState.mapBatch && primitive == GX_TRIANGLES;
@@ -471,6 +477,7 @@ std::atomic<uint64_t> g_fifoCachedDlIndexBytes{0};
 std::atomic<uint32_t> g_fifoCachedDlVerts{0};
 std::atomic<uint32_t> g_fifoGeometryHits{0};
 std::atomic<uint32_t> g_fifoGeometryMisses{0};
+std::atomic<uint32_t> g_fifoNativeDraws{0};
 std::atomic<uint32_t> g_geometryEntries{0};
 std::atomic<uint64_t> g_geometryResidentBytes{0};
 std::atomic<uint64_t> g_drainWaitNs{0};

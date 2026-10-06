@@ -40,8 +40,9 @@
 
         <meta-data android:name="com.oculus.supportedDevices" android:value="quest2|quest3|quest3s|questpro" />
         <meta-data android:name="com.oculus.vr.focusaware" android:value="true" />
-        <!-- Let the runtime move CPU budget to the GPU; the per-eye replay is GPU-bound. -->
-        <meta-data android:name="com.oculus.trade_cpu_for_gpu_amount" android:value="-1" />
+        <!-- Let the runtime move CPU budget to the GPU (Quest 3 and 3S): 1 = one GPU level more and one
+             CPU level less, -1 the reverse. The eye passes are GPU-bound; the CPU has room. -->
+        <meta-data android:name="com.oculus.trade_cpu_for_gpu_amount" android:value="1" />
 
         <!-- The game. Its own process, which PrimedGunVrActivity ends when the game
              closes: SDLActivity cannot be created twice in one process, and the

@@ -29,6 +29,13 @@
     <uses-feature android:name="com.oculus.feature.PASSTHROUGH" android:required="false" />
     <uses-feature android:name="android.hardware.touchscreen" android:required="false" />
     <uses-feature android:name="android.hardware.gamepad" android:required="false" />
+    <!-- Hand tracking declared optional, which the game does not use: Horizon OS then
+         launches it without the "pick up your controllers" check, so a start with
+         sleeping controllers (or from adb, for automated runs) goes straight in;
+         the controllers work as soon as they wake. -->
+    <uses-feature android:name="oculus.software.handtracking" android:required="false" android:version="1" />
+    <uses-permission android:name="com.oculus.permission.HAND_TRACKING" />
+    <uses-permission android:name="oculus.permission.handtracking" />
 
     <application
         android:allowBackup="false"
@@ -40,6 +47,8 @@
 
         <meta-data android:name="com.oculus.supportedDevices" android:value="quest2|quest3|quest3s|questpro" />
         <meta-data android:name="com.oculus.vr.focusaware" android:value="true" />
+        <!-- With oculus.software.handtracking above: hand tracking is optional, not used. -->
+        <meta-data android:name="com.oculus.handtracking.version" android:value="V2.0" />
         <!-- Let the runtime move CPU budget to the GPU (Quest 3 and 3S): 1 = one GPU level more and one
              CPU level less, -1 the reverse. The eye passes are GPU-bound; the CPU has room. -->
         <meta-data android:name="com.oculus.trade_cpu_for_gpu_amount" android:value="1" />

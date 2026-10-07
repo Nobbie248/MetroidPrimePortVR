@@ -59,6 +59,7 @@ VisorDpad::Tracker g_visor;
 bool g_was_active = false;
 bool g_recenter_was_pressed = false; // the right stick click's last state
 bool g_was_gameplay = false;
+bool g_in_game_menu = false; // VrNoteInGameMenu, from the game thread like VrPadUpdate
 uint32_t g_gameplay_samples = 0;
 std::atomic<bool> g_owns_motor{false}; // port 0's rumble goes to the headset controllers
 
@@ -317,7 +318,7 @@ void VrPadUpdate(const CStateManager* mgr) noexcept {
         const bool first_person = player->GetCameraState() == CPlayer::kCS_FirstPerson;
         const bool unmorphed = player->GetMorphballTransitionState() == CPlayer::kMS_Unmorphed;
         const bool cinematic = mgr->GetCameraManager() != nullptr && mgr->GetCameraManager()->IsInCinematicCamera();
-        gameplay = first_person && unmorphed && !cinematic && !mgr->GetInMapScreen();
+        gameplay = first_person && unmorphed && !cinematic && !mgr->GetInMapScreen() && !g_in_game_menu;
         if (gameplay) {
             const CPlayer::EPlayerOrbitState state = player->GetOrbitState();
             orbit = state == CPlayer::kOS_OrbitObject || state == CPlayer::kOS_ForcedOrbitObject ||
@@ -399,6 +400,8 @@ void VrPadUpdate(const CStateManager* mgr) noexcept {
     g_state.visor_zone = visor.zone;
     g_state.visor_direction = static_cast<int>(visor.direction);
 }
+
+void VrNoteInGameMenu(bool open) noexcept { g_in_game_menu = open; }
 
 VrPadState GetVrPadState() noexcept {
     std::lock_guard lock(g_mutex);

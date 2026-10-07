@@ -1,3 +1,79 @@
+## VR: the morph ball's HUD on the virtual screen (2026-10-07)
+
+In the headset the morph ball's HUD sat at the edges of the view, half out
+of sight, while the combat HUD worked. The combat HUD is drawn through a
+perspective camera, so the head-locked route places it at its own angles. The
+ball HUD's frame (`FRME_BallHud`) has an orthographic camera (PrimedGun's
+classifier recognises it by its -3.2 left edge). An orthographic draw is
+replayed unchanged in each eye, so it stretches over each eye's whole image.
+Its energy bar and bomb gauges then land at the edges of the lenses, and in a
+different spot in each eye because the eye frustums are asymmetric.
+
+Aurora's reserved route `AURORA_STEREO_ROUTE_SCREEN_2D` now lays a draw's mono
+picture on the virtual screen. The screen hangs `vr_screen_distance_meters`
+ahead of the game camera and is `vr_screen_width_meters` wide, the same
+settings as the menu and cinematic screen, with the picture's aspect. It is
+Wiicompiled's "race 2D screen" (`HudScreen`): it stays in front of the
+player, and the head can turn to look at its corners. Lean back and
+recentring move it as they move the world.
+
+- `stereo_replay::compose_screen_2d_projection` takes perspective draws as well
+  as orthographic ones. It builds the screen point from the mono clip
+  coordinates, (x * halfWidth, y * halfHeight, -distance * w, w), so the whole
+  chain stays a single matrix. Depth uses the mono clip z times the eye depth
+  of the screen's nearest corner. The draw's own NDC depth is therefore scaled
+  by a factor of at most one. Every draw at a given point of the screen gets
+  the same factor, so the layout keeps its depth order and its depth range,
+  which keeps it in front of the world. A screen that faces the eye keeps the
+  exact depth. A draw in a sub-viewport is remapped into the picture, and the
+  remap is undone for the eye pass, which applies that viewport again.
+- `aurora_set_stereo_screen_2d(width, distance, unitsPerMeter)` is read at
+  frame begin. `PushVrSettingsToAurora` feeds it the screen settings and
+  `vr_world_scale`. With no screen, the route draws like FULLSCREEN, as before.
+- `CSamusHud::Draw` routes the ball frame and the base frame drawn with it
+  (hint messages, counter) to the screen while `PortVrBallHudShown()` (the HUD
+  state is `kHS_Ball`). `CInGameGuiManager::Draw` sends the minimap there too,
+  so it keeps its place in the ball HUD's layout. The camera filters stay
+  full-screen. The combat, scan, X-ray and thermal HUDs are unchanged.
+- The stereo statistics line counts "screen 2D" draws.
+- `port_vr_stereo_tests` checks the following: a screen facing the eye matches
+  the head-locked plane; a perspective draw lands on the screen with its depth;
+  on a turned screen, depth only shrinks, alike for every draw at a point and
+  exact at the nearest corner; a sub-viewport draw keeps its place; and the
+  eye uniform carries the projection. Picking the farthest corner instead of
+  the nearest fails the depth check.
+
+build/vr and build/nooxr pass 42/42 port tests, and a desktop boot to the
+Landing Site runs clean. Confirmed in the headset (PSVR2, SteamVR): the ball
+HUD shows on the screen, with 12 draws a frame on the route in morph ball and
+none in first person.
+
+The same headset session turned up two more things.
+
+- **Region title cards.** On arrival in a region, a script billboard
+  (`CScriptSpecialFunction` `kSF_Billboard`, which shows `TXTR_LavaBillboard`,
+  `TXTR_ChozoRuinsBillboard` and the like from NoARAM.pak) sets
+  `CStateManager`'s pending on-screen texture.
+  `CInGameGuiManager::Draw` draws it with `CGraphics::Render2D`, which is
+  orthographic, so it was stretched over each eye's image too. That draw now
+  takes the screen route.
+- **A message box looked like a freeze.** "Increased Pirate activity in
+  Magmoor Caverns." waits for GameCube A. Because the player was still in
+  first person and unmorphed, `vr_pad.cpp` kept the gameplay layout, where A
+  is the weapon trigger and the controller's A does nothing. PrimedGun
+  switched to its default controls through game flow hooks for the message,
+  save, logbook, pause and map screens. Here
+  `CInGameGuiManager::Update` tells the pad every tick whether one of its
+  paused states (`kIGGS_MapScreen` to `kIGGS_PauseHUDMessage`) is the
+  previous or the next state (`PortVr::VrNoteInGameMenu`), and the classic
+  layout applies meanwhile. The diagnosis came from the thread stacks of the
+  live process, read with dbghelp, and a capture of the mirror window. The game
+  loop was running; its world pass was replaced by the pause blur and the box.
+
+Confirmed in the headset: the Chozo Ruins title card shows on the screen (one
+draw a frame on the route while it is up). The menu layout for message boxes
+has not been tried on a message yet.
+
 ## Renderer: a full frame of vertices no longer aborts the game (2026-10-07)
 
 A Quest play session crashed after a door load. The crash was a SIGABRT in

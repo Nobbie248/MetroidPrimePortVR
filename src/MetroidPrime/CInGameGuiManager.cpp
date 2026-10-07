@@ -32,6 +32,7 @@
 #ifdef TARGET_PC
 #include "aurora/gfx.h"
 #include "vr/vr_debug_tab.h"
+#include "vr/vr_pad.h"
 #include "vr/vr_view.h"
 #endif
 #include "float.h"
@@ -563,6 +564,13 @@ void CInGameGuiManager::PreDraw(CStateManager& mgr, bool isCameraActive) {
 void CInGameGuiManager::Update(const CStateManager& mgr, float dt, CArchitectureQueue& queue,
                                bool cameraActive) {
   EnsureStates(mgr);
+#ifdef TARGET_PC
+  // PortVr: the map, pause, logbook, save and message screens take the VR
+  // controllers' plain GameCube layout, where A confirms (in the gameplay one
+  // A is the weapon trigger, and a message box looked frozen).
+  PortVr::VrNoteInGameMenu(InGameGuiStates::IsPausedState(x1bc_prevState) ||
+                           InGameGuiStates::IsPausedState(x1c0_nextState));
+#endif
   if (x1d8_onScreenTexAlpha == 0.f) {
     x1dc_onScreenTexTok = nullptr;
   }

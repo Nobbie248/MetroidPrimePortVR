@@ -28,6 +28,12 @@ namespace PortVr {
 // real pads, unless a headset session is running in PrimedGun controller mode.
 void VrPadUpdate(const CStateManager* mgr) noexcept;
 
+// Game thread, every tick from CInGameGuiManager::Update: one of its paused
+// screens (map, pause, logbook, save, HUD message) is open, opening or
+// closing. The classic mapping applies meanwhile, as PrimedGun's game flow
+// hooks made it, so the controllers' A confirms and B backs out.
+void VrNoteInGameMenu(bool open) noexcept;
+
 // What the pad synthesis last decided, for the game hooks and the overlays.
 struct VrPadState {
     bool active = false;        // the VR controllers own port 0

@@ -728,6 +728,20 @@ bool CPlayerVisor::DrawScanObjectIndicators(const CStateManager& mgr) const {
                                                17.f * fit * x48_interpWindowDims.GetY()));
   shield->Draw(CModelFlags::AlphaBlended(CColor(0)));
 #ifdef TARGET_PC
+  // PortVr: the shield is a frame around the window's hole whose border lies
+  // past the TV picture's edges; its depth hides the scan reticle's lines and
+  // the icons outside the window. On the head-locked plane that border falls
+  // inside the headset's view, so it is drawn again scaled by 5, 25 and 125:
+  // each copy's hole (+-4.98 by +-4.48 model units) lies inside the last
+  // one's border (+-28.49), and the last reaches well past the eyes' view.
+  if (PortVr::VrImmersive()) {
+    for (float extend = 5.f; extend <= 125.f; extend *= 5.f) {
+      gpRender->SetModelMatrix(
+          CTransform4f::Scale(17.f * fit * x48_interpWindowDims.GetX() * extend, 1.f,
+                              17.f * fit * x48_interpWindowDims.GetY() * extend));
+      shield->Draw(CModelFlags::AlphaBlended(CColor(0)));
+    }
+  }
   // PortVr: the shield above masks the window's part of the view on the plane;
   // the icons below sit on their objects in the world.
   AuroraSetStereoDrawRoute(AURORA_STEREO_ROUTE_WORLD);

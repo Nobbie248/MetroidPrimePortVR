@@ -25,6 +25,20 @@
 
 #include "Kyoto/Math/CloseEnough.hpp"
 
+#ifdef TARGET_PC
+#include "Kyoto/Basics/CBasics.hpp"
+#include <string.h>
+
+// Port: the model's position array is kept as the file stores it, big-endian
+// (CSkinRules::PortBuildPointsAndNormals swaps each float as it skins). Read
+// a vertex of it in host byte order.
+static CVector3f PortReadBigVector(const uchar* p) {
+  float v[3];
+  memcpy(v, p, sizeof(v));
+  return CVector3f(CBasics::SwapBytes(v[0]), CBasics::SwapBytes(v[1]), CBasics::SwapBytes(v[2]));
+}
+#endif
+
 #include "rstl/algorithm.hpp"
 #include "rstl/math.hpp"
 
@@ -120,11 +134,21 @@ CAnimData::CAnimData(
   ++skPOICacheReferenceCount;
 
   xd8_modelData->CalculateDefault();
+#ifdef TARGET_PC
+  // Port: swap the big-endian positions; summed as native floats they gave
+  // garbage bounds (see PortReadBigVector).
+  const uchar* pointBytes =
+      reinterpret_cast< const uchar* >(xd8_modelData->GetModel()->GetPositions());
+  for (int i = 0; i < xd8_modelData->GetNumPoints(); ++i) {
+    x108_aabb.AccumulateBounds(PortReadBigVector(pointBytes + i * sizeof(CVector3f)));
+  }
+#else
   const CVector3f* pointItr =
       reinterpret_cast< const CVector3f* >(xd8_modelData->GetModel()->GetPositions());
   for (int i = 0; i < xd8_modelData->GetNumPoints(); ++i) {
     x108_aabb.AccumulateBounds(pointItr[i]);
   }
+#endif
 
   x120_particleDB.CacheParticleDesc(charInfo.GetParticleResData());
 
@@ -269,11 +293,21 @@ void CAnimData::SubstituteModelData(const TLockedToken< CSkinnedModel >& model) 
   xd8_modelData->CalculateDefault();
   x108_aabb = CAABox::MakeMaxInvertedBox();
 
+#ifdef TARGET_PC
+  // Port: swap the big-endian positions; summed as native floats they gave
+  // garbage bounds (see PortReadBigVector).
+  const uchar* pointBytes =
+      reinterpret_cast< const uchar* >(xd8_modelData->GetModel()->GetPositions());
+  for (int i = 0; i < xd8_modelData->GetNumPoints(); ++i) {
+    x108_aabb.AccumulateBounds(PortReadBigVector(pointBytes + i * sizeof(CVector3f)));
+  }
+#else
   const CVector3f* pointItr =
       reinterpret_cast< const CVector3f* >(xd8_modelData->GetModel()->GetPositions());
   for (int i = 0; i < xd8_modelData->GetNumPoints(); ++i) {
     x108_aabb.AccumulateBounds(pointItr[i]);
   }
+#endif
 }
 
 void CAnimData::SetInfraModel(const TLockedToken< CModel >& model,

@@ -1,3 +1,41 @@
+## Ice beam shell spiked to infinity: averaged normals read big-endian (2026-10-07)
+
+Freezing an enemy with the ice beam sometimes drew its ice shell as long
+streaks shooting out of the body to infinity, all parallel to the shot. Space
+pirates showed it most. PC and Quest both had it; the console does not.
+
+The frozen shell is the character's ice model drawn through
+`CVertexMorphEffect`, which bulges the shell along the shot's direction. On
+its first draw after a freeze it picks the vertices whose normal faces the
+shot and gives each a weight from that normal. The normals come from
+`CSkinnedModelWithAvgNormals`, which groups the ice model's vertices by
+position and averages their normals. That constructor read the model's
+position and normal arrays as native floats. The port keeps those arrays as
+the file stores them, big-endian (`CSkinRules::PortBuildPointsAndNormals`
+swaps each float as it skins, and `CCubeModel::SetSkinningArraysCurrent` says
+so), so every value was a byte-swapped float: mostly denormals and zeros, a
+few huge. Distinct positions then compared equal within `FLT_EPSILON` and were
+grouped together, and the summed normals normalised to 0/0 or x/0. A NaN
+normal drops its vertex from the effect; an infinite one gives an infinite
+weight, and the vertex is pushed to infinity along the shot. That is the
+streak.
+
+Measured at the Phazon Mines save station (slot 2 save state) with a
+temporary count at load: one 134-vertex ice model had 101 of its averaged
+normals not of unit length and 65 position groups; another, 371 vertices, had
+261 bad and 274 groups. With the fix every averaged normal is unit length and
+each vertex has its own position group (134 of 134, 371 of 371).
+
+- `CSkinnedModelWithAvgNormals`: under `TARGET_PC`, swap the positions and
+  normals into native vectors once and average those. The console path is
+  unchanged.
+- `CAnimData`: the constructor and `SetModel` accumulate `x108_aabb`, the
+  fallback bounding box of a character with no per-animation boxes, from the
+  same raw position array. Same swap (`PortReadBigVector`).
+
+Confirmed in the headset by the user: no more spiking ice. 42/42 port tests in
+`build/vr` and `build/nooxr`.
+
 ## VR: the morph ball's HUD on the virtual screen (2026-10-07)
 
 In the headset the morph ball's HUD sat at the edges of the view, half out

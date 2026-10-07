@@ -6,6 +6,11 @@
 #include "Kyoto/Graphics/CModel.hpp"
 #include "Kyoto/Math/CVector3f.hpp"
 
+#ifdef TARGET_PC
+#include "Kyoto/Basics/CBasics.hpp"
+#include <string.h>
+#endif
+
 #include "rstl/pair.hpp"
 #include "rstl/vector.hpp"
 
@@ -18,8 +23,37 @@ CSkinnedModelWithAvgNormals::CSkinnedModelWithAvgNormals(const CSkinnedModel& sk
 #else
   int vertexCount = skinnedModel.GetNumPoints();
 #endif
+#ifdef TARGET_PC
+  // Port: the model keeps its position and normal arrays as the file stores
+  // them, big-endian (CSkinRules::PortBuildPointsAndNormals swaps each float as
+  // it skins; CCubeModel::SetSkinningArraysCurrent notes the same). Summed as
+  // native floats they were garbage: most came out denormal or zero, so the
+  // normalised average was 0/0 or x/0, and CVertexMorphEffect, which weights
+  // each vertex of the frozen (ice beam) shell by these normals, pushed the
+  // vertices of a NaN or infinite normal out to infinity. Swap them once here.
+  rstl::vector< CVector3f > nativePositions(vertexCount);
+  rstl::vector< CVector3f > nativeNormals(vertexCount);
+  {
+    const uchar* srcPositions =
+        reinterpret_cast< const uchar* >(skinnedModel.GetModel()->GetPositions());
+    const uchar* srcNormals =
+        reinterpret_cast< const uchar* >(skinnedModel.GetModel()->GetNormals());
+    for (uint i = 0; i < vertexCount; ++i) {
+      float p[3];
+      float n[3];
+      memcpy(p, srcPositions + i * sizeof(p), sizeof(p));
+      memcpy(n, srcNormals + i * sizeof(n), sizeof(n));
+      nativePositions.push_back(CVector3f(CBasics::SwapBytes(p[0]), CBasics::SwapBytes(p[1]),
+                                          CBasics::SwapBytes(p[2])));
+      nativeNormals.push_back(CVector3f(CBasics::SwapBytes(n[0]), CBasics::SwapBytes(n[1]),
+                                        CBasics::SwapBytes(n[2])));
+    }
+  }
+  const CVector3f* modelPositions = nativePositions.data();
+#else
   const CVector3f* modelPositions =
       reinterpret_cast< const CVector3f* >(skinnedModel.GetModel()->GetPositions());
+#endif
 
   rstl::vector< TPosToVertListPair > vertMap;
   vertMap.reserve(vertexCount);
@@ -45,8 +79,12 @@ CSkinnedModelWithAvgNormals::CSkinnedModelWithAvgNormals(const CSkinnedModel& sk
     }
   }
 
+#ifdef TARGET_PC
+  const CVector3f* normals = nativeNormals.data();
+#else
   const CVector3f* normals =
       reinterpret_cast< const CVector3f* >(skinnedModel.GetModel()->GetNormals());
+#endif
 #if VERSION >= VERSION_GM8P_00 && VERSION != VERSION_GM8E_02
   CVector3f* avgNormals = reinterpret_cast< CVector3f* >(x3c_avgNormals.get());
   AUTO(mapCur, vertMap.begin());

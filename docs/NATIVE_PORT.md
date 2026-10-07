@@ -776,7 +776,7 @@ a temporary directory instead of mounting.
   the same sensitivity/invert apply, tuned by `stick_aim_rate`, default 900 px/s)
   and is consumed, so it no longer drives the game's free-look. Fire stays on
   whatever is bound to A; remap it in the Controls tab.
-- Spring Ball (Input tab, persisted as `spring_ball`, off by default): C-stick
+- Spring Ball (Input tab, persisted as `spring_ball`, on by default): C-stick
   up in morph ball jumps, as in Metroid Prime Trilogy and the randomprime discs
   the Archipelago world makes, once the Morph Ball Bombs are held. It is a bomb
   jump from the ball's position that keeps the horizontal speed, with the same
@@ -860,22 +860,23 @@ a temporary directory instead of mounting.
   its size and place. Morph ball, cutscene and other scripted cameras keep
   their own FOVs; cutscenes that end in Samus's eyes ease to the setting.
 - Anti-aliasing and anisotropic filtering (Render tab, persisted as `msaa`,
-  1 or 4, default 1, and `anisotropy`, 1-16, default 16; pause Options >
-  Display has an Anti-Aliasing on/off row): 4x MSAA on the scene framebuffer
-  (WebGPU only guarantees 1x and 4x) and the anisotropy cap for mipmapped
-  textures, which retail asks for as GX_ANISO_4. Both apply at the start of the
-  next frame without a restart; an MSAA change rebuilds the framebuffers and
-  pipelines, so it hitches once. Console: `msaa <1|4>`, `aniso <1..16>`.
+  1 or 4, default 1, and `anisotropy`, 1-16, default 16, 4 on the Quest;
+  pause Options > Display has an Anti-Aliasing on/off row): 4x MSAA on the
+  scene framebuffer (WebGPU only guarantees 1x and 4x) and the anisotropy cap
+  for mipmapped textures, which retail asks for as GX_ANISO_4. Both apply at
+  the start of the next frame without a restart; an MSAA change rebuilds the
+  framebuffers and pipelines, so it hitches once. Console: `msaa <1|4>`,
+  `aniso <1..16>`.
 - HUD scale (Render tab and pause Options > Display, persisted as `hud_scale`,
   50-100 percent, default 100): shrinks the combat HUD, radar, beam and visor
   menus and the minimap toward the screen centre, each frame as a whole so the
   pieces stay on the visor frame. The helmet is not scaled. The minimap eases
   back to full size as it opens into the map screen.
 - Hide helmet and hide visor effects (Render tab and pause Options > Visor,
-  persisted as `hide_helmet` and `hide_visor_effects`, off by default): the
-  first drops the helmet frame (the dome and the lights at the bottom); the
-  second drops the faceplate decoration, Samus's face reflection and the
-  on-visor billboard effects (rain, splashes, steam). Console:
+  persisted as `hide_helmet`, on by default, and `hide_visor_effects`, off by
+  default): the first drops the helmet frame (the dome and the lights at the
+  bottom); the second drops the faceplate decoration, Samus's face reflection
+  and the on-visor billboard effects (rain, splashes, steam). Console:
   `hudscale <50..100>`, `helmet <0|1>`, `visorfx <0|1>` (0 hides).
 - Speedrun timer and LiveSplit (F1 > Extras; the timer also in pause Options >
   Display as In-Game Timer). `speedrun_timer` draws the in-game time (the play

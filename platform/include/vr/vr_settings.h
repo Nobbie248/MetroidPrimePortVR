@@ -57,7 +57,12 @@ struct PortVrSettings {
     bool direct_present = true;
     // Render-first pacing with one packet of overlap: the game records the next frame
     // while Aurora encodes this one, for more throughput at one frame of latency.
+    // Only the D3D12 backend pipelines so far; the others run render-first.
+#if defined(__ANDROID__)
+    bool pipelined_rendering = true;
+#else
     bool pipelined_rendering = false;
+#endif
     // aurora_set_gx_deindex_vertices: the Quest's GPU stalls on the dependent array
     // fetches. With it, static world surfaces are resolved once and stay on the GPU
     // (Aurora's geometry cache), which also lightens the FIFO thread, the PC's limit.
@@ -132,7 +137,7 @@ struct PortVrSettings {
     // icons with a frame around the hovered one.
     bool beam_wheel_hud_highlight = true;
     float frustum_culling_degrees = 115.0f;
-    float metroid_hud_distance = 0.75f;
+    float metroid_hud_distance = 0.10f;
     float metroid_hud_size = 0.75f;
     float metroid_hud_offset_up = 0.0f;
     float metroid_hud_offset_down = 0.0f;

@@ -192,9 +192,9 @@ void TestClicks() {
 
   // Numeric: right half up, left half down.
   Click(s, v, view, kPlusX, RowY(kCalibrationTab, 1), now, actions);
-  Check(s.selected == 1 && Near(v.metroid_hud_distance, 0.80f), "HUD distance up");
+  Check(s.selected == 1 && Near(v.metroid_hud_distance, 0.15f), "HUD distance up");
   Click(s, v, view, kMinusX, RowY(kCalibrationTab, 1), now, actions);
-  Check(Near(v.metroid_hud_distance, 0.75f), "HUD distance down");
+  Check(Near(v.metroid_hud_distance, 0.10f), "HUD distance down");
   // Toggle anywhere else on the row.
   Click(s, v, view, kLabelX, RowY(kCalibrationTab, 0), now, actions);
   Check(!v.cinematic_screen_enabled, "cinema screen toggle");

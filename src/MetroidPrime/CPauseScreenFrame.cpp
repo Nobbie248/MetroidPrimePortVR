@@ -556,7 +556,7 @@ void CGameOptions::TryRestoreDefaults(const CFinalInput& input, int category, in
     if (!frontEnd) {
       switch (category) {
       case 0:
-        PortDebug::SetHideHelmet(false);
+        PortDebug::SetHideHelmet(true);
         PortDebug::SetHideVisorEffects(false);
         PortDebug::SetRevealMap(false);
         PortDebug::SetMapPickups(false);

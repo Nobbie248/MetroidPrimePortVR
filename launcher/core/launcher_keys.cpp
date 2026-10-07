@@ -34,7 +34,11 @@ constexpr KeyInfo kKeys[] = {
     {"vr_multiview", K::Bool, "1"},
     {"vr_foveation", K::Choice, "off", 0, 0, 0, true, true, "off,low,medium,high"},
     {"vr_direct_present", K::Bool, "1"},
+#if defined(__ANDROID__)
+    {"vr_pipelined_rendering", K::Bool, "1"},
+#else
     {"vr_pipelined_rendering", K::Bool, "0"},
+#endif
     {"vr_deindex_vertices", K::Bool, "1"},
     {"vr_remove_cinematic_bars", K::Bool, "1"},
     {"vr_sky_at_infinity", K::Bool, "1"},
@@ -86,7 +90,7 @@ constexpr KeyInfo kKeys[] = {
     {"vr_position_marker_enabled", K::Bool, "1", 0, 0, 0, false},
     {"vr_frustum_culling_enabled", K::Bool, "1"},
     {"vr_frustum_culling_degrees", K::Float, "115", 70.0f, 175.0f, 1.0f},
-    {"vr_metroid_hud_distance", K::Float, "0.75", 0.10f, 3.00f, 0.05f},
+    {"vr_metroid_hud_distance", K::Float, "0.1", 0.10f, 3.00f, 0.05f},
     {"vr_metroid_hud_size", K::Float, "0.75", 0.10f, 3.00f, 0.05f},
     {"vr_metroid_hud_offset_up", K::Float, "0", 0.0f, 1.0f, 0.01f, false},
     {"vr_metroid_hud_offset_down", K::Float, "0", 0.0f, 1.0f, 0.01f, false},
@@ -112,7 +116,11 @@ constexpr KeyInfo kKeys[] = {
     {"fullscreen", K::Bool, "0", 0, 0, 0, true, false},
     {"vsync", K::Bool, "0", 0, 0, 0, true, false},
     {"msaa", K::Int, "1", 1.0f, 4.0f, 3.0f, true, false},
+#if defined(__ANDROID__)
+    {"anisotropy", K::Int, "4", 1.0f, 16.0f, 1.0f, true, false},
+#else
     {"anisotropy", K::Int, "16", 1.0f, 16.0f, 1.0f, true, false},
+#endif
     {"render_scale", K::Float, "1", 1.0f, 2.0f, 0.25f, true, false},
 };
 

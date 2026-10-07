@@ -136,7 +136,7 @@ float sRenderScale = 1.f;
 PortDebug::EAspectMode sAspectMode = PortDebug::kAspect_4_3;
 bool sHudWide = false;
 int sHudScale = PortDebug::kHudScaleMax;
-bool sHideHelmet = false;
+bool sHideHelmet = true;
 bool sHideVisorEffects = false;
 bool sHideMinimap = false;
 // Game-thread phases (NoteFramePhase), accumulated over RecordFrame's window.
@@ -154,7 +154,7 @@ bool sMouseAim = false;
 bool sTwinStick = false;
 float sTwinStickRightY = 0.f;
 bool sBeamShiftHeld = false;
-bool sSpringBall = false;
+bool sSpringBall = true;
 bool sSwapScanXray = false;
 bool sFastMorph = false;
 bool sInvulnerable = false;
@@ -169,7 +169,12 @@ float sSpringFlickRate = 6.f;
 float sStickAimRate = 900.f;
 float sFirstPersonFov = PortDebug::kFovRetail;
 int sMsaa = 1;
+// The Quest defaults to 4x, the level retail asks for (GX_ANISO_4).
+#if defined(__ANDROID__)
+int sAnisotropy = 4;
+#else
 int sAnisotropy = 16;
+#endif
 bool sUnlockHardMode = false;
 bool sUnlockFusionSuit = false;
 bool sUnlockGalleries = false;

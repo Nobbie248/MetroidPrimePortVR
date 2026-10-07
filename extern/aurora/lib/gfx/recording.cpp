@@ -183,13 +183,14 @@ void log_stereo_frame_stats(const FramePacket& frame) {
   const auto& uploads = resources().stats;
   Log.info("stereo frame: {} passes ({} EFB, {} replayed per eye, {} foveated, {} eyes only, {} discarded), "
            "{} EFB copies "
-           "({} taken per eye), {} draws (world {}, head-locked {}, head-locked 2D {}, fullscreen {}, sky {}, "
-           "skipped {}), eye uniforms {:.2f} ms/frame ({} draws); per frame: fifo {:.2f} ms ({} KB), game waits "
+           "({} taken per eye), {} draws (world {}, head-locked {}, head-locked 2D {}, screen 2D {}, fullscreen {}, "
+           "sky {}, skipped {}), eye uniforms {:.2f} ms/frame ({} draws); per frame: fifo {:.2f} ms ({} KB), game waits "
            "for fifo {:.2f} ms ({} drains), encode {:.2f} ms, submit {:.2f} ms; uploads verts {} KB, indices {} KB, "
            "uniforms {} KB, storage {} KB, textures {} KB",
            frame.renderPasses.size(), efbPasses, eyePasses, foveated, monoSkipped, discarded, copies, eyeCopies,
            g_recorder.drawCallCount, routes[AURORA_STEREO_ROUTE_WORLD], routes[AURORA_STEREO_ROUTE_HEAD_LOCKED],
-           routes[AURORA_STEREO_ROUTE_HEAD_LOCKED_2D], routes[AURORA_STEREO_ROUTE_FULLSCREEN],
+           routes[AURORA_STEREO_ROUTE_HEAD_LOCKED_2D], routes[AURORA_STEREO_ROUTE_SCREEN_2D],
+           routes[AURORA_STEREO_ROUTE_FULLSCREEN],
            routes[AURORA_STEREO_ROUTE_SKY], routes[AURORA_STEREO_ROUTE_SKIP], eyeUniformMs, eyeUniformDraws, fifoMs,
            fifoKb, drainWaitMs, drainCalls, encodeMs, submitMs, uploads.lastVertSize / 1024,
            uploads.lastIndexSize / 1024, uploads.lastUniformSize / 1024, uploads.lastStorageSize / 1024,
@@ -1120,17 +1121,35 @@ std::array<uint32_t, 2> stage_stereo_uniforms(const uint8_t* mono, Range monoRan
     g_recorder.multiviewMode = gx::MultiviewClip;
     return std::array<uint32_t, 2>{monoRange.offset, monoRange.offset};
   };
+  // The virtual screen (AURORA_STEREO_ROUTE_SCREEN_2D) takes the recorded
+  // picture's aspect, and the draw's viewport keeps its place in that picture.
+  stereo_replay::HudScreen screen{};
+  stereo_replay::HudNdcRemap screenNdc{};
+  if (route == AURORA_STEREO_ROUTE_SCREEN_2D && monoSize.width != 0 && monoSize.height != 0) {
+    const float width = static_cast<float>(monoSize.width);
+    const float height = static_cast<float>(monoSize.height);
+    screen = {
+        .halfWidth = state.screen2DHalfWidth,
+        .halfHeight = state.screen2DHalfWidth * height / width,
+        .distance = state.screen2DDistance,
+    };
+    const auto& viewport = g_recorder.cachedViewport;
+    screenNdc = stereo_replay::make_hud_ndc_remap(viewport.left, viewport.top, viewport.width, viewport.height, 0.0f,
+                                                  0.0f, width, height);
+  }
+  const bool onScreen = screen.valid();
   // 2D content and full-screen effects: the same uniform in both eyes.
   const std::array<uint32_t, 2> same{monoRange.offset, monoRange.offset};
-  if (route == AURORA_STEREO_ROUTE_FULLSCREEN || route == AURORA_STEREO_ROUTE_SCREEN_2D) {
+  if (route == AURORA_STEREO_ROUTE_FULLSCREEN || (route == AURORA_STEREO_ROUTE_SCREEN_2D && !onScreen)) {
     return state.multiview ? stage_eye_clips({monoProjection, monoProjection}, false) : same;
   }
   // An orthographic draw is 2D content, identical in both eyes, unless its
-  // route lays it on the head-locked plane (stereo_replay.hpp HeadLockedPlane).
+  // route lays it on the head-locked plane (stereo_replay.hpp HeadLockedPlane)
+  // or on the virtual screen.
   const bool perspective = stereo_uniform_is_perspective(mono, layout);
   const bool onPlane =
       !perspective && route == AURORA_STEREO_ROUTE_HEAD_LOCKED_2D && g_recorder.headLockedPlane.valid();
-  if (!perspective && !onPlane) {
+  if (!perspective && !onPlane && !onScreen) {
     return state.multiview ? stage_eye_clips({monoProjection, monoProjection}, false) : same;
   }
   const stereo_replay::HudScreen plane =
@@ -1141,12 +1160,15 @@ std::array<uint32_t, 2> stage_stereo_uniforms(const uint8_t* mono, Range monoRan
   // A screen-projecting texture matrix (AuroraSetStereoScreenTexMtx) differs per eye:
   // under multiview such a draw takes the full eye copies (MultiviewFull).
   const auto screenTexMtx = g_recorder.stereoScreenTexMtx;
-  const bool perEyeTexMtx = !onPlane && screenTexMtx.texSlot != 0xFF;
+  const bool perEyeTexMtx = !onPlane && !onScreen && screenTexMtx.texSlot != 0xFF;
   if (!perEyeTexMtx) {
     std::array<Mat4x4<float>, AURORA_STEREO_EYE_COUNT> clips;
     for (uint32_t eye = 0; eye < AURORA_STEREO_EYE_COUNT; ++eye) {
       const auto& params = state.eyes[eye];
-      if (onPlane) {
+      if (onScreen) {
+        clips[eye] = stereo_replay::compose_screen_2d_projection(params.projection, params.viewFromCenter, screen,
+                                                                 monoProjection, screenNdc);
+      } else if (onPlane) {
         clips[eye] = stereo_replay::compose_head_locked_2d_projection(
             params.projection, params.headLockedViewFromCenter, plane, monoProjection);
       } else {
@@ -1193,7 +1215,17 @@ std::array<uint32_t, 2> stage_stereo_uniforms(const uint8_t* mono, Range monoRan
         monoSize.width != 0 ? static_cast<float>(params.width) / static_cast<float>(monoSize.width) : 1.0f;
     const float renderScaleY =
         monoSize.height != 0 ? static_cast<float>(params.height) / static_cast<float>(monoSize.height) : 1.0f;
-    if (onPlane) {
+    if (onScreen) {
+      compose_stereo_screen_2d_uniform(scratch.data(), layout,
+                                       StereoEyeScreenCompose{
+                                           .projection = &params.projection,
+                                           .viewFromCenter = &params.viewFromCenter,
+                                           .screen = screen,
+                                           .ndcRemap = screenNdc,
+                                           .renderScaleX = renderScaleX,
+                                           .renderScaleY = renderScaleY,
+                                       });
+    } else if (onPlane) {
       compose_stereo_2d_uniform(scratch.data(), layout,
                                 StereoEye2DCompose{
                                     .projection = &params.projection,

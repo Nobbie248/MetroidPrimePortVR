@@ -1605,6 +1605,17 @@ void CSamusHud::Draw(const CStateManager& mgr, float alpha, uint helmetVis, bool
                                       CCameraFilterPass::kFS_CookieCutterDepthRandomStatic,
                                       CColor::White(), nullptr, 1.f - alpha);
       }
+#ifdef TARGET_PC
+      // PortVr: the morph ball's HUD is laid out for the whole picture (its
+      // frame camera is orthographic), so head-locked it would cover each
+      // eye's image and put its gauges at the edges of the lenses. The headset
+      // lays it, and the base frame drawn with it (hint messages), on the
+      // virtual screen in front of the player instead.
+      const bool vrBallScreen = PortVrBallHudShown();
+      if (vrBallScreen) {
+        AuroraSetStereoDrawRoute(AURORA_STEREO_ROUTE_SCREEN_2D);
+      }
+#endif
       if (x288_loadedSelectedHud != nullptr) {
         if (mgr.GetPlayer()->GetDeathTime() > 0.f) {
           if (mgr.GetPlayer()->GetMorphballTransitionState() != CPlayer::kMS_Unmorphed) {
@@ -1631,6 +1642,11 @@ void CSamusHud::Draw(const CStateManager& mgr, float alpha, uint helmetVis, bool
         currentTime = timer.GetElapsedMicros();
         x7ac_profileInfo[6].x8_drawUsec = currentTime - previousTime;
       }
+#ifdef TARGET_PC
+      if (vrBallScreen) {
+        AuroraSetStereoDrawRoute(AURORA_STEREO_ROUTE_HEAD_LOCKED);
+      }
+#endif
     }
   }
   if (!x29c_decoIntf.null() && x2cc_preLoadCountdown == 0) {

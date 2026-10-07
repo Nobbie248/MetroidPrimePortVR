@@ -68,6 +68,11 @@ public:
   float GetDesiredViewportScaleX() const { return x500_viewportScaleX; }
   float GetDesiredViewportScaleY() const { return x504_viewportScaleY; }
   CGuiFrame* GetBaseHudFrame() const { return x274_loadedFrmeBaseHud; }
+#ifdef TARGET_PC
+  // PortVr: the morph ball's HUD frame is the one drawn. A frame fades out
+  // before the next one loads, so this flips while neither shows.
+  bool PortVrBallHudShown() const { return x2bc_nextState == kHS_Ball; }
+#endif
 
   static CTransform4f BuildFinalCameraTransform(const CQuaternion& rot, const CVector3f& pos,
                                                 const CVector3f& camPos);

@@ -66,7 +66,7 @@ void BuildPortConfigTab(TabContext& ctx, QTabWidget* tabs) {
   ctx.Check(layout, QObject::tr("Scan window zoom"), "vr_scan_zoom",
             QObject::tr("Off, the scan visor's window shows the view behind it unmagnified, keeping its frame."));
   ctx.Float(layout, QObject::tr("Virtual screen distance"), "vr_screen_distance_meters")
-      ->setToolTip(QObject::tr("Metres; menus and cutscenes hang on this screen."));
+      ->setToolTip(QObject::tr("Metres; menus, cutscenes and the morph ball's HUD hang on this screen."));
   ctx.Float(layout, QObject::tr("Virtual screen width"), "vr_screen_width_meters")
       ->setToolTip(QObject::tr("Metres."));
   ctx.Float(layout, QObject::tr("Lean back"), "vr_lean_back_degrees")

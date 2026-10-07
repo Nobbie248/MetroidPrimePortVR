@@ -291,7 +291,7 @@
     <string name="primedgun_scan_zoom">Scan window zoom</string>
     <string name="primedgun_scan_zoom_note">Off, the scan visor\'s window shows the view behind it unmagnified, keeping its frame.</string>
     <string name="primedgun_screen_distance">Virtual screen distance</string>
-    <string name="primedgun_screen_distance_note">Metres; menus and cutscenes hang on this screen.</string>
+    <string name="primedgun_screen_distance_note">Metres; menus, cutscenes and the morph ball\'s HUD hang on this screen.</string>
     <string name="primedgun_screen_width">Virtual screen width</string>
     <string name="primedgun_screen_width_note">Metres.</string>
     <string name="primedgun_lean_back">Lean back</string>

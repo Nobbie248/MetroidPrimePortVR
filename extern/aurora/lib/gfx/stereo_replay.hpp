@@ -496,6 +496,78 @@ inline EyeUvRect head_locked_plane_uv_rect(const Mat4x4<float>& eyeFrustum,
   return {.u = u0, .v = v0, .width = u1 - u0, .height = v1 - v0};
 }
 
+// --- the virtual screen (AURORA_STEREO_ROUTE_SCREEN_2D) ---------------------
+//
+// A 2D layout drawn for the whole picture, such as Metroid Prime's morph ball
+// HUD, keeps its pieces in the corners of the mono view. Replayed per eye as
+// it is, an orthographic draw covers each eye's whole image, so those pieces
+// land at the edges of the lenses, out of sight. The route lays the draw's
+// mono picture on the virtual screen instead (HudScreen, in the recorded game
+// camera space), which keeps the layout's shape and keeps it in front of the
+// player while the head looks around it.
+//
+// Unlike compose_hud_screen_projection the draw may be a perspective one as
+// well (a HUD model drawn through its frame's camera): the screen point is
+// built from the draw's mono clip coordinates, (x * halfWidth, y * halfHeight,
+// -distance * w, w), which is the point for its NDC scaled by its w, so the
+// chain stays linear.
+//
+// Depth: the eye's clip w is then the point's eye depth times the mono w, so
+// the mono clip z times a constant hands the divide the draw's own NDC depth
+// times that constant over the eye depth. With the screen's nearest corner's
+// eye depth as the constant, the factor is at most one on the screen, so the
+// depth stays in the volume (and in the draw's depth range, which the viewport
+// applies), and it is the same for every draw at a point of the screen, so the
+// layout keeps its own depth order. A screen that faces the eye squarely
+// keeps the exact depth.
+//
+// `ndcRemap` places the draw's viewport in the recorded picture (identity for
+// a full-picture viewport). The eye pass applies the same viewport, scaled to
+// the eye, after this projection, so the eye coordinates are taken back into
+// that viewport too.
+inline constexpr float kScreen2DMinDepthFraction = 0.05f; // of the distance, for a corner beside or behind the eye
+
+inline Mat4x4<float> compose_screen_2d_projection(const Mat4x4<float>& eyeFrustum, const Mat3x4<float>& viewFromCenter,
+                                                  const HudScreen& screen, const Mat4x4<float>& gameProjection,
+                                                  const HudNdcRemap& ndcRemap = {}) noexcept {
+  const Mat4x4<float> frameProjection = remap_hud_ndc(gameProjection, ndcRemap);
+  // The point's eye-space coordinates, each as a functional of (mv_pos, 1).
+  Mat3x4<float> eyePoint{};
+  for (size_t row = 0; row < 3; ++row) {
+    const auto& view = *(&viewFromCenter.m0 + row);
+    auto& dst = *(&eyePoint.m0 + row);
+    for (size_t i = 0; i < 4; ++i) {
+      dst[i] = view[0] * screen.halfWidth * frameProjection.m0[i] +
+               view[1] * screen.halfHeight * frameProjection.m1[i] +
+               (view[3] - view[2] * screen.distance) * frameProjection.m3[i];
+    }
+  }
+  const auto& depthRow = viewFromCenter.m2;
+  float nearest = 0.0f;
+  bool first = true;
+  for (const float x : {-screen.halfWidth, screen.halfWidth}) {
+    for (const float y : {-screen.halfHeight, screen.halfHeight}) {
+      const float depth = -(depthRow[0] * x + depthRow[1] * y - depthRow[2] * screen.distance + depthRow[3]);
+      nearest = first ? depth : std::min(nearest, depth);
+      first = false;
+    }
+  }
+  nearest = std::max(nearest, kScreen2DMinDepthFraction * screen.distance);
+
+  const float inverseScaleX = ndcRemap.scaleX != 0.0f ? 1.0f / ndcRemap.scaleX : 1.0f;
+  const float inverseScaleY = ndcRemap.scaleY != 0.0f ? 1.0f / ndcRemap.scaleY : 1.0f;
+  Mat4x4<float> out{};
+  for (size_t i = 0; i < 4; ++i) {
+    out.m3[i] = -eyePoint.m2[i];
+    const float x = eyeFrustum.m0[0] * eyePoint.m0[i] + eyeFrustum.m0[2] * eyePoint.m2[i];
+    const float y = eyeFrustum.m1[1] * eyePoint.m1[i] + eyeFrustum.m1[2] * eyePoint.m2[i];
+    out.m0[i] = (x - ndcRemap.offsetX * out.m3[i]) * inverseScaleX;
+    out.m1[i] = (y - ndcRemap.offsetY * out.m3[i]) * inverseScaleY;
+    out.m2[i] = backend_ndc_depth_row(frameProjection)[i] * nearest;
+  }
+  return out;
+}
+
 // The headset settings panel (aurora_imgui_set_stereo_overlay): a rectangle
 // centred on the virtual screen, in the same world units as the screen.
 struct OverlayPanel {

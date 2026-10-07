@@ -287,7 +287,17 @@ void CInGameGuiManager::Draw(const CStateManager& mgr) const {
     const CViewport& viewport = CGraphics::GetViewport();
     const int x = viewport.mLeft + (viewport.mWidth - w) / 2 + x1c4_onScreenTex.xc_offset.GetX();
     const int y = viewport.mTop + (viewport.mHeight - h) / 2 - x1c4_onScreenTex.xc_offset.GetY();
+#ifdef TARGET_PC
+    // PortVr: the region's title card (a script billboard, TXTR_LavaBillboard
+    // and the like) is placed in the 2D picture, so each eye would stretch it
+    // over its whole image. The headset shows it on the virtual screen, like
+    // the morph ball's HUD.
+    AuroraSetStereoDrawRoute(AURORA_STEREO_ROUTE_SCREEN_2D);
+#endif
     CGraphics::Render2D(tex, x, y, w, h, CColor::White().WithAlphaOf(x1d8_onScreenTexAlpha));
+#ifdef TARGET_PC
+    AuroraSetStereoDrawRoute(AURORA_STEREO_ROUTE_WORLD);
+#endif
   }
 
   float staticAlpha = 0.f;
@@ -410,7 +420,10 @@ void CInGameGuiManager::Draw(const CStateManager& mgr) const {
 #ifdef TARGET_PC
     // PortVr: the minimap and its depth mask are drawn in the HUD frame
     // camera's space, so the headset keeps them in front of the head too.
-    AuroraSetStereoDrawRoute(AURORA_STEREO_ROUTE_HEAD_LOCKED);
+    // With the morph ball's HUD they go on the virtual screen with it
+    // (CSamusHud::Draw), where they keep their place in its layout.
+    AuroraSetStereoDrawRoute(x34_samusHud->PortVrBallHudShown() ? AURORA_STEREO_ROUTE_SCREEN_2D
+                                                                 : AURORA_STEREO_ROUTE_HEAD_LOCKED);
     drawsSince();
 #endif
     CGuiCamera* camera = x34_samusHud->GetBaseHudFrame()->GetFrameCamera();

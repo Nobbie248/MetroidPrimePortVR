@@ -88,7 +88,10 @@ void aurora_set_stereo_mirror_view(AuroraStereoMirrorView view);
 typedef enum AuroraStereoDrawRoute {
   AURORA_STEREO_ROUTE_WORLD = 0,           // a game camera draw: eye frustum and eye pose composed in
   AURORA_STEREO_ROUTE_HEAD_LOCKED = 1,     // a camera-space draw (HUD), scaled by the head-locked scale
-  AURORA_STEREO_ROUTE_SCREEN_2D = 2,       // 2D content (reserved: drawn like FULLSCREEN for now)
+  // A 2D layout drawn for the whole picture (Metroid Prime's morph ball HUD): its mono picture, perspective and
+  // orthographic draws alike, is laid on the virtual screen (aurora_set_stereo_screen_2d) hung ahead in the game
+  // camera's space, so its corners stay in sight and the head looks around it. Drawn like FULLSCREEN without one.
+  AURORA_STEREO_ROUTE_SCREEN_2D = 2,
   AURORA_STEREO_ROUTE_FULLSCREEN = 3,      // identical in both eyes, game projection untouched
   AURORA_STEREO_ROUTE_PER_EYE_RESOLVE = 4, // reserved: the pass's EFB copy replayed per eye (drawn like WORLD)
   // Not drawn in the eyes. An EFB copy made under it is taken from the mono EFB only and the eyes sample that copy:
@@ -109,6 +112,10 @@ typedef enum AuroraStereoDrawRoute {
 // their distance (0.75 and 0.75: the HUD at three quarters of its authored
 // size and distance). Read at frame begin.
 void aurora_set_stereo_head_locked(float sizeScale, float distanceScale);
+// The virtual screen AURORA_STEREO_ROUTE_SCREEN_2D draws are laid on: widthMeters across and distanceMeters
+// ahead of the game camera, its height following the picture's aspect, the game drawing unitsPerMeter units to
+// the metre. A zero turns it off. Read at frame begin.
+void aurora_set_stereo_screen_2d(float widthMeters, float distanceMeters, float unitsPerMeter);
 // Whether immersive packets are replayed per eye (default true). Off, they are
 // shown as the mono image on the virtual screen, which is the fail-safe path.
 void aurora_set_stereo_immersive_replay(bool enabled);

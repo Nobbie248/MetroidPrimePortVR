@@ -83,6 +83,13 @@ struct StereoFrameState {
   // it (z) the distance, so a camera-space HUD can be shrunk and pulled closer.
   float headLockedScaleXY = 1.0f;
   float headLockedScaleZ = 1.0f;
+  // AURORA_STEREO_ROUTE_SCREEN_2D draws: the virtual screen they are laid on
+  // (stereo_replay.hpp compose_screen_2d_projection), its half width and its
+  // distance ahead in the recorded space's units; its height follows the
+  // recorded picture's aspect. Zero: no screen, and the route draws like
+  // AURORA_STEREO_ROUTE_FULLSCREEN.
+  float screen2DHalfWidth = 0.0f;
+  float screen2DDistance = 0.0f;
   std::array<StereoEyeParams, AURORA_STEREO_EYE_COUNT> eyes{};
   std::array<StereoEyeOutput, AURORA_STEREO_EYE_COUNT> outputs{};
 };

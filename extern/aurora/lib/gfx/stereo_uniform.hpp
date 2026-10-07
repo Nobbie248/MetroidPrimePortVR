@@ -219,6 +219,21 @@ struct StereoEye2DCompose {
   float renderScaleY = 1.0f;
 };
 
+namespace detail {
+// The eye's projection in place of the mono one, and the eye target's render
+// size, as compose_stereo_uniform makes it.
+inline void set_stereo_projection(uint8_t* uniform, const StereoUniformLayout& layout,
+                                  const Mat4x4<float>& projection, float renderScaleX, float renderScaleY) noexcept {
+  std::memcpy(uniform + layout.projectionOffset, &projection, sizeof(projection));
+
+  float renderSize[2];
+  std::memcpy(renderSize, uniform, sizeof(renderSize));
+  renderSize[0] *= renderScaleX;
+  renderSize[1] *= renderScaleY;
+  std::memcpy(uniform, renderSize, sizeof(renderSize));
+}
+} // namespace detail
+
 // Rewrites `uniform` (a copy of the mono uniform) in place for one eye of an
 // orthographic draw on the head-locked plane: the projection becomes
 // stereo_replay::compose_head_locked_2d_projection's (the draw's position
@@ -231,13 +246,31 @@ inline void compose_stereo_2d_uniform(uint8_t* uniform, const StereoUniformLayou
   std::memcpy(&projection, uniform + layout.projectionOffset, sizeof(projection));
   projection = stereo_replay::compose_head_locked_2d_projection(*eye.projection, *eye.headLockedViewFromCenter,
                                                                 eye.plane, projection);
-  std::memcpy(uniform + layout.projectionOffset, &projection, sizeof(projection));
+  detail::set_stereo_projection(uniform, layout, projection, eye.renderScaleX, eye.renderScaleY);
+}
 
-  float renderSize[2];
-  std::memcpy(renderSize, uniform, sizeof(renderSize));
-  renderSize[0] *= eye.renderScaleX;
-  renderSize[1] *= eye.renderScaleY;
-  std::memcpy(uniform, renderSize, sizeof(renderSize));
+// AURORA_STEREO_ROUTE_SCREEN_2D: a draw, perspective or orthographic, laid on
+// the virtual screen (stereo_replay.hpp compose_screen_2d_projection).
+struct StereoEyeScreenCompose {
+  const Mat4x4<float>* projection = nullptr;     // the eye frustum
+  const Mat3x4<float>* viewFromCenter = nullptr; // the eye pose, from the space the draw was recorded in
+  stereo_replay::HudScreen screen{};
+  stereo_replay::HudNdcRemap ndcRemap{}; // the draw's viewport within the recorded picture
+  float renderScaleX = 1.0f; // eye target size over the recorded render target size
+  float renderScaleY = 1.0f;
+};
+
+// Rewrites `uniform` (a copy of the mono uniform) in place for one eye of a
+// draw on the virtual screen: only the projection changes (the screen takes
+// the mono picture, so the position matrices and the lights stay the mono
+// view's), and the render size becomes the eye target's.
+inline void compose_stereo_screen_2d_uniform(uint8_t* uniform, const StereoUniformLayout& layout,
+                                             const StereoEyeScreenCompose& eye) noexcept {
+  Mat4x4<float> projection;
+  std::memcpy(&projection, uniform + layout.projectionOffset, sizeof(projection));
+  projection = stereo_replay::compose_screen_2d_projection(*eye.projection, *eye.viewFromCenter, eye.screen,
+                                                           projection, eye.ndcRemap);
+  detail::set_stereo_projection(uniform, layout, projection, eye.renderScaleX, eye.renderScaleY);
 }
 
 } // namespace aurora::gfx

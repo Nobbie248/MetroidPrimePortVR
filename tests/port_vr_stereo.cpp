@@ -264,6 +264,124 @@ int main() {
   Check(!stereo_replay::head_locked_plane_uv_rect(flatFrustum, rightEye, {}, -0.5f, 0.5f, 0.5f, -0.5f).valid(),
         "no plane, no copy rectangle");
 
+  // The virtual screen (AURORA_STEREO_ROUTE_SCREEN_2D: the morph ball's HUD).
+  // A screen that faces the eye squarely is the head-locked plane: same
+  // place, same exact depth.
+  {
+    const auto onScreen =
+        stereo_replay::compose_screen_2d_projection(flatFrustum, rightEye, paneScreen, paneOrtho);
+    bool same = true;
+    for (size_t row = 0; row < 4; ++row) {
+      for (size_t i = 0; i < 4; ++i) {
+        same = same && Near((*(&onScreen.m0 + row))[i], (*(&onPlane.m0 + row))[i]);
+      }
+    }
+    Check(same, "a screen facing the eye lays an orthographic draw like the head-locked plane");
+  }
+  // A perspective draw: its mono NDC lands on the screen, and with the screen
+  // facing the eye its NDC depth survives the divide.
+  const auto apply = [](const Mat4x4<float>& m, const float (&v)[4], float (&out)[4]) {
+    for (size_t row = 0; row < 4; ++row) {
+      const auto& r = *(&m.m0 + row);
+      out[row] = r[0] * v[0] + r[1] * v[1] + r[2] * v[2] + r[3] * v[3];
+    }
+  };
+  // Where the point of the screen at frame NDC (x, y) lands in an eye's NDC.
+  const auto screenPointNdc = [](const Mat4x4<float>& frustum, const Mat3x4<float>& view,
+                                 const stereo_replay::HudScreen& s, float x, float y, float& outX, float& outY) {
+    const float p[4] = {x * s.halfWidth, y * s.halfHeight, -s.distance, 1.f};
+    float e[3];
+    for (size_t row = 0; row < 3; ++row) {
+      const auto& r = *(&view.m0 + row);
+      e[row] = r[0] * p[0] + r[1] * p[1] + r[2] * p[2] + r[3] * p[3];
+    }
+    outX = (frustum.m0[0] * e[0] + frustum.m0[2] * e[2]) / -e[2];
+    outY = (frustum.m1[1] * e[1] + frustum.m1[2] * e[2]) / -e[2];
+  };
+  {
+    const float hudVertex[4] = {0.3f, -0.2f, -4.f, 1.f};
+    float mono[4];
+    apply(projection, hudVertex, mono);
+    const auto composed =
+        stereo_replay::compose_screen_2d_projection(cantedFrustum, rightEye, paneScreen, projection);
+    float eyeClip[4];
+    apply(composed, hudVertex, eyeClip);
+    float x = 0.f;
+    float y = 0.f;
+    screenPointNdc(cantedFrustum, rightEye, paneScreen, mono[0] / mono[3], mono[1] / mono[3], x, y);
+    Check(eyeClip[3] > 0.f && Near(eyeClip[0] / eyeClip[3], x) && Near(eyeClip[1] / eyeClip[3], y),
+          "a perspective draw's mono picture lands on the screen");
+    Check(Near(eyeClip[2] / eyeClip[3], mono[2] / mono[3]), "a screen facing the eye keeps the draw's depth");
+  }
+  // The head turned 30 degrees and moved: the screen stays where it hangs,
+  // and depth only ever shrinks, by the same factor for every draw at a
+  // point of the screen, so the layout keeps its depth order.
+  {
+    const float c = std::cos(0.5235988f);
+    const float s = std::sin(0.5235988f);
+    const auto turned = Affine(c, 0, -s, 0.2f, 0, 1, 0, -0.1f, s, 0, c, 0.3f);
+    const auto composed = stereo_replay::compose_screen_2d_projection(flatFrustum, turned, paneScreen, paneOrtho);
+    // ndc (0.5, 0.4) at mono depths 0.75 and 0.25.
+    const float front[4] = {5.f, 2.f, -1.f, 1.f};
+    const float back[4] = {5.f, 2.f, 0.f, 1.f};
+    float frontClip[4];
+    float backClip[4];
+    apply(composed, front, frontClip);
+    apply(composed, back, backClip);
+    float x = 0.f;
+    float y = 0.f;
+    screenPointNdc(flatFrustum, turned, paneScreen, 0.5f, 0.4f, x, y);
+    Check(Near(frontClip[0] / frontClip[3], x) && Near(frontClip[1] / frontClip[3], y),
+          "the screen stays where it hangs when the head turns");
+    const float frontDepth = frontClip[2] / frontClip[3];
+    const float backDepth = backClip[2] / backClip[3];
+    Check(frontDepth > backDepth && backDepth > 0.f && frontDepth <= 0.75f && backDepth <= 0.25f,
+          "depth shrinks on a turned screen, keeping its order");
+    Check(Near(frontDepth / 0.75f, backDepth / 0.25f), "every draw at a point of the screen shrinks alike");
+    float largest = 0.f;
+    for (const float cornerX : {-1.f, 1.f}) {
+      for (const float cornerY : {-1.f, 1.f}) {
+        const float corner[4] = {10.f * cornerX, 5.f * cornerY, -1.f, 1.f};
+        float clip[4];
+        apply(composed, corner, clip);
+        largest = std::fmax(largest, clip[2] / clip[3] / 0.75f);
+      }
+    }
+    Check(Near(largest, 1.f), "the nearest corner keeps the exact depth");
+  }
+  // A draw in a sub-viewport (the picture's top-left quarter) keeps its place
+  // in the picture: the eye pass applies the same viewport, scaled to the eye,
+  // after the projection.
+  {
+    const auto quarter = stereo_replay::make_hud_ndc_remap(0.f, 0.f, 320.f, 240.f, 0.f, 0.f, 640.f, 480.f);
+    const auto composed =
+        stereo_replay::compose_screen_2d_projection(flatFrustum, rightEye, paneScreen, paneOrtho, quarter);
+    float clip[4];
+    apply(composed, vertex, clip); // ndc (0.5, 0) of the quarter: (-0.25, 0.5) of the picture
+    float x = 0.f;
+    float y = 0.f;
+    screenPointNdc(flatFrustum, rightEye, paneScreen, -0.25f, 0.5f, x, y);
+    Check(Near(clip[0] / clip[3] * quarter.scaleX + quarter.offsetX, x) &&
+              Near(clip[1] / clip[3] * quarter.scaleY + quarter.offsetY, y),
+          "a sub-viewport draw keeps its place in the picture on the screen");
+  }
+  {
+    auto screenUniform = ortho;
+    std::memcpy(screenUniform.data() + layout.projectionOffset, &paneOrtho, sizeof(paneOrtho));
+    compose_stereo_screen_2d_uniform(screenUniform.data(), layout,
+                                     StereoEyeScreenCompose{&flatFrustum, &rightEye, paneScreen, {}, 2.f, 0.5f});
+    Mat4x4<float> stagedScreen;
+    std::memcpy(&stagedScreen, screenUniform.data() + layout.projectionOffset, sizeof(stagedScreen));
+    const auto expected = stereo_replay::compose_screen_2d_projection(flatFrustum, rightEye, paneScreen, paneOrtho);
+    Check(std::memcmp(&stagedScreen, &expected, sizeof(expected)) == 0,
+          "the screen eye uniform carries the screen projection");
+    Check(std::memcmp(screenUniform.data() + layout.positionOffset, ortho.data() + layout.positionOffset,
+                      kStereoPositionMatrices * sizeof(Mat3x4<float>)) == 0,
+          "a screen draw's position matrices are untouched");
+    std::memcpy(outSizes, screenUniform.data(), sizeof(outSizes));
+    Check(Near(outSizes[0], 3840.f) && Near(outSizes[1], 540.f), "the screen eye uniform takes the eye's render size");
+  }
+
   // An eye's version of an EFB copy has the eye's resolution: a full copy
   // of an 800 x 450 desktop EFB in a 4808 x 4904 eye, a half-size copy
   // stays half the eye's, a part of the view keeps its share.

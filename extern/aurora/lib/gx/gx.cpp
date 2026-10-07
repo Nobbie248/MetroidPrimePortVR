@@ -36,8 +36,8 @@ using webgpu::g_device;
 using webgpu::g_graphicsConfig;
 
 GXState g_gxState{};
-wgpu::BindGroup g_emptyTextureBindGroup;
-wgpu::BindGroup g_emptyMultiviewTextureBindGroup;
+std::array<wgpu::BindGroup, 2> g_emptyTextureBindGroups;
+std::array<wgpu::BindGroup, 2> g_emptyMultiviewTextureBindGroups;
 
 namespace {
 wgpu::Sampler sEmptySampler;
@@ -50,9 +50,14 @@ absl::flat_hash_map<u32, std::pair<wgpu::BindGroupLayout, wgpu::BindGroupLayout>
 wgpu::BindGroupLayout sTextureBindGroupLayout;
 wgpu::BindGroupLayout sSamplerBindGroupLayout;
 wgpu::PipelineLayout sPipelineLayout;
+// The Lean layout (TextureLayout): the GX textures alone.
+wgpu::BindGroupLayout sLeanTextureBindGroupLayout;
+wgpu::PipelineLayout sLeanPipelineLayout;
 // Multiview stereo replay (gfx/stereo_multiview.hpp): the GX textures as 2D arrays.
 wgpu::BindGroupLayout sMultiviewTextureBindGroupLayout;
 wgpu::PipelineLayout sMultiviewPipelineLayout;
+wgpu::BindGroupLayout sMultiviewLeanTextureBindGroupLayout;
+wgpu::PipelineLayout sMultiviewLeanPipelineLayout;
 // ... and a shadow receiver's (sShadowTextureBindGroupLayout with the GX textures as 2D arrays).
 wgpu::BindGroupLayout sMultiviewShadowTextureBindGroupLayout;
 wgpu::PipelineLayout sMultiviewShadowRecvPipelineLayout;
@@ -339,6 +344,18 @@ u16 draw_sync_token() noexcept { return sDrawSyncToken.load(std::memory_order_ac
 
 const gfx::TextureBind& get_texture(GXTexMapID id) noexcept { return g_gxState.textures[static_cast<size_t>(id)]; }
 
+// The GX pipeline layout whose group 2 has `textures` (TextureLayout), mono or multiview.
+static const wgpu::PipelineLayout& pipeline_layout(TextureLayout textures, bool multiview) noexcept {
+  switch (textures) {
+  case TextureLayout::Lean:
+    return multiview ? sMultiviewLeanPipelineLayout : sLeanPipelineLayout;
+  case TextureLayout::ShadowRecv:
+    return multiview ? sMultiviewShadowRecvPipelineLayout : sShadowRecvPipelineLayout;
+  default:
+    return multiview ? sMultiviewPipelineLayout : sPipelineLayout;
+  }
+}
+
 wgpu::RenderPipeline build_pipeline(const PipelineConfig& config, ArrayRef<wgpu::VertexBufferLayout> vtxBuffers,
                                     wgpu::ShaderModule shader, const char* label) noexcept {
   ZoneScoped;
@@ -393,11 +410,13 @@ wgpu::RenderPipeline build_pipeline(const PipelineConfig& config, ArrayRef<wgpu:
   // EyeClipImmediate keeps the plain layout: its larger uniform binding is bound at the draw.
   const bool multiview =
       config.shaderConfig.multiview == MultiviewClip || config.shaderConfig.multiview == MultiviewFull;
+  const wgpu::PipelineLayout& layout = pipeline_layout(texture_layout(config.shaderConfig), multiview);
+  // Never a null layout: Dawn would infer one from the shader, whose groups ours don't match, and the
+  // draws would come out as garbage rather than an error.
+  CHECK(layout || (multiview && !sMultiviewPipelineLayout), "GX pipeline layout missing");
   wgpu::RenderPipelineDescriptor descriptor{
       .label = label,
-      .layout = shadow_receives(config.shaderConfig)
-                    ? (multiview ? sMultiviewShadowRecvPipelineLayout : sShadowRecvPipelineLayout)
-                    : (multiview ? sMultiviewPipelineLayout : sPipelineLayout),
+      .layout = layout,
       .vertex =
           {
               .module = shader,
@@ -615,6 +634,22 @@ void populate_pipeline_config(PipelineConfig& config, GXPrimitive primitive, GXV
 // The lightmap's slot is the last binding, left out of group 2 when the device has no room for it.
 static size_t texture_binding_count() noexcept { return kTextureBindings - (webgpu::g_lightmapBinding ? 0 : 1); }
 
+// Group 2's layout object for `textures` (TextureLayout), mono or multiview, and how many of
+// kTextureBindings it has: the Lean layout stops after the GX textures.
+static const wgpu::BindGroupLayout& texture_bind_group_layout(TextureLayout textures, bool multiview) noexcept {
+  switch (textures) {
+  case TextureLayout::Lean:
+    return multiview ? sMultiviewLeanTextureBindGroupLayout : sLeanTextureBindGroupLayout;
+  case TextureLayout::ShadowRecv:
+    return multiview ? sMultiviewShadowTextureBindGroupLayout : sShadowTextureBindGroupLayout;
+  default:
+    return multiview ? sMultiviewTextureBindGroupLayout : sTextureBindGroupLayout;
+  }
+}
+static size_t texture_layout_binding_count(TextureLayout textures) noexcept {
+  return textures == TextureLayout::Lean ? MaxTextures * 2 : texture_binding_count();
+}
+
 namespace {
 // Whether a draw binds a group 2 of its own: textures, or the volumetric fog, the sun's shadow map or
 // a baked lightmap.
@@ -631,25 +666,28 @@ gfx::BindGroupRef build_texture_bind_group(const ShaderInfo& info, const ViewFor
                                            bool multiview = false) noexcept {
   // Using C WGPU types instead of C++ wrappers to avoid destructor overhead
   std::array<WGPUBindGroupEntry, kTextureBindings> textureEntries{};
-  textureEntries[MaxTextures * 2].binding = MaxTextures * 2;
-  textureEntries[MaxTextures * 2].textureView = gfx::probe::cube_view(g_gxState.pbrCube).Get();
-  textureEntries[MaxTextures * 2 + 1].binding = MaxTextures * 2 + 1;
-  textureEntries[MaxTextures * 2 + 1].sampler = gfx::probe::sampler().Get();
-  for (u32 i = 0; i < gfx::probe::VolumeTextures; ++i) {
-    textureEntries[MaxTextures * 2 + 2 + i].binding = MaxTextures * 2 + 2 + i;
-    textureEntries[MaxTextures * 2 + 2 + i].textureView = gfx::probe::volume_view(g_gxState.pbrVolume, i).Get();
-  }
-  textureEntries[kLightmapBinding].binding = kLightmapBinding;
-  textureEntries[kLightmapBinding].textureView = gfx::probe::lightmap_view(g_gxState.pbrLightmap).Get();
-  textureEntries[kBrdfLutBinding].binding = kBrdfLutBinding;
-  textureEntries[kBrdfLutBinding].textureView = gfx::probe::brdf_lut_view().Get();
-  textureEntries[kVolFogFroxelBinding].binding = kVolFogFroxelBinding;
-  textureEntries[kVolFogFroxelBinding].textureView = gfx::volfog::froxel_view().Get();
-  textureEntries[kVolFogSamplerBinding].binding = kVolFogSamplerBinding;
-  textureEntries[kVolFogSamplerBinding].sampler = gfx::volfog::sampler().Get();
-  if (info.shadowReceive) {
-    textureEntries[kShadowMapBinding].textureView = gfx::shadow::map_view().Get();
-    textureEntries[kShadowSamplerBinding].sampler = gfx::shadow::sampler().Get();
+  const TextureLayout layout = texture_layout(info);
+  if (layout != TextureLayout::Lean) {
+    textureEntries[MaxTextures * 2].binding = MaxTextures * 2;
+    textureEntries[MaxTextures * 2].textureView = gfx::probe::cube_view(g_gxState.pbrCube).Get();
+    textureEntries[MaxTextures * 2 + 1].binding = MaxTextures * 2 + 1;
+    textureEntries[MaxTextures * 2 + 1].sampler = gfx::probe::sampler().Get();
+    for (u32 i = 0; i < gfx::probe::VolumeTextures; ++i) {
+      textureEntries[MaxTextures * 2 + 2 + i].binding = MaxTextures * 2 + 2 + i;
+      textureEntries[MaxTextures * 2 + 2 + i].textureView = gfx::probe::volume_view(g_gxState.pbrVolume, i).Get();
+    }
+    textureEntries[kLightmapBinding].binding = kLightmapBinding;
+    textureEntries[kLightmapBinding].textureView = gfx::probe::lightmap_view(g_gxState.pbrLightmap).Get();
+    textureEntries[kBrdfLutBinding].binding = kBrdfLutBinding;
+    textureEntries[kBrdfLutBinding].textureView = gfx::probe::brdf_lut_view().Get();
+    textureEntries[kVolFogFroxelBinding].binding = kVolFogFroxelBinding;
+    textureEntries[kVolFogFroxelBinding].textureView = gfx::volfog::froxel_view().Get();
+    textureEntries[kVolFogSamplerBinding].binding = kVolFogSamplerBinding;
+    textureEntries[kVolFogSamplerBinding].sampler = gfx::volfog::sampler().Get();
+    if (info.shadowReceive) {
+      textureEntries[kShadowMapBinding].textureView = gfx::shadow::map_view().Get();
+      textureEntries[kShadowSamplerBinding].sampler = gfx::shadow::sampler().Get();
+    }
   }
   for (u32 i = 0; i < MaxTextures; ++i) {
     const auto& tex = g_gxState.textures[i];
@@ -685,10 +723,8 @@ gfx::BindGroupRef build_texture_bind_group(const ShaderInfo& info, const ViewFor
   }
   const WGPUBindGroupDescriptor textureBindGroupDescriptor{
       .label = {multiview ? "GX Multiview Texture Bind Group" : "GX Texture Bind Group", WGPU_STRLEN},
-      .layout = multiview ? (info.shadowReceive ? sMultiviewShadowTextureBindGroupLayout
-                                                : sMultiviewTextureBindGroupLayout).Get()
-                          : (info.shadowReceive ? sShadowTextureBindGroupLayout : sTextureBindGroupLayout).Get(),
-      .entryCount = texture_binding_count(),
+      .layout = texture_bind_group_layout(layout, multiview).Get(),
+      .entryCount = texture_layout_binding_count(layout),
       .entries = textureEntries.data(),
   };
   return gfx::bind_group_ref(textureBindGroupDescriptor);
@@ -799,6 +835,43 @@ std::array<wgpu::BindGroupEntry, kTextureBindings> empty_texture_entries(const w
   }
   return entries;
 }
+
+// The Lean and Full groups with nothing bound (g_emptyTextureBindGroups), from `entries`.
+std::array<wgpu::BindGroup, 2> empty_texture_bind_groups(const std::array<wgpu::BindGroupEntry, kTextureBindings>& entries,
+                                                        bool multiview) {
+  std::array<wgpu::BindGroup, 2> groups;
+  for (const TextureLayout layout : {TextureLayout::Lean, TextureLayout::Full}) {
+    const bool lean = layout == TextureLayout::Lean;
+    const wgpu::BindGroupDescriptor desc{
+        .label = multiview ? (lean ? "GX Empty Multiview Lean Texture Bind Group" : "GX Empty Multiview Texture Bind Group")
+                           : (lean ? "GX Empty Lean Texture Bind Group" : "GX Empty Texture Bind Group"),
+        .layout = texture_bind_group_layout(layout, multiview),
+        .entryCount = texture_layout_binding_count(layout),
+        .entries = entries.data(),
+    };
+    groups[static_cast<size_t>(layout)] = g_device.CreateBindGroup(&desc);
+  }
+  return groups;
+}
+
+// A GX pipeline layout: the frame's buffers, the uniform and `textures` as group 2 (none for the
+// shadow map pass, which samples nothing).
+wgpu::PipelineLayout make_pipeline_layout(const wgpu::BindGroupLayout* textures, const char* label) {
+  std::array<wgpu::BindGroupLayout, 3> layouts{
+      gfx::detail::resources().staticBindGroupLayout,
+      gfx::detail::resources().uniformBindGroupLayout,
+  };
+  if (textures != nullptr) {
+    layouts[2] = *textures;
+  }
+  const wgpu::PipelineLayoutDescriptor desc{
+      .label = label,
+      .bindGroupLayoutCount = textures != nullptr ? 3u : 2u,
+      .bindGroupLayouts = layouts.data(),
+      .immediateSize = sizeof(DrawImmediateData),
+  };
+  return g_device.CreatePipelineLayout(&desc);
+}
 } // namespace
 
 void initialize() noexcept {
@@ -893,6 +966,12 @@ void initialize() noexcept {
     };
     sTextureBindGroupLayout = g_device.CreateBindGroupLayout(&descriptor);
     const auto plainEntries = textureEntries;
+    const wgpu::BindGroupLayoutDescriptor leanDescriptor{
+        .label = "GX Lean Texture Bind Group Layout",
+        .entryCount = MaxTextures * 2,
+        .entries = textureEntries.data(),
+    };
+    sLeanTextureBindGroupLayout = g_device.CreateBindGroupLayout(&leanDescriptor);
     // A shadow receiver's: the sun's shadow map and its comparison sampler in the froxel's slots
     textureEntries[kShadowMapBinding] = {
         .binding = kShadowMapBinding,
@@ -918,20 +997,23 @@ void initialize() noexcept {
       // Multiview stereo replay (gfx/stereo_multiview.hpp): the same bindings, the GX textures as
       // 2D arrays.
       const auto multiviewLayout = [](std::array<wgpu::BindGroupLayoutEntry, kTextureBindings> entries,
-                                      const char* label) {
+                                      size_t count, const char* label) {
         for (u32 i = 0; i < MaxTextures; ++i) {
           entries[i * 2].texture.viewDimension = wgpu::TextureViewDimension::e2DArray;
         }
         const wgpu::BindGroupLayoutDescriptor layoutDescriptor{
             .label = label,
-            .entryCount = texture_binding_count(),
+            .entryCount = count,
             .entries = entries.data(),
         };
         return g_device.CreateBindGroupLayout(&layoutDescriptor);
       };
-      sMultiviewTextureBindGroupLayout = multiviewLayout(plainEntries, "GX Multiview Texture Bind Group Layout");
-      sMultiviewShadowTextureBindGroupLayout =
-          multiviewLayout(textureEntries, "GX Multiview Shadow Receiver Texture Bind Group Layout");
+      sMultiviewTextureBindGroupLayout =
+          multiviewLayout(plainEntries, texture_binding_count(), "GX Multiview Texture Bind Group Layout");
+      sMultiviewLeanTextureBindGroupLayout =
+          multiviewLayout(plainEntries, MaxTextures * 2, "GX Multiview Lean Texture Bind Group Layout");
+      sMultiviewShadowTextureBindGroupLayout = multiviewLayout(textureEntries, texture_binding_count(),
+                                                               "GX Multiview Shadow Receiver Texture Bind Group Layout");
     }
   }
   {
@@ -948,88 +1030,23 @@ void initialize() noexcept {
     sEmptyTexture = g_device.CreateTexture(&descriptor);
     sEmptyTextureView = sEmptyTexture.CreateView();
   }
-  {
-    const auto entries = empty_texture_entries(sEmptyTextureView);
-    const wgpu::BindGroupDescriptor desc{
-        .label = "GX Empty Texture Bind Group",
-        .layout = sTextureBindGroupLayout,
-        .entryCount = texture_binding_count(),
-        .entries = entries.data(),
-    };
-    g_emptyTextureBindGroup = g_device.CreateBindGroup(&desc);
-  }
-  {
-    const std::array layouts{
-        gfx::detail::resources().staticBindGroupLayout,
-        gfx::detail::resources().uniformBindGroupLayout,
-        sTextureBindGroupLayout,
-    };
-    const wgpu::PipelineLayoutDescriptor desc{
-        .label = "GX Pipeline Layout",
-        .bindGroupLayoutCount = layouts.size(),
-        .bindGroupLayouts = layouts.data(),
-        .immediateSize = sizeof(DrawImmediateData),
-    };
-    sPipelineLayout = g_device.CreatePipelineLayout(&desc);
-  }
+  g_emptyTextureBindGroups = empty_texture_bind_groups(empty_texture_entries(sEmptyTextureView), false);
+  sPipelineLayout = make_pipeline_layout(&sTextureBindGroupLayout, "GX Pipeline Layout");
+  sLeanPipelineLayout = make_pipeline_layout(&sLeanTextureBindGroupLayout, "GX Lean Pipeline Layout");
+  sShadowRecvPipelineLayout = make_pipeline_layout(&sShadowTextureBindGroupLayout, "GX Shadow Receiver Pipeline Layout");
+  sShadowPipelineLayout = make_pipeline_layout(nullptr, "GX Shadow Map Pipeline Layout");
   if (sMultiviewTextureBindGroupLayout) {
     const wgpu::TextureViewDescriptor arrayViewDescriptor{
         .label = "Empty texture array view",
         .dimension = wgpu::TextureViewDimension::e2DArray,
     };
     sEmptyArrayTextureView = sEmptyTexture.CreateView(&arrayViewDescriptor);
-    const auto entries = empty_texture_entries(sEmptyArrayTextureView);
-    const wgpu::BindGroupDescriptor emptyDescriptor{
-        .label = "GX Empty Multiview Texture Bind Group",
-        .layout = sMultiviewTextureBindGroupLayout,
-        .entryCount = texture_binding_count(),
-        .entries = entries.data(),
-    };
-    g_emptyMultiviewTextureBindGroup = g_device.CreateBindGroup(&emptyDescriptor);
-    const auto pipelineLayout = [](const wgpu::BindGroupLayout& textures, const char* label) {
-      const std::array layouts{
-          gfx::detail::resources().staticBindGroupLayout,
-          gfx::detail::resources().uniformBindGroupLayout,
-          textures,
-      };
-      const wgpu::PipelineLayoutDescriptor desc{
-          .label = label,
-          .bindGroupLayoutCount = layouts.size(),
-          .bindGroupLayouts = layouts.data(),
-          .immediateSize = sizeof(DrawImmediateData),
-      };
-      return g_device.CreatePipelineLayout(&desc);
-    };
-    sMultiviewPipelineLayout = pipelineLayout(sMultiviewTextureBindGroupLayout, "GX Multiview Pipeline Layout");
-    sMultiviewShadowRecvPipelineLayout =
-        pipelineLayout(sMultiviewShadowTextureBindGroupLayout, "GX Multiview Shadow Receiver Pipeline Layout");
-  }
-  {
-    const std::array layouts{
-        gfx::detail::resources().staticBindGroupLayout,
-        gfx::detail::resources().uniformBindGroupLayout,
-        sShadowTextureBindGroupLayout,
-    };
-    const wgpu::PipelineLayoutDescriptor desc{
-        .label = "GX Shadow Receiver Pipeline Layout",
-        .bindGroupLayoutCount = layouts.size(),
-        .bindGroupLayouts = layouts.data(),
-        .immediateSize = sizeof(DrawImmediateData),
-    };
-    sShadowRecvPipelineLayout = g_device.CreatePipelineLayout(&desc);
-  }
-  {
-    const std::array layouts{
-        gfx::detail::resources().staticBindGroupLayout,
-        gfx::detail::resources().uniformBindGroupLayout,
-    };
-    const wgpu::PipelineLayoutDescriptor desc{
-        .label = "GX Shadow Map Pipeline Layout",
-        .bindGroupLayoutCount = layouts.size(),
-        .bindGroupLayouts = layouts.data(),
-        .immediateSize = sizeof(DrawImmediateData),
-    };
-    sShadowPipelineLayout = g_device.CreatePipelineLayout(&desc);
+    g_emptyMultiviewTextureBindGroups = empty_texture_bind_groups(empty_texture_entries(sEmptyArrayTextureView), true);
+    sMultiviewPipelineLayout = make_pipeline_layout(&sMultiviewTextureBindGroupLayout, "GX Multiview Pipeline Layout");
+    sMultiviewLeanPipelineLayout =
+        make_pipeline_layout(&sMultiviewLeanTextureBindGroupLayout, "GX Multiview Lean Pipeline Layout");
+    sMultiviewShadowRecvPipelineLayout = make_pipeline_layout(&sMultiviewShadowTextureBindGroupLayout,
+                                                              "GX Multiview Shadow Receiver Pipeline Layout");
   }
 }
 
@@ -1042,7 +1059,12 @@ void shutdown() noexcept {
   sMultiviewShadowTextureBindGroupLayout = {};
   sMultiviewShadowRecvPipelineLayout = {};
   sEmptyArrayTextureView = {};
-  g_emptyMultiviewTextureBindGroup = {};
+  g_emptyTextureBindGroups = {};
+  g_emptyMultiviewTextureBindGroups = {};
+  sLeanTextureBindGroupLayout = {};
+  sLeanPipelineLayout = {};
+  sMultiviewLeanTextureBindGroupLayout = {};
+  sMultiviewLeanPipelineLayout = {};
   sShadowTextureBindGroupLayout = {};
   sShadowRecvPipelineLayout = {};
   sShadowPipelineLayout = {};

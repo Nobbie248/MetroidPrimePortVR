@@ -1,3 +1,48 @@
+## Renderer: a lean texture bind group for plain GX draws (2026-10-07)
+
+After the upstream merge, the Chozo plaza encoded in 2.33-2.50 ms on the
+Quest's render worker against 2.0-2.2 ms before, and the FIFO's bind-group
+stage took 0.68 ms against 0.62. Upstream's PBR, volumetric fog, shadow and
+lightmap work had grown GX group 2 from 23 to 27 bindings, and every draw
+bound all of them; Dawn tracks each texture of a bind group every time one is
+set.
+
+A GX shader without PBR or volumetric fog declares nothing past the GX
+textures (bindings 0-15), so such draws now take a Lean layout of those 16
+entries (`gx::TextureLayout`, `texture_layout`): its own bind group layouts
+(mono and multiview), pipeline layouts and empty groups, beside the Full and
+shadow-receiver ones. A draw without a group of its own inherits the bound
+group only in its pipeline's layout; otherwise the encoder puts that layout's
+empty group back (`gfx::bind_gx_textures`). The choice is a pure function of
+the ShaderConfig, so the pipeline cache stays valid. `build_pipeline` checks
+that it never gets a null layout: Dawn would infer one from the shader and
+the draws would come out as garbage, not as an error.
+
+Measured at the plaza (72 Hz, scale 0.85), the lean build against the merge
+build interleaved in one sitting, memory clock mostly 2092 MHz: encode 1.74 /
+1.84 ms against 2.35 / 2.36, the FIFO's bind-group stage 0.58 against 0.68,
+72 / 71 FPS with 0.5-1.4 stale frames a second against 72 / 69 with 1.2-3.7.
+On the PC (D3D12, windowed), encode 0.46 against 0.72 ms and submit 0.42
+against 0.54. The image is unchanged on both. (A Quest shot taken with the
+controllers asleep shows the arm cannon across the view: the cannon's default
+pose, not a rendering fault.)
+
+Upstream's draw tags (GX_AURORA_SET_DRAW_TAG, two FIFO commands per model
+surface) have a toggle, `draw_tags` (F1 > Debug > Rendering, and DRAW TAGS on
+the VR menu's DEBUG tab). Off saves only 0.05-0.1 ms of FIFO time, so they
+stay on by default.
+
+Measuring notes. The Quest's memory clock (VrApi `Mem=`) ranged from 1555 to
+3196 MHz across sessions and moved every memory-bound stage (the FIFO's
+copies and de-indexing, encoding) by 10-30 %: most of the "merge regression"
+below was that, the rest the bigger bind groups. Compare builds interleaved in
+one sitting and record `Mem=`. The MP_FRAME_STATS milestone lines now carry
+the game thread's phases (update, world draw, HUD draw). Two switches of a
+first A/B never reached the game: the Quest activity forwards only the `MP_*`
+names in `PrimedGunVrActivity.TEST_ENVIRONMENT`. `MP_DAWN_ENABLE` and
+`MP_DAWN_DISABLE` are forwarded now, so `--es MP_DAWN_DISABLE skip_validation`
+runs the Quest with Dawn validation on.
+
 ## Merged upstream port b02f932b (2026-10-07)
 
 This merge brings in upstream's 552 commits since the last merge (136ceb5c,
@@ -55,13 +100,11 @@ desktop-without-OpenXR and Quest builds compile. On the Quest 3, the Chozo
 plaza draws the same image as before the merge (722 draws, 0 errors,
 0 dropped draws).
 
-At 72 Hz and scale 0.85, the merged build runs the plaza at 70 FPS with
-about 2 stale frames a second, against 71-72 FPS before. The FIFO thread
-takes 6.6-6.9 ms against 6.4-6.7 ms, and encoding 2.33-2.38 ms against
-2.16-2.26 ms. The pre-merge numbers come from the previous night's runs:
-same-sitting comparisons are skewed (see below). A known contributor is
-upstream's GX_AURORA_SET_DRAW_TAG, two per model surface (about 4,000 a
-frame, 58 KB of FIFO).
+At 72 Hz and scale 0.85, the merged build first measured 70 FPS with about 2
+stale frames a second at the plaza, against 71-72 FPS before, with the FIFO
+thread 0.2 ms and encoding 0.15 ms slower. See the lean texture bind group
+entry above: most of that was the headset's memory clock, the rest the bigger
+texture bind groups, and both are resolved.
 
 An older build run after this one recompiles shaders on a background thread
 for the whole session. Upstream moved dawn_cache.db to schema 3, with blob

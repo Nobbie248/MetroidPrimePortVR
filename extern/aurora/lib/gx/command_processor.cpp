@@ -1113,7 +1113,7 @@ static void push_gx_draw(GXPrimitive prim, GXVtxFmt fmt, u32 vtxCount, gfx::Rang
       .stereoUniformOffset = cache.stereoUniformOffsets,
       .cachedGeometry = cachedGeometry,
       .nativeVertices = cache.config.shaderConfig.nativeVertices != 0,
-      .shadowGroup = cache.shaderInfo.shadowReceive,
+      .textureLayout = texture_layout(cache.config.shaderConfig),
       .stereoTextureBindGroup = cache.stereoBindGroups,
       .multiviewPipeline = multiviewPipeline,
   };

@@ -1,6 +1,11 @@
 #pragma once
 
+#include <cstdint>
 #include "frame_packet.hpp"
+
+namespace aurora::gx {
+enum class TextureLayout : uint8_t;
+}
 
 namespace aurora::gfx {
 
@@ -11,9 +16,10 @@ bool bind_pipeline(PipelineRef ref, const wgpu::RenderPassEncoder& pass);
 void bind_gx_uniform(const wgpu::RenderPassEncoder& pass, const wgpu::BindGroup& bindGroup, uint32_t offset);
 // The same for a GX draw's texture bind group (group 2, by its cache reference) and
 // its index buffer range: consecutive draws of one model share both. A draw without a
-// group of its own keeps the last one, unless that was a shadow receiver's (`shadowGroup`,
-// its own layout): the empty group (the multiview one with `multiview`) goes back then.
-void bind_gx_textures(const wgpu::RenderPassEncoder& pass, BindGroupRef bindGroup, bool shadowGroup = false,
+// group of its own keeps the bound one while that has its pipeline's layout (`layout`,
+// gx::TextureLayout); else the empty group of that layout (the multiview one with
+// `multiview`) goes back.
+void bind_gx_textures(const wgpu::RenderPassEncoder& pass, BindGroupRef bindGroup, gx::TextureLayout layout,
                       bool multiview = false);
 // Call after setting bind group 2 directly, so the next GX draw sets its own again.
 void forget_texture_group();

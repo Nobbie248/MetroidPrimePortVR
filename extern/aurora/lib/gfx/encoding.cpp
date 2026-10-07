@@ -47,9 +47,9 @@ WGPUBindGroup g_currentUniform = nullptr;
 uint32_t g_currentUniformOffset = 0;
 // ... and the texture bind group and index range (bind_gx_textures, bind_gx_indices).
 BindGroupRef g_currentTextures = 0;
-// Group 2 holds a shadow receiver's group (its own layout), which a GX draw without a group of
-// its own can't inherit. Only the empty group clears it: a stale flag costs a rebind.
-bool g_currentTexturesShadow = false;
+// ... and group 2's layout (gx::TextureLayout), -1 when unknown: a GX draw without a group of
+// its own keeps the bound one only in its pipeline's layout, else that layout's empty group goes back.
+int8_t g_currentTexturesLayout = -1;
 uint64_t g_currentIndexOffset = UINT64_MAX;
 uint64_t g_currentIndexSize = 0;
 wgpu::IndexFormat g_currentIndexFormat = wgpu::IndexFormat::Uint16;
@@ -62,17 +62,22 @@ WGPUBuffer g_currentVertexBuffer = nullptr;
 void forget_gx_binds() {
   g_currentUniform = nullptr;
   g_currentTextures = 0;
+  g_currentTexturesLayout = -1;
   g_currentIndexOffset = UINT64_MAX;
   g_currentIndexSize = 0;
   g_currentGeometry = -1;
   g_currentVertexBuffer = nullptr;
 }
 
-// Group 2 with nothing bound: at a pass's start, and after a draw of another kind.
-void bind_empty_textures(const wgpu::RenderPassEncoder& pass, bool multiview = false) {
-  pass.SetBindGroup(2, multiview ? gx::g_emptyMultiviewTextureBindGroup : gx::g_emptyTextureBindGroup);
+// Group 2 with nothing bound, in `layout`: at a pass's start, after a draw of another kind, and
+// for a GX draw without textures whose pipeline wants another layout than the bound group's.
+void bind_empty_textures(const wgpu::RenderPassEncoder& pass, gx::TextureLayout layout, bool multiview = false) {
+  const auto& groups = multiview ? gx::g_emptyMultiviewTextureBindGroups : gx::g_emptyTextureBindGroups;
+  // A shadow receiver always binds a group of its own; the full group stands in for it.
+  const size_t index = layout == gx::TextureLayout::Lean ? 0 : 1;
+  pass.SetBindGroup(2, groups[index]);
   g_currentTextures = 0;
-  g_currentTexturesShadow = false;
+  g_currentTexturesLayout = static_cast<int8_t>(index);
 }
 
 // A pass's group 0 at its start: the frame's buffers.
@@ -120,7 +125,7 @@ void render_stereo_eye_pass_commands(const wgpu::RenderPassEncoder& pass, Render
                            : 1.f;
   forget_bound_state();
   bind_frame_geometry(pass);
-  bind_empty_textures(pass, multiview);
+  bind_empty_textures(pass, gx::TextureLayout::Lean, multiview);
 
   for (auto& cmd : passInfo.commands) {
     switch (cmd.type) {
@@ -366,7 +371,7 @@ void render_pass(const wgpu::RenderPassEncoder& pass, FramePacket& frame, Render
 
   // Bind bind group for the whole pass
   bind_frame_geometry(pass);
-  bind_empty_textures(pass);
+  bind_empty_textures(pass, gx::TextureLayout::Lean);
 
   for (auto& cmd : passInfo.commands) {
 #ifdef AURORA_GFX_DEBUG_GROUPS
@@ -413,7 +418,7 @@ void render_pass(const wgpu::RenderPassEncoder& pass, FramePacket& frame, Render
       render_custom_draw(cmd.data.customDraw, pass, passInfo);
       forget_bound_state();
       bind_frame_geometry(pass);
-      bind_empty_textures(pass);
+      bind_empty_textures(pass, gx::TextureLayout::Lean);
       if (hasViewport) {
         apply_viewport(pass, currentViewport);
       }
@@ -750,11 +755,11 @@ void bind_gx_uniform(const wgpu::RenderPassEncoder& pass, const wgpu::BindGroup&
   g_currentUniformOffset = offset;
 }
 
-void bind_gx_textures(const wgpu::RenderPassEncoder& pass, BindGroupRef bindGroup, bool shadowGroup,
+void bind_gx_textures(const wgpu::RenderPassEncoder& pass, BindGroupRef bindGroup, gx::TextureLayout layout,
                       bool multiview) {
   if (bindGroup == 0) {
-    if (g_currentTexturesShadow) {
-      bind_empty_textures(pass, multiview);
+    if (g_currentTexturesLayout != static_cast<int8_t>(layout)) {
+      bind_empty_textures(pass, layout, multiview);
     }
     return;
   }
@@ -763,7 +768,7 @@ void bind_gx_textures(const wgpu::RenderPassEncoder& pass, BindGroupRef bindGrou
   }
   pass.SetBindGroup(2, find_bind_group(bindGroup));
   g_currentTextures = bindGroup;
-  g_currentTexturesShadow = shadowGroup;
+  g_currentTexturesLayout = static_cast<int8_t>(layout);
 }
 
 void forget_texture_group() { g_currentTextures = 0; }

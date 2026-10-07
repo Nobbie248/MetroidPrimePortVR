@@ -206,6 +206,9 @@ void SetDrawTags(bool enabled);
 // world's draw and the HUD's, timed in the game code and averaged per frame.
 enum FramePhase { kPhaseUpdate = 0, kPhaseDrawWorld = 1, kPhaseDrawGui = 2, kPhaseCount = 3 };
 void NoteFramePhase(FramePhase phase, uint64_t nanoseconds);
+// A phase's average over the last timing window, in ms (the Performance tab's figures, and
+// the MP_FRAME_STATS milestone lines).
+double FramePhaseMs(FramePhase phase);
 struct ScopedPhaseTimer {
   explicit ScopedPhaseTimer(FramePhase p) : phase(p), start(std::chrono::steady_clock::now()) {}
   ~ScopedPhaseTimer() {

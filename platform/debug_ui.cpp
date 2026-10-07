@@ -1555,6 +1555,7 @@ void SetDrawTags(bool enabled) {
 }
 
 void NoteFramePhase(FramePhase phase, uint64_t nanoseconds) { sPhaseNs[phase] += nanoseconds; }
+double FramePhaseMs(FramePhase phase) { return sPhaseMs[phase]; }
 
 bool RevealMap() {
   EnsureInitialized();

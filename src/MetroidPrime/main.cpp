@@ -1211,10 +1211,15 @@ int CMain::RsMain(int argc, const char* const* argv) {
         } else if (s_frameLog == 2 || s_frameLog == 10 || s_frameLog == 60 || s_frameLog == 300 ||
                    s_frameLog == 1800) {
           const double span = static_cast< double >(frameEndNs - milestoneSpanStartNs) / 1e9;
-          PortLog::Write("port: frame %u at %.2f s (avg fps %.1f over the last %u frames, worst frame %.1f ms)\n",
+          // Port: with the game thread's phases over the last timing window (PortDebug::FramePhaseMs).
+          PortLog::Write("port: frame %u at %.2f s (avg fps %.1f over the last %u frames, worst frame %.1f ms; game "
+                         "thread per frame: update %.2f, world draw %.2f, HUD draw %.2f ms)\n",
                          s_frameLog, static_cast< double >(frameEndNs - loopBeganNs) / 1e9,
                          span > 0.0 ? (s_frameLog - milestoneSpanStartFrame) / span : 0.0,
-                         s_frameLog - milestoneSpanStartFrame, static_cast< double >(milestoneWorstNs) / 1e6);
+                         s_frameLog - milestoneSpanStartFrame, static_cast< double >(milestoneWorstNs) / 1e6,
+                         PortDebug::FramePhaseMs(PortDebug::kPhaseUpdate),
+                         PortDebug::FramePhaseMs(PortDebug::kPhaseDrawWorld),
+                         PortDebug::FramePhaseMs(PortDebug::kPhaseDrawGui));
           milestoneSpanStartNs = frameEndNs;
           milestoneSpanStartFrame = s_frameLog;
           milestoneWorstNs = 0;

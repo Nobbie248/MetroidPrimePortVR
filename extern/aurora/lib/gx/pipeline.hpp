@@ -26,7 +26,7 @@ struct DrawData {
   // indices absolute into it (gx/geometry_cache.hpp), vtxStart 0.
   bool cachedGeometry = false;
   bool nativeVertices = false;
-  bool shadowGroup = false; // bindGroups.textureBindGroup has the shadow receiver layout
+  TextureLayout textureLayout = TextureLayout::Lean; // group 2's layout, the pipeline's (texture_layout)
   // ... and the texture bind groups, when the draw samples an EFB copy taken
   // per eye; zero binds the mono group. Under multiview (gfx/stereo_multiview.hpp)
   // [0] is the multiview pipeline's bind group, of 2D array views.

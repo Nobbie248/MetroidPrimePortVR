@@ -121,9 +121,10 @@ inline void set_eye_mask(DrawImmediateData& data, u32 eyeMask) {
   data.serial = (data.serial & 0x7FFFFFFFu) | (eyeMask != 0 ? 0x80000000u : 0u);
 }
 
-extern wgpu::BindGroup g_emptyTextureBindGroup;
+// Group 2 with nothing bound, by TextureLayout (Lean, Full; a shadow receiver always binds its own).
+extern std::array<wgpu::BindGroup, 2> g_emptyTextureBindGroups;
 // The multiview stereo replay's (gfx/stereo_multiview.hpp): 2D array views.
-extern wgpu::BindGroup g_emptyMultiviewTextureBindGroup;
+extern std::array<wgpu::BindGroup, 2> g_emptyMultiviewTextureBindGroups;
 // GX draw commands the game has issued (GXBegin, GXCallDisplayList), for the port's
 // per-section draw counts (aurora_gx_draw_commands_issued). Game thread only.
 extern uint32_t g_drawCommandsIssued;
@@ -651,6 +652,19 @@ inline bool shadow_receives(const ShaderConfig& sc) noexcept {
   return sc.shadow && sc.pbr != 0 && sc.volFog == VolFogNone && sc.depthOnly == 0 && sc.lineMode == 0 && !sc.drawId;
 }
 
+// Group 2's layout for a shader. Without PBR or volumetric fog a shader declares nothing past the GX
+// textures (bindings 0-15), so it takes the Lean layout: Dawn tracks every texture of a bind group
+// each time one is set, which is most of what encoding hundreds of draws costs. Full has every
+// binding, ShadowRecv a shadow receiver's (the shadow map in the froxel's slots). A draw without a
+// group of its own keeps the bound one only in its pipeline's layout (gfx::bind_gx_textures).
+enum class TextureLayout : u8 { Lean = 0, Full = 1, ShadowRecv = 2 };
+inline TextureLayout texture_layout(const ShaderConfig& sc) noexcept {
+  if (shadow_receives(sc)) {
+    return TextureLayout::ShadowRecv;
+  }
+  return sc.pbr != 0 || sc.volFog != VolFogNone ? TextureLayout::Full : TextureLayout::Lean;
+}
+
 struct PipelineConfig;
 
 struct GXBindGroups {
@@ -679,6 +693,13 @@ struct ShaderInfo {
   bool usesShadow : 1 = false;    // ShaderConfig::shadow: the shadow uniforms and vs_shadow
   bool shadowReceive : 1 = false; // shadow_receives: group 2 uses the shadow layout
 };
+// As texture_layout(const ShaderConfig&), from the info built of that config.
+inline TextureLayout texture_layout(const ShaderInfo& info) noexcept {
+  if (info.shadowReceive) {
+    return TextureLayout::ShadowRecv;
+  }
+  return info.usesPbr || info.usesVolFog ? TextureLayout::Full : TextureLayout::Lean;
+}
 struct BindGroupRanges {
   std::array<gfx::Range, MaxIndexAttr> vaRanges{};
 };

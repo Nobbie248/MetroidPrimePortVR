@@ -192,6 +192,8 @@ class PrimedGunVrActivity : SDLActivity() {
         private const val QUIT_GRACE_MS = 3000L
         // The game's per-run switches an adb start may pass as string extras.
         private val TEST_ENVIRONMENT =
-            listOf("MP_BOOT_WORLD", "MP_FAST_BOOT", "MP_VR_LOG", "MP_LOAD_STATE", "MP_FRAME_STATS", "MP_SORT_OPAQUE", "MP_MINIMAP_BATCH", "MP_SURFACE_CULL", "MP_MONO_SHADOW", "MP_GEOMETRY_CACHE", "MP_FOVEATION", "MP_FDM_DEVICE", "MP_FOVEATION_LAYERS", "MP_NATIVE_VERTICES")
+            listOf("MP_BOOT_WORLD", "MP_FAST_BOOT", "MP_VR_LOG", "MP_LOAD_STATE", "MP_FRAME_STATS", "MP_SORT_OPAQUE", "MP_MINIMAP_BATCH", "MP_SURFACE_CULL", "MP_MONO_SHADOW", "MP_GEOMETRY_CACHE", "MP_FOVEATION", "MP_FDM_DEVICE", "MP_FOVEATION_LAYERS", "MP_NATIVE_VERTICES",
+                // Dawn toggles for driver debugging (aurora gpu.cpp), e.g. MP_DAWN_DISABLE=skip_validation.
+                "MP_DAWN_ENABLE", "MP_DAWN_DISABLE")
     }
 }

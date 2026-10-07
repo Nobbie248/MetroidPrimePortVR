@@ -741,7 +741,13 @@ bool CPlayerVisor::DrawScanObjectIndicators(const CStateManager& mgr) const {
   gpRender->SetPerspective(camera.GetRenderFov(), CGraphics::GetViewportWidth(),
                            CGraphics::GetViewportHeight(), camera.GetNearClipDistance(),
                            camera.GetFarClipDistance());
+#ifdef TARGET_PC
+  // PortVr: the icons face the head, as they face the camera on the TV; in the
+  // headset the camera only carries the body's yaw.
+  CMatrix3f cameraRotation = PortVr::VrHeadViewRotation(cameraXf);
+#else
   CMatrix3f cameraRotation = cameraXf.BuildMatrix3f();
+#endif
   CVector3f cameraPosition = cameraXf.GetTranslation();
   for (int i = 0; i < x13c_scanTargets.size(); ++i) {
     const SScanObjectIndicatorInfo& target = x13c_scanTargets[i];

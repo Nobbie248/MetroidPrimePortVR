@@ -14,6 +14,7 @@
 
 #pragma once
 
+#include "Kyoto/Math/CMatrix3f.hpp"
 #include "Kyoto/Math/CTransform4f.hpp"
 #include "Kyoto/Math/CVector3f.hpp"
 #include "MetroidPrime/TGameTypes.hpp"
@@ -37,6 +38,14 @@ CTransform4f VrHeadFacingTransform(const CTransform4f& cameraXf) noexcept;
 // (the game camera plus the head's offset from the tracking base) along its
 // forward, lean back included. False when not immersive or the head is unknown.
 bool VrHeadGaze(const CTransform4f& cameraXf, CVector3f& origin, CVector3f& direction) noexcept;
+
+// The eyes' facing in the world, as VrHeadGaze sees it (lean back included),
+// kept upright: `cameraXf`'s rotation with the head's yaw and pitch composed
+// in but not its roll, or `cameraXf`'s own rotation when not immersive or the
+// head is unknown. For the billboards the game turns to the camera (scan
+// icons, target reticles), which would otherwise face the body and show their
+// edge when the head turns, and would roll with a tilted head.
+CMatrix3f VrHeadViewRotation(const CTransform4f& cameraXf) noexcept;
 
 // Replaces `frustum` with the head-facing cone of the settings' culling angle
 // when immersive and culling is enabled; false leaves it alone.

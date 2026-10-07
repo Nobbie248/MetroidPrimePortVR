@@ -139,6 +139,33 @@ bool VrHeadGaze(const CTransform4f& cameraXf, CVector3f& origin, CVector3f& dire
     return true;
 }
 
+CMatrix3f VrHeadViewRotation(const CTransform4f& cameraXf) noexcept {
+    const CMatrix3f body = cameraXf.BuildMatrix3f();
+    if (!ImmersiveNow()) {
+        return body;
+    }
+    OpenXRFrameRequest request{};
+    if (!OpenXRLatestFrameRequest(request) || !request.head_valid) {
+        return body;
+    }
+    // As VrHeadGaze: the eyes see the game camera's space through lean^-1 * head.
+    const float leanBack = GetVrSettings().lean_back_degrees * kDegreesToRadians;
+    const CQuaternion leanInverse = AxisQuaternion(1.f, 0.f, 0.f, -leanBack);
+    const CQuaternion head = (leanInverse * PrimeFromXr(request.head_orientation)).BuildNormalized();
+    const CTransform4f view = cameraXf.GetRotation() * head.BuildTransform4f();
+    // Upright: the head's facing without its roll. The right axis stays level,
+    // so up is as close to the world's up as the facing allows; looking
+    // straight up or down, where level is undefined, the head's own right.
+    const CVector3f forward = view.GetForward();
+    CVector3f right = CVector3f::Cross(forward, CVector3f(0.f, 0.f, 1.f));
+    if (right.Magnitude() < 1.e-3f) {
+        right = view.GetRight();
+    }
+    right.Normalize();
+    return CTransform4f::FromColumns(right, forward, CVector3f::Cross(right, forward), CVector3f::Zero())
+        .BuildMatrix3f();
+}
+
 bool VrCullingFrustum(const CTransform4f& cameraXf, float nearZ, CFrustumPlanes& frustum) noexcept {
     if (!ImmersiveNow()) {
         return false;

@@ -35,6 +35,7 @@
 
 #ifdef TARGET_PC
 #include "port_debug.h"
+#include "vr/vr_view.h"
 #endif
 
 #include <float.h>
@@ -595,7 +596,13 @@ void CCompoundTargetReticle::Draw(const CStateManager& mgr, bool hideLockon) con
       !mgr.GetCameraManager()->IsInCinematicCamera()) {
     CTransform4f camXf = mgr.GetCameraManager()->GetCurrentCameraTransform(mgr);
     CGraphics::SetViewPointMatrix(camXf);
+#ifdef TARGET_PC
+    // PortVr: the reticles face the head, as the scan icons do
+    // (CPlayerVisor::DrawScanObjectIndicators).
+    CMatrix3f rot = PortVr::VrHeadViewRotation(camXf);
+#else
     CMatrix3f rot = camXf.BuildMatrix3f();
+#endif
 
     CGraphics::SetCullMode(kCM_None);
 

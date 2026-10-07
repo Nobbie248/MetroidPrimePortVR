@@ -118,8 +118,25 @@ public:
   void RemoveFreeEntryFromFreeList(SGameMemInfo*);
   void DumpAllocations() const;
   size_t GetLargestFreeChunk() const;
+#ifdef TARGET_PC
+  // Port: heap checker (always-on guard/allocated checks in FreeNormalAllocation; the whole-heap
+  // walk and the frame-delayed-free bookkeeping only with MP_HEAP_CHECK=1).
+  static bool HeapCheckEnabled();
+  // Walks every block; on the first corrupted one logs a report and aborts.
+  void CheckHeap() const;
+  // Header fingerprint of a block that looks like a live normal-heap allocation (false for
+  // pool pointers and anything else without intact guards and the allocated bit).
+  bool PeekLiveBlock(const void* ptr, const char** fileAndLine, size_t* len) const;
+#endif
 
 private:
+#ifdef TARGET_PC
+  // Returns nullptr when the block is sound, else what is wrong with it. Cheap form: range,
+  // alignment, guards, allocated bit. `deep` also checks the prev/next links and the length.
+  const char* ValidateBlock(const SGameMemInfo* info, bool requireAllocated, bool deep) const;
+  [[noreturn]] void ReportCorruption(const char* what, const void* ptr,
+                                     const SGameMemInfo* info) const;
+#endif
   SGameMemInfo** GetBinPtr(uint bin) { return &x14_bins[bin]; }
   uchar x4_;
   uchar x5_;

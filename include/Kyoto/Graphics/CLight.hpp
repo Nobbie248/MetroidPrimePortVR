@@ -63,6 +63,31 @@ public:
                             float angleQ);
   static CLight BuildLocalAmbient(const CVector3f& pos, const CColor& color);
 
+#ifdef TARGET_PC
+  // Port: what Remastered lights PBR draws with in this light's place (GXSetPBRLightHdr): a
+  // linear, unclamped colour at the light's position plus a world-space offset, falling off
+  // from full at r0 to none at r1 (EPortHdrFalloff). Draws without PBR keep the light above.
+  // r1 0 (the default) is none.
+  enum EPortHdrFalloff { kPHF_None, kPHF_Linear, kPHF_Quadratic, kPHF_Smooth };
+  void SetPortHdr(const float linearColor[3], const CVector3f& worldOffset, float r0, float r1,
+                  EPortHdrFalloff falloff) {
+    for (int i = 0; i < 3; ++i) {
+      xPortHdrColor[i] = linearColor[i];
+    }
+    xPortHdrOffset = worldOffset;
+    xPortHdrR0 = r0;
+    xPortHdrR1 = r1;
+    xPortHdrFalloff = falloff;
+  }
+  void ClearPortHdr() { xPortHdrR1 = 0.f; }
+  bool HasPortHdr() const { return xPortHdrR1 > 0.f; }
+  const float* GetPortHdrColor() const { return xPortHdrColor; }
+  const CVector3f& GetPortHdrOffset() const { return xPortHdrOffset; }
+  float GetPortHdrR0() const { return xPortHdrR0; }
+  float GetPortHdrR1() const { return xPortHdrR1; }
+  EPortHdrFalloff GetPortHdrFalloff() const { return xPortHdrFalloff; }
+#endif
+
 private:
   CVector3f x0_pos;
   CVector3f xc_dir;
@@ -81,6 +106,13 @@ private:
   mutable float x48_cachedIntensity;
   mutable bool x4c_24_intensityDirty : 1;
   mutable bool x4c_25_radiusDirty : 1;
+#ifdef TARGET_PC
+  float xPortHdrColor[3] = {0.f, 0.f, 0.f};
+  CVector3f xPortHdrOffset = CVector3f(0.f, 0.f, 0.f);
+  float xPortHdrR0 = 0.f;
+  float xPortHdrR1 = 0.f;
+  EPortHdrFalloff xPortHdrFalloff = kPHF_None;
+#endif
 };
 CHECK_SIZEOF(CLight, 0x50)
 

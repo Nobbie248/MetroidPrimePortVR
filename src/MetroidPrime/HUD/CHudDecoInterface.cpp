@@ -68,6 +68,10 @@ CHudDecoInterfaceCombat::CHudDecoInterfaceCombat(CGuiFrame& hud)
   x7c_basewidget_frame = hud.FindWidget(skFrameNormalGroupWidgetName);
   x14_pivotPosition = x70_basewidget_pivot->GetIdleXform().GetTranslation();
   x78_basewidget_tickdeco0->SetColor(gpTweakGuiColors->GetTickDecoColor());
+#ifdef TARGET_PC
+  // The graded scales beside the missile and threat bars stretch with them.
+  hud.SetSpreadStretchTree(x78_basewidget_tickdeco0);
+#endif
   x38_basePosition = x7c_basewidget_frame->GetO2PTransform().GetTranslation();
   x44_baseRotation = x7c_basewidget_frame->GetO2PTransform().BuildMatrix3f();
   UpdateHudAlpha();

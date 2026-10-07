@@ -22,6 +22,7 @@
 #ifdef TARGET_PC
 #include <dolphin/gx/GXExtra.h>
 
+#include "Kyoto/CFrameDelayedKiller.hpp"
 #include "port_mods.h"
 #endif
 
@@ -56,6 +57,7 @@ CTexture::CTexture(ETexelFormat fmt, const short w, const short h, int mips)
 #ifdef TARGET_PC
 , mPortNativeId(0)
 , mPortTexelsChanged(false)
+, mPortClampT(kCM_Repeat)
 #endif
 {
   InitBitmapBuffers(fmt, w, h, mips);
@@ -85,6 +87,7 @@ CTexture::CTexture(CInputStream& in, EAutoMipmap automip, EBlackKey blackKey)
 #ifdef TARGET_PC
 , mPortNativeId(0)
 , mPortTexelsChanged(false)
+, mPortClampT(kCM_Repeat)
 #endif
 {
   mTexelFormat = ETexelFormat(in.Get< uint >());
@@ -149,6 +152,68 @@ CTexture::~CTexture() {
 void CTexture::PortSetNativeId(uint id) {
   mPortNativeId = PortMods::BindTexture(this, id) ? id : 0;
 }
+
+// Blank rows at the bottom for new glyph cells (the bitmap font's accents).
+// The width stays, so the tiled block rows just continue: the old rows are
+// copied whole and the new ones are zeroed (palette index 0, transparent).
+bool CTexture::PortGrowHeight(int extraRows) {
+  if (mPortNativeId != 0 || mNumMips != 1 || extraRows <= 0) {
+    return false;
+  }
+  int blockW, blockH, bitsPerPixel;
+  switch (mTexelFormat) {
+  case kTF_I4:
+  case kTF_C4:
+    blockW = 8;
+    blockH = 8;
+    bitsPerPixel = 4;
+    break;
+  case kTF_I8:
+  case kTF_IA4:
+  case kTF_C8:
+    blockW = 8;
+    blockH = 4;
+    bitsPerPixel = 8;
+    break;
+  case kTF_IA8:
+  case kTF_RGB565:
+  case kTF_RGB5A3:
+    blockW = 4;
+    blockH = 4;
+    bitsPerPixel = 16;
+    break;
+  default:
+    return false;
+  }
+  const GXTexFmt native = HasPalette() ? GXTexFmt(mNativeCIFormat) : mNativeFormat;
+  const int newHeight = mHeight + extraRows;
+  const uint newSize = GXGetTexBufferSize(mWidth, newHeight, native, false, 0);
+  const int blocksPerRow = (mWidth + blockW - 1) / blockW;
+  const int bytesPerBlock = blockW * blockH * bitsPerPixel / 8;
+  const size_t copySize =
+      size_t(blocksPerRow) * size_t((mHeight + blockH - 1) / blockH) * size_t(bytesPerBlock);
+  if (copySize > mMemoryAllocated || newSize <= mMemoryAllocated) {
+    return false;
+  }
+  void* const old = mARAMToken.GetMRAMSafe();
+  void* const buf = CMemory::Alloc(newSize, IAllocator::kHI_RoundUpLen);
+  memcpy(buf, old, copySize);
+  memset(static_cast< char* >(buf) + copySize, 0, newSize - copySize);
+  // The FIFO worker may still name the old buffer; the killer frees it later.
+  CFrameDelayedKiller::ScheduleDeletion(CFrameDelayedKiller::kWhichFrame_NextFrame, old);
+  mARAMToken.PostConstruct(buf, newSize, 1);
+  mHeight = newHeight;
+  const bool wasCounted = mCounted;
+  UncountMemory();
+  mMemoryAllocated = newSize;
+  if (wasCounted) {
+    CountMemory();
+  }
+  InitTextureObjects();
+  mPortTexelsChanged = true;
+  DCFlushRange(buf, OSRoundUp32B(newSize));
+  return true;
+}
 #endif
 
 void CTexture::InitTextureObjects() {
@@ -160,6 +225,14 @@ void CTexture::InitTextureObjects() {
   }
   bool hasMips = mNumMips > 1;
   GXTexWrapMode wrap = (GXTexWrapMode)mClampMode;
+#ifdef TARGET_PC
+  if (!mIsPowerOfTwo) {
+    mPortClampT = kCM_Clamp;
+  }
+  GXTexWrapMode wrapT = (GXTexWrapMode)mPortClampT;
+#else
+  GXTexWrapMode wrapT = wrap;
+#endif
   short width = mWidth;
   short height = mHeight;
   void* buf = mARAMToken.GetMRAMSafe();
@@ -184,9 +257,9 @@ void CTexture::InitTextureObjects() {
 #endif
 
   if (IsCITextureFormat(mTexelFormat)) {
-    GXInitTexObjCI(&mTexObj, buf, width, height, mNativeCIFormat, wrap, wrap, hasMips, 0);
+    GXInitTexObjCI(&mTexObj, buf, width, height, mNativeCIFormat, wrap, wrapT, hasMips, 0);
   } else {
-    GXInitTexObj(&mTexObj, buf, width, height, mNativeFormat, wrap, wrap, hasMips);
+    GXInitTexObj(&mTexObj, buf, width, height, mNativeFormat, wrap, wrapT, hasMips);
     GXInitTexObjLOD(&mTexObj, mNumMips > 1 ? GX_LIN_MIP_LIN : GX_LINEAR, GX_LINEAR, 0.f,
                     mNumMips - 1.f, 0.f, false, false, mNumMips > 1 ? GX_ANISO_4 : GX_ANISO_1);
   }
@@ -194,8 +267,20 @@ void CTexture::InitTextureObjects() {
   mCanLoadObj = true;
 }
 
+#ifdef TARGET_PC
+void CTexture::Load(GXTexMapID tex, EClampMode clamp) const { PortLoad(tex, clamp, clamp); }
+
+void CTexture::PortLoad(GXTexMapID tex, EClampMode clamp, EClampMode clampT) const {
+  // An NPOT texture always clamps; anything else rebinds when the slot holds this
+  // texture with other modes (retail Load kept the stale ones).
+  const EClampMode wantS = mIsPowerOfTwo ? clamp : kCM_Clamp;
+  const EClampMode wantT = mIsPowerOfTwo ? clampT : kCM_Clamp;
+  if (sLoadedTextures[tex] != this || mCanLoadObj || mClampMode != wantS ||
+      mPortClampT != wantT) {
+#else
 void CTexture::Load(GXTexMapID tex, EClampMode clamp) const {
   if (sLoadedTextures[tex] != this || mCanLoadObj) {
+#endif
     void* ptr = mARAMToken.GetMRAMSafe();
     CountMemory();
 
@@ -206,6 +291,13 @@ void CTexture::Load(GXTexMapID tex, EClampMode clamp) const {
 
     mCanLoadObj = false;
 
+#ifdef TARGET_PC
+    if (mClampMode != wantS || mPortClampT != wantT) {
+      mClampMode = wantS;
+      mPortClampT = wantT;
+      GXInitTexObjWrapMode(&mTexObj, (GXTexWrapMode)wantS, (GXTexWrapMode)wantT);
+    }
+#else
     if (mClampMode != clamp) {
       if (!mIsPowerOfTwo) {
         mClampMode = kCM_Clamp;
@@ -215,6 +307,7 @@ void CTexture::Load(GXTexMapID tex, EClampMode clamp) const {
 
       GXInitTexObjWrapMode(&mTexObj, (GXTexWrapMode)mClampMode, (GXTexWrapMode)mClampMode);
     }
+#endif
 
 #ifdef TARGET_PC
     // Aurora draws its own copy of the texels for as long as the object names the same data,

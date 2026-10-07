@@ -235,6 +235,16 @@ void CNewFlameThrower::Render(const CStateManager& mgr) const {
     gens[2] = x360_secondarySmokeGen.get();
     gens[3] = x364_secondaryFireGen.get();
     gens[4] = x368_secondarySparksGen.get();
+#ifdef TARGET_PC
+    // Remastered's flamethrower never loads MainSmoke, SecondaryFire or
+    // SecondarySparks (its flame body is the swooshes), so with the converted
+    // effects (marked by PIRN) only MainFire and SecondarySmoke are drawn.
+    if (x304_mainFire->xPortIrnd) {
+      gens[1] = x360_secondarySmokeGen.get();
+      CElementGen::RenderParticlesFlameThrower(gens, 2);
+      return;
+    }
+#endif
     CElementGen::RenderParticlesFlameThrower(gens, 5);
   }
 }

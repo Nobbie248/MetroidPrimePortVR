@@ -1713,6 +1713,9 @@ public class SDLActivity extends Activity implements View.OnSystemUiVisibilityCh
                 }
                 if ((buttonFlags[i] & 0x00000002) != 0) {
                     mapping.put(KeyEvent.KEYCODE_ESCAPE, button); /* API 11 */
+                    // Port: Back answers like Escape; the box is not cancelable, so
+                    // Back did nothing and the box could only be left by a button.
+                    mapping.put(KeyEvent.KEYCODE_BACK, button);
                 }
             }
             button.setText(buttonTexts[i]);

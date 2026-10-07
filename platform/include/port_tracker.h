@@ -4,6 +4,7 @@
 #include <vector>
 
 class CStateManager;
+class CWorld;
 
 // Progress tracker for the F1 overlay and the debug console: rooms visited per
 // world, scans per logbook category, upgrades held and missing, expansions,
@@ -54,6 +55,8 @@ struct Summary {
 // Builds the summary from the live game; call on the main thread with a
 // running state manager. Room names load in the background over a few calls.
 Summary Collect(const CStateManager& mgr);
+// The names of `world`'s rooms by area index, empty for any still loading.
+const std::vector< std::string >& RoomNames(const CWorld& world);
 // Drops the room name tables (called when the state manager goes away, since a
 // world change retires the PAKs they come from).
 void Reset();

@@ -461,6 +461,16 @@ private:
   bool x835_30_inPhazonPool : 1;
   bool x835_31_actorAttached : 1;
   // bool x835_32_unk : 1;
+
+#ifdef TARGET_PC
+  // Port: Remastered's rapid-fire charge (PortDebug::RapidCharge). Latched on
+  // the press: the beam's quick shots fired so far and the time since the last.
+  void PortStartRapidCharge();
+  bool PortRapidChargeShot(float dt, CStateManager& mgr);
+  bool mPortRapidCharge;
+  int mPortRapidShots;
+  float mPortRapidTimer;
+#endif
 };
 CHECK_SIZEOF(CPlayerGun, 0x838)
 

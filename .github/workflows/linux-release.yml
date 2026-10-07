@@ -1,0 +1,102 @@
+name: linux-release
+
+# Builds the Linux release artefacts (AppImage and tarball) on an old glibc.
+#
+# A binary only runs on systems whose glibc and libstdc++ are at least as new
+# as the ones it was linked against, and a desktop build picks up whatever the
+# build host has (issue #3: a 0.12.0 AppImage needing glibc 2.43 refused to
+# start on LMDE). AlmaLinux 9 has glibc 2.34; gcc-toolset links the parts of
+# its newer libstdc++ that the system one lacks statically, so the result needs
+# nothing past the system's GLIBCXX_3.4.29. The last step checks that.
+on:
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-24.04
+    container: almalinux:9
+    env:
+      CCACHE_DIR: ${{ github.workspace }}/.ccache
+      CCACHE_MAXSIZE: 2G
+      MAX_GLIBC: "2.34"
+      MAX_GLIBCXX: "3.4.29"
+    steps:
+      - name: Dependencies
+        run: |
+          dnf install -y epel-release dnf-plugins-core
+          dnf config-manager --set-enabled crb
+          dnf install -y --allowerasing gcc-toolset-14-gcc gcc-toolset-14-gcc-c++ \
+            cmake ninja-build git curl file findutils binutils python3 \
+            alsa-lib-devel pulseaudio-libs-devel libX11-devel libXext-devel \
+            libXrandr-devel libXcursor-devel libXi-devel libXfixes-devel \
+            libXScrnSaver-devel libXtst-devel wayland-devel wayland-protocols-devel \
+            libxkbcommon-devel mesa-libEGL-devel mesa-libGL-devel \
+            freetype-devel libpng-devel zlib-devel bzip2-devel brotli-devel \
+            libzstd-devel openssl-devel ccache
+      - uses: actions/checkout@v4
+        with:
+          # The version string is `git describe`; it needs the tags.
+          fetch-depth: 0
+      # ccache keeps the objects between runs, and the unpacked dependency
+      # sources skip the downloads in Configure, as in windows.yml.
+      - uses: actions/cache@v4
+        with:
+          path: .ccache
+          key: ccache-linux-${{ github.sha }}
+          restore-keys: ccache-linux-
+      - uses: actions/cache@v4
+        with:
+          path: |
+            build/port-gcc/_deps/*-src
+            build/port-gcc/_deps/*-subbuild
+          key: deps-linux-${{ hashFiles('CMakeLists.txt', 'extern/aurora/**/CMakeLists.txt', 'extern/aurora/**/*.cmake') }}
+      - name: Configure
+        run: |
+          git config --global --add safe.directory "$GITHUB_WORKSPACE"
+          source /opt/rh/gcc-toolset-14/enable
+          cmake -S . -B build/port-gcc -G Ninja -DCMAKE_BUILD_TYPE=RelWithDebInfo \
+            -DCMAKE_C_COMPILER_LAUNCHER=ccache -DCMAKE_CXX_COMPILER_LAUNCHER=ccache \
+            -DAURORA_ENABLE_TESTS=OFF -DMP_BUILD_TESTS=ON
+      - name: Build
+        run: |
+          source /opt/rh/gcc-toolset-14/enable
+          cmake --build build/port-gcc -j 4
+          ccache -s
+      - name: Test
+        run: ctest --test-dir build/port-gcc -L port --output-on-failure
+      - name: Check the glibc and libstdc++ floor
+        run: |
+          bin=build/port-gcc/metroid_prime_port
+          "$bin" --version
+          too_new() {  # $1 = prefix, $2 = highest allowed version
+            objdump -T "$bin" | grep -oE "\($1_[0-9.]+\)" | tr -d '()' | sort -Vu |
+              awk -F_ '{ print $NF }' |
+              while read -r v; do
+                [ "$(printf '%s\n%s\n' "$v" "$2" | sort -V | tail -1)" = "$2" ] || echo "$1_$v"
+              done
+          }
+          bad="$(too_new GLIBC "$MAX_GLIBC")$(too_new GLIBCXX "$MAX_GLIBCXX")$(too_new CXXABI 1.3.13)"
+          if [ -n "$bad" ]; then
+            echo "symbol versions newer than the floor:" >&2
+            echo "$bad" >&2
+            objdump -T "$bin" | grep -E "$(echo $bad | tr ' ' '|')" >&2
+            exit 1
+          fi
+          echo "needs at most glibc $MAX_GLIBC, GLIBCXX $MAX_GLIBCXX"
+      - name: Package
+        run: |
+          export APPIMAGE_EXTRACT_AND_RUN=1
+          bash tools/make_appimage.sh build/port-gcc build/appimage
+          d=build/release/metroid-prime-port-linux-x86_64
+          mkdir -p "$d/share/licenses/metroid-prime-port"
+          cp build/port-gcc/metroid_prime_port "$d/"
+          cp LICENSE NOTICE "$d/share/licenses/metroid-prime-port/"
+          tar -C build/release -czf build/release/metroid-prime-port-linux-x86_64.tar.gz \
+            metroid-prime-port-linux-x86_64
+          mv build/appimage/MetroidPrime-x86_64.AppImage build/release/
+      - uses: actions/upload-artifact@v4
+        with:
+          name: metroid_prime_port-linux
+          path: |
+            build/release/MetroidPrime-x86_64.AppImage
+            build/release/metroid-prime-port-linux-x86_64.tar.gz

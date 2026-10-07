@@ -782,6 +782,7 @@ gfx::TextureHandle resolve_static_palette_texture(const GXTexObj_& obj, const GX
 
 void end_frame() noexcept {
   const auto streamingStats = gfx::texture_replacement::process_streaming();
+  gfx::texture_replacement::sweep_idle_cache();
   s_stats.pendingLoads = streamingStats.pendingLoads;
   s_stats.publishes = streamingStats.publishes;
   s_stats.publishBytes = streamingStats.publishBytes;

@@ -104,6 +104,7 @@ public:
   Node::ETreeType GetTreeType() const { return x18_treeType; }
 
   const CVector3f& GetVert(int idx) const { return x4c_verts[idx]; }
+  uint PortTriangleCount() const { return x40_polyCount; }
   const CCollisionEdge& GetEdge(int idx) const { return x3c_edges[idx]; }
   uint GetVertMaterial(int idx) const { return x28_materials[x2c_vertMats[idx]]; }
   uint GetEdgeMaterial(int idx) const { return x28_materials[x30_edgeMats[idx]]; }

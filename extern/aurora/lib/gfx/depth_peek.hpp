@@ -9,15 +9,15 @@ namespace aurora::gfx::depth_peek {
 void initialize();
 void shutdown();
 
+bool enabled() noexcept;
 void request_snapshot() noexcept;
+// Whether a GXPeekZ is waiting for a snapshot; a frame recorded without one needs no depth stored.
+bool snapshot_wanted() noexcept;
 bool read_latest(uint16_t x, uint16_t y, uint32_t& z) noexcept;
 
 void encode_frame_snapshot(const wgpu::CommandEncoder& cmd, const wgpu::TextureView& depthView,
                            wgpu::Extent3D sourceSize, uint32_t msaaSamples) noexcept;
 void after_submit() noexcept;
-
-// Whether a frame depth snapshot is wanted (the final pass's mono depth is then read).
-bool snapshot_wanted() noexcept;
 
 namespace testing {
 void reset() noexcept;

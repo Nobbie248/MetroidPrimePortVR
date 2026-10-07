@@ -19,6 +19,7 @@ the port asks for the image on first launch when it cannot find one.
 |---|---|---|
 | Aurora (windowing, WebGPU/Dawn plumbing) | MIT | `extern/aurora/LICENSE` |
 | MusyX (audio mixer) | MIT | `extern/musyx/LICENSE` |
+| astc-encoder (ASTC texture writer) | Apache-2.0 | `extern/astcenc/LICENSE.txt` |
 | SDL3 | zlib | fetched at configure time, `build/*/_deps/sdl-src/LICENSE.txt` |
 | Dear ImGui | MIT | fetched, `imgui-src/LICENSE` |
 | fmt | MIT | fetched, `fmt-src/LICENSE` |
@@ -60,7 +61,11 @@ self-contained — and it is why `MP_USER_PATH` cannot be used to move saves.
   packages into `dist/licenses/`, preserving the dependency path, and puts
   `docs/NATIVE_PORT.md` in as the `README`. It also packages `textures/` (the
   HD and button-prompt sets), so the artefact zips as-is with no copy from a
-  Linux build.
+  Linux build. SDL3 (built from source), zlib, libpng, nod and OpenSSL are
+  linked statically into the exe, so their licences (including `openssl.txt`
+  and `nod-*.txt`) are the only trace; only `webgpu_dawn.dll`, `dxil.dll` and
+  `dxcompiler.dll` ship as DLLs (Dawn's prebuilt package has no static lib).
+  The workflow fails if the exe imports SDL3/zlib/libpng/nod/OpenSSL DLLs.
 - **Windows also carries `ffmpeg.exe`**, which the Remastered import runs to
   decode that game's movies (Windows has no ffmpeg of its own, and the port
   links no decoder). It is a separate program under the LGPL 2.1, built in the
@@ -72,21 +77,14 @@ self-contained — and it is why `MP_USER_PATH` cannot be used to move saves.
   together with the executable in every Windows package. The Linux packages
   ship no ffmpeg and use the system's.
 - **The AppImage and the APK**: `tools/make_appimage.sh` collects them into
-  `usr/share/licenses/metroid-prime-port/` and records which shared libraries it
-  bundled in `BUNDLED_LIBRARIES.txt`, so a reader can tell what came from where.
+  `usr/share/licenses/metroid-prime-port/`. It bundles no shared libraries.
   The APK's `syncLicenseNotices` task gathers the same set into `assets/`,
   verified present in a built package: `port-license.txt`, `port-notice.txt`,
   `aurora.txt`, `musyx.txt`, `sdl-src.txt`, `imgui-src.txt`, `fmt-src.txt` and
-  `zstd-src.txt`. The notices for the libraries an AppImage copies from the
-  build host are still named rather than reproduced — see below.
+  `zstd-src.txt`.
 - **The Flatpak** collects them in the manifest's `post-install`: the two
   vendored snapshots out of the tree, and the four fetched packages by glob,
-  because the fetched ones only exist once `cmake-ninja` has run. It has still
-  never been built here — see below.
-- **The shared libraries an AppImage copies are named, not reproduced.** They
-  come off the build host rather than out of the tree, so their terms cannot be
-  collected automatically; `BUNDLED_LIBRARIES.txt` says which were bundled and a
-  real release should ship their licence texts too.
+  because the fetched ones only exist once `cmake-ninja` has run.
 
 ## Signing identity
 
@@ -121,28 +119,36 @@ not the debug key's `CN=Android Debug` (`edd22fdb…`), the arm64 `.so` is 29 MB
 all six third-party notices are in `assets/`, and no `.iso`, `.pak` or `.strg`
 is in the package.
 
-The port targets `versionName "0.9.0"` and `versionCode 11`.
+The port targets `versionName "0.18.0"` and `versionCode 21`. A version bump
+also adds a `<release>` entry (newest first) to
+`packaging/io.github.odrannnn.metroidprimeport.metainfo.xml`, which is the
+version Flatpak reports; `tools/make_flatpak.sh` stops if the two differ.
 
 ## Per-platform packaging
 
 | Platform | Builds from | Produces | State |
 |---|---|---|---|
-| Linux | `cmake -S . -B build-gcc` | executable | works; tests green. `cmake --install` also produces a complete tree, verified by running it |
-| Linux | `tools/make_appimage.sh` | AppImage | builds; **notices missing** |
-| Linux | `tools/make_flatpak.sh` | Flatpak | manifest installs a working tree and collects notices; **never built here** — no `flatpak-builder` on the development machine. The app id is a placeholder, and there is no AppStream metainfo |
+| Linux | `cmake -S . -B build/port-gcc` | executable | works; tests green. `cmake --install` also produces a complete tree, verified by running it |
+| Linux | `.github/workflows/linux-release.yml` | AppImage + tarball | manual trigger; builds on AlmaLinux 9 and runs `tools/make_appimage.sh`. Use these for releases, not a desktop build |
+| Linux | `tools/make_flatpak.sh` | Flatpak | manifest installs a working tree and collects notices; builds (`tools/make_flatpak.sh` writes `build/flatpak/MetroidPrimePort.flatpak`). The app id is `io.github.odrannnn.metroidprimeport`, with AppStream metainfo shipped |
 | Windows | `.github/workflows/windows.yml` | zipped `dist/` | manual trigger only for now; green when run, artifact uploaded, packaged startup checked |
-| Android | `tools/android_apk.sh :app:assembleRelease` | APK | builds, signed with this project's own key; **on-device behaviour unverified** |
+| Android | `tools/android_apk.sh :app:assembleRelease` | APK | builds, signed with this project's own key; runs on-device (POCO F8 Ultra, 60 FPS), touch/Continue-load still unverified |
 
-The Linux binary is the only one with a test suite attached: 14 `port`-labelled
+The Linux binary is the only one with a test suite attached: 43 `port`-labelled
 ctest targets, all run by both CI jobs.
 
 ## Runtime dependencies
 
-The AppImage deliberately does **not** bundle glibc, so the build is only as
-portable as its build host. `platform/glibc_compat.c` lowers that floor to
-**glibc 2.39** (Ubuntu 24.04, the current LTS) by defining the newer symbol
-versions in terms of the older ones. Above that, `pidfd_spawnp`/`pidfd_getpid`
-used by nod would need an older nod build or an older base.
+A Linux binary only runs where glibc and libstdc++ are at least as new as the
+ones it was linked against, so a desktop build is only as portable as the
+desktop. The 0.12.0 AppImage needed glibc 2.43 and GLIBCXX_3.4.34 and would not
+start on LMDE (issue #3). The release artefacts therefore come from
+`.github/workflows/linux-release.yml`, which builds in `almalinux:9` with
+gcc-toolset-14 and fails unless the binary needs at most **glibc 2.34** and
+**GLIBCXX_3.4.29** (Debian 12, Ubuntu 22.04, RHEL 9 and newer). The AppImage
+bundles nothing, so freetype, libpng, zstd and OpenSSL 3 come from the system.
+`gh workflow run linux-release.yml --ref port -R Odrannnn/MetroidPrimePort`, then
+`gh run download <id> -n metroid_prime_port-linux`.
 
 A Vulkan driver, X11 or Wayland, and DBus for the file dialog come from the
 host. A session that reaches `show_window` over SDL's Wayland backend will hang
@@ -166,20 +172,17 @@ under GNOME unless the port's own X11 preference applies — see
 
    The one thing still unexplained is **why the in-game screen finds a corrupt
    file at all** on a card that was supposed to be empty. That is not a shipping
-   blocker, but it is not understood, and `PORT_NOTES.md` records it as open.
+   blocker, but it is not understood and is still open.
 2. **No answer for the decompiled game source.** The port's own work is MIT
    (`LICENSE`, scoped) and `NOTICE` says so, but what may be done with a working
    copy of decompiled game code is a question for the copyright holder, and no
    part of this tree answers it.
-3. **The AppImage only *names* the shared libraries it copies** rather than
-   reproducing their terms. Windows, AppImage, APK and the Flatpak manifest all
-   collect the rest.
-4. **Android on-device behaviour is unverified** — boot, render, save, play a
-   seed and connect all need a device. Partly narrowed: the arm64 APK installs,
-   launches, brings up WebGPU and opens the SAF picker on the x86_64 emulator
-   under ARM translation (see `docs/ANDROID_BUILD_PROBE.md`), so packaging and
-   lifecycle are checkable without hardware. Performance and touch input are not,
-   and those still need a device.
+3. ~~**The AppImage only names the shared libraries it copies.**~~ It no longer
+   copies any.
+4. **Android on-device behaviour is partly verified** — the release build runs on
+   a POCO F8 Ultra at a steady 60 FPS (see `docs/ANDROID_BUILD_PROBE.md`). Still
+   unverified: loading a save from the title screen's Continue, touch ergonomics
+   and tap reliability, and performance on any other device.
 5. **~~`wss://` does not work on Android~~ — resolved.** OpenSSL 3.5.8 is built
    from a pinned, hash-checked source for the NDK and linked statically, so
    `MP_HAVE_OPENSSL` is defined in the APK and a `wss://` server connects. On
@@ -189,14 +192,12 @@ under GNOME unless the port's own X11 preference applies — see
    enumerated by hand from `/apex/com.android.conscrypt/cacerts`, and zero
    certificates is a loud error naming the directories rather than an obscure
    verification failure later. Both halves are proven on the emulator — see
-   `docs/ANDROID_BUILD_PROBE.md`. **Costs 2.17 MB of APK, +20.3%** (11.19 MB ->
-   13.46 MB), which is more than the 0.8-1.2 MB first estimated.
-6. **The Flatpak path has never been built.** Its manifest is correct — the
-   project's own install rules put a runnable tree in `/app`, and the notices
-   are collected — but nothing here has ever run `flatpak-builder`, so the
-   manifest is unproven against a real runtime. That part needs
-   `flatpak-builder`, which is not installed. Two things also remain before it
-   could be published:
+   `docs/ANDROID_BUILD_PROBE.md`. Costs about 2 MB of APK — the measured numbers
+   are in `docs/ANDROID_BUILD_PROBE.md`.
+6. **The Flatpak is not on Flathub.** `tools/make_flatpak.sh` builds a bundle
+   from the committed `port` branch; the project's own install rules put a
+   runnable tree in `/app`, and the notices are collected. Before it could be
+   published:
    - **~~No icon is shipped at all~~ — resolved.** `packaging/varia-bolt.svg` is
      the maintainer's own artwork (it has to be *original*: anything
      recognisably Nintendo's is not ours to redistribute), and every package

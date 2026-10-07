@@ -1,4 +1,5 @@
 #include "port_skip_cutscenes.h"
+#include "port_bytes.h"
 
 #include <algorithm>
 #include <cstring>
@@ -81,12 +82,7 @@ struct Reader {
   }
 };
 
-void Put32(std::vector< uint8_t >& out, uint32_t v) {
-  out.push_back(static_cast< uint8_t >(v >> 24));
-  out.push_back(static_cast< uint8_t >(v >> 16));
-  out.push_back(static_cast< uint8_t >(v >> 8));
-  out.push_back(static_cast< uint8_t >(v));
-}
+using port::AppendBE32;
 
 bool Parse(const uint8_t* scly, size_t size, uint32_t& version, std::vector< Layer >& layers) {
   Reader r{scly, scly + size};
@@ -143,16 +139,16 @@ void Write(uint32_t version, const std::vector< Layer >& layers, std::vector< ui
   for (const Layer& layer : layers) {
     std::vector< uint8_t > b;
     b.push_back(layer.unk);
-    Put32(b, static_cast< uint32_t >(layer.objects.size()));
+    AppendBE32(b, static_cast< uint32_t >(layer.objects.size()));
     for (const Object& o : layer.objects) {
       b.push_back(o.type);
-      Put32(b, static_cast< uint32_t >(8 + 12 * o.conns.size() + o.props.size()));
-      Put32(b, o.id);
-      Put32(b, static_cast< uint32_t >(o.conns.size()));
+      AppendBE32(b, static_cast< uint32_t >(8 + 12 * o.conns.size() + o.props.size()));
+      AppendBE32(b, o.id);
+      AppendBE32(b, static_cast< uint32_t >(o.conns.size()));
       for (const Conn& c : o.conns) {
-        Put32(b, c.state);
-        Put32(b, c.msg);
-        Put32(b, c.target);
+        AppendBE32(b, c.state);
+        AppendBE32(b, c.msg);
+        AppendBE32(b, c.target);
       }
       b.insert(b.end(), o.props.begin(), o.props.end());
     }
@@ -161,10 +157,10 @@ void Write(uint32_t version, const std::vector< Layer >& layers, std::vector< ui
   }
   out.clear();
   out.insert(out.end(), {'S', 'C', 'L', 'Y'});
-  Put32(out, version);
-  Put32(out, static_cast< uint32_t >(layers.size()));
+  AppendBE32(out, version);
+  AppendBE32(out, static_cast< uint32_t >(layers.size()));
   for (const auto& b : blobs)
-    Put32(out, static_cast< uint32_t >(b.size()));
+    AppendBE32(out, static_cast< uint32_t >(b.size()));
   for (const auto& b : blobs)
     out.insert(out.end(), b.begin(), b.end());
 }

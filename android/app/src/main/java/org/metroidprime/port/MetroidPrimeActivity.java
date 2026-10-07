@@ -77,7 +77,35 @@ public final class MetroidPrimeActivity extends SDLActivity {
                 android.widget.RelativeLayout.LayoutParams.MATCH_PARENT,
                 android.widget.RelativeLayout.LayoutParams.MATCH_PARENT));
         }
+        preferHighestRefreshRate();
         warnIfDataFolderUnreachable();
+    }
+
+    // Android runs an app at 60 Hz on a 90/120 Hz panel unless the window asks
+    // for more, and the swapchain is always Fifo here, so without this the
+    // uncapped frame rate stops at 60. Picks the fastest mode at the current
+    // resolution; the 60 FPS cap still paces frames when it is on.
+    private void preferHighestRefreshRate() {
+        android.view.Display display = Build.VERSION.SDK_INT >= Build.VERSION_CODES.R
+            ? getDisplay() : getWindowManager().getDefaultDisplay();
+        if (display == null) {
+            return;
+        }
+        android.view.Display.Mode current = display.getMode();
+        android.view.Display.Mode best = current;
+        for (android.view.Display.Mode mode : display.getSupportedModes()) {
+            if (mode.getPhysicalWidth() == current.getPhysicalWidth()
+                && mode.getPhysicalHeight() == current.getPhysicalHeight()
+                && mode.getRefreshRate() > best.getRefreshRate()) {
+                best = mode;
+            }
+        }
+        android.view.WindowManager.LayoutParams params = getWindow().getAttributes();
+        params.preferredDisplayModeId = best.getModeId();
+        getWindow().setAttributes(params);
+        Log.i(TAG, String.format(Locale.ROOT, "Display mode %d: %dx%d at %.1f Hz (was %.1f Hz)",
+            best.getModeId(), best.getPhysicalWidth(), best.getPhysicalHeight(),
+            best.getRefreshRate(), current.getRefreshRate()));
     }
 
     // The data was moved to shared storage (port_paths.h reads the same file),

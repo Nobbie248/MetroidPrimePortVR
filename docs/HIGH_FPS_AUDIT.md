@@ -43,108 +43,51 @@ The important result is that the engine core is **already dt-scaled**, and the
 particle systems run by real time with fixed 60 Hz substeps, so they already
 scale. The remaining real work is the scattered per-frame counters.
 
-Status: the tick plumbing, the projectile tick period, decals, and an
-experimental `sim_rate` setting are implemented (see "Implemented" below). The
-per-frame counters are still outstanding.
+Status: the tick plumbing, the projectile tick period, decals, the particle
+seeding, and the per-tick rate accumulators are implemented (see
+"Implemented" below), behind the experimental `sim_rate` / `sim_adaptive`
+settings. What is left is the short list under "Findings".
 
 ## Findings
 
-Line numbers were collected by an automated pass and spot-checked against the
-source; treat them as pointers for the follow-up, not as verified targets.
+Findings below use function and symbol names; the converted items live in
+"Implemented".
 
 Coverage note: `CPlayerDynamics.cpp` (and the morph-ball friction) were missed by
 the first pass - its scope was `CPlayer.cpp` - and were found from a report that
 walking slowed at a raised rate. That file is now audited and fixed; the per-tick
 friction below was the cause.
 
-### Tick plumbing (must change)
+### Still open (everything else is in "Implemented" below)
 
-- `platform/include/port_timing.h:9` `FixedStepClock::kPeriod = 1.0 / 60.0`
-- `src/MetroidPrime/main.cpp:469` `static const float tickPeriod = 1.f / 60.f;`
-- `src/MetroidPrime/main.cpp:474` `x30_inputGenerator.Update(1.f / 60.f, ...)`
-- `src/MetroidPrime/main.cpp:477` `CreateTimerTick(kAMT_Game, tickPeriod)`
-- `src/MetroidPrime/main.cpp:820` `const double dt = 1.f / 60.f;`
-- `src/MetroidPrime/main.cpp:1149` `CStreamAudioManager::Update(1.f / 60.f)`
-- `src/Kyoto/Audio/CSfxManager.cpp` voice wrappers advance volume ramps per call
-  (audio itself is wall-clock via the AI/MusyX backends, so this is cosmetic)
+- `CGroundMovement`: `x14_waterLandingVelocityReduction` is applied inside the
+  collision sub-step loop. Probably a one-time landing response, but if it
+  re-applies while skimming water it is rate-dependent; verify against a real
+  water surface before touching it.
+- Short debounces, deliberately left as-is (a few frames of timing error at a
+  doubled rate): `CPlayer::x2b0_outOfWaterTicks` and
+  `xa2c_damageLoopSfxDelayTicks`, `CSpacePirate::x63c_frenzyFrames`, the
+  morph-ball spider-electric `x8_curFrame` / `x4_lifetime`.
+- Packed bitfields, left to avoid disturbing the layout:
+  `CWallCrawlerSwarm` boid `x7c_6_remainingLaunchNotOnSurfaceFrames` /
+  `x7c_24_framesNotOnSurface`.
+- Throttle counters, benign (they only skip expensive work between frames, so
+  at a raised rate they run more often): `CParasite` / `CSeedling`
+  `x5d4_thinkCounter`, `CSpacePirate` / `CFlyingPirate` `% 7` cadences,
+  `CFishCloud::x118_thinkCounter`, `CBallCamera::x478_shortMoveCount`.
+- HUD memo countdown (`CStateManager::xf80_hudMessageFrameCount`, via
+  `CMFGame`'s `IncrementHUDMessageFrameCounter`): ticks down once per `Update`,
+  so the memo clears faster in wall time at a raised rate.
 
-### Particles (already rate-independent)
-
-All three particle systems accumulate **real time** and then step the simulation
-in fixed `1/60` substeps until they catch up, exactly like a fixed-timestep
-integrator. The frame counter they index their tables with follows that
-accumulated time, so the tables resolve correctly at any tick rate.
-
-`CElementGen`:
-
-- `src/Kyoto/Particles/CElementGen.cpp:59` `kTickTime = 1 / 60.0` (the substep)
-- `CElementGen.cpp:424` `double t = x74_curFrame * kTickTime;`
-- `CElementGen.cpp:425` `dt1 = close_enough(dt, kTickTime) ? kTickTime : dt;`
-- `CElementGen.cpp:436` `x78_curSeconds += dt1;` (driven by real dt)
-- `CElementGen.cpp:444` `while (t < x78_curSeconds && !close_enough(t, x78_curSeconds))`
-- `CElementGen.cpp:483-484` `t += kTickTime; ++x74_curFrame;` (substep, bounded by real time)
-
-`CParticleElectric`:
-
-- `src/Kyoto/Particles/CParticleElectric.cpp:271` `x28_currentFrame * (1.0 / 60.0)`
-- `CParticleElectric.cpp:302` `while (evalTime < x30_curTime)` where `x30_curTime += dt`
-- `CParticleElectric.cpp:330-331` `evalTime += 1.0 / 60.0; ++x28_currentFrame;`
-- `CParticleElectric.cpp:439` `x15c_genRem += rate;` is per substep, which is fixed
-
-`CParticleSwoosh`:
-
-- `src/Kyoto/Particles/CParticleSwoosh.cpp:20` `kFrameTime = 1.f / 60.f` (the substep)
-- `CParticleSwoosh.cpp:147,151` `advance = dt * timeScale; x30_curTime += advance;`
-- `CParticleSwoosh.cpp:152` `while (x1d0_26_forceOneUpdate || evalTime < x30_curTime)`
-- `CParticleSwoosh.cpp:195-196` `evalTime += kFrameTime; ++x28_curFrame;`
-
-Caveat: `CParticleGlobals::SetEmitterTime()`/`GetValue()` and the `% PISY`
-spawn cadence are expressed in substeps (1/60 s), so they quantise to 60 Hz even
-when the outer tick is faster. That is a fidelity limit, not a speed error.
-
-### Decals (converted)
-
-`CDecal` ignored its `dt` and advanced a frame counter per `Update`:
-
-- `src/Weapons/CDecal.cpp:262,266,270` `x58_frameIdx >= <part>.GetLifetime()`
-- `CDecal.cpp:274` `++x58_frameIdx;`
-- `CDecal.cpp:51` `clr->GetValue(x58_frameIdx, color)` table lookup by frame
-
-It now accumulates `float x6c_elapsedTime += dt` and derives
-`x58_frameIdx = int(x6c_elapsedTime * 60.f)`, so every existing frame-unit read
-and lifetime comparison keeps working while the decal ages in real time. The
-added member fits the existing padding, so `NESTED_CHECK_SIZEOF(CDecalManager,
-SDecal, 0x78)` is unchanged. `CDecalManager::Update(dt, ...)` already passed the
-real dt.
-
-### Per-frame counters and cadences (scattered)
-
-Player:
-
-- `src/MetroidPrime/Player/CPlayer.cpp:1661-1662` `x2b0_outOfWaterTicks` (cap 2)
-- `CPlayer.cpp:2756,3001` `xa2c_damageLoopSfxDelayTicks` (cap 2)
-- `Player/CPlayerGun.cpp:803,1116` `x30c_rapidFireShots` +-1 per call
-- `Player/CMorphBall.cpp:1434` `x1e38_wallSparkFrameCountdown -= 1`
-- `CMorphBall.cpp:2718,2729` spider-ball effect `x8_curFrame` vs `x4_lifetime`
-- `src/MetroidPrime/CStateManager.cpp:1276` `++x8d8_updateFrameIdx` (also the global particle seed)
-
-Enemies:
-
-- `Enemies/CSpacePirate.cpp:715,927,943,2712,2803`
-- `Enemies/CFlyingPirate.cpp:692,1829`
-- `Enemies/CMetroidBeta.cpp:995`
-- `Enemies/CParasite.cpp:229`, `CSeedling.cpp:79`
-- `Enemies/CWallCrawlerSwarm.cpp:737,743,979,982`
-- `Weapons/CIceProjectile.cpp:200`, `Weapons/CNewFlameThrower.cpp:282,622`
-
-Scripts / misc:
-
-- `ScriptObjects/CFishCloud.cpp:410` `++x118_thinkCounter`
-- `ScriptObjects/CScriptPickupGenerator.cpp:158` `x44_delayTimer -= 1.f`
-- `Cameras/CBallCamera.cpp:1957` `x478_shortMoveCount += 1`
-- `CMFGame.cpp:165` HUD message frame counter (in `CStateManager`)
-- `src/MetroidPrime/CStateManager.cpp` `Update` head: `CElementGen/CParticleElectric/
-  CDecal/CProjectileWeapon::SetGlobalSeed(x8d8_updateFrameIdx)` — per-tick RNG seed
+Done and moved to "Implemented": the tick plumbing, the projectile tick
+period, decals, the `x8d8_updateFrameIdx` seed (now a `float` of 60 Hz frame
+units via `TickFrames()`), and the per-tick rate accumulators
+(`CSpacePirate` cloak-delay and `x7bc_attackRemTime`, `CFlyingPirate` `x7e4_`,
+`CMetroidBeta` `x834_particlePhase`, `CScriptPickupGenerator`
+`x44_delayTimer`, `CIceProjectile` trail spawn, `CMorphBall` wall-spark
+countdown, `CNewFlameThrower` flame-contact lifetime, player/morph-ball
+friction, `CFishCloud` steering). The particle systems need no conversion:
+all three accumulate real time and step it in fixed 1/60 substeps.
 
 ### Confirmed dt-scaled (no change needed)
 
@@ -162,17 +105,17 @@ Scripts / misc:
 ## Implemented: experimental `sim_rate`
 
 - `PortDebug::SimRate()/SetSimRate()/SimPeriod()` (env `MP_SIM_RATE`, settings
-  key `sim_rate`, slider in the F1 Performance tab, range 30..480, default 60).
+  key `sim_rate`, slider in F1 > Video > Frame rate, range 30..480, default 60).
 - `PortDebug::SimAdaptive()/SetSimAdaptive()` (env `MP_SIM_ADAPTIVE`, settings
-  key `sim_adaptive`, checkbox in the same tab). When set, `UpdateTicks` uses
+  key `sim_adaptive`, checkbox on the same page). When set, `UpdateTicks` uses
   `period = clamp(frameTime, 1/480, 1/30)` instead of `1/SimRate()`, i.e. one
   step per frame with `dt` equal to the measured frame time, so a variable
   frame rate is matched tick-for-tick and the fixed-step accumulator only
   subdivides when a frame exceeds 1/30 s.
 - `CGameArchitectureSupport::GetTickPeriod()` exposes the step actually used so
   `RsMain` feeds the same `dt` to `CSfxManager::Update` and streamed audio.
-- `PortTiming::FixedStepClock` gained `SetPeriod()`/`Period()`; the step is now
-  runtime rather than `constexpr`.
+- `PortTiming::FixedStepClock` gained a runtime step (`mPeriod`,
+  `SetPeriod()`/`Period()`); `kPeriod` stays the `constexpr` 60 Hz default.
 - `CGameArchitectureSupport::UpdateTicks` sets the clock period from `SimRate()`
   and uses it for `CreateTimerTick` and `CInputGenerator::Update`.
 - `CMain::RsMain` recomputes `dt` per frame and passes it to
@@ -274,12 +217,12 @@ Phase 1 - decals (done)
   fixed 1/60 substeps (verified above). Only the substep granularity quantises
   effects to 60 Hz if sub-frame fidelity is ever wanted.
 
-Phase 2 - scattered counters (list above)
+Phase 2 - scattered counters (done, except the items "Findings" leaves open)
 
-- Convert each counter to seconds (`+= dt`) or to a one-shot guarded by a time
-  threshold. The `x2b0_outOfWaterTicks`/`rapidFireShots` style counters are short
-  debounces and can become `dt`-based. Make the particle RNG seed a function of
-  accumulated time rather than `x8d8_updateFrameIdx`.
+- Each per-tick rate accumulator is scaled by `TickFrames()` and each
+  per-tick cadence/duration counter converted to 60 Hz frame units; the
+  particle RNG seed is accumulated time (`x8d8_updateFrameIdx`) rather than a
+  tick count. See "Implemented".
 
 Phase 3 - tick plumbing (done)
 
@@ -289,7 +232,10 @@ Phase 3 - tick plumbing (done)
 
 Phase 4 - verification
 
-- Add a port smoke scenario that runs the same scripted input at 60 and 120 Hz
+- For interpolation, this sweep is covered by `docs/FRAME_INTERPOLATION.md`
+  section 7 (t = 0/0.5/1 captures compared against tick frames, plus the ASan
+  tour with interpolation forced on). For `sim_rate` itself, still to do:
+  add a port smoke scenario that runs the same scripted input at 60 and 120 Hz
   and asserts that travelled distance, turn angle, jump height and animation
   phase match within tolerance (the existing `MP_SMOKE_*` driver already injects
   deterministic input).
@@ -307,5 +253,6 @@ Phase 4 - verification
 - **`close_enough(dt, 1/60)` workarounds** in `CProjectileWeapon.cpp:148`,
   `CElementGen.cpp:425` and elsewhere assume the canonical step and must be
   revisited.
-- **RNG determinism.** Seeding particles from the tick index makes them
-  rate-dependent; seed from a fixed schedule or a stable frame counter instead.
+- **RNG determinism.** Particle, decal and projectile seeds now come from the
+  accumulated 60 Hz frame count (`TickFrames()`), so the same real time gives
+  the same sequence at any rate.

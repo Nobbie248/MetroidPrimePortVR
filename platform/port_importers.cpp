@@ -66,6 +66,8 @@ SDL_Process* Spawn(const std::string& name, const std::string& argument, bool pi
     SDL_SetNumberProperty(props, SDL_PROP_PROCESS_CREATE_STDOUT_NUMBER, SDL_PROCESS_STDIO_APP);
     SDL_SetBooleanProperty(props, SDL_PROP_PROCESS_CREATE_STDERR_TO_STDOUT_BOOLEAN, true);
   }
+  // Without this, Windows opens a console window for every run (aurora's SDL patch).
+  SDL_SetBooleanProperty(props, "SDL.process.create.windows.no_window", true);
   SDL_Process* process = SDL_CreateProcessWithProperties(props);
   if (process == nullptr) {
     error = std::string("could not start ") + name + ": " + SDL_GetError();

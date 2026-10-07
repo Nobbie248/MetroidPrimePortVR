@@ -220,9 +220,10 @@ int RequiredArtifacts();
 bool VariaOnlyHeatProtection();
 
 // Spring Ball as the connected seed has it, for a seed on the built-in tables
-// whose slot_data has arrived: 0 off, 1 once the Morph Ball Bombs are held,
-// 2 on (its item, or the first Progressive Bomb, has been received). -1 when
-// no such seed is connected, so the port's own setting applies.
+// whose slot_data has arrived: 0 not yet (its item hasn't been received),
+// 1 once the Morph Ball Bombs are held, 2 on (its item, or the first
+// Progressive Bomb, has been received). -1 when no such seed is connected or
+// the seed has Spring Ball off, so the port's own setting applies.
 int SpringBallRule();
 
 // The connected seed's pre_scan_elevators: 1 on, 0 off (or AP off), -1 while

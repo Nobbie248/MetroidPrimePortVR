@@ -3,6 +3,8 @@
 // unit test needs neither Aurora nor a disc.
 
 #include "port_mods.h"
+#include "port_strings.h"
+#include "port_bytes.h"
 
 #include <algorithm>
 #include <cstring>
@@ -17,9 +19,7 @@ constexpr uint32_t kPakVersion = 0x00030005;
 constexpr uint32_t kMaxNameLength = 1024;
 constexpr uint32_t kMaxResources = 1000000;
 
-uint32_t ReadBE32(const uint8_t* data) {
-  return (uint32_t(data[0]) << 24) | (uint32_t(data[1]) << 16) | (uint32_t(data[2]) << 8) | uint32_t(data[3]);
-}
+using port::ReadBE32;
 
 void WriteBE32(uint8_t* data, uint32_t value) {
   data[0] = uint8_t(value >> 24);
@@ -30,18 +30,7 @@ void WriteBE32(uint8_t* data, uint32_t value) {
 
 uint64_t RoundUp32(uint64_t value) { return (value + 31) & ~uint64_t(31); }
 
-int HexDigit(char c) {
-  if (c >= '0' && c <= '9') {
-    return c - '0';
-  }
-  if (c >= 'a' && c <= 'f') {
-    return c - 'a' + 10;
-  }
-  if (c >= 'A' && c <= 'F') {
-    return c - 'A' + 10;
-  }
-  return -1;
-}
+using port::HexDigit;
 
 std::filesystem::path HostPath(const std::string& text) {
   return std::filesystem::path(std::u8string(text.begin(), text.end()));
@@ -105,12 +94,14 @@ bool ParsePakTable(const uint8_t* data, size_t size, PakTable& table, size_t& ne
   return true;
 }
 
-bool ParseNativeTextureName(const std::string& fileName, uint32_t& id) {
-  if (fileName.size() != 12 || fileName[8] != '.') {
+// "<8 hex digits>.<ext>", the extension in any case (`ext` is lower case).
+static bool ParseHexIdName(const std::string& fileName, const char* ext, uint32_t& id) {
+  const size_t extLength = std::strlen(ext);
+  if (fileName.size() != 9 + extLength || fileName[8] != '.') {
     return false;
   }
-  for (size_t i = 9; i < 12; ++i) {
-    if ((fileName[i] | 0x20) != "dds"[i - 9]) {
+  for (size_t i = 0; i < extLength; ++i) {
+    if ((fileName[9 + i] | 0x20) != ext[i]) {
       return false;
     }
   }
@@ -123,6 +114,30 @@ bool ParseNativeTextureName(const std::string& fileName, uint32_t& id) {
     id = (id << 4) | uint32_t(digit);
   }
   return true;
+}
+
+bool ParseNativeTextureName(const std::string& fileName, uint32_t& id) {
+  return ParseHexIdName(fileName, "dds", id);
+}
+
+bool ParseMaterialCubeName(const std::string& fileName, uint32_t& id) {
+  return ParseHexIdName(fileName, "envcube", id);
+}
+
+bool ImportStampStale(const std::string& stampText, int current) {
+  size_t i = 0;
+  while (i < stampText.size() && (stampText[i] == ' ' || stampText[i] == '\t')) {
+    ++i;
+  }
+  long value = 0;
+  size_t digits = 0;
+  for (; i < stampText.size() && stampText[i] >= '0' && stampText[i] <= '9'; ++i, ++digits) {
+    value = value * 10 + (stampText[i] - '0');
+    if (value > 1000000) {
+      break;
+    }
+  }
+  return digits == 0 || value < current;
 }
 
 bool ParseLooseName(const std::string& fileName, uint32_t& type, uint32_t& id) {

@@ -1,3 +1,4 @@
+#include "port_env.h"
 #include "port_apclient.h"
 #include "port_log.h"
 #include "port_paths.h"
@@ -47,11 +48,6 @@ namespace {
 using Protocol::Config;
 using Protocol::ItemGrant;
 using Protocol::Session;
-
-bool EnvEnabled(const char* name) {
-  const char* value = std::getenv(name);
-  return value != nullptr && value[0] != '\0' && std::strcmp(value, "0") != 0;
-}
 
 std::string UserDirectory() {
   const std::string& dir = PortPaths::UserFolder();
@@ -155,19 +151,35 @@ struct Runtime {
     {
       std::lock_guard<std::mutex> lock(mutex);
       exiting = true; // a restart still in flight must not start a new worker
+      // Set under the lock: WaitBackoff checks it under the lock, so a notify
+      // sent between its check and its wait would otherwise be lost.
+      stop.store(true, std::memory_order_release);
     }
-    stop.store(true, std::memory_order_release);
     wake.notify_all();
-    if (worker.joinable()) {
-      bool done;
-      {
-        std::unique_lock<std::mutex> lock(mutex);
-        done = wake.wait_for(lock, std::chrono::seconds(2), [this] { return workerDone; });
-      }
+    // A restart in flight holds the old worker itself and joins it, so it is
+    // waited for too; with `exiting` set it starts nothing new.
+    std::thread current;
+    std::vector<std::thread> restarts;
+    bool done;
+    {
+      std::unique_lock<std::mutex> lock(mutex);
+      done = wake.wait_for(lock, std::chrono::seconds(2), [this] {
+        return restartsRunning == 0 && (!worker.joinable() || workerDone);
+      });
+      current = std::move(worker);
+      restarts = std::move(restarters);
+    }
+    for (std::thread& thread : restarts) {
       if (done)
-        worker.join();
+        thread.join(); // finished, or returning from the lambda
       else
-        worker.detach();
+        thread.detach();
+    }
+    if (current.joinable()) {
+      if (done)
+        current.join();
+      else
+        current.detach();
     }
     FlushState(); // whatever the worker had not written yet
   }
@@ -256,12 +268,22 @@ struct Runtime {
   // Held for the whole of a restart (Connect/Disconnect), so two in a row run
   // one after the other.
   std::mutex restartMutex;
+  // The restart threads (under mutex), kept so Shutdown() can join them, and
+  // how many have not returned yet. Finished ones are joined by the next
+  // StartRestart.
+  std::vector<std::thread> restarters;
+  int restartsRunning = 0;
   // The last logic evaluation and what it was made from; it only changes with
   // an item or the seed's options, and the map asks every frame.
   bool logicValid = false;
   PortApLogic::Options logicOptions;
   bool logicHasWorld = false;
-  PortApWorld::Layout logicWorld;
+  uint64_t logicWorldRevision = 0; // Session::WorldRevision
+  // The seed's layout as last copied out of the session, handed out shared
+  // (SessionWorldLocked) and copied again only when the session's world
+  // revision moves on.
+  std::shared_ptr<const PortApWorld::Layout> worldCache;
+  uint64_t worldCacheRevision = 0;
   PortApLogic::Items logicItems;
   std::vector<PortApLogic::Level> logicLevels;
   bool enabled = false;
@@ -320,6 +342,17 @@ Runtime& GetRuntime() {
     ~Stopper() { runtime->Shutdown(); }
   } stopper{runtime};
   return *runtime;
+}
+
+// The session's layout, shared. `mutex` is held and the session exists.
+std::shared_ptr<const PortApWorld::Layout> SessionWorldLocked(Runtime& runtime) {
+  const uint64_t revision = runtime.session->WorldRevision();
+  if (runtime.worldCache == nullptr || runtime.worldCacheRevision != revision) {
+    runtime.worldCache =
+        std::make_shared<const PortApWorld::Layout>(runtime.session->GetState().world);
+    runtime.worldCacheRevision = revision;
+  }
+  return runtime.worldCache;
 }
 
 // Names the session a save's received items came from: FNV-1a over the seed
@@ -457,18 +490,21 @@ void ApplyBuiltinWorld(Runtime& runtime, CStateManager& mgr, CPlayerState& playe
   namespace Prime = MetroidPrime;
   bool unlimitedMissiles = false;
   bool unlimitedPowerBombs = false;
-  PortApWorld::Layout layout;
+  // The disc's values outside a seed's game.
+  static const PortApWorld::Layout kNoLayout;
+  std::shared_ptr<const PortApWorld::Layout> seedLayout;
   {
     std::lock_guard<std::mutex> lock(runtime.mutex);
     const bool builtin = runtime.config.builtin && runtime.session != nullptr;
     if (builtin && runtime.session->GetState().hasWorld)
-      layout = runtime.session->GetState().world;
+      seedLayout = SessionWorldLocked(runtime);
     // The world's item limits (its Config.py; not in slot data) hold in a
     // seed's game, the disc's anywhere else.
     const bool seedGame = builtin && runtime.session->GetState().hasWorld;
     CPlayerState::PortSetAmmoLimits(seedGame ? 999 : 250, seedGame ? 99 : 8);
     // The seed's tank capacity; a game outside Archipelago has the disc's.
-    const float capacity = static_cast<float>(layout.etankCapacity);
+    const float capacity =
+        static_cast<float>((seedLayout != nullptr ? *seedLayout : kNoLayout).etankCapacity);
     if (CPlayerState::GetEnergyTankCapacity() != capacity) {
       // Full health stays full under the new capacity.
       const bool full = player.GetHealthInfo().GetHP() >= player.CalculateHealth();
@@ -506,13 +542,14 @@ void ApplyBuiltinWorld(Runtime& runtime, CStateManager& mgr, CPlayerState& playe
   if (world != nullptr && world->IGetWorldAssetId() == Prime::kTallonWorld)
     temple = world->IGetAreaId(Prime::kArtifactTempleArea);
   // The layers the seed keeps on or off.
+  const PortApWorld::Layout& layout = seedLayout != nullptr ? *seedLayout : kNoLayout;
   for (const PortApWorld::LayerChange& change : PortApWorld::Layers(layout)) {
     CScriptLayerManager* state = gpGameState->StateForWorld(change.mlvl).GetLayerState().GetPtr();
     TAreaId area(change.area);
     if (world != nullptr && world->IGetWorldAssetId() == change.mlvl)
       area = world->IGetAreaId(change.mrea);
     if (state == nullptr || area.Value() < 0 ||
-        static_cast<size_t>(area.Value()) >= state->GetAreaLayers().size())
+        static_cast<size_t>(area.Value()) >= static_cast<size_t>(state->GetAreaLayers().size()))
       continue;
     if (change.whileLayer >= 0 && !state->IsLayerActive(area, TLayerId(change.whileLayer)))
       continue;
@@ -520,7 +557,7 @@ void ApplyBuiltinWorld(Runtime& runtime, CStateManager& mgr, CPlayerState& playe
       state->SetLayerActive(area, TLayerId(change.layer), change.active);
   }
   if (layers == nullptr || temple.Value() < 0 ||
-      static_cast<size_t>(temple.Value()) >= layers->GetAreaLayers().size())
+      static_cast<size_t>(temple.Value()) >= static_cast<size_t>(layers->GetAreaLayers().size()))
     return;
   for (int id = CPlayerState::kIT_Truth; id <= CPlayerState::kIT_Newborn; ++id) {
     const bool held = player.GetItemAmount(static_cast<CPlayerState::EItemType>(id)) > 0;
@@ -631,8 +668,7 @@ void EnterSeed(Runtime& runtime, const std::string& seed) {
     runtime.queuedChecks.clear();
   }
   if (runtime.resetPending) {
-    PortLog::Write("archipelago: MP_AP_RESET_STATE=1 discarded saved progress for %s\n",
-                   config.slot.c_str());
+    PortLog::Write("archipelago: MP_AP_RESET_STATE=1 discarded saved progress\n");
     state.nextItemIndex = 0;
     state.checkedLocations.clear();
     state.progressive.clear();
@@ -642,8 +678,8 @@ void EnterSeed(Runtime& runtime, const std::string& seed) {
   runtime.statePath = path;
   runtime.recordSynced = false;
   runtime.MarkStateDirtyLocked();
-  PortLog::Write("archipelago: game directory %s\n",
-                 std::filesystem::path(path).parent_path().string().c_str());
+  // The directory's name holds the slot name, which the log leaves out.
+  PortLog::Write("archipelago: game state for seed \"%s\" in archipelago_games\n", seed.c_str());
 }
 
 void WorkerLoop(Runtime& runtime) {
@@ -661,7 +697,7 @@ void WorkerLoop(Runtime& runtime) {
       std::lock_guard<std::mutex> lock(runtime.mutex);
       runtime.connected = false;
       runtime.stateLabel = "connecting";
-      runtime.LogStateLocked("connecting to " + config.server);
+      runtime.LogStateLocked("connecting to the server"); // the log names no server or slot
     }
 
     std::string host;
@@ -698,7 +734,10 @@ void WorkerLoop(Runtime& runtime) {
     } else {
       while (!runtime.stop.load(std::memory_order_acquire) && client.IsOpen()) {
         std::string message;
-        const bool received = client.ReceiveText(message, 1000);
+        // Checks, chat and the goal queued by the game go out after this
+        // wait, so it is kept short: a check reaches the server within about
+        // a tenth of a second. A frame cut by the timeout stays in the decoder.
+        const bool received = client.ReceiveText(message, 100);
         if (!received && !client.IsOpen()) {
           connectionError = ErrorText(client.Error());
           connectionFailed = true;
@@ -745,6 +784,12 @@ void WorkerLoop(Runtime& runtime) {
               if (seedName != nullptr && seedName->IsString())
                 EnterSeed(runtime, seedName->AsString());
             }
+            // Every game's names can be a lot of work, and the game thread
+            // takes the same lock every frame, so they are read in out here.
+            const bool dataPackage = cmd == "DataPackage";
+            Session::DataPackageNames packageNames;
+            if (dataPackage)
+              packageNames = Session::ParseDataPackage(command);
             {
               std::lock_guard<std::mutex> lock(runtime.mutex);
               if (runtime.session == nullptr)
@@ -757,24 +802,30 @@ void WorkerLoop(Runtime& runtime) {
               const bool oldHasLogic = runtime.session->GetState().hasLogic;
               const PortApLogic::Options oldLogic = runtime.session->GetState().logic;
               const bool oldHasWorld = runtime.session->GetState().hasWorld;
-              const PortApWorld::Layout oldWorld = runtime.session->GetState().world;
+              // The layout is the large part of the state, so it is not copied
+              // to be compared: a new revision says it may have changed.
+              const uint64_t oldWorldRevision = runtime.session->WorldRevision();
               const std::string oldError = runtime.session->LastError();
               const std::string oldResetReason = runtime.session->ResetReason();
-              runtime.session->HandlePacket(command, outgoing, newGrants);
+              if (dataPackage)
+                runtime.session->MergeDataPackage(std::move(packageNames));
+              else
+                runtime.session->HandlePacket(command, outgoing, newGrants);
               if (runtime.session->ResetReason() != oldResetReason) {
                 // The recorded checks belonged to another session, so the state
                 // file has just been rewritten empty. Say why, because the
                 // symptom otherwise is a multiworld that sends nothing.
                 PortLog::Write(
-                             "archipelago: saved progress was %s; starting %s fresh (set "
+                             "archipelago: saved progress was %s; starting this slot fresh (set "
                              "MP_AP_RESET_STATE=1 to discard it deliberately)\n",
-                             runtime.session->ResetReason().c_str(), config.slot.c_str());
+                             runtime.session->ResetReason().c_str());
               }
               const Protocol::State& state = runtime.session->GetState();
               if (state.nextItemIndex != oldIndex || state.checkedLocations != oldChecks ||
                   state.progressive != oldProgressive || state.seed != oldSeed ||
                   state.hasLogic != oldHasLogic || state.logic != oldLogic ||
-                  state.hasWorld != oldHasWorld || state.world != oldWorld)
+                  state.hasWorld != oldHasWorld ||
+                  runtime.session->WorldRevision() != oldWorldRevision)
                 runtime.MarkStateDirtyLocked();
               runtime.grants.insert(runtime.grants.end(), newGrants.begin(), newGrants.end());
               runtime.lastMessage = runtime.session->LastMessage();
@@ -795,7 +846,7 @@ void WorkerLoop(Runtime& runtime) {
                 runtime.connected = true;
                 runtime.stateLabel = "connected";
                 runtime.lastError.clear();
-                runtime.LogStateLocked("connected as " + config.slot);
+                runtime.LogStateLocked("connected");
                 runtime.AppendChatLocked("port", "Connected to " + config.server + " as " + config.slot);
                 initialChecks = state.checkedLocations;
                 for (auto queued = runtime.queuedChecks.begin(); queued != runtime.queuedChecks.end();) {
@@ -805,7 +856,7 @@ void WorkerLoop(Runtime& runtime) {
                   else
                     ++queued;
                 }
-                if (EnvEnabled("MP_AP_SEND_ALL"))
+                if (port::EnvFlag("MP_AP_SEND_ALL"))
                   sendAllChecks = runtime.session->AllLocationIds();
                 for (const std::string& warning : runtime.session->GetSlotData().warnings)
                   PortLog::Write("archipelago: seed option %s; the game will not match the "
@@ -1043,13 +1094,12 @@ void StartLocked(Runtime& runtime, bool firstStart) {
   // slot and seed - leaves the recorded checks looking valid, so this is the
   // way out: it drops them before the first connect (or once the seed is known).
   runtime.resetPending = false;
-  if (firstStart && EnvEnabled("MP_AP_RESET_STATE")) {
+  if (firstStart && port::EnvFlag("MP_AP_RESET_STATE")) {
     if (runtime.statePath.empty()) {
       runtime.resetPending = true;
     } else if (state.nextItemIndex != 0 || !state.checkedLocations.empty() ||
                !state.progressive.empty()) {
-      PortLog::Write("archipelago: MP_AP_RESET_STATE=1 discarded saved progress for %s\n",
-                     runtime.config.slot.c_str());
+      PortLog::Write("archipelago: MP_AP_RESET_STATE=1 discarded saved progress\n");
       state = Protocol::State();
       state.seed = seed;
     }
@@ -1068,7 +1118,7 @@ void EnsureLoadedImpl(Runtime& runtime) {
   if (runtime.attempted)
     return;
   runtime.attempted = true;
-  if (EnvEnabled("MP_AP_DISABLE")) {
+  if (port::EnvFlag("MP_AP_DISABLE")) {
     runtime.stateLabel = "off";
     return;
   }
@@ -1086,8 +1136,9 @@ void Restart(Runtime& runtime) {
     if (runtime.exiting)
       return;
     old = std::move(runtime.worker);
+    // Under the lock, so WaitBackoff cannot miss the wake-up below.
+    runtime.stop.store(true, std::memory_order_release);
   }
-  runtime.stop.store(true, std::memory_order_release);
   runtime.wake.notify_all();
   if (old.joinable())
     old.join();
@@ -1128,17 +1179,39 @@ void Restart(Runtime& runtime) {
 }
 
 void StartRestart(Runtime& runtime) {
-  std::thread(
-      [&runtime] {
-        try {
-          Restart(runtime);
-        } catch (const std::exception& error) {
-          PortLog::Write("archipelago: restart failed: %s\n", error.what());
-        } catch (...) {
-          PortLog::Write("archipelago: restart failed\n");
-        }
-      })
-      .detach();
+  // Restarts that have all returned (counted down under the lock, so only the
+  // lambda's own return is left) are joined here rather than piling up.
+  std::vector<std::thread> finished;
+  {
+    std::lock_guard<std::mutex> lock(runtime.mutex);
+    if (runtime.exiting)
+      return;
+    if (runtime.restartsRunning == 0)
+      finished.swap(runtime.restarters);
+  }
+  for (std::thread& thread : finished)
+    thread.join();
+  std::lock_guard<std::mutex> lock(runtime.mutex);
+  if (runtime.exiting)
+    return;
+  ++runtime.restartsRunning;
+  try {
+    runtime.restarters.emplace_back([&runtime] {
+      try {
+        Restart(runtime);
+      } catch (const std::exception& error) {
+        PortLog::Write("archipelago: restart failed: %s\n", error.what());
+      } catch (...) {
+        PortLog::Write("archipelago: restart failed\n");
+      }
+      std::lock_guard<std::mutex> done(runtime.mutex);
+      --runtime.restartsRunning;
+      runtime.wake.notify_all();
+    });
+  } catch (...) {
+    --runtime.restartsRunning; // no thread, so nothing to wait for
+    throw;
+  }
 }
 
 } // namespace
@@ -1239,7 +1312,7 @@ bool Connect(const ConnectionDetails& details, std::string& error) {
       error = "not a server address: " + connection.server;
       return false;
     }
-    if (EnvEnabled("MP_AP_DISABLE")) {
+    if (port::EnvFlag("MP_AP_DISABLE")) {
       error = "MP_AP_DISABLE is set";
       return false;
     }
@@ -1413,7 +1486,7 @@ bool SendChat(const std::string& text, std::string& error) {
       error = "not connected";
       return false;
     }
-    // The socket thread sends these after its receive wait (up to a second).
+    // The socket thread sends these after its receive wait (up to 100 ms).
     constexpr size_t kPendingSay = 64;
     if (runtime.pendingSay.size() >= kPendingSay) {
       error = "still sending the last messages";
@@ -1539,16 +1612,16 @@ bool BuiltinRules() {
 }
 
 // The layout of the seed in play, once its slot_data has been seen (in this
-// session or an earlier one).
-bool SeedLayout(PortApWorld::Layout& out) {
+// session or an earlier one), else null. Shared rather than copied: this is
+// asked on every hit the player takes and every room load.
+std::shared_ptr<const PortApWorld::Layout> SeedLayout() {
   EnsureLoaded();
   Runtime& runtime = GetRuntime();
   std::lock_guard<std::mutex> lock(runtime.mutex);
   if (!runtime.enabled || runtime.session == nullptr || !runtime.session->GetConfig().builtin ||
       !runtime.session->GetState().hasWorld)
-    return false;
-  out = runtime.session->GetState().world;
-  return true;
+    return nullptr;
+  return SessionWorldLocked(runtime);
 }
 
 } // namespace
@@ -1668,10 +1741,10 @@ bool NewGameStart(uint32_t& world, uint32_t& area) {
       return false;
     world = MetroidPrime::kTallonWorld;
     area = 0;
-    PortApWorld::Layout layout;
-    if (SeedLayout(layout)) {
+    const std::shared_ptr<const PortApWorld::Layout> seedLayout = SeedLayout();
+    if (seedLayout != nullptr) {
       PortApWorld::Place place;
-      if (PortApWorld::StartRoom(layout, place)) {
+      if (PortApWorld::StartRoom(*seedLayout, place)) {
         world = place.mlvl;
         area = place.mrea;
       }
@@ -1684,9 +1757,10 @@ bool NewGameStart(uint32_t& world, uint32_t& area) {
 
 bool WarpToStart(uint32_t& world, uint32_t& area) {
   try {
-    PortApWorld::Layout layout;
-    if (!SeedLayout(layout))
+    const std::shared_ptr<const PortApWorld::Layout> seedLayout = SeedLayout();
+    if (seedLayout == nullptr)
       return false;
+    const PortApWorld::Layout& layout = *seedLayout;
     // A start room the tables don't have is the Landing Site, as for a new game.
     PortApWorld::Place place;
     place.mlvl = MetroidPrime::kTallonWorld;
@@ -1701,8 +1775,8 @@ bool WarpToStart(uint32_t& world, uint32_t& area) {
 
 bool SeedStrings(uint32_t strg, std::vector< std::string >& out) {
   try {
-    PortApWorld::Layout layout;
-    return SeedLayout(layout) && PortApWorld::Strings(layout, strg, out);
+    const std::shared_ptr<const PortApWorld::Layout> seedLayout = SeedLayout();
+    return seedLayout != nullptr && PortApWorld::Strings(*seedLayout, strg, out);
   } catch (...) {
     return false;
   }
@@ -1710,8 +1784,7 @@ bool SeedStrings(uint32_t strg, std::vector< std::string >& out) {
 
 bool SuitDamageReduction(int mode, bool varia, bool gravity, bool phazon, float& out) {
   try {
-    PortApWorld::Layout layout;
-    if (!SeedLayout(layout))
+    if (SeedLayout() == nullptr)
       return false;
     const float reduction = PortApWorld::SuitDamageReduction(mode, varia, gravity, phazon);
     if (reduction < 0.f)
@@ -1741,8 +1814,7 @@ bool SeedResultsLine(std::string& out) {
 
 bool SeedGivesStartItems() {
   try {
-    PortApWorld::Layout layout;
-    return SeedLayout(layout);
+    return SeedLayout() != nullptr;
   } catch (...) {
     return false;
   }
@@ -1751,9 +1823,10 @@ bool SeedGivesStartItems() {
 bool TeleporterDestination(uint32_t world, uint32_t editorId, uint32_t& destWorld,
                            uint32_t& destArea) {
   try {
-    PortApWorld::Layout layout;
-    if (!SeedLayout(layout))
+    const std::shared_ptr<const PortApWorld::Layout> seedLayout = SeedLayout();
+    if (seedLayout == nullptr)
       return false;
+    const PortApWorld::Layout& layout = *seedLayout;
     PortApWorld::Place retail, place;
     retail.mlvl = destWorld;
     retail.mrea = destArea;
@@ -1769,9 +1842,10 @@ bool TeleporterDestination(uint32_t world, uint32_t editorId, uint32_t& destWorl
 
 bool TempleOps(std::vector< uint8_t >& ops) {
   try {
-    PortApWorld::Layout layout;
-    if (!SeedLayout(layout))
+    const std::shared_ptr<const PortApWorld::Layout> seedLayout = SeedLayout();
+    if (seedLayout == nullptr)
       return false;
+    const PortApWorld::Layout& layout = *seedLayout;
     ops = PortApWorld::TempleOps(layout);
     return !ops.empty();
   } catch (...) {
@@ -1846,9 +1920,10 @@ void WatchShields(CStateManager& mgr, CGameState::ApProgress& progress) {
 
 bool RoomOps(uint32_t mrea, const uint8_t* scly, size_t size, std::vector< uint8_t >& ops) {
   try {
-    PortApWorld::Layout layout;
-    if (!SeedLayout(layout))
+    const std::shared_ptr<const PortApWorld::Layout> seedLayout = SeedLayout();
+    if (seedLayout == nullptr)
       return false;
+    const PortApWorld::Layout& layout = *seedLayout;
     std::vector< PortSkipCutscenes::ScriptObject > objects;
     if (!PortSkipCutscenes::ScanObjects(scly, size, objects))
       return false;
@@ -1865,9 +1940,10 @@ bool DoorOps(uint32_t mrea, const uint8_t* scly, size_t size, std::vector< uint8
       std::lock_guard< std::mutex > lock(PlacedShieldsMutex());
       PlacedShields().erase(mrea);
     }
-    PortApWorld::Layout layout;
-    if (!SeedLayout(layout))
+    const std::shared_ptr<const PortApWorld::Layout> seedLayout = SeedLayout();
+    if (seedLayout == nullptr)
       return false;
+    const PortApWorld::Layout& layout = *seedLayout;
     uint32_t broken[4];
     const std::vector< PortApWorld::DoorChange > doors =
         PortApWorld::Doors(layout, mrea, BrokenShields(broken));
@@ -1896,9 +1972,10 @@ bool DoorOps(uint32_t mrea, const uint8_t* scly, size_t size, std::vector< uint8
 bool MapDoors(uint32_t mapa, std::vector< std::pair< uint32_t, int > >& doors) {
   try {
     doors.clear();
-    PortApWorld::Layout layout;
-    if (!SeedLayout(layout))
+    const std::shared_ptr<const PortApWorld::Layout> seedLayout = SeedLayout();
+    if (seedLayout == nullptr)
       return false;
+    const PortApWorld::Layout& layout = *seedLayout;
     uint32_t broken[4];
     for (const PortApWorld::MapDoor& door :
          PortApWorld::MapDoors(layout, mapa, BrokenShields(broken)))
@@ -1911,8 +1988,8 @@ bool MapDoors(uint32_t mapa, std::vector< std::pair< uint32_t, int > >& doors) {
 
 int RequiredArtifacts() {
   try {
-    PortApWorld::Layout layout;
-    return SeedLayout(layout) ? layout.requiredArtifacts : 12;
+    const std::shared_ptr<const PortApWorld::Layout> seedLayout = SeedLayout();
+    return seedLayout != nullptr ? seedLayout->requiredArtifacts : 12;
   } catch (...) {
     return 12;
   }
@@ -1968,7 +2045,8 @@ int SpringBallRule() {
       return runtime.session->ReceivedCount(Prime::kItemBase + Prime::kProgressiveBomb) > 0 ? 2
                                                                                             : 0;
     default:
-      return 0;
+      // The seed leaves Spring Ball out of logic: the port's own setting applies.
+      return -1;
     }
   } catch (...) {
     return -1;
@@ -1988,11 +2066,12 @@ bool Logic(LogicState& out) {
       if (!state.hasLogic)
         return false;
       if (!runtime.logicValid || runtime.logicOptions != state.logic ||
-          runtime.logicHasWorld != state.hasWorld || runtime.logicWorld != state.world ||
+          runtime.logicHasWorld != state.hasWorld ||
+          runtime.logicWorldRevision != runtime.session->WorldRevision() ||
           runtime.logicItems != state.progressive) {
         runtime.logicOptions = state.logic;
         runtime.logicHasWorld = state.hasWorld;
-        runtime.logicWorld = state.world;
+        runtime.logicWorldRevision = runtime.session->WorldRevision();
         runtime.logicItems = state.progressive;
         PortApLogic::Options options = state.logic;
         if (state.hasWorld)

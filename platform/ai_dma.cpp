@@ -15,6 +15,7 @@
 #include <SDL3/SDL.h>
 
 #include <dolphin/ai.h>
+#include "port_env.h"
 
 namespace {
 constexpr uint32_t kSampleRate = 32000;
@@ -82,7 +83,7 @@ void EnsureStarted() {
   sStarted = true;
   // Enabled by default; MP_DISABLE_AI_AUDIO=1 isolates streamed audio (music)
   // from the MusyX effects when diagnosing.
-  sOutputEnabled = std::getenv("MP_DISABLE_AI_AUDIO") == nullptr;
+  sOutputEnabled = !port::EnvFlag("MP_DISABLE_AI_AUDIO");
   // Silence the AI is notionally playing before the first AIInitDMA, so the
   // guest's `AIGetDMAStartAddr` always yields a readable buffer.
   sBuffer = reinterpret_cast< uintptr_t >(sSilence);

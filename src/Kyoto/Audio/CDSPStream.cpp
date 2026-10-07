@@ -41,6 +41,35 @@ bool StreamTraceVerbose() {
     }                                \
   } while (0)
 
+#ifdef TARGET_PC
+// The guest guarded the stream table with OSDisableInterrupts, which is a no-op on
+// PC, but three threads touch it here: the game (allocate, silence, volume), the
+// MusyX mixer (UpdateStream, called with the MusyX lock held) and Aurora's DVD
+// worker (ReadCompleted). Unlocked, the worker could count xec_readsPending down
+// while the mixer tested it, so a stream was freed twice or its slot leaked. Every
+// section takes the MusyX lock instead: the mixer already holds it, it is recursive
+// (the snd* calls inside lock it again), and the heap lock CMemory takes under it
+// is never held while waiting for the MusyX lock, so the order stays one way.
+extern "C" void hwDisableIrq();
+extern "C" void hwEnableIrq();
+static BOOL StreamLock() {
+  hwDisableIrq();
+  return TRUE;
+}
+static void StreamUnlock(BOOL) { hwEnableIrq(); }
+namespace {
+struct StreamLockScope {
+  StreamLockScope() { hwDisableIrq(); }
+  ~StreamLockScope() { hwEnableIrq(); }
+  StreamLockScope(const StreamLockScope&) = delete;
+  StreamLockScope& operator=(const StreamLockScope&) = delete;
+};
+} // namespace
+#else
+static BOOL StreamLock() { return OSDisableInterrupts(); }
+static void StreamUnlock(BOOL ints) { OSRestoreInterrupts(ints); }
+#endif
+
 static struct {
   CDSPStream streams[4];
   int handleCounter;
@@ -194,18 +223,18 @@ uint CDSPStream::AllocateStream(const SStreamInfo& info, char vol, char pan) {
 
 int CDSPStream::AllocateMono(const SStreamInfo& info, char vol, char pan, int oneshot) {
   int handle;
-  BOOL ints = OSDisableInterrupts();
+  BOOL ints = StreamLock();
   CDSPStream* stream;
   handle = PickFreeStream(stream, oneshot);
   if (static_cast< uint >(handle) != static_cast< uint >(-1)) {
     uint readLen = stream->AllocateStream(info, vol, pan);
-    OSRestoreInterrupts(ints);
+    StreamUnlock(ints);
     OpenFiles(stream->x10_fileName.data(), *stream);
     DVDReadAsyncPrio(&stream->x50_fileInfo1, stream->xd4_buffer, static_cast< s32 >(readLen),
                      static_cast< s32 >(stream->x18_headerSize), ReadCompleted, 1);
     return handle;
   }
-  OSRestoreInterrupts(ints);
+  StreamUnlock(ints);
   return handle;
 }
 
@@ -233,7 +262,7 @@ void CDSPStream::DeallocateStream() {
 
 int CDSPStream::AllocateStereo(const SStreamInfo& leftInfo, const SStreamInfo& rightInfo, char vol,
                                int oneshot) {
-  BOOL ints = OSDisableInterrupts();
+  BOOL ints = StreamLock();
   CDSPStream* streams[2];
   int handle = PickFreeStream(streams[0], oneshot);
   if (static_cast< uint >(handle) != static_cast< uint >(-1)) {
@@ -243,7 +272,7 @@ int CDSPStream::AllocateStereo(const SStreamInfo& leftInfo, const SStreamInfo& r
       uint readLen[2];
       readLen[0] = streams[0]->AllocateStream(leftInfo, vol, 0);
       readLen[1] = streams[1]->AllocateStream(rightInfo, vol, 0x7F);
-      OSRestoreInterrupts(ints);
+      StreamUnlock(ints);
       OpenFiles(streams[0]->x10_fileName.data(), *streams[0]);
       OpenFiles(streams[1]->x10_fileName.data(), *streams[1]);
       DVDReadAsyncPrio(&streams[0]->x50_fileInfo1, streams[0]->xd4_buffer,
@@ -257,7 +286,7 @@ int CDSPStream::AllocateStereo(const SStreamInfo& leftInfo, const SStreamInfo& r
     streams[0]->DeallocateStream();
     handle = -1;
   }
-  OSRestoreInterrupts(ints);
+  StreamUnlock(ints);
   return handle;
 }
 
@@ -269,7 +298,7 @@ void CDSPStream::SilenceStream() {
 }
 
 void CDSPStream::Silence(int handle) {
-  BOOL ints = OSDisableInterrupts();
+  BOOL ints = StreamLock();
   int idx = FindStreamIdx(handle);
   if (static_cast< uint >(idx) != 0xFFFFFFFF) {
     g_Streams[idx].SilenceStream();
@@ -280,7 +309,7 @@ void CDSPStream::Silence(int handle) {
       g_Streams[idx].xc_left->SilenceStream();
     }
   }
-  OSRestoreInterrupts(ints);
+  StreamUnlock(ints);
 }
 
 void CDSPStream::UpdateStreamVolume(int vol) {
@@ -291,7 +320,7 @@ void CDSPStream::UpdateStreamVolume(int vol) {
 }
 
 void CDSPStream::UpdateVolume(int handle, int vol) {
-  BOOL ints = OSDisableInterrupts();
+  BOOL ints = StreamLock();
   int idx = FindStreamIdx(handle);
   if (static_cast< uint >(idx) != 0xFFFFFFFF) {
     CDSPStream& stream = g_Streams[idx];
@@ -303,28 +332,28 @@ void CDSPStream::UpdateVolume(int handle, int vol) {
       stream.xc_left->UpdateStreamVolume(vol);
     }
   }
-  OSRestoreInterrupts(ints);
+  StreamUnlock(ints);
 }
 
 bool CDSPStream::IsStreamActive(int handle) {
   bool ret = false;
-  BOOL ints = OSDisableInterrupts();
+  BOOL ints = StreamLock();
   int idx = FindStreamIdx(handle);
   if (static_cast< uint >(idx) != 0xFFFFFFFF) {
     ret = g_Streams[idx].x0_state != 0;
   }
-  OSRestoreInterrupts(ints);
+  StreamUnlock(ints);
   return ret;
 }
 
 bool CDSPStream::IsStreamAvailable(int handle) {
   bool ret = false;
-  BOOL ints = OSDisableInterrupts();
+  BOOL ints = StreamLock();
   int idx = FindStreamIdx(handle);
   if (static_cast< uint >(idx) != 0xFFFFFFFF) {
     ret = g_Streams[idx].x0_state == 4;
   }
-  OSRestoreInterrupts(ints);
+  StreamUnlock(ints);
   return ret;
 }
 
@@ -372,7 +401,7 @@ void CDSPStream::BufferStream() {
     }
   }
 
-  BOOL ints = OSDisableInterrupts();
+  BOOL ints = StreamLock();
   // Advance the destination selector before starting the read: the completion
   // (which may run on Aurora's DVD worker thread before this call returns)
   // uploads the half that was just read based on this flag, so leaving the
@@ -380,9 +409,9 @@ void CDSPStream::BufferStream() {
   xe0_curBuffer ^= 1;
   if (readLen != 0) {
     if (xec_readsPending == 0) {
-      MP_STREAM_TRACE_LOG("read issue file=%s off=%u len=%u half=%u cur=%u loop=%d",
+      MP_STREAM_TRACE_LOG("read issue file=%s off=%u len=%u half=%u fileCur=%u loop=%d",
                           this->x10_fileName.data(), x18_headerSize + xcc_fileCur, readLen, xe0_curBuffer,
-                          static_cast< int >(x20_loopFlag));
+                          xcc_fileCur, static_cast< int >(x20_loopFlag));
       // Publish the outstanding-read count *before* starting the read. The
       // completion runs on Aurora's DVD worker thread, so starting the read
       // first let it decrement the count before this call assigned it: the
@@ -414,7 +443,7 @@ void CDSPStream::BufferStream() {
     StopStream();
   }
 
-  OSRestoreInterrupts(ints);
+  StreamUnlock(ints);
 }
 
 u32 CDSPStream::UpdateStream(void*, u32 destOffset, void*, u32 len, u32 user) {
@@ -476,6 +505,10 @@ int CDSPStream::InitializeStream() {
 }
 
 void CDSPStream::ReadCompleted(s32, DVDFileInfo* fileInfo) {
+#ifdef TARGET_PC
+  // Runs on Aurora's DVD worker thread; see StreamLock.
+  StreamLockScope lock;
+#endif
   int idx = 0;
   CDSPStream* s = g_Streams;
   for (; idx < 4; ++idx, ++s) {

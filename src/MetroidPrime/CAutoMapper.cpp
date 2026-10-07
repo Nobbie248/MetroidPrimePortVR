@@ -744,6 +744,10 @@ void CAutoMapper::ProcessMapScreenInput(const CFinalInput& input, const CStateMa
     x2f4_aButtonPos = 1;
   }
 
+  // Port: whether a touch drag can pan the map; the overlay reads it.
+  PortDebug::SetMapScreenOpen(IsInPlayerControlState() && (x1bc_state == kAMS_MapScreen ||
+                                                           x1bc_state == kAMS_MapScreenUniverse));
+
   if (IsInPlayerControlState()) {
     x2e4_lStickPos = 0;
     x2e8_rStickPos = 0;
@@ -836,6 +840,15 @@ void CAutoMapper::ProcessMapRotateInput(const CFinalInput& input, const CStateMa
     break;
   }
 
+  const float twist = PortDebug::TakeMapRotate();
+  if (twist != 0.f) {
+    CEulerAngles eulers = CEulerAngles::FromQuaternion(xa8_renderState0.x8_camOrientation);
+    CAbsAngle angZ = CAbsAngle::FromRadians(eulers.GetZ());
+    angZ += CRelAngle(twist);
+    xa8_renderState0.x8_camOrientation = CQuaternion::YXZRotation(
+        CRelAngle(0.f), CRelAngle(eulers.GetX()), CRelAngle(angZ.AsRadians()));
+  }
+
   if (up > 0.f || down > 0.f || left > 0.f || right > 0.f) {
     float deltaFrames = 60.f * input.Time();
     SetShouldRotatingSoundBePlaying(true);
@@ -914,6 +927,13 @@ void CAutoMapper::ProcessMapZoomInput(const CFinalInput& input, const CStateMana
     x324_zoomState = kZS_Out;
   }
 
+  // Port: a pinch scales the camera distance by the inverse of the finger spread.
+  const float pinch = PortDebug::TakeMapZoom();
+  if (pinch != 1.f) {
+    xa8_renderState0.x18_camDist =
+        GetClampedMapScreenCameraDistance(xa8_renderState0.x18_camDist / pinch);
+  }
+
   if (oldDist == xa8_renderState0.x18_camDist)
     SetShouldZoomingSoundBePlaying(false);
   else
@@ -927,7 +947,24 @@ void CAutoMapper::ProcessMapPanInput(const CFinalInput& input, const CStateManag
   float right = ControlMapper::GetAnalogInput(ControlMapper::kC_MapMoveRight, input);
 
   CMatrix3f camRot = xa8_renderState0.x8_camOrientation.BuildTransform();
-  if (forward > 0.f || back > 0.f || left > 0.f || right > 0.f) {
+
+  // Port: a touch drag moves the area point so the map follows the finger. A full
+  // view height is two yScale (the visible world height at the focus distance, as
+  // in Draw). The area point moves against the finger, along the camera's right and up.
+  float panX = 0.f;
+  float panY = 0.f;
+  float panViewDp = 400.f;
+  const bool fingerDown = PortDebug::TakeMapPan(&panX, &panY, &panViewDp);
+  CVector3f touchPan(0.f, 0.f, 0.f);
+  if (panX != 0.f || panY != 0.f) {
+    float camAngleRad = xa8_renderState0.x1c_camAngle * (1.f / 360.f) * (2.f * M_PIF);
+    float yScale = xa8_renderState0.x18_camDist /
+                   static_cast< float >(tan(M_PIF / 2.f - 0.5f * camAngleRad));
+    float worldPerDp = 2.f * yScale / panViewDp;
+    touchPan = CVector3f(-panX * worldPerDp, 0.f, panY * worldPerDp);
+  }
+
+  if (forward > 0.f || back > 0.f || left > 0.f || right > 0.f || fingerDown) {
     float deltaFrames = 60.f * input.Time();
     float speed = GetFinalMapScreenCameraMoveSpeed();
     int flags = 0;
@@ -970,7 +1007,7 @@ void CAutoMapper::ProcessMapPanInput(const CFinalInput& input, const CStateManag
     }
 
     CVector3f dirVec = speed * (deltaFrames * CVector3f(right - left, 0.f, forward - back));
-    CVector3f newPoint = xa8_renderState0.x20_areaPoint + camRot * dirVec;
+    CVector3f newPoint = xa8_renderState0.x20_areaPoint + camRot * (dirVec + touchPan);
     if ((newPoint - xa8_renderState0.x20_areaPoint).Magnitude() > input.Time()) {
       SetShouldPanningSoundBePlaying(true);
     } else {

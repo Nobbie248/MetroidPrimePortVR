@@ -8,8 +8,9 @@
 
 #include <string.h>
 
-static rstl::reserved_vector< SSkinWeighting, 3 > StreamInSkinWeighting(CInputStream& in) {
-  rstl::reserved_vector< SSkinWeighting, 3 > weights;
+static rstl::reserved_vector< SSkinWeighting, SKIN_MAX_WEIGHTS >
+StreamInSkinWeighting(CInputStream& in) {
+  rstl::reserved_vector< SSkinWeighting, SKIN_MAX_WEIGHTS > weights;
   const int weightCount = in.Get< int >();
 
   if (weightCount > weights.capacity()) {
@@ -167,6 +168,28 @@ void CVirtualBone::BuildFinalPosMatrix(const CPoseAsTransforms& pose,
     x20_xf = CTransform4f(rotation, offset);
     break;
   }
+#ifdef TARGET_PC
+  case 4: {
+    const CSegId& id0 = x0_weights[0].x0_id;
+    const float weight0 = x0_weights[0].x4_weight;
+    const CSegId& id1 = x0_weights[1].x0_id;
+    const float weight1 = x0_weights[1].x4_weight;
+    const CSegId& id2 = x0_weights[2].x0_id;
+    const float weight2 = x0_weights[2].x4_weight;
+    const CSegId& id3 = x0_weights[3].x0_id;
+    const float weight3 = x0_weights[3].x4_weight;
+    const CMatrix3f& rotation0 = pose.GetTransformMinusOffset(id0);
+    const CMatrix3f& rotation1 = pose.GetTransformMinusOffset(id1);
+    CMatrix3f rotation(rotation0, weight0, rotation1, weight1);
+    CVector3f offset = weight0 * points[id0.val()] + weight1 * points[id1.val()];
+    pose.AccumulateScaledTransform(id2, rotation, weight2);
+    pose.AccumulateScaledTransform(id3, rotation, weight3);
+    offset += weight2 * points[id2.val()];
+    offset += weight3 * points[id3.val()];
+    x20_xf = CTransform4f(rotation, offset);
+    break;
+  }
+#endif
   default:
     x20_xf = CTransform4f::Identity();
     break;

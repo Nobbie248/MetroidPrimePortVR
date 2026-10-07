@@ -15,6 +15,7 @@
 #include "MetroidPrime/CModelData.hpp"
 #include "MetroidPrime/CStateManager.hpp"
 #include "MetroidPrime/CWorld.hpp"
+#include "port_actor_collision_bounds.h"
 #include "port_apclient.h"
 #include "port_hints.h"
 #include "port_log.h"
@@ -887,8 +888,28 @@ CEntity* ScriptLoader::LoadActor(CStateManager& mgr, CInputStream& in, int propC
     data = CModelData(CStaticRes(staticId, head.x40_scale));
   }
 
-  if (collisionExtent == CVector3f::Zero() || negativeCollisionExtent)
+  if (collisionExtent == CVector3f::Zero() || negativeCollisionExtent) {
     aabb = data.GetBounds(xf.GetRotation());
+#ifdef TARGET_PC
+    // No authored extent, so the collision box is the model's own box - and a
+    // mod can replace the model, which would replace the collider with it: the
+    // Magmoor Workstation lava crust, drawn a few centimetres thick, walls off
+    // the floor the disc's model is flush with. The disc's own CMDL carries the
+    // box the actor was authored against, so read that instead. Rendering is
+    // untouched. (port_actor_collision_bounds.h)
+    if (solid && animType != 'ANCS' && staticId != 0) {
+      float bounds[6] = {};
+      if (PortActorCollisionBounds::ReadOriginalModelBounds(uint32_t(staticId), bounds)) {
+        // The normal model only: the X-ray and thermal models are attached
+        // later, by the CActor constructor, so retail's box never covers them.
+        CAABox original(bounds[0], bounds[1], bounds[2], bounds[3], bounds[4], bounds[5]);
+        aabb = original.GetTransformedAABox(
+            xf.GetRotation() * CTransform4f::Scale(head.x40_scale.GetX(), head.x40_scale.GetY(),
+                                                   head.x40_scale.GetZ()));
+      }
+    }
+#endif
+  }
 
   return rs_new CScriptActor(mgr.AllocateUniqueId(), head.x0_actorHead.x0_name, info, xf, data,
                              aabb, list, mass, zMomentum, hInfo, dVuln, actParms, looping, active,
@@ -940,7 +961,10 @@ CEntity* ScriptLoader::LoadPickup(CStateManager& mgr, CInputStream& in, int prop
       // A model id the resource factory does not know (a seed made for another
       // disc version, or a hand-edited one) would make the check below drop
       // the pickup entirely, and with it the item; the retail look is better.
-      if (PortRandomizer::ModelForItem(randoItem, randomModel) &&
+      // A pickup with no model at all is one a script hands over unseen (the
+      // second Phazon Suit in Elite Quarters); it stays invisible.
+      const bool hidden = originalModel.model == 0xFFFFFFFFu && originalModel.acs == 0xFFFFFFFFu;
+      if (!hidden && PortRandomizer::ModelForItem(randoItem, randomModel) &&
           (gpResourceFactory->GetResourceTypeById(static_cast< CAssetId >(randomModel.model)) != 0 ||
            gpResourceFactory->GetResourceTypeById(static_cast< CAssetId >(randomModel.acs)) != 0)) {
         // Mirror the area data exactly: an animated pickup keeps its static
@@ -1864,9 +1888,15 @@ CEntity* ScriptLoader::LoadSpacePirate(CStateManager& mgr, CInputStream& in, int
     pInfo.GetAnimationParameters().SetCharacter(2);
   }
 
+#ifdef TARGET_PC
+  const CAssetId acsFile =
+      CSpacePirate::PortTrooperLook(pInfo.GetAnimationParameters().GetACSFile(), pInfo, in);
+#else
+  const CAssetId acsFile = pInfo.GetAnimationParameters().GetACSFile();
+#endif
   return rs_new CSpacePirate(
       mgr.AllocateUniqueId(), head.x0_actorHead.x0_name, info, head.x0_actorHead.x10_transform,
-      CModelData(CAnimRes(pInfo.GetAnimationParameters().GetACSFile(),
+      CModelData(CAnimRes(acsFile,
                           pInfo.GetAnimationParameters().GetCharacter(), head.x40_scale,
                           pInfo.GetAnimationParameters().GetInitialAnimation(), true)),
       actParms, pInfo, in, propCount);

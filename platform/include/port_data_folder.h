@@ -2,7 +2,7 @@
 
 // Android's data folder: moving the settings, memory card, mods, save states and
 // texture pack out of the app's private storage into a folder the player can
-// reach with a file manager or a USB cable, and back (F1 > Extras > Data
+// reach with a file manager or a USB cable, and back (F1 > System > Data
 // folder). The copy engine is platform-neutral so it can be tested on the
 // desktop; the panel is Android only.
 //

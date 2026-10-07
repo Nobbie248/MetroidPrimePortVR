@@ -11,6 +11,7 @@
 #include "pipeline_cache.hpp"
 #include "resource_cache.hpp"
 #include "probe.hpp"
+#include "resource_cache.hpp"
 #include "tex_copy_conv.hpp"
 #include "tex_palette_conv.hpp"
 #include "../gx/gx.hpp"
@@ -46,6 +47,9 @@ WGPUBindGroup g_currentUniform = nullptr;
 uint32_t g_currentUniformOffset = 0;
 // ... and the texture bind group and index range (bind_gx_textures, bind_gx_indices).
 BindGroupRef g_currentTextures = 0;
+// Group 2 holds a shadow receiver's group (its own layout), which a GX draw without a group of
+// its own can't inherit. Only the empty group clears it: a stale flag costs a rebind.
+bool g_currentTexturesShadow = false;
 uint64_t g_currentIndexOffset = UINT64_MAX;
 uint64_t g_currentIndexSize = 0;
 wgpu::IndexFormat g_currentIndexFormat = wgpu::IndexFormat::Uint16;
@@ -62,6 +66,13 @@ void forget_gx_binds() {
   g_currentIndexSize = 0;
   g_currentGeometry = -1;
   g_currentVertexBuffer = nullptr;
+}
+
+// Group 2 with nothing bound: at a pass's start, and after a draw of another kind.
+void bind_empty_textures(const wgpu::RenderPassEncoder& pass, bool multiview = false) {
+  pass.SetBindGroup(2, multiview ? gx::g_emptyMultiviewTextureBindGroup : gx::g_emptyTextureBindGroup);
+  g_currentTextures = 0;
+  g_currentTexturesShadow = false;
 }
 
 // A pass's group 0 at its start: the frame's buffers.
@@ -109,7 +120,7 @@ void render_stereo_eye_pass_commands(const wgpu::RenderPassEncoder& pass, Render
                            : 1.f;
   forget_bound_state();
   bind_frame_geometry(pass);
-  pass.SetBindGroup(2, multiview ? gx::g_emptyMultiviewTextureBindGroup : gx::g_emptyTextureBindGroup);
+  bind_empty_textures(pass, multiview);
 
   for (auto& cmd : passInfo.commands) {
     switch (cmd.type) {
@@ -175,7 +186,9 @@ void render_stereo_eye_pass(wgpu::CommandEncoder& cmd, RenderPass& passInfo, uin
       .resolveTarget = eyePass.resolveView,
       .loadOp = source.loadOp != wgpu::LoadOp::Undefined ? source.loadOp
                                                          : (source.clear ? wgpu::LoadOp::Clear : wgpu::LoadOp::Load),
-      .storeOp = source.storeOp,
+      // Stored even when the mono pass discards its colour (recording.cpp discard_dead_stores):
+      // the eye image is what the eye's copies and the headset read.
+      .storeOp = source.storeOp == wgpu::StoreOp::Discard ? wgpu::StoreOp::Store : source.storeOp,
       .clearValue =
           {
               .r = source.clearValue.x(),
@@ -229,7 +242,9 @@ void render_stereo_multiview_pass(wgpu::CommandEncoder& cmd, RenderPass& passInf
       .view = passInfo.stereo.multiviewColorView,
       .loadOp = source.loadOp != wgpu::LoadOp::Undefined ? source.loadOp
                                                          : (source.clear ? wgpu::LoadOp::Clear : wgpu::LoadOp::Load),
-      .storeOp = source.storeOp,
+      // Stored even when the mono pass discards its colour (recording.cpp discard_dead_stores):
+      // the eye image is what the eye's copies and the headset read.
+      .storeOp = source.storeOp == wgpu::StoreOp::Discard ? wgpu::StoreOp::Store : source.storeOp,
       .clearValue =
           {
               .r = source.clearValue.x(),
@@ -351,7 +366,7 @@ void render_pass(const wgpu::RenderPassEncoder& pass, FramePacket& frame, Render
 
   // Bind bind group for the whole pass
   bind_frame_geometry(pass);
-  pass.SetBindGroup(2, gx::g_emptyTextureBindGroup);
+  bind_empty_textures(pass);
 
   for (auto& cmd : passInfo.commands) {
 #ifdef AURORA_GFX_DEBUG_GROUPS
@@ -398,7 +413,7 @@ void render_pass(const wgpu::RenderPassEncoder& pass, FramePacket& frame, Render
       render_custom_draw(cmd.data.customDraw, pass, passInfo);
       forget_bound_state();
       bind_frame_geometry(pass);
-      pass.SetBindGroup(2, gx::g_emptyTextureBindGroup);
+      bind_empty_textures(pass);
       if (hasViewport) {
         apply_viewport(pass, currentViewport);
       }
@@ -483,7 +498,7 @@ void render(wgpu::CommandEncoder& cmd, FramePacket& frame, RenderPass& passInfo,
       .colorAttachmentCount = passInfo.colorAttachmentCount,
       .colorAttachments = attachments.data(),
       .depthStencilAttachment = depthStencilAttachmentPtr,
-      .timestampWrites = webgpu::gpu_prof::pass_writes(label),
+      .timestampWrites = webgpu::gpu_prof::pass_writes(passIndex == 0 ? "EFB pass (first)" : "EFB pass (later)"),
   };
 
   // An immersive frame's final pass on a headset that owns the display: nothing
@@ -627,7 +642,8 @@ void copy_staging_buffer_range(wgpu::CommandEncoder& cmd, const FramePacket& fra
 bool needs_staging_copy(const FramePacket& frame, const FrameOp& op) {
   const auto& highWater = op.highWater;
   if (highWater.verts > frame.copied.verts || highWater.uniforms > frame.copied.uniforms ||
-      highWater.indices > frame.copied.indices || highWater.storage > frame.copied.storage) {
+      highWater.indices > frame.copied.indices || highWater.storage > frame.copied.storage ||
+      op.bufferUploads.size() > frame.copied.bufferUploadCount) {
     return true;
   }
   if constexpr (UseTextureBuffer) {
@@ -662,6 +678,11 @@ void copy_staging_to_high_water(wgpu::CommandEncoder& cmd, FramePacket& frame, c
                            detail::geometry_buffer(), upload.dst, upload.size);
   }
   frame.copied.geometryUploadCount = op.geometryUploads.size();
+  for (size_t i = frame.copied.bufferUploadCount; i < op.bufferUploads.size(); ++i) {
+    const auto& item = *op.bufferUploads[i];
+    cmd.CopyBufferToBuffer(item.src, 0, item.dst, item.dstOffset, item.size);
+  }
+  frame.copied.bufferUploadCount = op.bufferUploads.size();
 
   if constexpr (UseTextureBuffer) {
     for (size_t i = frame.copied.textureUploadCount; i < op.textureUploads.size(); ++i) {
@@ -729,13 +750,23 @@ void bind_gx_uniform(const wgpu::RenderPassEncoder& pass, const wgpu::BindGroup&
   g_currentUniformOffset = offset;
 }
 
-void bind_gx_textures(const wgpu::RenderPassEncoder& pass, BindGroupRef bindGroup) {
-  if (bindGroup == 0 || bindGroup == g_currentTextures) {
+void bind_gx_textures(const wgpu::RenderPassEncoder& pass, BindGroupRef bindGroup, bool shadowGroup,
+                      bool multiview) {
+  if (bindGroup == 0) {
+    if (g_currentTexturesShadow) {
+      bind_empty_textures(pass, multiview);
+    }
+    return;
+  }
+  if (bindGroup == g_currentTextures) {
     return;
   }
   pass.SetBindGroup(2, find_bind_group(bindGroup));
   g_currentTextures = bindGroup;
+  g_currentTexturesShadow = shadowGroup;
 }
+
+void forget_texture_group() { g_currentTextures = 0; }
 
 void bind_gx_indices(const wgpu::RenderPassEncoder& pass, const wgpu::Buffer& buffer, uint64_t offset,
                      uint64_t size, wgpu::IndexFormat format) {

@@ -213,7 +213,13 @@ const CFactoryFnReturn FModelFactory(const SObjectTag& tag, const rstl::auto_ptr
   rstl::rc_ptr< IVParamObj > obj = xfer.x0_obj;
   CSimplePool* pool = static_cast< TObjOwnerParam< CSimplePool* >* >(obj.GetPtr())->GetData();
   GXInvalidateVtxCache();
+#ifdef TARGET_PC
+  CModel* model = rs_new CModel(ptr, len, *pool);
+  const_cast< CCubeModel* >(model->GetCubeModel())->PortSetAssetId(tag.GetId());
+  return model;
+#else
   return rs_new CModel(ptr, len, *pool);
+#endif
 }
 
 const float* CModel::GetPositions() const {

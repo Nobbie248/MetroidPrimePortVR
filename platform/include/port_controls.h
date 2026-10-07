@@ -1,6 +1,6 @@
 #pragma once
 
-// Input rebinding: the port's keyboard defaults and the overlay's Controls tab.
+// Input rebinding: the port's keyboard defaults and the overlay's Controls page.
 // The binding storage, matching and persistence live in Aurora (dolphin/pad.h).
 
 namespace PortControls {
@@ -16,7 +16,10 @@ bool Capturing();
 bool ShiftHeld();
 // The PAD bits whose alt controller button (PortDebug::PadAltButton) is held.
 unsigned HeldAltPadButtons();
-// Draws the Controls tab of the debug overlay.
-void DrawTab();
+// The Controls page's Keyboard & mouse and Controller sub-tabs of the debug
+// overlay. Each polls the capture and shows its prompt, so a binding can be
+// started from either.
+void DrawKeyboardMouse();
+void DrawController();
 
 } // namespace PortControls

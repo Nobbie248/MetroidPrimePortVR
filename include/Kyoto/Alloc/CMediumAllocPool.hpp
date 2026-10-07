@@ -15,7 +15,11 @@ struct SMediumAllocPuddle {
   const uint GetNumAllocs() const { return x18_numAllocs; }
   const uint GetNumEntries() const { return x1c_numEntries; }
   const bool CanErase() const { return x20_canErase; }
-  const uint GetPtrOffset(const void* ptr) const { return (uchar*)ptr - x0_mainData.get(); }
+  // size_t, not uint: a 64-bit difference truncated to 32 bits can land
+  // a pointer from elsewhere inside the puddle.
+  const size_t GetPtrOffset(const void* ptr) const {
+    return size_t((const uchar*)ptr - x0_mainData.get());
+  }
   static ushort GetBlockOffset(const void* ptrA, const void* ptrB);
   static void InitBookKeeping(uchar* bookKeepingPtr, const ushort blockCount);
 

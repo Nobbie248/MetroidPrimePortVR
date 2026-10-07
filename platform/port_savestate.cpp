@@ -47,6 +47,12 @@ int sLoadRequest = -1;
 bool sReloadRequest = false;
 // The mods are read again where the next game starts (InstallPending).
 bool sReloadMods = false;
+// In the front end nothing of a game is loaded, so the mods are read again
+// at CFrontEndUI's next tick (TakeFrontEndReload), instead of at the next
+// game: a Remastered import started at the title screen unloads them then.
+bool sInFrontEnd = false;
+bool sFrontEndReload = false;
+int sModReloads = 0;
 std::string sMessage;
 // SlotInfo is drawn every overlay frame; files change only through WriteSlot.
 Info sInfoCache[kSlotCount + 1];
@@ -227,6 +233,7 @@ void ReloadModFiles() {
   PortMods::BeginReload();
   PortRemastered::ApplyPendingImport();
   PortMods::FinishReload();
+  ++sModReloads;
 }
 
 bool DoLoad(CStateManager& mgr, int slot) {
@@ -349,8 +356,14 @@ bool RequestLoad(int slot) {
   return true;
 }
 
+int ModReloads() { return sModReloads; }
+
 bool RequestModReload() {
   if (PortDebug::StateManager() == nullptr) {
+    if (sInFrontEnd) {
+      sFrontEndReload = true;
+      return true;
+    }
     // Nothing of a game is loaded: the next one starts from the new files.
     sReloadMods = true;
     SetMessage("The mods reload when the game starts");
@@ -392,13 +405,34 @@ bool Tick(CStateManager& mgr) {
   return false;
 }
 
+void ReloadModsNow() {
+  sReloadMods = false;
+  gpResourceFactory->PortReopenPaks(ReloadModFiles);
+  const PortMods::Status& status = PortMods::CurrentStatus();
+  SetMessage("Mods reloaded: " + std::to_string(status.overlays) + " disc file(s), " +
+             std::to_string(PortMods::NativeTextureCount()) + " native texture(s)");
+}
+
+void SetInFrontEnd(bool inFrontEnd) {
+  sInFrontEnd = inFrontEnd;
+  if (!inFrontEnd && sFrontEndReload) {
+    // Left before CFrontEndUI got to it: the next game reads the new files.
+    sFrontEndReload = false;
+    sReloadMods = true;
+  }
+}
+
+bool TakeFrontEndReload() {
+  if (!sFrontEndReload || !sInFrontEnd || PortDebug::StateManager() != nullptr) {
+    return false;
+  }
+  sFrontEndReload = false;
+  return true;
+}
+
 void InstallPending() {
   if (sReloadMods) {
-    sReloadMods = false;
-    gpResourceFactory->PortReopenPaks(ReloadModFiles);
-    const PortMods::Status& status = PortMods::CurrentStatus();
-    SetMessage("Mods reloaded: " + std::to_string(status.overlays) + " disc file(s), " +
-               std::to_string(PortMods::NativeTextureCount()) + " native texture(s)");
+    ReloadModsNow();
   }
   if (!sInstallPending)
     return;

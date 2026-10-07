@@ -55,15 +55,19 @@ static void snd_handle_irq() {
   // sndProfStartPCM(&prof.dspCtrl);
   salCtrlDsp(salAiGetDest());
   // sndProfStopPMC(&prof.dspCtrl);
-  hwIRQLeaveCritical();
 #if MUSY_TARGET == MUSY_TARGET_DOLPHIN
+  hwIRQLeaveCritical();
   hwIRQEnterCritical();
   // sndProfStartPCM(&prof.auxProcessing);
   salHandleAuxProcessing();
   // sndProfStopPMC(&prof.auxProcessing);
   hwIRQLeaveCritical();
-#endif
   hwIRQEnterCritical();
+#endif
+  /* On PC the game thread takes this same lock between sections, so a key off or
+   * break it wrote between the mix and the clear below was wiped unseen, and a
+   * looping voice (the charge beam hum) kept playing with no synth voice left to
+   * stop it. The mix and the clear stay in one critical section. */
   salFrame ^= 1;
   salAuxFrame = (salAuxFrame + 1) % 3;
 

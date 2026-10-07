@@ -32,6 +32,7 @@
 #include "Kyoto/Graphics/CGraphics.hpp"
 #include "Kyoto/Math/CMath.hpp"
 #include "math.h"
+#include "port_debug.h"
 #ifdef TARGET_PC
 #include "vr/vr_view.h"
 #endif
@@ -382,6 +383,12 @@ void CPlayer::UpdateOrbitInput(const CFinalInput& input, CStateManager& mgr) {
           }
           SetOrbitState(kOS_OrbitObject, mgr);
           UpdateOrbitPosition(gpTweakPlayer->GetOrbitNormalDistance(x308_orbitType), mgr);
+        } else if (PortDebug::DirectAim()) {
+          // A GameCube L trigger's analog travel (Orbit Far) starts a frame before
+          // its click, so an empty lock-on becomes a point orbit there. Mouse
+          // buttons, keys and pad triggers mapped as buttons press both in the
+          // same frame, which made L do nothing without a target.
+          OrbitPoint(kOT_Far, mgr);
         }
       } else {
         if (ControlMapper::GetPressInput(ControlMapper::kC_OrbitFar, input)) {
@@ -1734,7 +1741,12 @@ void CPlayer::ApplyGrappleForces(const CFinalInput& input, CStateManager& mgr, f
 
 void CPlayer::UpdateGrappleArmTransform(const CVector3f& offset, CStateManager& mgr, float dt) {
   CTransform4f armXf = GetTransform();
+#ifdef TARGET_PC
+  const CVector3f armPosition =
+      PortAnchorGunDown(GetTransform().Rotate(offset) + GetTranslation(), mgr);
+#else
   const CVector3f armPosition = GetTransform().Rotate(offset) + GetTranslation();
+#endif
   armXf.SetTranslation(armPosition);
   if (x2f8_morphBallState != kMS_Unmorphed) {
     x490_gun->GrappleArm().SetTransform(armXf);

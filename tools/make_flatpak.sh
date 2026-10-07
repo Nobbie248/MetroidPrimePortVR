@@ -30,6 +30,17 @@ if [[ -n "$(git -C "$ROOT" status --porcelain)" ]]; then
     echo "warning: uncommitted changes are not part of a git source" >&2
 fi
 
+# Flatpak shows the newest metainfo release as the app's version, so it has to
+# match the release being built.
+METAINFO="$ROOT/packaging/$APP_ID.metainfo.xml"
+APP_VERSION=$(sed -n 's/^ *versionName "\(.*\)"/\1/p' "$ROOT/android/app/build.gradle")
+META_VERSION=$(sed -n 's/^ *<release version="\([^"]*\)".*/\1/p' "$METAINFO" | head -n 1)
+if [[ "$APP_VERSION" != "$META_VERSION" ]]; then
+    echo "the newest release in $METAINFO is $META_VERSION, but versionName is" \
+        "$APP_VERSION; add a <release> entry for $APP_VERSION" >&2
+    exit 1
+fi
+
 mkdir -p "$OUT"
 # rofiles-fuse gives the build a source tree whose files are immutable, so a
 # build step cannot modify the checkout it came from. It needs FUSE, and the

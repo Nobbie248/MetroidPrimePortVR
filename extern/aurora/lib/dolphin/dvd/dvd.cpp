@@ -49,6 +49,8 @@ namespace aurora::dvd::impl {
 
 namespace {
 
+void (*s_readErrorCallback)() = nullptr;
+
 class CommandDataBase {
 public:
   virtual ~CommandDataBase() = default;
@@ -65,11 +67,22 @@ public:
   }
 
   int64_t read(uint8_t* buf, size_t len) override {
-    return nod_read(handle, buf, len);
+    return reportFailure(nod_read(handle, buf, len));
   }
 
   int64_t seek(int64_t offset, int32_t whence) override {
-    return nod_seek(handle, offset, whence);
+    return reportFailure(nod_seek(handle, offset, whence));
+  }
+
+private:
+  // Port: a failed read of the image itself (not an overlay file) means it is cut
+  // short or damaged; tell the port once so it can refuse the image next launch.
+  static int64_t reportFailure(int64_t result) {
+    static std::atomic_bool s_reported{false};
+    if (result < 0 && s_readErrorCallback != nullptr && !s_reported.exchange(true)) {
+      s_readErrorCallback();
+    }
+    return result;
   }
 };
 
@@ -1124,6 +1137,25 @@ int64_t aurora_dvd_base_seek(void* handle, int64_t offset, int32_t whence) {
 }
 
 void aurora_dvd_base_close(void* handle) { delete static_cast<CommandDataNod*>(handle); }
+
+void aurora_dvd_set_read_error_callback(void (*callback)(void)) { s_readErrorCallback = callback; }
+
+// Port: from the raw fst.bin, whose 12-byte entries hold a file's offset at +4
+// (big-endian; Wii stores it divided by 4).
+int64_t aurora_dvd_base_offset(s32 entrynum) {
+  NodPartitionMeta meta{};
+  if (s_partition == nullptr || entrynum <= 0 || entrynum >= s_baseEntryCount ||
+      nod_partition_meta(s_partition, &meta) != NOD_RESULT_OK || meta.raw_fst.data == nullptr ||
+      meta.raw_fst.size < (static_cast<size_t>(entrynum) + 1) * 12) {
+    return -1;
+  }
+  const u8* entry = meta.raw_fst.data + static_cast<size_t>(entrynum) * 12;
+  if (entry[0] != 0) {
+    return -1; // a directory
+  }
+  const int64_t offset = (int64_t{entry[4]} << 24) | (entry[5] << 16) | (entry[6] << 8) | entry[7];
+  return nod_partition_is_wii(s_partition) ? offset * 4 : offset;
+}
 
 BOOL DVDOpen(const char* fileName, DVDFileInfo* fileInfo) {
   s32 entrynum = DVDConvertPathToEntrynum(fileName);

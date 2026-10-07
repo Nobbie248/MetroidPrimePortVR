@@ -25,6 +25,8 @@ SDL_Process* Start(const std::vector<std::string>& arguments, bool piped) {
   // ffmpeg's complaints go to the port's own log; a probe's are of no interest.
   SDL_SetNumberProperty(props, SDL_PROP_PROCESS_CREATE_STDERR_NUMBER,
                         piped ? SDL_PROCESS_STDIO_INHERITED : SDL_PROCESS_STDIO_NULL);
+  // Without this, Windows opens a console window for every run (aurora's SDL patch).
+  SDL_SetBooleanProperty(props, "SDL.process.create.windows.no_window", true);
   SDL_Process* process = SDL_CreateProcessWithProperties(props);
   SDL_DestroyProperties(props);
   return process;

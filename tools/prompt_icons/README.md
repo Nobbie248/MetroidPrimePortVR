@@ -40,7 +40,7 @@ own, so it labels the port's default keys:
 | `{xbox,playstation,switch}_{stick_l,stick_r,dpad}_{up,down,left,right}.png` | the same prompts for one direction (the map screen's stick frames, the visor hints' D-pad arrows) |
 | `keyboard_w/a/s/d.png`, `keyboard_i/j/k/l.png`, `keyboard_arrow_*.png` | keyboard stick, C-stick and D-pad directions; the whole-stick prompts are drawn from them as an inverted T of keys (`keyboard_wasd`, `keyboard_ijkl`, `keyboard_arrows`), since the pack has no such icons |
 | `playstation_trigger_r1.png`, `switch_button_r.png` | PlayStation / Switch Z prompts (the right shoulder) |
-| `gamecube_button_*.png`, `gamecube_trigger_l.png`, `gamecube_trigger_r.png` | a GameCube pad's buttons, used only when an action is remapped; there is no static GameCube set, since that is the game's own art |
+| `gamecube_button_color_*.png`, `gamecube_button_start.png`, `gamecube_trigger_l.png`, `gamecube_trigger_r.png` | a GameCube pad's buttons, used only when an action is remapped; there is no static GameCube set, since that is the game's own art |
 
 Which game textures they are written as comes from the prompt table in
 `platform/port_prompts.cpp`, which `tools/make_prompt_glyphs.py` parses, so a

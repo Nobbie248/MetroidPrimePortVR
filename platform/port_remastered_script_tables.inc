@@ -60,6 +60,7 @@ static const RemasteredScriptType kRemasteredScriptTypes[] = {
     {0x55032cda, 0x27},  // MetroidBetaMP1
     {0x564a1641, 0x03},  // DoorMP1
     {0x61653ed2, 0x72},  // AtomicAlphaMP1
+    {0x65ee9092, 0x0e},  // IntroBossMP1
     {0x6665f6df, 0x45},  // DebrisExtendedMP1
     {0x6cfa6902, 0x25},  // FlyingPirateMP1
     {0x705b28fc, 0x3b},  // SpankWeedMP1
@@ -70,6 +71,7 @@ static const RemasteredScriptType kRemasteredScriptTypes[] = {
     {0x77e59f98, 0x17},  // HUDMemoMP1
     {0x79f02e11, 0x0f},  // SpawnPointMP1
     {0x7a4bc122, 0x82},  // WorldLightFaderMP1
+    {0x7d070ef0, 0x4a},  // ElectroMagneticPulseMP1
     {0x7e1f2807, 0x61},  // StreamedAudioMP1
     {0x7e6063c8, 0x4c},  // PlayerActor
     {0x7f2845c7, 0x86},  // OmegaPirateMP1
@@ -83,6 +85,7 @@ static const RemasteredScriptType kRemasteredScriptTypes[] = {
     {0x90905f24, 0x57},  // PlayerStateChangeMP1
     {0x93c5b36d, 0x68},  // RadialDamageMP1
     {0x980ef312, 0x83},  // MetroidPrimeStage2MP1
+    {0x99dfc912, 0x89},  // CameraShakerNewMP1
     {0x9b0f9c29, 0x1c},  // CameraShakerOldMP1
     {0x9e8a4940, 0x05},  // Timer
     {0xa10baa67, 0x0b},  // Dock
@@ -99,14 +102,18 @@ static const RemasteredScriptType kRemasteredScriptTypes[] = {
     {0xafb53a8c, 0x42},  // PointOfInterest
     {0xb0c4378e, 0x6b},  // MagdoliteMP1
     {0xb421cdcb, 0x07},  // EffectMP1
+    {0xb5cd58cd, 0x6e},  // ContraptionMP1
     {0xb5d157db, 0x3f},  // RipperMP1
     {0xb6200be6, 0x00},  // ActorMP1
+    {0xb6e36fd4, 0x21},  // WarWaspMP1
     {0xb99d2b06, 0x70},  // GeemerMP1
     {0xbe462b0e, 0x3d},  // ParasiteMP1
     {0xc0366dc7, 0x2a},  // CoverPoint
     {0xc0e28b3d, 0x56},  // SwitchMP1
+    {0xc30c5758, 0x6c},  // TeamAiMgrMP1
     {0xc6e2de1f, 0x2f},  // PathCameraMP1
     {0xc7668e15, 0x2c},  // SpiderBallWaypointMP1
+    {0xc963cc17, 0x67},  // EyeBallMP1
     {0xcb5682c4, 0x53},  // VisorGooMP1
     {0xcbe62855, 0x4b},  // IceSheegothMP1
     {0xcc92b31b, 0x19},  // CameraBlurKeyframeMP1
@@ -119,8 +126,10 @@ static const RemasteredScriptType kRemasteredScriptTypes[] = {
     {0xdcb49607, 0x1a},  // DamageableTriggerMP1
     {0xde522669, 0x0a},  // Generator
     {0xdf4fcca3, 0x14},  // RandomRelayMP1
+    {0xe8ca3ea0, 0x16},  // GarBeetleMP1
     {0xea30e0b1, 0x0f},  // SpawnPoint
     {0xeaa40b01, 0x58},  // ThardusMP1
+    {0xefa09db4, 0x5b},  // AiJumpPointMP1
     {0xf4326a02, 0x26},  // ElitePirateMP1
     {0xf526fc2a, 0x04},  // TriggerMP1
     {0xf649eec3, 0x0d},  // CameraWaypointMP1
@@ -148,6 +157,7 @@ static const RemasteredScriptEvent kRemasteredScriptEvents[] = {
     {0x0eb1f342, 0xbbb14e48, 18},  // SpacePirateMP1 Play
     {0x1205609a, 0xe425a59e, 0},  // MemoryRelayMP1 Active
     {0x1230fa75, 0x90955660, 14},  // MetareeMP1 Dead
+    {0x12db855d, 0x46cca349, 30},  // WaterMP1 Default
     {0x12db855d, 0x7ce5c17a, 18},  // WaterMP1 Play
     {0x12db855d, 0xd8831c04, 0},  // WaterMP1 Active
     {0x1498ba74, 0x66e313a9, 25},  // TryclopsMP1 Modify
@@ -162,7 +172,9 @@ static const RemasteredScriptEvent kRemasteredScriptEvents[] = {
     {0x1fb9af22, 0x05ecf35d, 18},  // ActorKeyframe Play
     {0x23f1e994, 0x4b804e41, 18},  // PlayerHintMP1 Play
     {0x254d4d49, 0x7bfd5ea9, 10},  // BabygothMP1 Attack
+    {0x254d4d49, 0x9c03e8ac, 0},  // BabygothMP1 Active
     {0x254d4d49, 0xe510336c, 13},  // BabygothMP1 Patrol
+    {0x25c6d2a3, 0x01e37870, 0},  // TimerMP1 Active
     {0x25c6d2a3, 0xb0b6a01a, 9},  // TimerMP1 Zero
     {0x2b3ad4b6, 0xf690a1e2, 1},  // CoverPointMP1 Arrived
     {0x30a6b6de, 0x8ee4b93f, 25},  // FlaahgraTentacleMP1 Modify
@@ -199,6 +211,8 @@ static const RemasteredScriptEvent kRemasteredScriptEvents[] = {
     {0x564a1641, 0x48d14395, 8},  // DoorMP1 Open
     {0x564a1641, 0x8cc44aca, 7},  // DoorMP1 MaxReached
     {0x61653ed2, 0x0430a5fe, 13},  // AtomicAlphaMP1 Patrol
+    {0x65ee9092, 0x36a51c61, 14},  // IntroBossMP1 Dead
+    {0x65ee9092, 0x4fb0f4d2, 20},  // IntroBossMP1 DeathRattle
     {0x6cfa6902, 0x6c07dba6, 12},  // FlyingPirateMP1 Retreat
     {0x6cfa6902, 0x7ab964e8, 10},  // FlyingPirateMP1 Attack
     {0x6cfa6902, 0x9f6d26d9, 13},  // FlyingPirateMP1 Patrol
@@ -227,6 +241,7 @@ static const RemasteredScriptEvent kRemasteredScriptEvents[] = {
     {0x980ef312, 0xa85a8d6a, 18},  // MetroidPrimeStage2MP1 Play
     {0x980ef312, 0xb2447860, 13},  // MetroidPrimeStage2MP1 Patrol
     {0x980ef312, 0xe7cab56a, 16},  // MetroidPrimeStage2MP1 CameraTarget
+    {0x9e8a4940, 0x01e37870, 0},  // Timer Active
     {0x9e8a4940, 0xb0b6a01a, 9},  // Timer Zero
     {0xa10baa67, 0x97622e8f, 7},  // Dock MaxReached
     {0xa12967fb, 0x047f89b0, 23},  // PlatformMP1 InvulnDamage
@@ -234,6 +249,7 @@ static const RemasteredScriptEvent kRemasteredScriptEvents[] = {
     {0xa12967fb, 0x28e11b3f, 0},  // PlatformMP1 Active
     {0xa12967fb, 0x48bcdc05, 14},  // PlatformMP1 Dead
     {0xa12967fb, 0x5662a66a, 25},  // PlatformMP1 Modify
+    {0xa12967fb, 0x68b8e7a3, 32},  // PlatformMP1 InheritBounds
     {0xa12967fb, 0x8b34ee2a, 5},  // PlatformMP1 Inactive
     {0xa12967fb, 0xdb8148e3, 18},  // PlatformMP1 Play
     {0xa12967fb, 0xf8fdfef9, 22},  // PlatformMP1 Damage
@@ -257,6 +273,7 @@ static const RemasteredScriptEvent kRemasteredScriptEvents[] = {
     {0xb421cdcb, 0x87e534b4, 30},  // EffectMP1 Default
     {0xb421cdcb, 0xbb8f6246, 5},  // EffectMP1 Inactive
     {0xb421cdcb, 0xd96d6b30, 18},  // EffectMP1 Play
+    {0xb5cd58cd, 0x254df1cb, 14},  // ContraptionMP1 Dead
     {0xb5d157db, 0xcb3927cf, 13},  // RipperMP1 Patrol
     {0xb6200be6, 0x15ae8556, 23},  // ActorMP1 InvulnDamage
     {0xb6200be6, 0x1701f4cb, 32},  // ActorMP1 InheritBounds
@@ -264,10 +281,13 @@ static const RemasteredScriptEvent kRemasteredScriptEvents[] = {
     {0xb6200be6, 0x5734a941, 0},  // ActorMP1 Active
     {0xb6200be6, 0x80823636, 7},  // ActorMP1 MaxReached
     {0xb6200be6, 0xb1db9f08, 5},  // ActorMP1 Inactive
+    {0xb6200be6, 0xc396d194, 28},  // ActorMP1 ScanDone
     {0xb6200be6, 0xf668d4b9, 14},  // ActorMP1 Dead
     {0xb99d2b06, 0xcc66d41a, 13},  // GeemerMP1 Patrol
     {0xbe462b0e, 0x0e1ff5b2, 13},  // ParasiteMP1 Patrol
     {0xc0366dc7, 0xf690a1e2, 1},  // CoverPoint Arrived
+    {0xc0e28b3d, 0x04752e41, 2},  // SwitchMP1 Closed
+    {0xc0e28b3d, 0x20dec106, 8},  // SwitchMP1 Open
     {0xc6e2de1f, 0x655173c3, 15},  // PathCameraMP1 CameraPath
     {0xc7668e15, 0x50e485e1, 5},  // SpiderBallWaypointMP1 Inactive
     {0xc7668e15, 0xa49eb114, 1},  // SpiderBallWaypointMP1 Arrived
@@ -287,12 +307,14 @@ static const RemasteredScriptEvent kRemasteredScriptEvents[] = {
     {0xdb389155, 0x5316c4ad, 7},  // PlayerActorMP1 MaxReached
     {0xdcb49607, 0x0991107c, 22},  // DamageableTriggerMP1 Damage
     {0xdcb49607, 0x0c8447a8, 14},  // DamageableTriggerMP1 Dead
+    {0xdcb49607, 0xa8b512bb, 7},  // DamageableTriggerMP1 MaxReached
     {0xdcb49607, 0xaa329d2d, 0},  // DamageableTriggerMP1 Active
     {0xde522669, 0xd276253a, 9},  // Generator Zero
     {0xdf4fcca3, 0xb44d640c, 9},  // RandomRelayMP1 Zero
     {0xeaa40b01, 0x888528c2, 9},  // ThardusMP1 Zero
     {0xeaa40b01, 0xae55c34f, 13},  // ThardusMP1 Patrol
     {0xeaa40b01, 0xf99023d5, 14},  // ThardusMP1 Dead
+    {0xefa09db4, 0xb5b31b70, 1},  // AiJumpPointMP1 Arrived
     {0xf4326a02, 0x16cdcace, 5},  // ElitePirateMP1 Inactive
     {0xf4326a02, 0x2afff9ec, 14},  // ElitePirateMP1 Dead
     {0xf4326a02, 0xa595fd8a, 20},  // ElitePirateMP1 DeathRattle

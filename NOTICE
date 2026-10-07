@@ -34,6 +34,7 @@ travels with any build that contains it.
 | Aurora — windowing, WebGPU/Dawn plumbing | MIT | `extern/aurora/LICENSE` |
 | MusyX — audio mixer | MIT | `extern/musyx/LICENSE` |
 | SDL3 | zlib | fetched at configure time, `build/*/_deps/sdl-src/` |
+| ARM astc-encoder 5.7.0 — ASTC texture encoder for the Remastered importer | Apache-2.0, © Arm Limited | `extern/astcenc/LICENSE.txt` |
 | Dear ImGui | MIT | fetched, `imgui-src/` |
 | fmt | MIT | fetched, `fmt-src/` |
 | zstd | BSD | fetched, `zstd-src/` |

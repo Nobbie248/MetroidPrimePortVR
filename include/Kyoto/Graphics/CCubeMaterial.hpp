@@ -55,10 +55,24 @@ public:
   // 0 off, 1 on, 2 mirror, 3 window; -1 takes it from MP_PBR_PROBE on first use.
   static int sPortPBRProbeMode;
   static uint sPortPBRDraws;
+  // The PBR draws outside the probe's own capture that reflected the live probe rather than a
+  // room environment's cube; while none do, the capture is skipped.
+  static uint sPortPBRProbeDraws;
+  static bool sPortCapturingProbe;
   // Port: a draw that keeps PBR under the thermal visor, as the fluid planes keep their own
   // shader there (port_room_liquid.cpp); additive is the hot pass's blend.
   enum EPortPBRThermal { kPT_None, kPT_Cold, kPT_Additive };
   static EPortPBRThermal sPortPBRThermal;
+  // Port: the light slots holding area lights (CActorLights::ActivateLights; CGraphics::
+  // LoadLight clears a slot it loads). A PBR draw lit by a room's baked light leaves them
+  // out, as Remastered lights actors by the bake and runtime lights alone.
+  static uint sPortAreaLights;
+  // Port: whether the material draws differently once its model's vertices are moved into
+  // world space and drawn with an identity model matrix (port_room_geo.cpp's merged props):
+  // reflections and UV animation mode 6 place the texture by the model matrix itself.
+  bool PortNeedsModelMatrix() const;
+  // Port: how many TEV konst colours the material loads (0 without kStateFlag_KonstValues).
+  uint PortKonstCount() const;
 #endif
   uint GetTextureCount() const {
     return CBasics::SwapBytes(*reinterpret_cast< const uint* >(GetData() + 4));

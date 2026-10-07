@@ -12,6 +12,13 @@
 // and layout tags are dropped, a line break is kept only where the disc's
 // string breaks a line too, and a string naming a button or an icon keeps
 // the disc's version, Remastered's controls not being this game's.
+//
+// Remastered's translations are added to the same tables, as more languages
+// named by their MSBT chunk ("EUFR"), which the port's language setting picks.
+// A translated string keeps the disc's layout tags and button images (in the
+// order Remastered names its buttons), so one naming more or fewer buttons
+// than the disc's string stays English. Remastered's own names for the
+// original's strings ("[0552A456]_InstructionsA") are placed by their English.
 
 #include <cstddef>
 #include <cstdint>
@@ -32,16 +39,41 @@ bool ParseMsbt(const uint8_t* data, size_t size, const char* language, std::vect
 
 // "[0D1F9C75]_002" -> 0x0D1F9C75, 2. False for Remastered's own labels.
 bool SplitTextLabel(const std::string& label, uint32_t& strg, uint32_t& index);
+// "[0552A456]_InstructionsA" -> 0x0552A456, "InstructionsA". False for an
+// index's label and Remastered's own.
+bool SplitNamedLabel(const std::string& label, uint32_t& strg, std::string& name);
+
+// The languages added to the tables, in their MSBT chunk's name, which is also
+// their STRG language. English is "USEN" in Remastered and "ENGL" on the disc.
+struct TextLanguage {
+  const char* code;
+  const char* name;
+};
+extern const TextLanguage kTextLanguages[];
+extern const size_t kTextLanguageCount;
+constexpr const char* kRemasteredEnglish = "USEN";
 
 // Remastered's string in the original's markup. False when the disc's string
 // should stay: the wording is the same, or the text needs something the
 // original cannot draw.
 bool ConvertText(const std::u16string& remastered, const std::u16string& retail, std::u16string& out);
+// A translation in the original's markup, laid out as the disc's English
+// string `retail`; `english` is Remastered's English for it. False when it
+// should stay English: its buttons do not match the disc's, or it holds
+// something the markup cannot.
+bool TranslateText(const std::u16string& remastered, const std::u16string& retail, const std::u16string& english,
+                   std::u16string& out);
 
-// A copy of the disc's STRG with the English strings in `strings` (by index)
-// replaced where ConvertText allows it. False when the table cannot be read or
-// nothing in it changed.
-bool MergeStringTable(const uint8_t* retail, size_t size, const std::map<uint32_t, std::u16string>& strings,
-                      std::vector<uint8_t>& out, int& changed);
+// One table's strings in Remastered, each by language chunk ("USEN", "EUFR").
+struct TableText {
+  std::map<uint32_t, std::map<std::string, std::u16string>> byIndex;
+  std::map<std::string, std::map<std::string, std::u16string>> byName;
+};
+
+// A copy of the disc's STRG with the English strings Remastered reworded
+// (ConvertText) and a section for each of kTextLanguages it has translations
+// for. False when the table cannot be read or nothing in it changed.
+bool MergeStringTable(const uint8_t* retail, size_t size, const TableText& text, std::vector<uint8_t>& out,
+                      int& reworded, int& translated);
 
 }  // namespace PortRemastered

@@ -1,6 +1,7 @@
 // Lists or dumps files of a Metroid Prime Remastered .nsp through PortRemastered::Nsp.
 //   port_remastered_nsp_tool <nsp> <keys> list
 //   port_remastered_nsp_tool <nsp> <keys> cat <path> [offset [size]]
+//   port_remastered_nsp_tool <nsp> <keys> brdf [out]   extracts the BRDF table, checks its SHA-256
 
 #include "port_remastered_nsp.h"
 
@@ -26,6 +27,24 @@ int main(int argc, char** argv) {
   if (command == "list") {
     for (const PortRemastered::RomfsFile& file : nsp.Files()) {
       std::printf("%llu\t%s\n", static_cast<unsigned long long>(file.size), file.path.c_str());
+    }
+    return 0;
+  }
+
+  if (command == "brdf") {
+    std::vector<uint8_t> lut;
+    if (!PortRemastered::ExtractBrdfLut(nsp, lut, error)) {
+      std::fprintf(stderr, "brdf failed: %s\n", error.c_str());
+      return 1;
+    }
+    std::printf("brdf table: %zu bytes, SHA-256 matches the known table\n", lut.size());
+    if (argc >= 5) {
+      std::FILE* f = std::fopen(argv[4], "wb");
+      if (!f || std::fwrite(lut.data(), 1, lut.size(), f) != lut.size()) {
+        std::fprintf(stderr, "write failed\n");
+        return 1;
+      }
+      std::fclose(f);
     }
     return 0;
   }

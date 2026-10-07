@@ -531,7 +531,9 @@ void CSfxManager::Update(float dt) {
       mDoUpdate = true;
     }
   }
-  ushort local_e0[70];
+  // Port: was [70], but x48_ holds 72, so 71-72 live sounds overran the stack
+  // (stack-protector abort on arm64).
+  ushort local_e0[72];
   if (mDoUpdate) {
     for (i = 0; i < chan.x48_.size(); ++i) {
       if (!chan.x48_[i]) {

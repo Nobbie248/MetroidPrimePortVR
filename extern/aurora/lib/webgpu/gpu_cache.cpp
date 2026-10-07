@@ -31,7 +31,8 @@ static std::vector<XXH128_hash_t> cache_keys_used;
 static std::vector<uint8_t> compress_buffer;
 #endif
 
-constexpr int CACHE_SCHEMA = 2;
+// 3: rows carry an XXH3-64 checksum of the stored value.
+constexpr int CACHE_SCHEMA = 3;
 // % of rows pruned to trigger a full VACUUM
 constexpr uint64_t VacuumPrunePercentThreshold = 25;
 
@@ -39,11 +40,37 @@ static std::filesystem::path cache_path() {
   return io::fs_path_from_string(g_config.cachePath) / "dawn_cache.db";
 }
 
-static void init_abort() {
+// Set right after a failed operation found the file damaged, while a transaction
+// may still hold db; the next cache_init() (or cache_shutdown()) does the abort.
+static bool abort_pending;
+static void note_if_corrupt() {
+  if (db != nullptr && sqlite::is_corrupt(db)) {
+    abort_pending = true;
+  }
+}
+
+// Stops using the cache for this session. A damaged database is deleted so the
+// next start rebuilds it instead of handing Dawn bad pipeline blobs.
+static void cache_abort() {
   cache_broken = true;
+  const bool corrupt = abort_pending || (db != nullptr && sqlite::is_corrupt(db));
+  abort_pending = false;
+  if (load_stmt != nullptr) {
+    sqlite3_finalize(load_stmt);
+    load_stmt = nullptr;
+  }
+  if (store_stmt != nullptr) {
+    sqlite3_finalize(store_stmt);
+    store_stmt = nullptr;
+  }
   sqlite3_close(db);
   db = nullptr;
+  if (corrupt) {
+    Log.warn("Dawn cache is damaged; deleting it");
+    sqlite::delete_db_files(io::fs_path_to_string(cache_path()), Log);
+  }
 }
+
 
 static int check(int ret) {
   if (ret != SQLITE_OK) {
@@ -84,7 +111,8 @@ CREATE TABLE cache (
   key BLOB PRIMARY KEY NOT NULL,
   value BLOB NOT NULL,
   size INTEGER NOT NULL,
-  compressed INTEGER NOT NULL
+  compressed INTEGER NOT NULL,
+  checksum INTEGER NOT NULL
 );
 DELETE FROM aurora_schema;
 INSERT INTO aurora_schema VALUES ({});)",
@@ -104,9 +132,9 @@ static bool cache_init_core() {
 
   std::string file = io::fs_path_to_string(cache_path());
   Log.debug("Using dawn cache at {}", file);
-  auto ret = sqlite3_open(file.c_str(), &db);
+  auto ret = sqlite::open_cache_db(file, &db, Log);
   if (ret != SQLITE_OK) {
-    Log.error("Failed to open database: {}", sqlite3_errmsg(db));
+    Log.error("Failed to open database {}", file);
     return false;
   }
 
@@ -122,15 +150,15 @@ static bool cache_init_core() {
     return false;
   }
 
-  ret = sqlite3_prepare_v3(db, "SELECT value, size, compressed FROM cache WHERE key = ?", -1, SQLITE_PREPARE_PERSISTENT,
-                           &load_stmt, nullptr);
+  ret = sqlite3_prepare_v3(db, "SELECT value, size, compressed, checksum FROM cache WHERE key = ?", -1,
+                           SQLITE_PREPARE_PERSISTENT, &load_stmt, nullptr);
   if (ret != SQLITE_OK) {
     Log.error("Failed to prepare statement: {}", sqlite3_errmsg(db));
     return false;
   }
 
-  ret = sqlite3_prepare_v3(db, "REPLACE INTO cache (key, value, size, compressed) VALUES (?, ?, ?, ?)", -1,
-                           SQLITE_PREPARE_PERSISTENT, &store_stmt, nullptr);
+  ret = sqlite3_prepare_v3(db, "REPLACE INTO cache (key, value, size, compressed, checksum) VALUES (?, ?, ?, ?, ?)",
+                           -1, SQLITE_PREPARE_PERSISTENT, &store_stmt, nullptr);
   if (ret != SQLITE_OK) {
     Log.error("Failed to prepare statement: {}", sqlite3_errmsg(db));
     return false;
@@ -205,13 +233,18 @@ static bool cache_init() {
     return false;
   }
 
+  if (abort_pending) {
+    cache_abort();
+    return false;
+  }
+
   if (db) {
     return true;
   }
 
   if (!cache_init_core()) {
     Log.error("SQLite DB init failed");
-    init_abort();
+    cache_abort();
     return false;
   }
 
@@ -242,10 +275,17 @@ size_t load_from_cache(void const* key, size_t keySize, void* value, size_t valu
   if (ret == SQLITE_ROW) {
     // Hit
     const auto foundPtr = sqlite3_column_blob(load_stmt, 0);
+    const auto foundBytes = static_cast<size_t>(sqlite3_column_bytes(load_stmt, 0));
     foundSize = sqlite3_column_int64(load_stmt, 1);
     const bool compressed = sqlite3_column_int(load_stmt, 2) != 0;
+    const auto checksum = static_cast<XXH64_hash_t>(sqlite3_column_int64(load_stmt, 3));
 
-    if (value && valueSize == foundSize) {
+    // A row that doesn't match its checksum is reported as a miss, so Dawn
+    // recompiles and overwrites it instead of passing garbage to the driver.
+    if (XXH3_64bits(foundPtr, foundBytes) != checksum) {
+      Log.warn("Dropping a Dawn cache entry with a bad checksum");
+      foundSize = 0;
+    } else if (value && valueSize == foundSize) {
       loadSucceeded = true;
       if (compressed) {
 #if defined(AURORA_CACHE_USE_ZSTD)
@@ -280,6 +320,8 @@ size_t load_from_cache(void const* key, size_t keySize, void* value, size_t valu
     foundSize = 0;
   } else {
     Log.error("Looking up cache key failed: {}", sqlite3_errmsg(db));
+    note_if_corrupt();
+    sqlite3_reset(load_stmt);
     return 0;
   }
 
@@ -338,11 +380,15 @@ void store_to_cache(void const* key, size_t keySize, void const* value, size_t v
       sqlite3_bind_blob64(store_stmt, 2, storedValue, storedValueSize, compressed ? SQLITE_STATIC : SQLITE_TRANSIENT));
   check(sqlite3_bind_int64(store_stmt, 3, static_cast<sqlite3_int64>(valueSize)));
   check(sqlite3_bind_int(store_stmt, 4, compressed));
+  check(sqlite3_bind_int64(store_stmt, 5,
+                           static_cast<sqlite3_int64>(XXH3_64bits(storedValue, static_cast<size_t>(storedValueSize)))));
 
   const auto ret = sqlite3_step(store_stmt);
   if (ret != SQLITE_DONE) {
     // Error or something
     Log.error("Failed to insert row: {}", sqlite3_errmsg(db));
+    note_if_corrupt();
+    sqlite3_reset(store_stmt);
     return;
   }
 
@@ -374,11 +420,13 @@ void cache_prune() {
     }
 
     if (!fill_used_key_table(cache_keys_used)) {
+      note_if_corrupt();
       return;
     }
 
     const auto totalRowsResult = select_uint64("SELECT COUNT(*) FROM cache");
     if (!totalRowsResult) {
+      note_if_corrupt();
       return;
     }
     totalRows = *totalRowsResult;
@@ -390,6 +438,7 @@ void cache_prune() {
                                   ")");
     if (ret != SQLITE_OK) {
       Log.error("Failed to prune dawn cache rows: {}", sqlite3_errmsg(db));
+      note_if_corrupt();
       return;
     }
     deletedRows = sqlite3_changes64(db);
@@ -422,6 +471,10 @@ void cache_shutdown() {
   compress_buffer.clear();
 #endif
   cache_keys_used.clear();
+  if (abort_pending) {
+    cache_abort();
+    return;
+  }
   if (load_stmt != nullptr) {
     check(sqlite3_finalize(load_stmt));
     load_stmt = nullptr;

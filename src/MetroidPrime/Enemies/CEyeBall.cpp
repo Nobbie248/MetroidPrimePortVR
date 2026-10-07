@@ -50,7 +50,13 @@ CEyeBall::CEyeBall(const TUniqueId uid, const rstl::string& name, const EFlavorT
 , mPlayerInRange(false)
 , mAlert(false)
 , mAttackDisabled(attackDisabled)
-, mFiringBeam(false) {
+, mFiringBeam(false)
+#ifdef TARGET_PC
+, mSweeping(false)
+, mLastAnimId(-1)
+, mLastAnimRemaining(0.f)
+#endif
+{
   mAnimIndices[0] = anim0;
   mAnimIndices[1] = anim1;
   mAnimIndices[2] = anim2;
@@ -175,6 +181,10 @@ void CEyeBall::Active(CStateManager& mgr, EStateMsg msg, float arg) {
     SetWasHit(false);
     BodyCtrl()->SetLocomotionType(pas::kLT_Combat);
     mCanAttack = false;
+#ifdef TARGET_PC
+    mSweeping = false;
+    mLastAnimId = -1;
+#endif
   } break;
   case kStateMsg_Update: {
     if (GetStateMachineTime() > GetAttackStartTime()) {
@@ -288,11 +298,33 @@ bool CEyeBall::ShouldFire(CStateManager& mgr, const float arg) { return !mAttack
 bool CEyeBall::ShouldAttack(CStateManager&, float) { return mAlert; }
 
 void CEyeBall::UpdateCycleAnimation(const float dt) {
+#ifdef TARGET_PC
+  // The wait for exactly zero time remaining only works with a fixed sim step,
+  // where every anim ends on a tick. With a variable step (adaptive sim rate)
+  // the looping idle almost never lands on zero, and a sweep can end with a
+  // sliver left that is under the next tick's dt, which the body controller
+  // counts as over and drops to locomotion. Either way the Eyon froze in its
+  // idle with head tracking on and its beam aimed at the player. So also start
+  // the next sweep when the idle loops around or a sweep was cut short.
+  const float remaining =
+      GetModelData()->GetAnimationData()->GetAnimTimeRemaining(rstl::string_l("Whole Body"));
+  const int animId = BodyCtrl()->GetCurrentAnimId();
+  const bool inLocomotion = BodyCtrl()->GetCurrentStateId() == pas::kAS_Locomotion;
+  const bool idleLooped =
+      inLocomotion && animId == mLastAnimId && remaining > mLastAnimRemaining;
+  const bool sweepCut = inLocomotion && mSweeping;
+  mLastAnimId = animId;
+  mLastAnimRemaining = remaining;
+  if (!idleLooped && !sweepCut && !close_enough(remaining, 0.f)) {
+    return;
+  }
+#else
   if (!close_enough(
           GetModelData()->GetAnimationData()->GetAnimTimeRemaining(rstl::string_l("Whole Body")),
           0.f)) {
     return;
   }
+#endif
 
   int i = 0;
   mCurrentAnim = (mCurrentAnim + 1) % 4;
@@ -303,6 +335,9 @@ void CEyeBall::UpdateCycleAnimation(const float dt) {
   if (animIdx != -1) {
     CBodyController* controller = BodyCtrl();
     controller->CommandMgr().DeliverCmd(CBCScriptedCmd(animIdx, false, false, 0.f));
+#ifdef TARGET_PC
+    mSweeping = true;
+#endif
   }
 }
 

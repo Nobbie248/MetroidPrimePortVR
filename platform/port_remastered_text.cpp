@@ -1,4 +1,5 @@
 #include "port_remastered_text.h"
+#include "port_bytes.h"
 
 #include <algorithm>
 #include <cstring>
@@ -9,16 +10,11 @@ namespace {
 constexpr uint32_t kStrgMagic = 0x87654321;
 constexpr uint32_t kEnglish = 0x454E474C;  // 'ENGL'
 
-uint16_t Le16(const uint8_t* p) { return uint16_t(p[0] | p[1] << 8); }
-uint32_t Le32(const uint8_t* p) { return uint32_t(p[0]) | uint32_t(p[1]) << 8 | uint32_t(p[2]) << 16 | uint32_t(p[3]) << 24; }
-uint64_t Le64(const uint8_t* p) { return uint64_t(Le32(p)) | uint64_t(Le32(p + 4)) << 32; }
-uint32_t Be32(const uint8_t* p) { return uint32_t(p[0]) << 24 | uint32_t(p[1]) << 16 | uint32_t(p[2]) << 8 | uint32_t(p[3]); }
-
-void PutBe32(std::vector<uint8_t>& out, uint32_t value) {
-  for (int shift = 24; shift >= 0; shift -= 8) {
-    out.push_back(uint8_t(value >> shift));
-  }
-}
+using port::AppendBE32;
+using port::ReadBE32;
+using port::ReadLE16;
+using port::ReadLE32;
+using port::ReadLE64;
 
 // One "MsgStdBn" file: a 32 byte header, then sections of a 16 byte header
 // (name, size) and their data, each padded to 16 bytes.
@@ -32,7 +28,7 @@ bool ParseMessages(const uint8_t* data, size_t size, std::vector<TextEntry>& out
   size_t labelsSize = 0;
   size_t textsSize = 0;
   for (size_t at = 0x20; at + 16 <= size;) {
-    const size_t length = Le32(data + at + 4);
+    const size_t length = ReadLE32(data + at + 4);
     if (length > size - at - 16) {
       error = "a section runs past the end";
       return false;
@@ -50,7 +46,7 @@ bool ParseMessages(const uint8_t* data, size_t size, std::vector<TextEntry>& out
     error = "no labels or no text";
     return false;
   }
-  const size_t count = Le32(texts);
+  const size_t count = ReadLE32(texts);
   if (count > (textsSize - 4) / 4) {
     error = "the text table is cut short";
     return false;
@@ -58,15 +54,15 @@ bool ParseMessages(const uint8_t* data, size_t size, std::vector<TextEntry>& out
   const size_t first = out.size();
   out.resize(first + count);
   for (size_t i = 0; i < count; ++i) {
-    const size_t begin = Le32(texts + 4 + 4 * i);
-    const size_t end = i + 1 < count ? Le32(texts + 8 + 4 * i) : textsSize;
+    const size_t begin = ReadLE32(texts + 4 + 4 * i);
+    const size_t end = i + 1 < count ? ReadLE32(texts + 8 + 4 * i) : textsSize;
     if (begin > end || end > textsSize) {
       error = "a text offset is out of range";
       return false;
     }
     std::u16string& text = out[first + i].text;
     for (size_t p = begin; p + 2 <= end; p += 2) {
-      text.push_back(char16_t(Le16(texts + p)));
+      text.push_back(char16_t(ReadLE16(texts + p)));
     }
     // The terminator; a zero inside a tag's payload is not one, so only the last counts.
     if (!text.empty() && text.back() == 0) {
@@ -74,21 +70,21 @@ bool ParseMessages(const uint8_t* data, size_t size, std::vector<TextEntry>& out
     }
   }
   // Hash slots of (count, offset), each a run of: length, name, text index.
-  const size_t slots = Le32(labels);
+  const size_t slots = ReadLE32(labels);
   if (slots > (labelsSize - 4) / 8) {
     error = "the label table is cut short";
     return false;
   }
   for (size_t s = 0; s < slots; ++s) {
-    const size_t labelCount = Le32(labels + 4 + 8 * s);
-    size_t at = Le32(labels + 8 + 8 * s);
+    const size_t labelCount = ReadLE32(labels + 4 + 8 * s);
+    size_t at = ReadLE32(labels + 8 + 8 * s);
     for (size_t l = 0; l < labelCount; ++l) {
       if (at >= labelsSize || labels[at] + size_t(5) > labelsSize - at) {
         error = "a label is out of range";
         return false;
       }
       const size_t length = labels[at];
-      const size_t index = Le32(labels + at + 1 + length);
+      const size_t index = ReadLE32(labels + at + 1 + length);
       if (index < count) {
         out[first + index].label.assign(reinterpret_cast<const char*>(labels + at + 1), length);
       }
@@ -188,7 +184,70 @@ std::u16string LayoutPrefix(const std::u16string& retail) {
   return retail.substr(0, at);
 }
 
+// A colour tag's payload (bytes R G B A) in the original's markup. Opaque black
+// ends every highlighted run, on dark backgrounds too: it gives the text its
+// widget's colour back.
+void AppendColour(const char16_t* payload, std::u16string& body, bool& coloured) {
+  static const char16_t kHex[] = u"0123456789ABCDEF";
+  if (coloured) {
+    body += u"&pop;";
+    coloured = false;
+  }
+  if (payload[0] != 0 || payload[1] != 0xFF00) {
+    body += u"&push;&main-color=#";
+    for (int k = 0; k < 2; ++k) {
+      const unsigned low = payload[k] & 0xFF;
+      const unsigned high = payload[k] >> 8;
+      body += {kHex[low >> 4], kHex[low & 15], kHex[high >> 4], kHex[high & 15]};
+    }
+    body += u';';
+    coloured = true;
+  }
+}
+
+// A tag's length in units after its 0x0E (group, type, payload size, payload),
+// or 0 when it runs past the end.
+size_t TagUnits(const std::u16string& text, size_t at) {
+  if (at + 3 >= text.size()) {
+    return 0;
+  }
+  const size_t units = (size_t(text[at + 3]) + 1) / 2;
+  return units > text.size() - at - 4 ? 0 : 3 + units;
+}
+
+// A message's words, its tags left out.
+std::u16string MessageWords(const std::u16string& text) {
+  std::u16string plain;
+  for (size_t i = 0; i < text.size(); ++i) {
+    if (text[i] == 0x0E) {
+      const size_t units = TagUnits(text, i);
+      if (units == 0) {
+        break;
+      }
+      i += units;
+    } else if (text[i] == 0x0F) {
+      i += 2;
+    } else {
+      plain.push_back(text[i]);
+    }
+  }
+  return Words(plain, false);
+}
+
+size_t CountBreaks(const std::u16string& text) { return size_t(std::count(text.begin(), text.end(), u'\n')); }
+
+constexpr uint32_t FourCc(const char* code) {
+  return uint32_t(uint8_t(code[0])) << 24 | uint32_t(uint8_t(code[1])) << 16 | uint32_t(uint8_t(code[2])) << 8 |
+         uint32_t(uint8_t(code[3]));
+}
+
 }  // namespace
+
+const TextLanguage kTextLanguages[] = {
+    {"EUFR", "French (France)"}, {"USFR", "French (Canada)"},  {"EUSP", "Spanish (Spain)"},
+    {"USSP", "Spanish (Latin America)"}, {"EUGE", "German"}, {"EUIT", "Italian"}, {"EUDU", "Dutch"},
+};
+const size_t kTextLanguageCount = sizeof(kTextLanguages) / sizeof(kTextLanguages[0]);
 
 bool ParseMsbt(const uint8_t* data, size_t size, const char* language, std::vector<TextEntry>& out,
                std::string& error) {
@@ -197,11 +256,11 @@ bool ParseMsbt(const uint8_t* data, size_t size, const char* language, std::vect
     return false;
   }
   // The form's length leaves out its header; what follows it is the extractor's footer.
-  const uint64_t form = Le64(data + 4);
+  const uint64_t form = ReadLE64(data + 4);
   const size_t end = form < size - 0x20 ? size_t(form) + 0x20 : size;
   // Chunks of a 24 byte header: the language, the length, a version and a skip.
   for (size_t at = 0x20; at + 24 <= end;) {
-    const uint64_t length = Le64(data + at + 4);
+    const uint64_t length = ReadLE64(data + at + 4);
     if (length > end - at - 24) {
       error = "a language runs past the end";
       return false;
@@ -238,8 +297,17 @@ bool SplitTextLabel(const std::string& label, uint32_t& strg, uint32_t& index) {
   return true;
 }
 
+bool SplitNamedLabel(const std::string& label, uint32_t& strg, std::string& name) {
+  uint32_t index = 0;
+  if (label.size() < 12 || SplitTextLabel(label, strg, index) ||
+      !SplitTextLabel(label.substr(0, 11) + "0", strg, index)) {
+    return false;
+  }
+  name = label.substr(11);
+  return true;
+}
+
 bool ConvertText(const std::u16string& remastered, const std::u16string& retail, std::u16string& out) {
-  static const char16_t kHex[] = u"0123456789ABCDEF";
   std::u16string body;
   std::u16string plain;
   bool coloured = false;
@@ -248,34 +316,16 @@ bool ConvertText(const std::u16string& remastered, const std::u16string& retail,
     const char16_t c = remastered[i];
     if (c == 0x0E) {
       // group, type, payload bytes, payload
-      if (i + 3 >= remastered.size()) {
+      const size_t units = TagUnits(remastered, i);
+      if (units == 0) {
         return false;
       }
       const unsigned group = remastered[i + 1];
       const unsigned type = remastered[i + 2];
-      const size_t units = (size_t(remastered[i + 3]) + 1) / 2;
-      if (units > remastered.size() - i - 4) {
-        return false;
-      }
       const char16_t* payload = remastered.data() + i + 4;
-      i += 3 + units;
-      if (group == 0 && type == 3 && units == 2) {
-        // A colour, as bytes R G B A. Opaque black ends every highlighted run,
-        // on dark backgrounds too: it gives the text its widget's colour back.
-        if (coloured) {
-          body += u"&pop;";
-          coloured = false;
-        }
-        if (payload[0] != 0 || payload[1] != 0xFF00) {
-          body += u"&push;&main-color=#";
-          for (int k = 0; k < 2; ++k) {
-            const unsigned low = payload[k] & 0xFF;
-            const unsigned high = payload[k] >> 8;
-            body += {kHex[low >> 4], kHex[low & 15], kHex[high >> 4], kHex[high & 15]};
-          }
-          body += u';';
-          coloured = true;
-        }
+      i += units;
+      if (group == 0 && type == 3 && units == 5) {
+        AppendColour(payload, body, coloured);
       } else if ((group == 0 && type == 2) || (group == 1 && type == 3)) {
         // A size in percent, and a layout mode: the original's widgets have their own.
       } else {
@@ -309,30 +359,108 @@ bool ConvertText(const std::u16string& remastered, const std::u16string& retail,
   return true;
 }
 
-bool MergeStringTable(const uint8_t* retail, size_t size, const std::map<uint32_t, std::u16string>& strings,
-                      std::vector<uint8_t>& out, int& changed) {
-  changed = 0;
-  if (size < 16 || Be32(retail) != kStrgMagic || Be32(retail + 4) != 0) {
+bool TranslateText(const std::u16string& remastered, const std::u16string& retail, const std::u16string& english,
+                   std::u16string& out) {
+  // The disc's button images, in the order its string shows them.
+  std::vector<std::u16string> images;
+  for (size_t at = retail.find(u"&image="); at != std::u16string::npos; at = retail.find(u"&image=", at + 1)) {
+    const size_t end = retail.find(u';', at);
+    if (end == std::u16string::npos) {
+      return false;
+    }
+    images.push_back(retail.substr(at, end + 1 - at));
+  }
+  // Breaks are where Remastered's English has the disc's (the same count), else
+  // only between paragraphs: the rest were made for Remastered's boxes.
+  const bool keepBreaks = CountBreaks(english) == CountBreaks(retail);
+  std::u16string body;
+  bool coloured = false;
+  size_t image = 0;
+  for (size_t i = 0; i < remastered.size(); ++i) {
+    const char16_t c = remastered[i];
+    if (c == 0x0E) {
+      const size_t units = TagUnits(remastered, i);
+      if (units == 0) {
+        return false;
+      }
+      const unsigned group = remastered[i + 1];
+      const unsigned type = remastered[i + 2];
+      const char16_t* payload = remastered.data() + i + 4;
+      i += units;
+      if (group == 0 && type == 3 && units == 5) {
+        AppendColour(payload, body, coloured);
+      } else if ((group == 0 && type == 2) || (group == 1 && type == 3)) {
+        // A size and a layout mode, as in ConvertText.
+      } else if (group == 1 && (type == 0 || type == 1) && image < images.size()) {
+        body += images[image++];  // a button or an icon, where the disc shows its own
+      } else {
+        return false;
+      }
+    } else if (c == 0x0F) {
+      i += 2;
+    } else if (c == u'\n') {
+      if (keepBreaks) {
+        body.push_back(c);
+      } else if (i + 1 < remastered.size() && remastered[i + 1] == u'\n') {
+        while (!body.empty() && body.back() == u' ') {
+          body.pop_back();
+        }
+        body += u"\n\n";
+        while (i + 1 < remastered.size() && remastered[i + 1] == u'\n') {
+          ++i;
+        }
+      } else if (!body.empty() && !IsSpace(body.back()) && body.back() != u'-') {
+        body.push_back(u' ');
+      }
+    } else if (c == u'\r') {
+      // Windows line ends: the \n does the work.
+    } else if (c >= 0x20 && c != u'&' && c != 0x7F) {
+      body.push_back(c);
+    } else {
+      return false;  // the original's markup has no escape for '&'
+    }
+  }
+  if (image != images.size()) {
     return false;
   }
-  const size_t languages = Be32(retail + 8);
-  const size_t count = Be32(retail + 12);
+  if (coloured) {
+    body += u"&pop;";
+  }
+  if (Words(body, true).empty()) {
+    return false;
+  }
+  out = LayoutPrefix(retail) + body;
+  return true;
+}
+
+bool MergeStringTable(const uint8_t* retail, size_t size, const TableText& text, std::vector<uint8_t>& out,
+                      int& reworded, int& translated) {
+  reworded = 0;
+  translated = 0;
+  if (size < 16 || ReadBE32(retail) != kStrgMagic || ReadBE32(retail + 4) != 0) {
+    return false;
+  }
+  const size_t languages = ReadBE32(retail + 8);
+  const size_t count = ReadBE32(retail + 12);
   if (languages > (size - 16) / 8 || count > size / 4) {
     return false;
   }
   const size_t base = 16 + 8 * languages;
   // Every language, as its strings.
+  std::vector<uint32_t> codes;
   std::vector<std::vector<std::u16string>> tables(languages);
+  size_t english = languages;
   for (size_t l = 0; l < languages; ++l) {
-    const size_t offset = Be32(retail + 20 + 8 * l);
+    codes.push_back(ReadBE32(retail + 16 + 8 * l));
+    const size_t offset = ReadBE32(retail + 20 + 8 * l);
     if (offset > size - base || 4 + 4 * count > size - base - offset) {
       return false;
     }
     const uint8_t* table = retail + base + offset + 4;
     const size_t room = size - base - offset - 4;
     for (size_t s = 0; s < count; ++s) {
-      std::u16string text;
-      for (size_t p = Be32(table + 4 * s);; p += 2) {
+      std::u16string string;
+      for (size_t p = ReadBE32(table + 4 * s);; p += 2) {
         if (p + 2 > room) {
           return false;
         }
@@ -340,47 +468,122 @@ bool MergeStringTable(const uint8_t* retail, size_t size, const std::map<uint32_
         if (c == 0) {
           break;
         }
-        text.push_back(c);
+        string.push_back(c);
       }
-      tables[l].push_back(std::move(text));
+      tables[l].push_back(std::move(string));
     }
-    if (Be32(retail + 16 + 8 * l) != kEnglish) {
+    if (codes[l] == kEnglish && english == languages) {
+      english = l;
+    }
+  }
+  if (english == languages) {
+    return false;
+  }
+  const std::vector<std::u16string> disc = tables[english];
+
+  // Each disc string's Remastered versions: by its index, else by a name whose
+  // English is the disc's word for word, or is the disc's screen title ("[ Inventory ]")
+  // without its brackets.
+  std::vector<const std::map<std::string, std::u16string>*> versions(count, nullptr);
+  std::vector<bool> bracketed(count, false);
+  for (const auto& [index, byLanguage] : text.byIndex) {
+    if (index < count) {
+      versions[index] = &byLanguage;
+    }
+  }
+  std::vector<std::u16string> discWords;
+  if (!text.byName.empty()) {
+    for (size_t s = 0; s < count; ++s) {
+      discWords.push_back(Words(disc[s], true));
+    }
+  }
+  for (const auto& [name, byLanguage] : text.byName) {
+    const auto found = byLanguage.find(kRemasteredEnglish);
+    if (found == byLanguage.end()) {
       continue;
     }
-    for (const auto& [index, text] : strings) {
-      std::u16string converted;
-      if (index < count && ConvertText(text, tables[l][index], converted)) {
-        tables[l][index] = std::move(converted);
-        ++changed;
+    const std::u16string words = MessageWords(found->second);
+    for (size_t s = 0; s < count && !words.empty(); ++s) {
+      if (versions[s] != nullptr) {
+        continue;
+      }
+      if (discWords[s] == words || discWords[s] == u"[ " + words + u" ]") {
+        versions[s] = &byLanguage;
+        bracketed[s] = discWords[s] != words;
       }
     }
   }
-  if (changed == 0) {
+
+  for (size_t s = 0; s < count; ++s) {
+    if (versions[s] == nullptr) {
+      continue;
+    }
+    const auto found = versions[s]->find(kRemasteredEnglish);
+    std::u16string converted;
+    if (found != versions[s]->end() && !bracketed[s] && ConvertText(found->second, disc[s], converted)) {
+      tables[english][s] = std::move(converted);
+      ++reworded;
+    }
+  }
+  // A language starts as the English, so a string without a translation stays readable.
+  for (size_t k = 0; k < kTextLanguageCount; ++k) {
+    const uint32_t code = FourCc(kTextLanguages[k].code);
+    if (std::find(codes.begin(), codes.end(), code) != codes.end()) {
+      continue;
+    }
+    std::vector<std::u16string> strings = tables[english];
+    int done = 0;
+    for (size_t s = 0; s < count; ++s) {
+      if (versions[s] == nullptr) {
+        continue;
+      }
+      const auto found = versions[s]->find(kTextLanguages[k].code);
+      const auto remasteredEnglish = versions[s]->find(kRemasteredEnglish);
+      std::u16string converted;
+      if (found != versions[s]->end() &&
+          TranslateText(found->second, disc[s],
+                        remasteredEnglish != versions[s]->end() ? remasteredEnglish->second : std::u16string(),
+                        converted)) {
+        if (bracketed[s]) {
+          const size_t prefix = LayoutPrefix(disc[s]).size();
+          converted = converted.substr(0, prefix) + u"[ " + converted.substr(prefix) + u" ]";
+        }
+        strings[s] = std::move(converted);
+        ++done;
+      }
+    }
+    if (done > 0) {
+      codes.push_back(code);
+      tables.push_back(std::move(strings));
+      translated += done;
+    }
+  }
+  if (reworded == 0 && translated == 0) {
     return false;
   }
   out.clear();
-  PutBe32(out, kStrgMagic);
-  PutBe32(out, 0);
-  PutBe32(out, uint32_t(languages));
-  PutBe32(out, uint32_t(count));
+  AppendBE32(out, kStrgMagic);
+  AppendBE32(out, 0);
+  AppendBE32(out, uint32_t(tables.size()));
+  AppendBE32(out, uint32_t(count));
   size_t offset = 0;
-  for (size_t l = 0; l < languages; ++l) {
-    PutBe32(out, Be32(retail + 16 + 8 * l));
-    PutBe32(out, uint32_t(offset));
+  for (size_t l = 0; l < tables.size(); ++l) {
+    AppendBE32(out, codes[l]);
+    AppendBE32(out, uint32_t(offset));
     offset += 4 + 4 * count;
     for (const std::u16string& text : tables[l]) {
       offset += 2 * (text.size() + 1);
     }
   }
-  for (size_t l = 0; l < languages; ++l) {
+  for (size_t l = 0; l < tables.size(); ++l) {
     size_t length = 4 * count;
     for (const std::u16string& text : tables[l]) {
       length += 2 * (text.size() + 1);
     }
-    PutBe32(out, uint32_t(length));
+    AppendBE32(out, uint32_t(length));
     size_t at = 4 * count;
     for (const std::u16string& text : tables[l]) {
-      PutBe32(out, uint32_t(at));
+      AppendBE32(out, uint32_t(at));
       at += 2 * (text.size() + 1);
     }
     for (const std::u16string& text : tables[l]) {

@@ -397,7 +397,7 @@ def join_locations(ap_locations, dump_locations, world_map):
         reverse_worlds.setdefault(asset_id, name)
 
     port_groups = {}
-    for key, (item, amount, capacity) in dump_locations.items():
+    for key, (item, amount, capacity, _hidden) in dump_locations.items():
         try:
             world_hex, mrea_hex, editor_hex = key.split(":")
             world_id, mrea_id, editor_id = (

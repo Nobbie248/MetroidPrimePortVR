@@ -68,6 +68,7 @@ public:
     return x6c_controlTxtrMap;
   }
   int GetMusicVolume() const { return x5c_musicVol; }
+  int GetSfxVolume() const { return x58_sfxVol; }
   const float GetHudAlpha() const;
   int GetHUDAlpha() const { return x60_hudAlpha; }
   const float GetHelmetAlpha() const;

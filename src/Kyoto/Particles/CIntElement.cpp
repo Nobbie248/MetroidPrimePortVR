@@ -157,6 +157,19 @@ CIEInitialRandom::~CIEInitialRandom() {
 }
 
 bool CIEInitialRandom::GetValue(int frame, int& valOut) const {
+#ifdef TARGET_PC
+  if (const CElementGen::CParticle* particle = CParticleGlobals::xPortIrndParticle) {
+    // See CREInitialRandom::GetValue; same range as CRandom16::Range(a, b), b inclusive.
+    int a, b;
+    x4_a->GetValue(frame, a);
+    x8_b->GetValue(frame, b);
+    const int span = (b - a) + 1;
+    valOut = a + (span > 0 ? static_cast< int >(CParticleGlobals::PortIrndBits(particle, this) %
+                                                static_cast< u32 >(span))
+                           : 0);
+    return false;
+  }
+#endif
   if (frame == 0) {
     int a, b;
     x4_a->GetValue(frame, a);

@@ -75,7 +75,7 @@ struct Config {
   std::vector< std::string > tags;
   int versionMajor = 0;
   int versionMinor = 6;
-  int versionBuild = 0;
+  int versionBuild = 8;
   std::map< std::string, int64_t > locations; // randomizer key -> AP location id
   std::map< int64_t, ItemEntry > items;       // AP item id -> grant
   // The tables are the built-in Metroid Prime ones (port_ap_metroidprime.h),
@@ -179,6 +179,18 @@ public:
   // packets are appended to `outgoing`, and items to grant to `granted`.
   void HandlePacket(const PortJson::Value& packet, std::vector< std::string >& outgoing,
                     std::vector< ItemGrant >& granted);
+
+  // A DataPackage's id -> name tables, per game. Building them is the slow
+  // part of a DataPackage (every name of every game) and needs nothing from
+  // the session, so the client builds them outside its lock and then merges
+  // them in; HandlePacket does both for a DataPackage. Neither throws.
+  struct GameNames {
+    std::map< int64_t, std::string > items;
+    std::map< int64_t, std::string > locations;
+  };
+  using DataPackageNames = std::map< std::string, GameNames >;
+  static DataPackageNames ParseDataPackage(const PortJson::Value& packet);
+  void MergeDataPackage(DataPackageNames&& names);
 
   // Human-readable notifications for the HUD and overlay, oldest first: item
   // receipts ("Energy Tank from Bob") and PrintJSON text. Drained by whoever
@@ -287,7 +299,12 @@ public:
   void SetState(const State& state) {
     mState = state;
     mGrantFrom = 0;
+    mWorldRevision = NextWorldRevision();
   }
+  // Changes whenever State::world may have (slot_data parsed, a state swapped
+  // in), so the client can tell the layout is unchanged without comparing or
+  // copying it. Unique across sessions; never 0.
+  uint64_t WorldRevision() const { return mWorldRevision; }
   bool HandshakeComplete() const { return mHandshakeComplete; }
   // "slot 3, team 0" after Connected, empty before.
   const std::string& SlotDescription() const { return mSlotDescription; }
@@ -322,11 +339,10 @@ private:
   // Slot -> game, from Connected's slot_info.
   std::map< int64_t, std::string > mSlotGames;
   // Id -> name per game, from DataPackage.
-  struct GameNames {
-    std::map< int64_t, std::string > items;
-    std::map< int64_t, std::string > locations;
-  };
   std::map< std::string, GameNames > mGameNames;
+  // See WorldRevision.
+  static uint64_t NextWorldRevision();
+  uint64_t mWorldRevision = NextWorldRevision();
   // What sits at this slot's locations, from LocationInfo.
   struct ScoutedItem {
     int64_t item = 0;

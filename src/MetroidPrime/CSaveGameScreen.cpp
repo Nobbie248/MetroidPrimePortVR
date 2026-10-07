@@ -1,4 +1,5 @@
 #include "MetroidPrime/CSaveGameScreen.hpp"
+#include "GuiSys/CGuiCamera.hpp"
 #include "GuiSys/CGuiFrame.hpp"
 #include "GuiSys/CGuiTableGroup.hpp"
 #include "GuiSys/CGuiTextPane.hpp"
@@ -314,6 +315,11 @@ bool CSaveGameScreen::PumpLoad() {
   }
   if (x44_frmeGenericMenu.TryCache()) {
     x50_loadedFrame = x44_frmeGenericMenu.GetObject();
+    // Port: keep the prompt's proportions in widescreen, pillarboxed (as the
+    // front end does) instead of stretching it across the wide viewport.
+    if (CGuiCamera* cam = x50_loadedFrame->GetFrameCamera()) {
+      cam->SetAspectMatch(true, false);
+    }
     x54_textpane_message =
         static_cast< CGuiTextPane* >(x50_loadedFrame->FindWidget("textpane_message"));
     x58_tablegroup_choices =

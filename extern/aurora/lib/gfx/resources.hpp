@@ -26,11 +26,26 @@ struct FrameBufferSizes {
   // The AuroraConfig::frameBufferScale these sizes are for.
   uint32_t scale = 1;
 
+  // Kept across frames (AuroraConfig::residentGeometryMiB): the device buffers hold these
+  // after what a frame holds, and no staging buffer does.
+  uint64_t residentVertex = 0;
+  uint64_t residentIndex = 0;
+  uint64_t residentStorage = 0;
+
   uint64_t staging() const noexcept {
     return vertex + uniform + index + storage + (UseTextureBuffer ? TextureUploadSize : 0);
   }
 };
 const FrameBufferSizes& frame_buffer_sizes() noexcept;
+
+enum class ResidentBuffer : uint8_t { Vertex, Index, Storage };
+// The part of a shared buffer kept across frames, as offsets into that buffer; size 0
+// when there is none.
+Range resident_region(ResidentBuffer kind) noexcept;
+// Copies `size` bytes into a resident region at `offset` (an offset into the buffer, as
+// resident_region gives), before the pass being recorded draws. False outside a frame's
+// recording, where nothing is copied.
+bool queue_resident_upload(ResidentBuffer kind, uint32_t offset, const uint8_t* data, size_t size);
 
 namespace detail {
 struct Resources {

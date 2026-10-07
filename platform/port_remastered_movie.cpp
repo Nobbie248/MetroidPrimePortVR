@@ -98,18 +98,35 @@ bool MovieStream(const uint8_t* data, size_t size, size_t& offset, size_t& lengt
 }
 
 bool JpegSplitter::Feed(const uint8_t* data, size_t size, const Sink& sink) {
+  // The pictures already split off go once per call, not once per picture:
+  // what is left is at most one unfinished picture.
+  if (m_start != 0) {
+    m_data.erase(m_data.begin(), m_data.begin() + m_start);
+    m_pos -= m_start;
+    if (m_scanStart != 0) {
+      m_scanStart -= m_start;
+    }
+    m_start = 0;
+  }
   m_data.insert(m_data.end(), data, data + size);
+  if (!Split(sink)) {
+    return false;
+  }
+  return m_data.size() - m_start <= kMaxPicture;
+}
+
+bool JpegSplitter::Split(const Sink& sink) {
   for (;;) {
     if (m_scanStart == 0) {
       // Header segments: a marker and a length each, up to the start of scan.
-      if (m_pos == 0) {
-        if (m_data.size() < 2) {
+      if (m_pos == m_start) {
+        if (m_data.size() - m_start < 2) {
           return true;
         }
-        if (m_data[0] != 0xFF || m_data[1] != 0xD8) {
+        if (m_data[m_start] != 0xFF || m_data[m_start + 1] != 0xD8) {
           return false;
         }
-        m_pos = 2;
+        m_pos = m_start + 2;
       }
       if (m_pos + 4 > m_data.size()) {
         return true;
@@ -161,8 +178,8 @@ bool JpegSplitter::Feed(const uint8_t* data, size_t size, const Sink& sink) {
     if (marker != 0xD9) {
       return false; // a second scan: not a baseline picture
     }
-    std::vector<uint8_t> frame(m_data.begin(), m_data.begin() + m_scanStart);
-    frame.reserve(m_pos + 2);
+    std::vector<uint8_t> frame(m_data.begin() + m_start, m_data.begin() + m_scanStart);
+    frame.reserve(m_pos + 2 - m_start);
     for (size_t i = m_scanStart; i < m_pos; ++i) {
       frame.push_back(m_data[i]);
       if (m_data[i] == 0xFF && m_data[i + 1] == 0x00) {
@@ -171,8 +188,8 @@ bool JpegSplitter::Feed(const uint8_t* data, size_t size, const Sink& sink) {
     }
     frame.push_back(0xFF);
     frame.push_back(0xD9);
-    m_data.erase(m_data.begin(), m_data.begin() + m_pos + 2);
-    m_pos = 0;
+    m_start = m_pos + 2;
+    m_pos = m_start;
     m_scanStart = 0;
     if (!sink(frame)) {
       return false;

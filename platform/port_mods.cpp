@@ -3,12 +3,14 @@
 // result with Aurora's DVD overlays.
 
 #include "port_mods.h"
+#include "port_strings.h"
 #include "port_paths.h"
 
 #include "port_debug.h"
 #include "port_hd_font.h"
 #include "port_hud_bars.h"
 #include "port_log.h"
+#include "port_remastered_import.h"
 #include "port_room_env.h"
 #include "port_room_geo.h"
 #include "port_room_liquid.h"
@@ -25,6 +27,8 @@
 #include <cstdlib>
 #include <cstring>
 #include <filesystem>
+#include <fstream>
+#include <iterator>
 #include <map>
 #include <set>
 #include <unordered_map>
@@ -44,6 +48,11 @@ std::vector<std::string> sOverlayNames;
 std::unordered_map<uint32_t, std::string> sNativeTextures;
 // <MREA id>.roomenv files, by area.
 std::unordered_map<uint32_t, std::string> sRoomEnvs;
+std::unordered_map<uint32_t, std::string> sMaterialCubes;
+std::string sBrdfLut;
+// gallery/NNN.jpg files, by file name, so a later mod's picture replaces an earlier one's.
+std::map<std::string, std::string> sGallery;
+std::vector<std::string> sRoomLods;
 std::string sFont;
 std::unordered_map<uint32_t, std::string> sRoomGeos;
 std::unordered_map<uint32_t, std::string> sRoomLiquids;
@@ -67,19 +76,8 @@ std::string PathString(const fs::path& path) {
 
 fs::path PathFromString(const std::string& text) { return fs::path(std::u8string(text.begin(), text.end())); }
 
-std::string Lower(std::string text) {
-  for (char& c : text) {
-    if (c >= 'A' && c <= 'Z') {
-      c = char(c - 'A' + 'a');
-    }
-  }
-  return text;
-}
-
-bool EndsWith(const std::string& text, const char* suffix) {
-  const size_t length = std::strlen(suffix);
-  return text.size() >= length && text.compare(text.size() - length, length, suffix) == 0;
-}
+using port::EndsWith;
+using port::Lower;
 
 // --- Base disc access -------------------------------------------------------
 
@@ -255,6 +253,16 @@ bool HasRoomGeometry() {
 
 const Status& CurrentStatus() { return sStatus; }
 
+const char* StaleRemasteredImport() { return sStatus.staleImport.empty() ? nullptr : sStatus.staleImport.c_str(); }
+
+namespace {
+bool sSuspended = false;
+}
+
+void SetSuspended(bool suspended) { sSuspended = suspended; }
+
+bool Suspended() { return sSuspended; }
+
 // Every .pak on the disc, as (entryNum, path).
 std::vector<std::pair<int32_t, std::string>> DiscPaks() {
   std::vector<std::pair<int32_t, std::string>> paks;
@@ -320,6 +328,24 @@ std::string RoomEnvPath(uint32_t mrea) {
   return found != sRoomEnvs.end() ? found->second : std::string();
 }
 
+std::string MaterialCubePath(uint32_t id) {
+  const auto found = sMaterialCubes.find(id);
+  return found != sMaterialCubes.end() ? found->second : std::string();
+}
+
+std::string BrdfLutPath() { return sBrdfLut; }
+
+std::vector<std::string> RoomLodPaths() { return sRoomLods; }
+
+std::vector<std::string> GalleryPaths() {
+  std::vector<std::string> paths;
+  paths.reserve(sGallery.size());
+  for (const auto& [name, path] : sGallery) {
+    paths.push_back(path);
+  }
+  return paths;
+}
+
 std::string HudBarsPath(uint32_t frame) {
   const auto found = sHudBars.find(frame);
   return found != sHudBars.end() ? found->second : std::string();
@@ -329,6 +355,8 @@ std::string RoomGeoPath(uint32_t mrea) {
   const auto found = sRoomGeos.find(mrea);
   return found != sRoomGeos.end() ? found->second : std::string();
 }
+
+bool RoomGeometryLoaded() { return !sRoomGeos.empty(); }
 
 std::string RoomLiquidPath(uint32_t mrea) {
   const auto found = sRoomLiquids.find(mrea);
@@ -366,12 +394,16 @@ void Initialize() {
   sStatus = {};
   sNativeTextures.clear();
   sRoomEnvs.clear();
+  sMaterialCubes.clear();
+  sBrdfLut.clear();
+  sGallery.clear();
+  sRoomLods.clear();
   sFont.clear();
   sRoomGeos.clear();
   sRoomLiquids.clear();
   sHudBars.clear();
   sStatus.folder = Folder();
-  sStatus.active = PortDebug::ModsEnabled();
+  sStatus.active = PortDebug::ModsEnabled() && !sSuspended;
   if (sStatus.folder.empty()) {
     return;
   }
@@ -395,6 +427,21 @@ void Initialize() {
     ModInfo& info = sStatus.mods.emplace_back();
     info.name = PathString(modDir.filename());
     info.enabled = sStatus.active && std::find(disabled.begin(), disabled.end(), info.name) == disabled.end();
+    // An import is told by its stamp, or by the folder name an import without one (before the
+    // stamp existed) was installed under. Checked even when disabled: it is still out of date.
+    {
+      std::ifstream stamp(modDir / PortRemastered::kImportStampName);
+      const bool stamped = stamp.is_open();
+      info.import = stamped || info.name == PortRemastered::kImportModName;
+      if (info.import) {
+        const std::string text((std::istreambuf_iterator<char>(stamp)), std::istreambuf_iterator<char>());
+        info.importStale = ImportStampStale(text, PortRemastered::kImportVersion);
+      }
+      if (info.importStale && sStatus.staleImport.empty()) {
+        sStatus.staleImport = info.name;
+        Message(info.name + " was imported by an older version; re-import Remastered to get the latest fixes");
+      }
+    }
     if (!info.enabled) {
       continue;
     }
@@ -407,6 +454,11 @@ void Initialize() {
         if (it->is_directory(ec)) {
           it.disable_recursion_pending();
         }
+        continue;
+      }
+      // The Remastered import's diagnostics (reports/*.tsv), not game files.
+      if (it.depth() == 0 && name == "reports" && it->is_directory(ec)) {
+        it.disable_recursion_pending();
         continue;
       }
       if (it->is_regular_file(ec)) {
@@ -433,8 +485,25 @@ void Initialize() {
         sFont = PathString(file);
         continue;
       }
+      if (name == "brdf.lut" && PathString(file.parent_path().filename()) == "roomenv") {
+        sBrdfLut = PathString(file);
+        continue;
+      }
+      if (name.size() > 4 && name.compare(name.size() - 4, 4, ".jpg") == 0 &&
+          PathString(file.parent_path().filename()) == "gallery") {
+        sGallery[name] = PathString(file);
+        continue;
+      }
+      if (name == PortRoomGeo::kLodFileName && PathString(file.parent_path().filename()) == "roomgeo") {
+        sRoomLods.push_back(PathString(file));
+        continue;
+      }
       if (PortRoomEnv::ParseFileName(name, id)) {
         sRoomEnvs[id] = PathString(file);
+        continue;
+      }
+      if (ParseMaterialCubeName(name, id)) {
+        sMaterialCubes[id] = PathString(file);
         continue;
       }
       if (PortHudBars::ParseFileName(name, id)) {
@@ -495,10 +564,10 @@ void Initialize() {
       int32_t entry;
       std::string path;
       std::string hostPath;
-      std::vector<uint8_t> header;
+      std::vector<uint8_t> header{};
       uint64_t size = 0;
-      PakTable table;
-      std::vector<const LooseResource*> take;
+      PakTable table{};
+      std::vector<const LooseResource*> take{};
     };
     std::vector<Pending> pending;
     std::set<uint32_t> knownIds;

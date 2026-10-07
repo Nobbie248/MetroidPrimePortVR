@@ -210,6 +210,28 @@ public:
   bool GetValue(int frame, float& valOut) const override;
 };
 
+#ifdef TARGET_PC
+// Port-only PSSZ: the current particle's secondary size (SSZE), as PSLL is its size.
+class CREParticleSecondarySize : public CRealElement {
+public:
+  ~CREParticleSecondarySize() override {}
+  bool GetValue(int frame, float& valOut) const override;
+};
+
+// Port-only DFCS/DFCP: a clamped ramp of the depth along the camera's forward axis, 0 at A and 1
+// at B, measured from the system origin (DFCS) or the current particle (DFCP).
+class CREDistanceFromCameraBlend : public CRealElement {
+  CRealElement* x4_a;
+  CRealElement* x8_b;
+  bool xc_particle;
+
+public:
+  CREDistanceFromCameraBlend(CRealElement* a, CRealElement* b, bool particle);
+  ~CREDistanceFromCameraBlend() override;
+  bool GetValue(int frame, float& valOut) const override;
+};
+#endif
+
 class CREParticleRotationOrLineWidth : public CRealElement {
 public:
   ~CREParticleRotationOrLineWidth() override {}

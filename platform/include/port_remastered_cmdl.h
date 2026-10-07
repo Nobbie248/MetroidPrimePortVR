@@ -29,6 +29,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <string>
+#include <utility>
 #include <vector>
 
 namespace PortRemastered {
@@ -138,6 +139,42 @@ struct ModelVertexBuffer {
   const ModelAttribute* Find(const std::string& name) const;
 };
 
+// The joint a triangle goes with when a skinned model is cut into rigid pieces, one per
+// joint: the one with the most weight over its three corners (the lowest on a tie), -1
+// for a buffer with no skin. Inline, so the converter links without the parser.
+inline int TriangleJoint(const ModelVertexBuffer& vb, const uint32_t corner[3]) {
+  const size_t n = vb.vertexCount;
+  if (vb.joints.size() != n * 4 || vb.weights.size() != n * 4) {
+    return -1;
+  }
+  std::pair<uint16_t, float> sum[12];
+  size_t used = 0;
+  for (int c = 0; c < 3; ++c) {
+    if (corner[c] >= n) {
+      continue;
+    }
+    for (size_t i = size_t(corner[c]) * 4; i < size_t(corner[c]) * 4 + 4; ++i) {
+      size_t k = 0;
+      while (k < used && sum[k].first != vb.joints[i]) {
+        ++k;
+      }
+      if (k == used) {
+        sum[used++] = {vb.joints[i], 0.0f};
+      }
+      sum[k].second += vb.weights[i];
+    }
+  }
+  int best = -1;
+  float most = 0.0f;
+  for (size_t k = 0; k < used; ++k) {
+    if (sum[k].second > most || (sum[k].second == most && best >= 0 && sum[k].first < best)) {
+      best = sum[k].first;
+      most = sum[k].second;
+    }
+  }
+  return best;
+}
+
 // One drawable mesh. Its vertex data is not here, it is in Model::vertexBuffers at
 // `vertexBuffer`; the indices are widened to 32 bit so that a 16 and a 32 bit
 // index buffer read the same.
@@ -151,6 +188,10 @@ struct ModelMesh {
   uint32_t vertexCount = 0;   // vertices in the buffer this mesh draws
   uint16_t unkC = 0;
   uint16_t unkE = 0;
+  // The mesh's entry in the two-bit bitmap after the meshes: its class (0 opaque, 1 sorted
+  // alpha, 2 alpha tested, 3 sorted additive). Blending comes from this, not from MTRL flags.
+  uint8_t bits2 = 0;
+  bool twoSided = false;  // the one-bit bitmap: Remastered draws it with culling off
   std::vector<uint32_t> indices;
 };
 
@@ -181,6 +222,9 @@ struct Model {
   std::vector<uint16_t> lodMeshes;
   std::vector<ModelLod> lods;      // five ranges per LOD entry, in file order
   std::vector<float> lodRules;     // distance thresholds, when the file has them
+  // The HEAD chunk's ANUV sub-chunk after its tag, up to the chunk's end (parsed by
+  // port_remastered_anuv.h); empty when the model animates no UVs.
+  std::vector<uint8_t> anuv;
 };
 
 // Parses one extracted model resource. `size` is the length of `data`, which has to

@@ -5,6 +5,9 @@
 #include "Kyoto/Particles/CRealElement.hpp"
 #include "Kyoto/Particles/CUVElement.hpp"
 #include "Kyoto/Particles/CVectorElement.hpp"
+#ifdef TARGET_PC
+#include "Kyoto/Particles/CGenDescription.hpp"
+#endif
 
 CSwooshDescription::CSwooshDescription()
 : x0_PSLT(nullptr)

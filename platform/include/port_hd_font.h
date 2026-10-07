@@ -78,6 +78,18 @@ struct Box {
 };
 Box GlyphBox(const Glyph& glyph, const Fit& fit, float x, float y, int cellWidth, int glyphBaseline);
 
+// The disc's Deface fonts hold ASCII only, and the languages the port adds
+// need accented letters and typographic punctuation. Each of these characters
+// is given the cell of an ASCII stand-in ('é' that of 'e'), which the bitmap
+// font draws as is and the distance field draws as the real character.
+struct StandIn {
+  uint32_t character;
+  char base;
+};
+const std::vector<StandIn>& StandIns();
+// How much wider `character` is than `base` in `font` (1 when either is missing).
+float AdvanceRatio(const Font& font, uint32_t character, uint32_t base);
+
 }  // namespace PortHdFont
 
 #ifndef PORT_HD_FONT_FILE_ONLY
@@ -102,6 +114,11 @@ bool DrawGlyph(const CRasterFont& font, const CGraphicsPalette* palette, int chr
                const GXColor& tint);
 // Puts back what Begin changed and no bitmap font state sets.
 void End();
+// True for the disc fonts of the distance field's typeface.
+bool SameTypeface(const CRasterFont& font);
+// AdvanceRatio in the mods' distance-field font; 1 when the feature is off or
+// there is no such font.
+float ModAdvanceRatio(uint32_t character, uint32_t base);
 
 }  // namespace PortHdFont
 #endif

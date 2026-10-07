@@ -26,6 +26,18 @@ void destroy_cube(uint32_t id);
 // The view of a room cube, or the probe's when there is no such cube.
 const wgpu::TextureView& cube_view(uint32_t id);
 bool has_cube(uint32_t id);
+// GX_AURORA_BLEND_PBR_CUBE, on the game thread: renders sum(weights[i] * src[i]) into room cube
+// `dst` (created or resized to the first source's size), face by face and mip by mip. Returns
+// false, leaving `dst` as it was or blank, when a source is missing or no EFB pass is open.
+constexpr uint32_t MaxBlend = 4;
+bool blend_cubes(uint32_t dst, const uint32_t* src, const float* weights, uint32_t count);
+
+// The environment BRDF table (GX_AURORA_SET_PBR_BRDF_LUT): 16x8 RG8, 256 bytes. Returns
+// whether one is now set; any other length clears it.
+constexpr uint32_t BrdfLutBytes = 256;
+bool set_brdf_lut(const uint8_t* texels, size_t length);
+// The table, or a 1x1 dummy while there is none. The sampler is sampler().
+const wgpu::TextureView& brdf_lut_view();
 
 // Ambient volumes (GX_AURORA_CREATE_PBR_VOLUME): a room's baked ambient light as five 3D
 // textures (mean, lobe, and the direction and sharpness of red, green and blue), which a
@@ -36,4 +48,16 @@ void destroy_volume(uint32_t id);
 bool has_volume(uint32_t id);
 // One texture of a volume, or of an empty one when there is no such volume.
 const wgpu::TextureView& volume_view(uint32_t id, uint32_t index);
+
+// Baked lightmaps (GX_AURORA_CREATE_PBR_LIGHTMAP): a 2D array of layers, laid out as
+// GXCreatePBRLightmap says (`format` is its GXPBRLightmapFormat). Not created when the
+// layout has no slot for it (lightmap_available) or the data is short.
+bool lightmap_available();
+bool lightmap_bc_supported();
+void create_lightmap(uint32_t id, uint32_t width, uint32_t height, uint32_t layers, uint32_t format,
+                     const uint8_t* texels, size_t length);
+void destroy_lightmap(uint32_t id);
+bool has_lightmap(uint32_t id);
+// The lightmap's array view, or a 1x1x4 dummy when there is no such lightmap.
+const wgpu::TextureView& lightmap_view(uint32_t id);
 } // namespace aurora::gfx::probe

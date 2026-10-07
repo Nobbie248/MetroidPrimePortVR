@@ -13,8 +13,8 @@ public:
   bool Free(const void* ptr);
 
   bool PtrWithinPool(const void* ptr) const {
-    return uint((reinterpret_cast< const uchar* >(ptr) - reinterpret_cast< uchar* >(x0_mainData)) /
-                4) < x8_numBlocks;
+    return size_t((reinterpret_cast< const uchar* >(ptr) - reinterpret_cast< uchar* >(x0_mainData)) /
+                  4) < x8_numBlocks;
   }
 
   uint GetIndexFromPtr(const void* ptr) const {

@@ -1,3 +1,4 @@
+#include "port_env.h"
 #include "port_randomizer.h"
 #include "port_log.h"
 #include "port_paths.h"
@@ -7,14 +8,17 @@
 #include <algorithm>
 #include <cctype>
 #include <cstdio>
+#include <cstdint>
 #include <cstdlib>
 #include <cstring>
+#include <filesystem>
 #include <fstream>
 #include <iterator>
 #include <limits>
 #include <map>
 #include <set>
 #include <string>
+#include <system_error>
 #include <utility>
 
 namespace PortRandomizer {
@@ -81,11 +85,6 @@ std::string SeedPath() {
 }
 
 std::string LogPath(const char* name) { return UserDirectory() + name; }
-
-bool EnvEnabled(const char* name) {
-  const char* value = std::getenv(name);
-  return value != nullptr && value[0] != '\0' && std::strcmp(value, "0") != 0;
-}
 
 struct ParseError {
   size_t offset;
@@ -470,9 +469,17 @@ bool LoadSeed(State& state) {
   return state.enabled;
 }
 
+// The logs are appended to across runs, so one past this size is moved to
+// "<name>.old" (replacing the last one) and started afresh.
+constexpr std::uintmax_t kLogLimit = 4u * 1024u * 1024u;
+
 void AppendLog(const char* fileName, const char* line) noexcept {
   try {
     const std::string path = LogPath(fileName);
+    std::error_code error;
+    const std::uintmax_t size = std::filesystem::file_size(path, error);
+    if (!error && size > kLogLimit)
+      std::filesystem::rename(path, path + ".old", error);
     std::ofstream output(path, std::ios::app);
     if (output)
       output << line;
@@ -487,7 +494,7 @@ void EnsureLoaded() {
     static const bool loaded = []() noexcept {
       try {
         State& state = GetState();
-        state.dump = EnvEnabled("MP_RANDO_DUMP");
+        state.dump = port::EnvFlag("MP_RANDO_DUMP");
         (void)LoadSeed(state);
       } catch (const ParseError& error) {
         State& state = GetState();

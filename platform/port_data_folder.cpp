@@ -1,4 +1,5 @@
 #include "port_data_folder.h"
+#include "port_strings.h"
 
 #include "port_paths.h"
 
@@ -38,10 +39,7 @@ std::string Relative(const fs::path& path, const fs::path& base) {
   return std::string(text.begin(), text.end());
 }
 
-bool EndsWith(const std::string& text, const char* suffix) {
-  const size_t length = std::char_traits< char >::length(suffix);
-  return text.size() >= length && text.compare(text.size() - length, length, suffix) == 0;
-}
+using port::EndsWith;
 
 // Every file a move copies, relative to `root` with '/' separators.
 std::vector< std::string > ListFiles(const std::string& root) {

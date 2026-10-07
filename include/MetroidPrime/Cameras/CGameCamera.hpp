@@ -50,6 +50,18 @@ public:
   // built with the default aspect, so follow it instead of the value cached at construction.
   // A stale aspect culls actors in the widened margins, which then stop animating.
   float GetAspectRatio() const;
+  // Port: the vertical FOV to draw with. Below 4:3 the game keeps its 4:3 horizontal extent
+  // and widens the vertical FOV instead of squeezing the view into a slice ("Vert+"). Cinematic
+  // cameras already derive their vertical FOV from a horizontal one and the live aspect.
+  static float VertPlusFov(float fov, float aspect);
+  // How far, per unit of view depth, the first-person arm cannon moves down so it stays on the
+  // screen's bottom edge as at 4:3 when the view is Vert+ widened (0 at 4:3 and wider).
+  static float VertPlusGunDrop(float aspect);
+  // FOV before the Vert+ widening, for blending into cameras that get widened.
+  float GetUnwidenedFov() const;
+  float GetRenderFov() const {
+    return x170_26_fovIsFitted ? x15c_currentFov : VertPlusFov(x15c_currentFov, GetAspectRatio());
+  }
 #else
   float GetAspectRatio() const { return x168_aspect; }
 #endif
@@ -68,6 +80,9 @@ protected:
   int x16c_controllerIdx;
   mutable bool x170_24_perspDirty : 1;
   bool x170_25_disablesInput : 1;
+#ifdef TARGET_PC
+  bool x170_26_fovIsFitted : 1;
+#endif
   float x174_delayTime;
   float x178_perspInterpRemTime;
   float x17c_perspInterpDur;

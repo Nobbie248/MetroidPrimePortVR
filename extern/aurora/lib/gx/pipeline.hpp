@@ -26,6 +26,7 @@ struct DrawData {
   // indices absolute into it (gx/geometry_cache.hpp), vtxStart 0.
   bool cachedGeometry = false;
   bool nativeVertices = false;
+  bool shadowGroup = false; // bindGroups.textureBindGroup has the shadow receiver layout
   // ... and the texture bind groups, when the draw samples an EFB copy taken
   // per eye; zero binds the mono group. Under multiview (gfx/stereo_multiview.hpp)
   // [0] is the multiview pipeline's bind group, of 2D array views.
@@ -50,6 +51,8 @@ struct PipelineConfig {
   uint32_t polygonOffsetBits;
   uint32_t polygonOffsetScaleBits;
   uint32_t polygonOffsetClampBits;
+  // 1: the sun's shadow-map pipeline of a ShaderConfig::shadow draw (vs_shadow, depth only).
+  uint32_t shadowPass = 0;
   bool depthCompare, depthUpdate, alphaUpdate, colorUpdate;
 };
 static_assert(std::has_unique_object_representations_v<PipelineConfig>);

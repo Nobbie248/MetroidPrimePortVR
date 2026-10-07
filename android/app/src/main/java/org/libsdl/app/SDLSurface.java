@@ -51,6 +51,36 @@ public class SDLSurface extends SurfaceView implements SurfaceHolder.Callback,
     // Pinch events
     private final ScaleGestureDetector scaleGestureDetector;
 
+    // Port: the mouse button state native SDL last saw. It works out which
+    // button changed by diffing against it, so a release that never arrives
+    // (pointer capture ending mid-press, a cancelled gesture) left a button
+    // held for good, and the next click diffed to button 0. UI thread only.
+    private static int sMouseButtonState;
+
+    private static void sendMouseButtons(int state, int action, float x, float y, boolean relative) {
+        if (action == MotionEvent.ACTION_CANCEL) {
+            action = MotionEvent.ACTION_UP;
+            state = 0;
+        }
+        if (action == MotionEvent.ACTION_DOWN || action == MotionEvent.ACTION_UP) {
+            final int changed = action == MotionEvent.ACTION_DOWN ? state & ~sMouseButtonState
+                                                                  : sMouseButtonState & ~state;
+            if (changed == 0) {
+                return;
+            }
+            sMouseButtonState = state;
+        }
+        SDLActivity.onNativeMouse(state, action, x, y, relative);
+    }
+
+    // Port: called when pointer capture changes, after which a held button's
+    // release may never be delivered.
+    static void releaseMouseButtons() {
+        if (sMouseButtonState != 0) {
+            sendMouseButtons(0, MotionEvent.ACTION_UP, 0, 0, true);
+        }
+    }
+
     // Startup
     protected SDLSurface(Context context) {
         super(context);
@@ -281,7 +311,7 @@ public class SDLSurface extends SurfaceView implements SurfaceHolder.Callback,
                 y = motionListener.getEventY(event, i);
                 relative = motionListener.inRelativeMode();
 
-                SDLActivity.onNativeMouse(buttonState, action, x, y, relative);
+                sendMouseButtons(buttonState, action, x, y, relative);
             } else if (toolType == MotionEvent.TOOL_TYPE_STYLUS || toolType == MotionEvent.TOOL_TYPE_ERASER) {
                 pointerId = event.getPointerId(i);
                 x = event.getX(i);
@@ -441,7 +471,7 @@ public class SDLSurface extends SurfaceView implements SurfaceHolder.Callback,
                     y = event.getY(i);
                     int button = event.getButtonState();
 
-                    SDLActivity.onNativeMouse(button, action, x, y, true);
+                    sendMouseButtons(button, action, x, y, true);
                     return true;
             }
         }

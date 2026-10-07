@@ -939,6 +939,10 @@ class SDLGenericMotionListener_API26 extends SDLGenericMotionListener_API24 {
             } else {
                 SDLActivity.getContentView().releasePointerCapture();
             }
+            if (enabled != mRelativeModeEnabled) {
+                // Port: a press made before the switch may never see its release.
+                SDLActivity.getContentView().post(SDLSurface::releaseMouseButtons);
+            }
             mRelativeModeEnabled = enabled;
             return true;
         } else {

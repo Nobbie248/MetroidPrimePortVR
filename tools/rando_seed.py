@@ -86,8 +86,9 @@ def read_dump(log_path, locations, models, include_drops):
             # are real item locations, so those are the randomizer's targets.
             if capacity <= 0 and not include_drops:
                 continue
-            locations[key.upper()] = (item, amount, capacity)
-            if model is None:
+            hidden = model is not None and int(model, 16) == 0xFFFFFFFF and int(acs, 16) == 0xFFFFFFFF
+            locations[key.upper()] = (item, amount, capacity, hidden)
+            if model is None or hidden:
                 continue
             entry = {
                 "model": "%08X" % int(model, 16),
@@ -119,8 +120,24 @@ def from_dump(log_paths, out_path, seed_name, shuffle_seed, include_drops):
             "use --include-drops to keep drop templates as well"
         )
 
-    keys = sorted(locations)
-    placements = list(locations.values())
+    # A pickup with no model is one a script hands over unseen, next to a
+    # visible pickup of the same item in the same area (Elite Quarters has two
+    # Phazon Suits). It is not a location of its own: it follows its sibling's
+    # placement, so the shuffle neither counts the item twice nor hides an item
+    # where nobody can see it.
+    followers = {}
+    for key, (item, amount, capacity, hidden) in locations.items():
+        if not hidden:
+            continue
+        area = key.rsplit(":", 1)[0]
+        for other, (o_item, o_amount, o_capacity, o_hidden) in sorted(locations.items()):
+            if (not o_hidden and other.startswith(area + ":")
+                    and (o_item, o_amount, o_capacity) == (item, amount, capacity)):
+                followers[key] = other
+                break
+
+    keys = sorted(key for key in locations if key not in followers)
+    placements = [locations[key][:3] for key in keys]
     if shuffle_seed is None:
         random.shuffle(placements)
     else:
@@ -129,6 +146,8 @@ def from_dump(log_paths, out_path, seed_name, shuffle_seed, include_drops):
     seed_locations = {}
     for key, (item, amount, capacity) in zip(keys, placements):
         seed_locations[key] = {"item": item, "amount": amount, "capacity": capacity}
+    for key, leader in sorted(followers.items()):
+        seed_locations[key] = dict(seed_locations[leader])
 
     seed = {"seed": seed_name, "locations": seed_locations}
     if models:

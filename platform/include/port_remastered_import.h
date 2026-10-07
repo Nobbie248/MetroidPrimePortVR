@@ -35,6 +35,34 @@ inline constexpr size_t kImportMaxLines = 200;
 // The mod folder an import ends up as.
 inline constexpr const char* kImportModName = "remastered-models";
 
+// An import is made in stages, and a re-import links in the previous import's output of every
+// stage whose number, options and inputs are unchanged instead of making it again. Bump the
+// number of the stage a change needs re-imported (all of them that it touches):
+namespace ImportStage {
+// port_remastered_convert/cmdl: how models and materials are written (models, effects, rooms,
+// room models, HUD).
+inline constexpr int kConverter = 20;
+// What a converted texture holds: port_remastered_image/txtr/dds/astc, and Converter's Get, Cube
+// and Baked. Each converted texture is kept across imports under its tag and this number, so a
+// kConverter bump re-imports the models without converting their textures again.
+inline constexpr int kTextures = 0;
+inline constexpr int kModels = 4;      // the table's models, their looks and the ANCS copies
+inline constexpr int kEffects = 6;     // port_remastered_effect_import and the particle converters
+inline constexpr int kRooms = 6;       // port_remastered_room: roomenv/, .roomgeo, .roomliquid, water maps
+inline constexpr int kRoomModels = 0;  // the rooms' own models and their levels of detail
+inline constexpr int kText = 0;        // port_remastered_text, and the font (port_remastered_font)
+inline constexpr int kHud = 1;         // port_remastered_hud, port_remastered_map
+inline constexpr int kMovies = 0;      // port_remastered_movie
+inline constexpr int kGallery = 0;     // the gallery pictures (port_gallery)
+}  // namespace ImportStage
+// Any stage's bump raises it. A full import writes it to kImportStampName in the mod; the mod scan
+// (port_mods.h) tells the player when an import carries a lower number, or none.
+inline constexpr int kImportVersion = 38 + ImportStage::kConverter + ImportStage::kTextures + ImportStage::kModels +
+                                      ImportStage::kEffects + ImportStage::kRooms + ImportStage::kRoomModels +
+                                      ImportStage::kText + ImportStage::kHud + ImportStage::kMovies +
+                                      ImportStage::kGallery;
+inline constexpr const char* kImportStampName = ".import-version";
+
 // ~/.switch/prod.keys if it is there, else empty.
 std::string DefaultKeysPath();
 
@@ -42,13 +70,16 @@ std::string DefaultKeysPath();
 // the game. The disc must be open. False (with the reason in the state's
 // message) when one is already running or there is no mods folder.
 bool StartImport(const std::string& nspPath, const std::string& keysPath, int threads = 0);
-// Only the menu movies (port_remastered_movie.h), into the mod an earlier
-// import made: for a player who had no ffmpeg then. Same state and cancelling;
+// Only the menu movies (port_remastered_movie.h) and the Extras gallery, into the mod an earlier
+// import made: for a player who had no ffmpeg then, or imported before the gallery. Same state and cancelling;
 // false when one is running or there is no such mod.
 bool StartMovieImport(const std::string& nspPath, const std::string& keysPath);
 // Whether the next import also converts the rooms themselves (five times the
 // size and twice the time). MP_REMASTERED_GEOMETRY, when set, decides instead.
 void SetImportGeometry(bool on);
+// Whether the next import links in the unchanged stages of the previous one (the default) or
+// makes everything again. MP_REMASTERED_REUSE=0 turns it off whatever this says.
+void SetImportReuse(bool on);
 ImportState ImportStatus();
 // Asks the running import to stop; it ends at the next model.
 void CancelImport();

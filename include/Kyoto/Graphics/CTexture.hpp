@@ -142,9 +142,21 @@ private:
   // Port: the asset id, when a mod draws this texture from <id>.dds (port_mods.h).
   uint mPortNativeId;
   mutable bool mPortTexelsChanged; // written in place since the last Load
+  mutable EClampMode mPortClampT;  // mClampMode is the S axis's
 
 public:
   void PortSetNativeId(uint id);
+  // Non-zero when a mod's .dds stands in for this texture's (stub) texels.
+  uint PortNativeId() const { return mPortNativeId; }
+  // Blank rows for new glyph cells at the bottom (the height grows), keeping
+  // mip 0's texels. Only single-mip 4/8-bit textures; false otherwise and when
+  // a mod replaces the texels. Existing UVs must be rescaled by old/new height.
+  bool PortGrowHeight(int extraRows);
+  // Load with a mode per axis (a Remastered material's sampler).
+  void PortLoad(GXTexMapID texMapId, EClampMode clampS, EClampMode clampT) const;
+  // The GX object PortLoad just bound (valid until the texture is freed); the
+  // VFX particle draw hands it to aurora::gfx::vfx.
+  const GXTexObj* PortTexObj() const { return &mTexObj; }
 #endif
 };
 CHECK_SIZEOF(CTexture, 0x68)

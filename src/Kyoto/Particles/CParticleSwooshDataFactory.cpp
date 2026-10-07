@@ -2,6 +2,9 @@
 
 #include "Kyoto/CRandom16.hpp"
 #include "Kyoto/Particles/CParticleDataFactory.hpp"
+#ifdef TARGET_PC
+#include "Kyoto/Particles/CGenDescription.hpp"
+#endif
 #include "Kyoto/Streams/CInputStream.hpp"
 
 const CFactoryFnReturn FParticleSwooshDataFactory(const SObjectTag& tag, CInputStream& in,
@@ -26,6 +29,13 @@ CSwooshDescription* CParticleSwooshDataFactory::CreateGeneratorDescription(CInpu
   CSwooshDescription* desc = rs_new CSwooshDescription();
 
   CreateWPSM(desc, in, pool);
+#ifdef TARGET_PC
+  if (desc->xPortVfx) {
+    for (CPortVfxMat::Tex& t : desc->xPortVfx->mat.tex) {
+      t.token.ForceCache();
+    }
+  }
+#endif
 
   return desc;
 }
@@ -124,6 +134,23 @@ bool CParticleSwooshDataFactory::CreateWPSM(CSwooshDescription* swoosh, CInputSt
     case 'CRND':
       swoosh->x45_26_CRND = CParticleDataFactory::GetBool(in);
       break;
+#ifdef TARGET_PC
+    // Port-only marker of a converted Remastered swoosh (xPortIrnd).
+    case 'PIRN':
+      CParticleDataFactory::GetClassID(in);
+      swoosh->xPortIrnd = in.ReadLong() != 0;
+      break;
+    // Port-only Remastered material, as a PART's.
+    case 'VMAT':
+    case 'VTMT':
+    case 'VPMT':
+    case 'VSMT':
+    case 'ITEN':
+      if (!CParticleDataFactory::PortReadVfxProperty(classId, swoosh->xPortVfx, in, pool)) {
+        return false;
+      }
+      break;
+#endif
     case '_END':
       done = true;
       break;

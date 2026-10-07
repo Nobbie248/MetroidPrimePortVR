@@ -21,11 +21,15 @@
 #include "MetroidPrime/Player/CMorphBall.hpp"
 #include "MetroidPrime/Player/CPlayer.hpp"
 #include "MetroidPrime/Player/CPlayerGun.hpp"
+#include "MetroidPrime/Player/CPlayerState.hpp"
 #include "MetroidPrime/TCastTo.hpp"
 #include "rstl/math.hpp"
 
 #include "port_debug.h"
 #include "port_freecam.h"
+#include "MetroidPrime/CScriptLayerManager.hpp"
+#include "port_room_env.h"
+#include <dolphin/gx/GXExtra.h>
 
 CMFGame::CMFGame(rstl::ncrc_ptr< CStateManager > stateManager,
                  rstl::ncrc_ptr< CInGameGuiManager > guiManager,
@@ -198,7 +202,13 @@ CIOWin::EMessageReturn CMFGame::OnMessage(const CArchitectureMessage& message,
         const CGameCamera& camera =
             mStateManager->GetCameraManager()->GetCurrentCamera(*mStateManager);
         const CCinematicCamera* const cineCam = TCastToConstPtr< CCinematicCamera >(camera);
-        if (input.PStart()) {
+#ifdef TARGET_PC
+        // A skips a skippable cinematic too (it does nothing else while one plays).
+        const bool skipPress = input.PStart() || (cineCam && input.PA());
+#else
+        const bool skipPress = input.PStart();
+#endif
+        if (skipPress) {
           if (cineCam && mStateManager->GetCinematicSkipObject() != kInvalidUniqueId) {
             CMidiManager::StopAll();
             mSkippedCineCam = cineCam->GetUniqueId();
@@ -241,8 +251,53 @@ void CMFGame::Draw() const {
   if (mGuiManager->GetIsGameDraw()) {
     gpMain->SetGameFrameDrawn(true);
     mStateManager->PreRender();
+#ifdef TARGET_PC
+    {
+      // Remastered's character backlight hint of the camera's room, before the models draw.
+      struct Layers {
+        CScriptLayerManager* layers;
+        TAreaId area;
+      } layers{mStateManager->WorldLayerState().GetPtr(), mStateManager->GetNextAreaId()};
+      PortRoomEnv::UpdateBacklight(
+          [](int32_t layer, void* context) {
+            const Layers& l = *static_cast< const Layers* >(context);
+            return l.layers == nullptr || l.area == kInvalidAreaId ||
+                   l.layers->IsLayerActive(l.area, TLayerId(layer));
+          },
+          &layers);
+    }
+#endif
     mStateManager->DrawWorld();
     (void)mStateManager->GetPlayer()->IsPlayerDeadEnough();
+#ifdef TARGET_PC
+    // Remastered's bloom and colour grade, over the world and under the visor. Thermal and
+    // X-ray draw their own picture, not the room's exposed light, so they keep neither.
+    const CPlayerState::EPlayerVisor visor = mStateManager->GetPlayerState()->GetActiveVisor(*mStateManager);
+    if (visor != CPlayerState::kPV_Thermal && visor != CPlayerState::kPV_XRay) {
+      float threshold = 0.f;
+      float tints[5][3] = {};
+      float tone[3][4] = {};
+      const bool toned = PortRoomEnv::Tone(tone);
+      const bool bloom = toned && PortRoomEnv::Bloom(threshold, tints);
+      struct Layers {
+        CScriptLayerManager* layers;
+        TAreaId area;
+      } layers{mStateManager->WorldLayerState().GetPtr(), mStateManager->GetNextAreaId()};
+      uint32_t gradeA = 0;
+      uint32_t gradeB = 0;
+      float gradeWeight = 0.f;
+      PortRoomEnv::ColorGrade(
+          [](int32_t layer, void* context) {
+            const Layers& l = *static_cast< const Layers* >(context);
+            return l.layers == nullptr || l.area == kInvalidAreaId ||
+                   l.layers->IsLayerActive(l.area, TLayerId(layer));
+          },
+          &layers, gradeA, gradeB, gradeWeight);
+      // The picture is measured for the next frames' auto exposure (UpdateFrame).
+      GXPortPostProcess(bloom, threshold, tints, tone, gradeA, gradeB, gradeWeight,
+                        toned ? PortRoomEnv::MeasureExposure() : 0.f);
+    }
+#endif
   }
 
   mGuiManager->PreDraw(*mStateManager, IsCameraActiveFlow());

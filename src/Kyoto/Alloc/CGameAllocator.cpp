@@ -13,6 +13,16 @@
 
 #include <stdint.h>
 
+#ifdef TARGET_PC
+#include <stdlib.h>
+#ifdef __linux__
+#include <sys/uio.h>
+#include <unistd.h>
+#endif
+
+#include "port_log.h"
+#endif
+
 /* Here just to make sure the data section matches */
 static const char* string_NULL = "<NULL>";
 static const char* string_SOURCE_MODULE_UNLOADED = "<SOURCE MODULE UNLOADED>";
@@ -342,7 +352,15 @@ uint CGameAllocator::FixupAllocPtrs(SGameMemInfo* info, const uint len, uint rou
 #endif
 
   SGameMemInfo* newPtr = info;
-  if (blockLength != roundedLen) {
+#ifdef TARGET_PC
+  // Port: the header is 0x40 bytes on x64 but blocks are 32-byte granular. A free block with 0x20
+  // spare bytes can't hold a remainder header; splitting it would write the new 0x40-byte header
+  // 0x20 bytes into the next block's header. Keep the slack in the allocation instead.
+  const bool canSplit = blockLength >= roundedLen + sizeof(SGameMemInfo);
+#else
+  const bool canSplit = true;
+#endif
+  if (blockLength != roundedLen && canSplit) {
     SGameMemInfo* newInfo;
 
     SGameMemInfo* infoNext = info->GetNext();
@@ -428,8 +446,202 @@ bool CGameAllocator::Free(const void* ptr) {
   return FreeNormalAllocation(ptr);
 }
 
+#ifdef TARGET_PC
+bool CGameAllocator::HeapCheckEnabled() {
+  static const bool sEnabled = [] {
+    const char* env = getenv("MP_HEAP_CHECK");
+    return env != nullptr && env[0] != '\0' && env[0] != '0';
+  }();
+  return sEnabled;
+}
+
+// A block header, or one of its strings, may itself be garbage: copy what looks like text, reading
+// through process_vm_readv where available so a wild pointer can't crash the report.
+static void HeapCheckText(const char* s, char* out, size_t cap) {
+  if (s == nullptr) {
+    snprintf(out, cap, "<null>");
+    return;
+  }
+  size_t n = 0;
+#ifdef __linux__
+  char buf[128];
+  if (cap > sizeof(buf)) {
+    cap = sizeof(buf);
+  }
+  iovec local{buf, cap - 1};
+  iovec remote{const_cast< char* >(s), cap - 1};
+  ssize_t got = process_vm_readv(getpid(), &local, 1, &remote, 1, 0);
+  if (got > 0) {
+    while (static_cast< ssize_t >(n) < got && buf[n] >= 0x20 && buf[n] < 0x7f) {
+      out[n] = buf[n];
+      ++n;
+    }
+  }
+#else
+  (void)n;
+#endif
+  out[n] = '\0';
+  if (n == 0) {
+    snprintf(out, cap, "<%p: not text>", static_cast< const void* >(s));
+  }
+}
+
+const char* CGameAllocator::ValidateBlock(const SGameMemInfo* info, bool requireAllocated,
+                                          bool deep) const {
+  if (xc_first == nullptr) {
+    return nullptr; // heap already released
+  }
+  const uintptr_t addr = reinterpret_cast< uintptr_t >(info);
+  if (addr < reinterpret_cast< uintptr_t >(xc_first) ||
+      addr > reinterpret_cast< uintptr_t >(x10_last)) {
+    return "block header outside the heap";
+  }
+  if (addr & 31) {
+    return "block header misaligned";
+  }
+  if (!info->IsPriorGuardIntact()) {
+    return "prior guard (+0x0) overwritten";
+  }
+  if (!info->IsPostGuardIntact()) {
+    return "post guard (+0x38) overwritten";
+  }
+  if (requireAllocated && !info->IsAllocated()) {
+    return "block is not marked allocated (double free?)";
+  }
+  if (!deep) {
+    return nullptr;
+  }
+  const SGameMemInfo* prev = info->GetPrev();
+  const SGameMemInfo* next = info->GetNext();
+  const auto inHeap = [&](const SGameMemInfo* p) {
+    return reinterpret_cast< uintptr_t >(p) >= reinterpret_cast< uintptr_t >(xc_first) &&
+           reinterpret_cast< uintptr_t >(p) <= reinterpret_cast< uintptr_t >(x10_last);
+  };
+  if (prev != nullptr) {
+    if (!inHeap(prev) || prev >= info) {
+      return "prev link outside the heap or not before the block";
+    }
+    if (prev->GetNext() != info) {
+      return "prev block does not link forward to this block";
+    }
+  } else if (info != xc_first) {
+    return "no prev link but not the first block";
+  }
+  if (next != nullptr) {
+    if (!inHeap(next) || next <= info) {
+      return "next link outside the heap or not after the block";
+    }
+    if (next->GetPrev() != info) {
+      return "next block does not link back to this block";
+    }
+    if (info->IsAllocated() &&
+        info->x4_len > reinterpret_cast< uintptr_t >(next) - addr - sizeof(SGameMemInfo)) {
+      return "length exceeds the space up to the next block";
+    }
+  } else if (info != x10_last) {
+    return "no next link but not the last block";
+  }
+  return nullptr;
+}
+
+void CGameAllocator::ReportCorruption(const char* what, const void* ptr,
+                                      const SGameMemInfo* info) const {
+  char fl[128];
+  char ty[64];
+  PortLog::Write("HEAP CHECK: %s\n", what);
+  PortLog::Write("HEAP CHECK: ptr=%p header=%p heap=[%p..%p] allocations=%u\n", ptr,
+                 static_cast< const void* >(info), static_cast< const void* >(xc_first),
+                 static_cast< const void* >(x10_last), x84_);
+  const uintptr_t lo = reinterpret_cast< uintptr_t >(xc_first);
+  const uintptr_t hi = reinterpret_cast< uintptr_t >(x10_last) + sizeof(SGameMemInfo);
+  const uintptr_t at = reinterpret_cast< uintptr_t >(info);
+  if (at >= lo && at + sizeof(SGameMemInfo) <= hi) {
+    const uchar* raw = reinterpret_cast< const uchar* >(info);
+    for (size_t row = 0; row < sizeof(SGameMemInfo); row += 16) {
+      char hex[64];
+      for (size_t i = 0; i < 16; ++i) {
+        snprintf(hex + i * 3, 4, "%02x ", raw[row + i]);
+      }
+      PortLog::Write("HEAP CHECK: header +0x%02zx: %s\n", row, hex);
+    }
+    // Walk from the head to the last block before `info` whose own header is still intact.
+    const SGameMemInfo* pred = nullptr;
+    const SGameMemInfo* cur = xc_first;
+    while (cur != nullptr && cur < info) {
+      if (!cur->IsPriorGuardIntact() || !cur->IsPostGuardIntact()) {
+        PortLog::Write("HEAP CHECK: walk from the head hit a damaged header at %p first\n",
+                       static_cast< const void* >(cur));
+        break;
+      }
+      pred = cur;
+      const SGameMemInfo* next = cur->GetNext();
+      if (next <= cur || reinterpret_cast< uintptr_t >(next) > hi) {
+        break;
+      }
+      cur = next;
+    }
+    if (cur != info && pred != nullptr && cur != nullptr && cur > info) {
+      PortLog::Write("HEAP CHECK: %p is not a block boundary, it lies inside the block below\n",
+                     static_cast< const void* >(info));
+    }
+    if (pred != nullptr) {
+      HeapCheckText(pred->x8_fileAndLine, fl, sizeof(fl));
+      HeapCheckText(pred->xc_type, ty, sizeof(ty));
+      PortLog::Write(
+          "HEAP CHECK: predecessor block %p: len=0x%zx span=0x%zx allocated=%d flags=0x%x "
+          "file=\"%s\" type=\"%s\"\n",
+          static_cast< const void* >(pred), pred->x4_len,
+          static_cast< size_t >(at - reinterpret_cast< uintptr_t >(pred)) - sizeof(SGameMemInfo),
+          pred->IsAllocated() ? 1 : 0, pred->GetPrevMaskedFlags(), fl, ty);
+      if (at - reinterpret_cast< uintptr_t >(pred) >= 2 * sizeof(SGameMemInfo)) {
+        const uchar* tail = raw - 32;
+        char hex[16 * 3 * 2 + 1];
+        for (size_t i = 0; i < 32; ++i) {
+          snprintf(hex + i * 3, 4, "%02x ", tail[i]);
+        }
+        PortLog::Write("HEAP CHECK: last 32 bytes before the header: %s\n", hex);
+      }
+    }
+    HeapCheckText(info->x8_fileAndLine, fl, sizeof(fl));
+    HeapCheckText(info->xc_type, ty, sizeof(ty));
+    PortLog::Write("HEAP CHECK: this block's strings: file=\"%s\" type=\"%s\"\n", fl, ty);
+  }
+  fflush(stderr);
+  abort();
+}
+
+void CGameAllocator::CheckHeap() const {
+  if (xc_first == nullptr) {
+    return;
+  }
+  for (const SGameMemInfo* it = xc_first; it != nullptr; it = it->GetNext()) {
+    if (const char* bad = ValidateBlock(it, false, true)) {
+      ReportCorruption(bad, it + 1, it);
+    }
+  }
+}
+
+bool CGameAllocator::PeekLiveBlock(const void* ptr, const char** fileAndLine, size_t* len) const {
+  if (xc_first == nullptr) {
+    return false;
+  }
+  const SGameMemInfo* info = static_cast< const SGameMemInfo* >(ptr) - 1;
+  if (ValidateBlock(info, true, false) != nullptr) {
+    return false;
+  }
+  *fileAndLine = info->x8_fileAndLine;
+  *len = info->x4_len;
+  return true;
+}
+#endif
+
 bool CGameAllocator::FreeNormalAllocation(const void* ptr) {
   SGameMemInfo* info = GetMemInfoFromBlockPtr(ptr);
+#ifdef TARGET_PC
+  if (const char* bad = ValidateBlock(info, true, HeapCheckEnabled())) {
+    ReportCorruption(bad, ptr, info);
+  }
+#endif
   size_t newLen = 0;
   const size_t infoLen = info->x4_len;
   SGameMemInfo* k = info->GetNext();

@@ -57,6 +57,9 @@ bool ParsePakTable(const uint8_t* data, size_t size, PakTable& table, size_t& ne
 bool ParseLooseName(const std::string& fileName, uint32_t& type, uint32_t& id);
 // "1A2B3C4D.dds" (any case) -> id 0x1A2B3C4D: a native texture.
 bool ParseNativeTextureName(const std::string& fileName, uint32_t& id);
+// "1A2B3C4D.envcube" (any case) -> id 0x1A2B3C4D: a converted material
+// reflection cube (written by the Remastered import, see PbrRecord's 'PBR7').
+bool ParseMaterialCubeName(const std::string& fileName, uint32_t& id);
 std::string FourCCString(uint32_t type);
 
 // --- Virtual files ------------------------------------------------------------
@@ -68,7 +71,7 @@ struct Segment {
   uint64_t length = 0;
   size_t memory = 0;         // kMemory: index into VirtualFile::memory
   uint64_t sourceOffset = 0; // kSource, kHost: where the segment starts in its file
-  std::string hostPath;      // kHost: read from this file, zeros past hostSize
+  std::string hostPath{};    // kHost: read from this file, zeros past hostSize
   uint64_t hostSize = 0;
 };
 
@@ -149,6 +152,8 @@ struct ModInfo {
   int files = 0;     // disc files replaced
   int resources = 0; // loose resources used
   int textures = 0;  // <id>.dds images
+  bool import = false;       // made by the Remastered import (stamp present, or its folder name)
+  bool importStale = false;  // ... and by an older importer than this build's
 };
 
 struct Status {
@@ -157,7 +162,15 @@ struct Status {
   std::vector<ModInfo> mods;
   int overlays = 0; // disc files served from mods
   std::vector<std::string> messages;
+  std::string staleImport; // name of the Remastered import that needs redoing; empty if none
 };
+
+// Whether a Remastered import's stamp file (its whole text; empty when the file is missing) is older
+// than `current`: missing, unreadable and lower numbers are stale, equal and higher are not. The
+// stamp's first line is the number, and anything after it (the build's commit) is ignored.
+bool ImportStampStale(const std::string& stampText, int current);
+// The name of the mod that is a stale Remastered import, or null. Set at each scan.
+const char* StaleRemasteredImport();
 
 // Scans the mods folder and registers the overlays. Call once, after the disc
 // is open and before the game starts.
@@ -169,6 +182,11 @@ void Initialize();
 void BeginReload();
 void FinishReload();
 const Status& CurrentStatus();
+// While suspended no mod loads, whatever the settings say: a Remastered import
+// unloads them so their memory is free while it runs. Takes effect at the next
+// reload or start.
+void SetSuspended(bool suspended);
+bool Suspended();
 // The mods folder, created if missing. Empty if there is no pref folder.
 std::string Folder();
 // Every .pak on the disc (with mods applied), as (entry number, path).
@@ -194,15 +212,28 @@ size_t NativeTexturesBound();
 std::string FontPath();
 // The <MREA id>.roomenv a mod supplies for an area (port_room_env.h); empty when none.
 std::string RoomEnvPath(uint32_t mrea);
+// The <id>.envcube a mod supplies for a material's own reflection cube
+// (PortRoomEnv::MaterialCube); empty when none.
+std::string MaterialCubePath(uint32_t id);
+// The roomenv/brdf.lut a mod supplies (port_room_env.h), the first mod's when several do; empty when none.
+std::string BrdfLutPath();
+// The gallery/NNN.jpg pictures the mods supply (the Extras gallery), in file name order; a later mod's file
+// replaces an earlier one's of the same name.
+std::vector<std::string> GalleryPaths();
 // The <FRME id>.hudbars a mod supplies for a HUD frame (port_hud_bars.h); empty when none.
 std::string HudBarsPath(uint32_t frame);
 // The <MREA id>.roomgeo a mod supplies for an area (port_room_geo.h); empty when none.
 std::string RoomGeoPath(uint32_t mrea);
 // The same for its liquid surfaces (port_room_liquid.h).
 std::string RoomLiquidPath(uint32_t mrea);
+// Every roomgeo/lods.bin the mods supply (port_room_geo.h), in mod order: a later one's
+// entry for a model stands in for an earlier one's.
+std::vector<std::string> RoomLodPaths();
 // Whether any mod folder holds room geometry. Reads the disk, and needs no Initialize:
 // the frame buffers are sized from it before there is a renderer.
 bool HasRoomGeometry();
+// Whether the loaded mods supply room geometry for any area.
+bool RoomGeometryLoaded();
 
 // Folder names the settings disable, '/'-separated (no folder name has one).
 std::vector<std::string> SplitDisabled(const std::string& list);

@@ -1,4 +1,6 @@
+#include "MetroidPrime/Cameras/CGameCamera.hpp"
 #include "MetroidPrime/Player/CWorldTransManager.hpp"
+#include "port_debug.h"
 
 #include "GuiSys/CGuiTextSupport.hpp"
 #include "Kyoto/CFrameDelayedKiller.hpp"
@@ -59,6 +61,15 @@ struct CWorldTransManager::SModelDatas {
 };
 NESTED_CHECK_SIZEOF(CWorldTransManager, SModelDatas, 0x1e0)
 
+// Port: Elevator Ride (PortDebug::ElevatorRide). Retail starts the closing
+// dissolve no earlier than 2 s in, then takes 3 s more, so every ride lasts at
+// least 5 s however fast the load. Fast starts the dissolve at 0.5 s and plays
+// it at twice the speed (about 2 s in all); Skip replaces the ride with the
+// plain disabled transition and drops its 2 s minimum.
+static const float kFastRideDissolveStart = 0.5f;
+static const float kFastRideDissolveSpeed = 2.f;
+static bool sRideSkipped = false;
+
 CWorldTransManager::CWorldTransManager() : x0_curTime(0.f)
 , x4_modelData(nullptr)
 , x8_textData(nullptr)
@@ -100,6 +111,7 @@ void CWorldTransManager::DisableTransition() {
   x4_modelData = nullptr;
   x8_textData = nullptr;
   x44_26_goingUp = false;
+  sRideSkipped = false;
 }
 
 int CWorldTransManager::GetSuitCharIdx() {
@@ -159,6 +171,13 @@ void CWorldTransManager::TouchModels() {
 void CWorldTransManager::EnableTransition(const CAnimRes& samusRes, CAssetId platformRes,
                                          const CVector3f& platformScale, CAssetId bgRes,
                                          const CVector3f& bgScale, bool goingUp) {
+  if (PortDebug::ElevatorRide() == PortDebug::kElevatorRide_Skip) {
+    DisableTransition();
+    sRideSkipped = true;
+    x44_25_stopSoon = false;
+    StartTransition();
+    return;
+  }
   x44_25_stopSoon = false;
   x30_transType = kTT_Enabled;
   x44_26_goingUp = goingUp;
@@ -208,6 +227,10 @@ void CWorldTransManager::StartTransition() {
 void CWorldTransManager::EndTransition() { DisableTransition(); }
 
 void CWorldTransManager::Update(float dt) {
+  if (x30_transType == kTT_Enabled && !x4_modelData.null() && x4_modelData->x1dc_dissolveStarted &&
+      PortDebug::ElevatorRide() == PortDebug::kElevatorRide_Fast) {
+    dt *= kFastRideDissolveSpeed;
+  }
   x0_curTime += dt;
   switch (x30_transType) {
   case kTT_Enabled:
@@ -223,13 +246,15 @@ void CWorldTransManager::Update(float dt) {
 }
 
 void CWorldTransManager::UpdateDisabled(float) {
-  if (x0_curTime > 2.f)
+  if (sRideSkipped || x0_curTime > 2.f)
     x44_24_transitionFinished = true;
 }
 
 void CWorldTransManager::UpdateEnabled(const float dt) {
   if (!x4_modelData.null() && !x4_modelData->x1c_samusModelData.IsNull()) {
-    if (x44_25_stopSoon && !x4_modelData->x1dc_dissolveStarted && x0_curTime >= 2.f) {
+    const float dissolveStart =
+        PortDebug::ElevatorRide() == PortDebug::kElevatorRide_Fast ? kFastRideDissolveStart : 2.f;
+    if (x44_25_stopSoon && !x4_modelData->x1dc_dissolveStarted && x0_curTime >= dissolveStart) {
       x4_modelData->x1dc_dissolveStarted = true;
       x4_modelData->x1d0_dissolveStartTime = x0_curTime;
       x4_modelData->x1d4_dissolveEndTime = 4.f + x0_curTime - 2.f;
@@ -371,7 +396,8 @@ void CWorldTransManager::DrawEnabled() const {
   const float fov = CCameraManager::GetDefaultFirstPersonVerticalFOV();
   const float nearPlane = CCameraManager::GetDefaultFirstPersonNearClipDistance();
   const float farPlane = CCameraManager::GetDefaultFirstPersonFarClipDistance();
-  gpRender->SetPerspective(fov,
+  gpRender->SetPerspective(CGameCamera::VertPlusFov(fov, CCast::LtoF(CGraphics::GetViewportWidth()) /
+                                                            CCast::LtoF(CGraphics::GetViewportHeight())),
                           CCast::LtoF(CGraphics::GetViewportWidth()) /
                               CCast::LtoF(CGraphics::GetViewportHeight()),
                           nearPlane, farPlane);

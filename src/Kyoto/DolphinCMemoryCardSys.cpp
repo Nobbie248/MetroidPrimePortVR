@@ -232,8 +232,8 @@ CMemoryCardSys::CMemoryCardSys() {
 
 void CMemoryCardSys::Initialize() {
   if (!mIsInitialized) {
-    // Port: keep the memory card next to the executable so a copied build is
-    // self-contained. CARDSetBasePath must run before CARDInit.
+    // Port: keep the memory card in user/ beside the executable so a copied
+    // build is self-contained. CARDSetBasePath must run before CARDInit.
     //
     // This has to end with a directory, not merely with a path. A slot's path
     // is default-constructed, and CARDInit fills an empty one from aurora's
@@ -262,7 +262,7 @@ void CMemoryCardSys::Initialize() {
       }
     }
 #else
-    // The executable's folder, or the user folder when that one is read-only.
+    // user/ beside the executable, or the user folder when that one is read-only.
     const std::string cardFolder = PortPaths::CardFolder();
     base = cardFolder.empty() ? nullptr : cardFolder.c_str();
 #endif

@@ -10,6 +10,10 @@
 
 #include "string.h"
 
+#ifdef TARGET_PC
+#include <vector>
+#endif
+
 class CTexture;
 class CDrawStringOptions;
 class CTextRenderBuffer;
@@ -156,7 +160,18 @@ private:
 
   static int KernLookup(const rstl::vector< CKernPair >& kerning, int a, const int b);
   const CGlyph* InternalGetGlyph(wchar_t c) const;
+#ifdef TARGET_PC
+  void PortAddStandIns();
+  struct PortAccentPending {
+    wchar_t chr;
+    const CGlyph* base;
+    float widen;
+  };
+  bool PortAddAccents(const std::vector< PortAccentPending >& pending,
+                      std::vector< rstl::pair< wchar_t, CGlyph > >& added);
+#endif
 };
+
 CHECK_SIZEOF(CRasterFont, 0x94)
 
 #endif // _CRASTERFONT

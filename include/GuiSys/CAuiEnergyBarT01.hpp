@@ -51,9 +51,10 @@ public:
 
   static rstl::pair< CVector3f, CVector3f > DownloadBarCoordFunc(float t);
 
-private:
   // Port: the strip a mod gives this bar in place of mCoordFunc, if any (port_hud_bars.h).
   const PortHudBars::Bar* PortBar() const;
+
+private:
   void PortDrawBar(const PortHudBars::Bar& bar, float from, float to,
                    const CColor& color) const;
 

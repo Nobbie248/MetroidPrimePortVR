@@ -31,7 +31,9 @@ struct SView {
   std::unique_ptr< CModelData > model;
 };
 
-SView sView;
+// Never destroyed: a static SView's model would be freed during static teardown, after the
+// resource pool and PortMods' texture table it unbinds from are already gone.
+SView& sView = *new SView;
 
 } // namespace
 
@@ -98,7 +100,7 @@ void Draw(const CStateManager& mgr) {
   // visor transition silently changes the on-screen size of every model between shots. Recomputing
   // from the live FOV keeps a model's framing the same in every cell of a capture sheet.
   const CGameCamera& camera = mgr.GetCameraManager()->GetCurrentCamera(mgr);
-  sView.fov = camera.GetFov();
+  sView.fov = camera.GetRenderFov();
   const float fovDeg = sView.fov > 5.f && sView.fov < 150.f ? sView.fov : 55.f;
   sView.fitDist = sView.radius / std::sin(0.5f * fovDeg * (M_PIF / 180.f)) * 1.1f + 0.05f;
   const float dist = sView.dist > 0.f ? sView.dist : sView.fitDist;

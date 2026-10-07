@@ -1,4 +1,5 @@
 #include <aurora/aurora.h>
+#include <aurora/phase.hpp>
 #include <aurora/time.hpp>
 
 #ifdef AURORA_ENABLE_GX
@@ -305,6 +306,7 @@ void shutdown() noexcept {
 
 const AuroraEvent* update() noexcept {
   ZoneScoped;
+  phase::set(phase::Main, "window event pump");
   if (g_initialFrame) {
     g_initialFrame = false;
     input::initialize();
@@ -312,7 +314,9 @@ const AuroraEvent* update() noexcept {
 #ifdef AURORA_ENABLE_GX
   gx::update();
 #endif
-  return window::poll_events();
+  const AuroraEvent* events = window::poll_events();
+  phase::set(phase::Main, "game update");
+  return events;
 }
 
 #ifdef AURORA_ENABLE_GX
@@ -373,6 +377,7 @@ bool begin_frame(uint64_t contentTag) noexcept {
     }
   }
 
+  phase::set(phase::Main, "begin_frame (waiting for a frame slot)");
   if (!gfx::begin_frame()) {
     return false;
   }
@@ -388,6 +393,7 @@ bool begin_frame(uint64_t contentTag) noexcept {
 void end_frame(uint64_t contentTag) noexcept {
   ZoneScoped;
 #ifdef AURORA_ENABLE_GX
+  phase::set(phase::Main, "end_frame (recording and queueing the frame)");
   gx::fifo::drain();
   gx::fifo::end_frame();
   gx::texture::end_frame();
@@ -444,8 +450,10 @@ void end_frame(uint64_t contentTag) noexcept {
       // The headset is the only display: nobody sees the window (stereo_host.hpp).
       if (!headsetOwnsDisplay && window::is_presentable() && g_surface) {
         ZoneScopedN("Acquire texture");
+        phase::set(phase::Render, "surface GetCurrentTexture");
         wgpu::SurfaceTexture surfaceTexture;
         g_surface.GetCurrentTexture(&surfaceTexture);
+        phase::set(phase::Render, "present blit recording");
         acquireAttempted = true;
         surfaceStatus = surfaceTexture.status;
         if (surfaceStatus == wgpu::SurfaceGetCurrentTextureStatus::SuccessOptimal) {
@@ -541,23 +549,8 @@ void end_frame(uint64_t contentTag) noexcept {
           pass.SetBindGroup(0, rmlBindGroup, 0, nullptr);
           pass.Draw(3);
         }
-        pass.End();
-      }
-      {
-        const std::array attachments{
-            wgpu::RenderPassColorAttachment{
-                .view = currentView,
-                .loadOp = wgpu::LoadOp::Load,
-                .storeOp = wgpu::StoreOp::Store,
-            },
-        };
-        const wgpu::RenderPassDescriptor renderPassDescriptor{
-            .label = "ImGui render pass",
-            .colorAttachmentCount = attachments.size(),
-            .colorAttachments = attachments.data(),
-            .timestampWrites = webgpu::gpu_prof::pass_writes("ImGui"),
-        };
-        const auto pass = encoder.BeginRenderPass(&renderPassDescriptor);
+        // ImGui draws in the same pass: a second pass would write the whole swapchain image out
+        // and read it back in, which costs a tile-based (mobile) GPU a full-screen round trip.
         pass.SetViewport(0.f, 0.f, static_cast<float>(webgpu::g_graphicsConfig.surfaceConfiguration.width),
                          static_cast<float>(webgpu::g_graphicsConfig.surfaceConfiguration.height), 0.f, 1.f);
         imgui::render(pass, imguiDrawData);
@@ -573,9 +566,11 @@ void end_frame(uint64_t contentTag) noexcept {
     const auto buffer = encoder.Finish(&cmdBufDescriptor);
     {
       ZoneScopedN("Queue Submit");
+      phase::set(phase::Render, "queue submit");
       const gfx::perf::Timer timer{gfx::perf::g_submitNs};
       g_queue.Submit(1, &buffer);
     }
+    phase::set(phase::Render, "after submit");
     webgpu::gpu_prof::after_submit();
     // The bridge's native follow-up on the same queue, then its completion callback.
     stereo_host::submitted(stereoSink);
@@ -585,9 +580,11 @@ void end_frame(uint64_t contentTag) noexcept {
       {
         window::SurfaceLock surfaceLock;
         if (window::is_presentable()) {
+          phase::set(phase::Render, "surface Present");
           status = g_surface.Present();
         }
       }
+      phase::set(phase::Render, "after present");
       if (status) {
         gfx::after_present();
       } else {
@@ -676,6 +673,10 @@ const AuroraEvent* aurora_update() { return aurora::update(); }
 bool aurora_begin_frame() { return aurora::begin_frame(AURORA_STEREO_CONTENT_TAG_UNKNOWN); }
 bool aurora_begin_frame_tagged(uint64_t contentTag) { return aurora::begin_frame(contentTag); }
 void aurora_release_lost_surface() { aurora::release_lost_surface(); }
+bool aurora_is_suspended() {
+  return aurora::window::is_backgrounded() || !aurora::window::is_surface_ready() ||
+         aurora::window::is_surface_changing();
+}
 void aurora_end_frame() { aurora::end_frame(AURORA_STEREO_CONTENT_TAG_UNKNOWN); }
 void aurora_end_frame_tagged(uint64_t contentTag) { aurora::end_frame(contentTag); }
 void aurora_end_frame_ex(uint64_t contentTag, void* imguiFrame) {

@@ -96,6 +96,9 @@ CHudThreatInterface::CHudThreatInterface(CGuiFrame& hud, EHudType type, float di
   x6c_energybart01_threatbar->SetShadowDrainSpeed(9999.f);
   x6c_energybart01_threatbar->SetShadowDrainDelay(0.f);
   x6c_energybart01_threatbar->SetIsAlwaysResetTimer(false);
+#ifdef TARGET_PC
+  hud.SetSpreadStretch(x6c_energybart01_threatbar);
+#endif
   if (x68_textpane_threatwarning) {
     x68_textpane_threatwarning->TextSupport().SetFontColor(
         gpTweakGuiColors->GetThreatWarningFont());

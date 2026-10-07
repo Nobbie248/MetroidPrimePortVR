@@ -26,17 +26,45 @@
 
 namespace PortRemastered {
 
-// A liquid's surface as its room describes it. The ids are in a pak's byte order.
+// A liquid's surface as its room describes it. The ids are in a pak's byte order. Water and
+// poison carry every field of Remastered's WaterRenderVolume (build/mpr/water/B-cpu.md section
+// 1), the room's or the loader's default; lava its model and its LavaRenderVolume's values.
 struct RoomLiquid {
   enum Type { kWater = 0, kPoison = 1, kLava = 2 };
   int type = kWater;
   std::array<uint8_t, 16> model{};  // a WMDL, or a lava pool's CMDL
-  // Water and poison only, as the model itself is a bare sheet.
-  bool hasNormal = false;
-  std::array<uint8_t, 16> normal{};         // the wave normal map
-  float tint[4] = {0.1f, 0.3f, 0.35f, 0.7f};  // colour, and the opacity seen straight on
-  float normalScale[2] = {0.08f, 0.08f};    // texcoords per unit of the model, along x and z
-  float waveAngle[2] = {30.0f, 90.0f};      // the two wave layers' directions, in degrees
+  uint8_t features[11] = {1, 1, 1, 1, 1, 0, 1, 0, 1, 0, 0};
+  float waves[2][5] = {{0.0f, 0.2f, 0.2f, 1.0f, 0.0f}, {0.0f, 0.2f, 0.2f, 1.0f, 0.0f}};
+  float tint[4] = {1.0f, 1.0f, 1.0f, 1.0f};
+  float normalDir[2] = {0.0f, 0.0f};
+  float normalSpeed = 0.5f;
+  float normalScale = 1.0f;
+  float fogColor[4] = {1.0f, 1.0f, 1.0f, 1.0f};
+  float fogDistance = 40.0f;
+  float material[5] = {5.0f, 0.1f, 0.25f, 1.0f, 0.25f};
+  float rain[10] = {0.75f, 1.0f, 0.5f, 0.8f, 0.1f, 1.0f, 0.75f, 1.5f, 0.5f, 1.0f};
+  float flow[10] = {0.25f, 10.0f, 0.2f, 5.0f, 1.0f, 0.5f, 60.0f, -1.0f, -1.0f, -1.0f};
+  float xrayOpacity = 1.0f;  // the entity's WaterMP1 (13264102), not the render volume's
+  std::array<uint8_t, 16> normalMap{}, flowMap{}, rainNoise{};  // TXTRs, all zero for none
+  // Lava (build/mpr/water/I-lava-cpu.md Q6): the flow's reach, its period in seconds, the
+  // brightness, the flow map's tiling in u, the pattern's scale and the tiling in v.
+  float lava[6] = {0.1f, 8.0f, 10.0f, 2.0f, 0.65f, 2.0f};
+};
+
+// What the importer makes of a water surface: its mesh (in Remastered's model space) and the
+// ids its three maps were written under (0 for none).
+struct RoomWaterAssets {
+  struct Vertex {
+    float pos[3];
+    float uv[4];
+    uint8_t color[4];
+  };
+  float boundsMin[3] = {0, 0, 0};
+  float boundsMax[3] = {0, 0, 0};
+  std::vector<Vertex> vertices;
+  std::vector<uint32_t> indices;
+  uint32_t normalMap = 0, flowMap = 0, rainNoise = 0;
+  uint32_t rainNoiseWidth = 0, rainNoiseHeight = 0;  // the source texture's
 };
 
 struct RoomIO {
@@ -53,10 +81,15 @@ struct RoomIO {
   // so the caller remembers what it has converted. These files are not counted
   // in `written`.
   std::function<bool(const std::array<uint8_t, 16>& model, uint32_t& cmdl)> model;
+  // Optional, as `model` for one rigid piece of a skinned model: the triangles on `joint`
+  // (TriangleJoint). Without it, animated actors of more than one bone are left out.
+  std::function<bool(const std::array<uint8_t, 16>& model, int joint, uint32_t& cmdl)> piece;
   // Optional; with it each room's liquid surfaces are written too, as
-  // "<MREA id>.roomliquid" (read by port_room_liquid.h). Converts one surface's model
-  // and gives the CMDL's id, as `model` does; it is asked once per surface.
+  // "<MREA id>.roomliquid" (read by port_room_liquid.h). `liquid` converts a lava pool's model
+  // and gives the CMDL's id, as `model` does; `water` reads a water or poison surface's mesh
+  // and writes its maps. Each is asked once per surface; without `water` those are dropped.
   std::function<bool(const RoomLiquid& liquid, uint32_t& cmdl)> liquid;
+  std::function<bool(const RoomLiquid& liquid, RoomWaterAssets& assets)> water;
   // Optional: the rooms (by pak name) to write geometry for; all of them without.
   std::function<bool(const std::string& room)> wantsGeometry;
   std::function<void(const std::string& line)> log;  // optional

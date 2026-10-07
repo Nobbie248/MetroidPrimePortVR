@@ -63,6 +63,28 @@ public:
   void MoveToThisFrameList() const;
   void VerifyCurrentShader(int shader) const;
 
+#ifdef TARGET_PC
+  // Port: the first cached texture of the first material set (the touch wheels' HUD icons).
+  const CTexture* PortFirstTexture(uint* id) const {
+    if (x18_matSets.empty()) {
+      return nullptr;
+    }
+    rstl::vector< TCachedToken< CTexture > >& list = x18_matSets.front().x0_textures;
+    for (rstl::vector< TCachedToken< CTexture > >::iterator it = list.begin(); it != list.end(); ++it) {
+      if (!it->TryCache()) {
+        // Not drawn yet (an icon the player doesn't own): load it now, it is tiny.
+        it->Lock();
+        it->ForceCache();
+      }
+      if (it->GetObject() != nullptr) {
+        *id = it->GetToken().GetTag().GetId();
+        return it->GetObject();
+      }
+    }
+    return nullptr;
+  }
+#endif
+
   void UnlockTextures() {
     rstl::vector< SShader >::iterator matIter;
     for (matIter = x18_matSets.begin() + 1; matIter != x18_matSets.end(); ++matIter) {

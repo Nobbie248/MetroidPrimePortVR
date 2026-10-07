@@ -287,6 +287,9 @@ public:
   // False for a view of memory it does not own (a mapped staging region): it cannot grow.
   [[nodiscard]] bool owned() const noexcept { return m_owned; }
   [[nodiscard]] bool empty() const noexcept { return m_length == 0; }
+  // False when appending size bytes would grow a buffer that wraps memory it doesn't own,
+  // which aborts.
+  [[nodiscard]] bool can_append(size_t size) const noexcept { return m_owned || m_length + size <= m_capacity; }
 
   void append(const void* data, size_t size) {
     resize(m_length + size, false);

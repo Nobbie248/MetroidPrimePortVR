@@ -19,6 +19,25 @@
 
 #include "rstl/algorithm.hpp"
 
+#ifdef TARGET_PC
+// Port: the vertical FOV for a cinematic's horizontal FOV at the live aspect.
+// Retail divides the angle by its 4:3 aspect and frames the shot for the 16:9
+// letterbox CCameraFilterPass::DrawWideScreen draws over it. Keep that shot's
+// width (in tangent space, so it holds at any aspect) up to 16:9, where the bars
+// crop it to the same band (or, with PortDebug::CinemaBars off, the whole shot
+// fills the screen), and past 16:9, where there are no bars, keep the
+// band's height and widen instead of cropping the shot (issues #9 and #14).
+static const float kCinematicRetailAspect = 4.f / 3.f;
+static float CinematicFovy(const float hfov, const float aspect) {
+  const float kLetterbox = 16.f / 9.f;
+  const float retailFovy = hfov / kCinematicRetailAspect;
+  const float tanHalfWidth =
+      kCinematicRetailAspect * tanf(CMath::Deg2Rad(0.5f * retailFovy));
+  const float fit = aspect < kLetterbox ? aspect : kLetterbox;
+  return 2.f * CMath::Rad2Deg(atanf(tanHalfWidth / fit));
+}
+#endif
+
 CCinematicCamera::CCinematicCamera(const TUniqueId uid, const rstl::string& name,
                                    const CEntityInfo& info, const CTransform4f& xf,
                                    const bool active, const float shotDuration, const float fovy,
@@ -28,14 +47,24 @@ CCinematicCamera::CCinematicCamera(const TUniqueId uid, const rstl::string& name
               (flags & 0x20) != 0, 0)
 , x1e8_duration(shotDuration)
 , x1ec_t(0.f)
+#ifdef TARGET_PC
+// Port: keep the script's FOV (fovy times the load-time aspect) so the camera
+// follows an aspect change; GetInterpolatedHFov divides it by the live one.
+, x1f0_origFovy(fovy * aspect)
+#else
 , x1f0_origFovy(fovy)
+#endif
 , x1f4_passedViewPoint(0)
 , x1f8_passedTarget(0)
 , x1fc_origOrientation(CQuaternion::FromMatrix(xf))
 , x20c_lookAtId(kInvalidUniqueId)
 , x210_moveIntoEyePos(CVector3f::Zero())
 , x21c_flags(flags)
-, x220_24_(false) {}
+, x220_24_(false) {
+#ifdef TARGET_PC
+  x170_26_fovIsFitted = true;
+#endif
+}
 
 CCinematicCamera::~CCinematicCamera() {}
 
@@ -93,7 +122,11 @@ void CCinematicCamera::Think(float dt, CStateManager& mgr) {
         SetTransform(CTransform4f::LookAt(viewPoint, target, up));
       }
     }
+#ifdef TARGET_PC
+    SetFov(CinematicFovy(GetInterpolatedHFov(x1d8_viewHFovs, x1ec_t), GetAspectRatio()));
+#else
     SetFov(GetInterpolatedHFov(x1d8_viewHFovs, x1ec_t) / GetAspectRatio());
+#endif
     if (x20c_lookAtId != kInvalidUniqueId) {
       if (CScriptActor* actor = TCastToPtr< CScriptActor >(mgr.ObjectById(x20c_lookAtId))) {
         if (actor->IsPlayerActor()) {
@@ -462,7 +495,13 @@ float CCinematicCamera::GetInterpolatedHFov(const rstl::vector< float >& fovs, f
   float result;
   const int count = fovs.size();
   if (count == 0) {
+#ifdef TARGET_PC
+    // Retail returns its fovy here (the script's FOV over the 4:3 aspect), which
+    // Think divides by the aspect a second time.
+    result = x1f0_origFovy / kCinematicRetailAspect;
+#else
     result = x1f0_origFovy;
+#endif
   } else if (count == 1) {
     result = fovs[0];
   } else {

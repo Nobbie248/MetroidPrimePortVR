@@ -12,6 +12,9 @@ extern "C" {
 #endif
 
 ImTextureID aurora_imgui_add_texture(uint32_t width, uint32_t height, const void* rgba8);
+// Frees a texture from aurora_imgui_add_texture. Not while a frame that draws it is still in flight: call it
+// the frame after the last one that used it.
+void aurora_imgui_remove_texture(ImTextureID texture);
 
 // The headset settings panel: draw data from a second ImGui context, rendered
 // into the panel texture once per sealed frame and shown in the headset at

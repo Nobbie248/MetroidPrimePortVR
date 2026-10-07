@@ -39,6 +39,11 @@ jobs:
           -DCMAKE_CXX_COMPILER_LAUNCHER=ccache
           -DAURORA_ENABLE_TESTS=ON
           -DMP_BUILD_TESTS=ON
+          -DBUILD_SHARED_LIBS=OFF
+          -DAURORA_SDL3_PROVIDER=vendor
+          -DAURORA_SDL3_LINKAGE=static
+          -DAURORA_NOD_LINKAGE=static
+          -DOPENSSL_USE_STATIC_LIBS=TRUE
 
       - name: Build
         run: cmake --build build-win -j
@@ -90,33 +95,22 @@ jobs:
         run: |
           New-Item -ItemType Directory -Force -Path dist | Out-Null
           Copy-Item build-win/metroid_prime_port.exe dist/
-          Copy-Item build-win/initial_pipeline_cache.db dist/
           Get-ChildItem build-win/*.dll | Copy-Item -Destination dist/
           if (Test-Path build-win/metroid_prime_port.pdb) { Copy-Item build-win/metroid_prime_port.pdb dist/ }
-          # find_package(OpenSSL) links the runner's own OpenSSL through import
-          # libraries, so its DLLs are not in build-win and have to be taken
-          # from that install. Without them the zip fails to start on any
-          # machine that has no OpenSSL of its own.
+          # SDL3, zlib, libpng, nod and the runner's OpenSSL are linked into the
+          # exe (see Configure); only Dawn's DLLs, which it loads itself, ship.
           $include = (Select-String -Path build-win/CMakeCache.txt -Pattern '^OPENSSL_INCLUDE_DIR:[A-Z]+=(.+)$').Matches[0].Groups[1].Value
-          if ($include -and -not $include.EndsWith('-NOTFOUND')) {
-            $root = Split-Path $include
-            foreach ($name in 'libcrypto-3-x64.dll', 'libssl-3-x64.dll') {
-              $dll = @("$root/bin/$name", "$root/$name") | Where-Object { Test-Path $_ } | Select-Object -First 1
-              if (-not $dll) { throw "$name not found under $root" }
-              Copy-Item $dll dist/
-            }
-          }
-          # The HD texture and button-prompt sets live next to the executable
-          # (DefaultTexturesPath); without them the zip shows GameCube prompts
-          # only. The post-build step puts them in build-win/textures.
-          if (-not (Test-Path build-win/textures/keyboard)) { throw 'build-win/textures missing' }
-          Copy-Item -Recurse build-win/textures dist/textures
+          if (-not $include -or $include.EndsWith('-NOTFOUND')) { throw 'OpenSSL not found: wss:// would be disabled' }
+          $root = Split-Path $include
+          # The button-prompt textures and the pipeline cache seed are built into
+          # the executable (MP_EMBED_RESOURCES), so the zip carries no copies.
           New-Item -ItemType Directory -Force -Path dist/licenses | Out-Null
           # The port's own grant and notice travel with the package too.
           Copy-Item LICENSE dist/licenses/port-license.txt
           Copy-Item NOTICE dist/licenses/port-notice.txt
           Copy-Item extern/aurora/LICENSE dist/licenses/aurora.txt
           Copy-Item extern/musyx/LICENSE dist/licenses/musyx.txt
+          Copy-Item extern/astcenc/LICENSE.txt dist/licenses/astcenc.txt
           Copy-Item docs/NATIVE_PORT.md dist/README.md
           # ffmpeg is its own program under the LGPL: its licence, and where
           # its source and build line are, go with it.
@@ -131,11 +125,21 @@ jobs:
               New-Item -ItemType Directory -Force -Path (Split-Path $destination) | Out-Null
               Copy-Item $_.FullName $destination
             }
-          if (Test-Path dist/libcrypto-3-x64.dll) {
-            $license = @("$root/license.txt", "$root/LICENSE.txt") | Where-Object { Test-Path $_ } | Select-Object -First 1
-            if ($license) { Copy-Item $license dist/licenses/openssl.txt }
-            else { Invoke-WebRequest https://raw.githubusercontent.com/openssl/openssl/openssl-3.5/LICENSE.txt -OutFile dist/licenses/openssl.txt }
-          }
+          # nod is now linked in: ship its licence (dual MIT / Apache-2.0).
+          Invoke-WebRequest https://raw.githubusercontent.com/encounter/nod/v2.0.0-alpha.12/LICENSE-MIT -OutFile dist/licenses/nod-MIT.txt
+          Invoke-WebRequest https://raw.githubusercontent.com/encounter/nod/v2.0.0-alpha.12/LICENSE-APACHE -OutFile dist/licenses/nod-Apache-2.0.txt
+          $license = @("$root/license.txt", "$root/LICENSE.txt") | Where-Object { Test-Path $_ } | Select-Object -First 1
+          if ($license) { Copy-Item $license dist/licenses/openssl.txt }
+          else { Invoke-WebRequest https://raw.githubusercontent.com/openssl/openssl/openssl-3.5/LICENSE.txt -OutFile dist/licenses/openssl.txt }
+
+      # Fail if a library that should be static is imported as a DLL again.
+      - name: Check the executable's imports
+        shell: pwsh
+        run: |
+          $imports = & dumpbin /dependents dist/metroid_prime_port.exe
+          $imports
+          $bad = $imports | Select-String -Pattern '^\s*(SDL3|zlib1|zlib-ng\d*|libpng\d*|nod|libssl-3-x64|libcrypto-3-x64)\.dll' -AllMatches
+          if ($bad) { throw "Executable imports DLLs that should be static: $bad" }
 
       # The runner has OpenSSL and other runtimes on PATH, which hid a DLL
       # missing from the package. Start it with the system directories only, as
@@ -155,6 +159,10 @@ jobs:
           $process = Start-Process -FilePath ./dist/metroid_prime_port.exe -WorkingDirectory ./dist -Wait -PassThru -RedirectStandardError ./startup-error.log
           if ($process.ExitCode -ne 1) { throw "Unexpected exit code: $($process.ExitCode)" }
           if (-not (Select-String -Path ./startup-error.log -Pattern 'no disc image given')) { throw 'Packaged executable did not reach main' }
+          # The run above left its log and caches in dist. Ship none of them:
+          # copied over an install, a cache file without its old -wal/-shm
+          # reads as malformed and feeds Dawn bad pipeline blobs.
+          Remove-Item -Force -ErrorAction SilentlyContinue ./dist/metroid_prime_port.log, ./dist/dawn_cache.db*, ./dist/pipeline_cache.db*
 
       - uses: actions/upload-artifact@v4
         with:

@@ -1,6 +1,8 @@
 // Draws a mod's distance-field font in place of the disc's glyph images (port_hd_font.h).
 
+#include "port_env.h"
 #include "port_hd_font.h"
+#include "port_strings.h"
 
 #include "port_gci.h"
 #include "port_log.h"
@@ -30,17 +32,23 @@ GXTexObj sTexture;
 // What Begin worked out for the font being drawn.
 Fit sFit;
 
+// The whole file, in one read when its size is known. The stream is left as a read
+// through istreambuf_iterator leaves it: failed only when the file did not open.
+using port::ReadAll;
+
 bool Load() {
   if (sTried) {
     return sLoaded;
   }
-  sTried = true;
+  // Not latched until there is a file: a font made before the mods are read asks
+  // again (PortAddStandIns runs while the game's fonts load).
   const std::string path = PortMods::FontPath();
   if (path.empty()) {
     return false;
   }
+  sTried = true;
   std::ifstream file(PortGci::PathFromString(path), std::ios::binary);
-  const std::vector<uint8_t> data((std::istreambuf_iterator<char>(file)), std::istreambuf_iterator<char>());
+  const std::vector<uint8_t> data = ReadAll(file);
   std::string error;
   if (!file || !ReadFont(data.data(), data.size(), sFont, error)) {
     PortLog::Write("[font] %s: %s\n", path.c_str(), file ? error.c_str() : "cannot read");
@@ -54,9 +62,6 @@ bool Load() {
   sLoaded = true;
   return true;
 }
-
-// The disc's fonts cut from the typeface the distance field holds.
-bool SameTypeface(const CRasterFont& font) { return std::strstr(font.PortGetName(), "Deface") != nullptr; }
 
 // One of the palette's RGB5A3 entries, which are stored big endian.
 GXColor PaletteColor(const CGraphicsPalette* palette, int index, const GXColor& tint) {
@@ -86,13 +91,19 @@ GXColor PaletteColor(const CGraphicsPalette* palette, int index, const GXColor& 
 
 bool Enabled() {
   if (sEnabled < 0) {
-    const char* const env = std::getenv("MP_HD_FONT");
-    sEnabled = env != nullptr && env[0] == '0' ? 0 : 1;
+    sEnabled = port::EnvFlag("MP_HD_FONT", true) ? 1 : 0;
   }
   return sEnabled != 0;
 }
 
 void SetEnabled(bool enabled) { sEnabled = enabled ? 1 : 0; }
+
+// The disc's fonts cut from the typeface the distance field holds.
+bool SameTypeface(const CRasterFont& font) { return std::strstr(font.PortGetName(), "Deface") != nullptr; }
+
+float ModAdvanceRatio(uint32_t character, uint32_t base) {
+  return Enabled() && Load() ? AdvanceRatio(sFont, character, base) : 1.f;
+}
 
 void Reset() {
   if (sLoaded) {

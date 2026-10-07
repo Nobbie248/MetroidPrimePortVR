@@ -1,0 +1,5 @@
+blank_issues_enabled: false
+contact_links:
+  - name: Building or packaging the port
+    url: https://github.com/Odrannnn/MetroidPrimePort/blob/port/docs/NATIVE_PORT.md
+    about: Build steps, settings, environment variables and testing notes.

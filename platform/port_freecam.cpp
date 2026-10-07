@@ -1,4 +1,4 @@
-// The debug free camera (F1 > Debug, console `freecam`); see port_freecam.h.
+// The debug free camera (F1 > Debug > Camera, console `freecam`); see port_freecam.h.
 #include "port_freecam.h"
 
 #include "port_debug.h"

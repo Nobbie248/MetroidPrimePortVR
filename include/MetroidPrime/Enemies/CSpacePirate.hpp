@@ -111,6 +111,12 @@ public:
                const CTransform4f& xf, const CModelData& mData, const CActorParameters& actParms,
                const CPatternedInfo& pInfo, CInputStream& in, int propCount);
   static uint GetNumProperties() { return skNumProperties; }
+#ifdef TARGET_PC
+  // The ANCS a pirate loads: a beam trooper gets its beam's Remastered look
+  // (keyed by weapon type) when the import wrote one. `in` sits at the pirate
+  // data, right after the actor parameters.
+  static CAssetId PortTrooperLook(CAssetId ancs, const CPatternedInfo& pInfo, CInputStream& in);
+#endif
   void DetachActorFromPirate();
   bool AttachActorToPirate(TUniqueId id);
   void SetAttackTarget(TUniqueId id);

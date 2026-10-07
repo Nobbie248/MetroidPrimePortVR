@@ -1,4 +1,5 @@
 // Opt-in lifecycle driver for real-disc regression runs (MP_ENABLE_SMOKE_DRIVER).
+#include "port_env.h"
 #include "compat.h"
 #include "port_debug.h"
 #include "port_mouse.h"
@@ -24,6 +25,7 @@
 #include "MetroidPrime/TCastTo.hpp"
 #include <dolphin/pad.h>
 #include <SDL3/SDL.h>
+#include <chrono>
 #include <cmath>
 #include <cstdlib>
 #include <cstdio>
@@ -44,7 +46,7 @@ bool sPowerProjectileSeen = false, sMissileProjectileSeen = false, sBombSeen = f
 bool sMouseComplete = false;
 unsigned sAreaReloads = 0;
 bool AreaReloadEnabled() {
-  static const bool enabled = std::getenv("MP_SMOKE_AREA_RELOAD") != nullptr;
+  static const bool enabled = port::EnvFlag("MP_SMOKE_AREA_RELOAD");
   return enabled;
 }
 bool sWasLocked = false;
@@ -92,7 +94,7 @@ void PortSmokeAreaReload(CStateManager& mgr) {
       PADSetVirtualStatus(0, &status);
     }
   }
-  static const bool morphEnabled = std::getenv("MP_SMOKE_MORPH") != nullptr;
+  static const bool morphEnabled = port::EnvFlag("MP_SMOKE_MORPH");
   static unsigned sMorphTicks = 0;
   static bool sMorphDone = false;
   if (morphEnabled && !sMorphDone && mgr.GetGameState() == CStateManager::kGS_Running &&
@@ -247,6 +249,7 @@ void PortSmokeElevator(CStateManager& mgr) {
   static unsigned sTicks = 0;
   static CAssetId sTicksWorld = kInvalidAssetId;
   static CAssetId sDestWorld = kInvalidAssetId;
+  static std::chrono::steady_clock::time_point sRideStart;
   if (delayTicks == 0 || sPhase == kDone || mgr.GetWantsToQuit() || mgr.World() == nullptr) return;
   const CAssetId world = mgr.World()->IGetWorldAssetId();
   if (world != sTicksWorld) {
@@ -274,13 +277,15 @@ void PortSmokeElevator(CStateManager& mgr) {
   case kPlaying:
     if (++sTicks < 2) return;
     std::fputs("[elevator-smoke] sending SetToZero\n", stderr);
+    sRideStart = std::chrono::steady_clock::now();
     sPhase = kRiding;
     mgr.SendScriptMsgAlways(sElevatorUid, kInvalidUniqueId, kSM_SetToZero);
     break;
   case kRiding:
     if (world != sDestWorld || !playing) return;
-    std::fprintf(stderr, "[elevator-smoke] passed: world %08X area %d\n", world,
-                 mgr.World()->GetCurrentAreaId().Value());
+    std::fprintf(stderr, "[elevator-smoke] passed: world %08X area %d after %.2f s\n", world,
+                 mgr.World()->GetCurrentAreaId().Value(),
+                 std::chrono::duration< double >(std::chrono::steady_clock::now() - sRideStart).count());
     sPhase = kDone;
     break;
   }
@@ -482,7 +487,7 @@ void PortSmokeScript(unsigned frame) {
   // Steps run in order and each fires once, at or after its frame. This has to
   // be straight-line rather than inside the parse block: with the loop guard
   // still on sNext, the second and later steps were never reached at all.
-  if (sNext < sCount && static_cast< int >(frame) >= sFrame[sNext]) {
+  if (sNext < static_cast<unsigned>(sCount) && static_cast< int >(frame) >= sFrame[sNext]) {
     sHeld = sButtons[sNext];
     sHoldUntil = frame + sHold[sNext];
     std::fprintf(stderr, "[smoke] frame %u: pressing 0x%04x for %u frame(s)\n", frame, sHeld, sHold[sNext]);
@@ -524,7 +529,7 @@ int sPendingShotCount = 0;
 } // namespace
 
 bool PortSmokeContinueEnabled() {
-  static const bool enabled = std::getenv("MP_SMOKE_CONTINUE") != nullptr;
+  static const bool enabled = port::EnvFlag("MP_SMOKE_CONTINUE");
   return enabled;
 }
 
@@ -568,7 +573,7 @@ static void ApplyContinuePressAndShots(unsigned frame) {
 // MP_SMOKE_STICK=1: hold the right stick and report the aim yaw change, to
 // verify twin-stick aiming (run with MP_TWIN_STICK=1).
 void PortSmokeStick(CStateManager& mgr) {
-  static const bool enabled = std::getenv("MP_SMOKE_STICK") != nullptr;
+  static const bool enabled = port::EnvFlag("MP_SMOKE_STICK");
   if (!enabled) return;
   static unsigned sTicks = 0;
   static float sStartYaw = 0.f;
@@ -626,7 +631,7 @@ void PortSmokeVisor(CStateManager& mgr) {  static const bool enabled = std::gete
 }
 
 bool PortSmokeMouseEnabled() {
-  static const bool enabled = std::getenv("MP_SMOKE_MOUSE") != nullptr;
+  static const bool enabled = port::EnvFlag("MP_SMOKE_MOUSE");
   return enabled;
 }
 
@@ -884,7 +889,7 @@ bool PortSmokeFrame(unsigned frame) {
     if (windows != nullptr && count > 0) window = windows[0];
     SDL_free(windows);
   }
-  if (std::getenv("MP_SMOKE_LIFECYCLE") != nullptr && limit >= 240) {
+  if (port::EnvFlag("MP_SMOKE_LIFECYCLE") && limit >= 240) {
     if (frame == limit / 4) {
       if (window != nullptr) SDL_HideWindow(window);
       PortDebug::SetAiAudioEnabled(false);
@@ -993,7 +998,7 @@ void PortSmokeDash(CStateManager& mgr) {
     } else {
       // A slow turn, so the camera keeps up and the orbit zone sees each yaw.
       sYaw += 1.5f * M_PIF / 180.f;
-      if (PortDebug::MouseAim() || PortDebug::TwinStick()) {
+      if (PortDebug::DirectAim()) {
         PortDebug::SynchronizeMouseAim(-std::sin(sYaw), std::cos(sYaw), 0.f);
       } else {
         player->SetTransform(CQuaternion::ZRotation(CRelAngle(sYaw))

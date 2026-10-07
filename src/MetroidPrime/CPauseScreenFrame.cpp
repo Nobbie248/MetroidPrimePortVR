@@ -26,6 +26,7 @@
 #include <stdio.h>
 
 #ifdef TARGET_PC
+#include "GuiSys/CGuiCamera.hpp"
 #include "GuiSys/CGuiModel.hpp"
 #include "port_debug.h"
 #include "port_map_pickups.h"
@@ -201,6 +202,8 @@ enum EPortOption {
   kPO_CrosshairSize,
   kPO_SkippableCutscenes,
   kPO_MapPickups,
+  kPO_ElevatorRide,
+  kPO_RapidCharge,
 };
 #define PORT_OPTION(opt) static_cast< EGameOption >(opt)
 
@@ -226,6 +229,7 @@ static const SGameOption skPortVisorOptions[] = {
     {PORT_OPTION(kPO_RevealMap), -1, 0.f, 1.f, 1.f, kOT_DoubleEnum},
     {PORT_OPTION(kPO_MapPickups), -1, 0.f, 1.f, 1.f, kOT_DoubleEnum},
     {PORT_OPTION(kPO_SkippableCutscenes), -1, 0.f, 1.f, 1.f, kOT_DoubleEnum},
+    {PORT_OPTION(kPO_ElevatorRide), -1, 0.f, 2.f, 1.f, kOT_TripleEnum},
     {kGO_RestoreDefaults, 35, 0.f, 1.f, 1.f, kOT_RestoreDefaults},
 };
 static const SGameOption skPortDisplayOptions[] = {
@@ -252,11 +256,12 @@ static const SGameOption skPortControllerOptions[] = {
     {PORT_OPTION(kPO_FastMorph), -1, 0.f, 1.f, 1.f, kOT_DoubleEnum},
     {PORT_OPTION(kPO_LockOnToggle), -1, 0.f, 1.f, 1.f, kOT_DoubleEnum},
     {PORT_OPTION(kPO_StickyCharge), -1, 0.f, 1.f, 1.f, kOT_DoubleEnum},
+    {PORT_OPTION(kPO_RapidCharge), -1, 0.f, 1.f, 1.f, kOT_DoubleEnum},
     {kGO_RestoreDefaults, 35, 0.f, 1.f, 1.f, kOT_RestoreDefaults},
 };
 static SOptionCategory skPauseOptions[] = {
-    {10, skPortVisorOptions},     {11, skPortDisplayOptions}, {4, skSoundOptions},
-    {10, skPortControllerOptions}, {0, nullptr},
+    {11, skPortVisorOptions},     {11, skPortDisplayOptions}, {4, skSoundOptions},
+    {11, skPortControllerOptions}, {0, nullptr},
 };
 
 static bool IsPortOption(EGameOption option) { return option > kGO_RestoreDefaults; }
@@ -277,6 +282,8 @@ static const wchar_t* PortOptionTitle(EGameOption option) {
     return L"Toggle Lock-On";
   case kPO_StickyCharge:
     return L"Sticky Charge";
+  case kPO_RapidCharge:
+    return L"Remastered Charge";
   case kPO_Fov:
     return L"Field of View";
   case kPO_AntiAliasing:
@@ -297,6 +304,8 @@ static const wchar_t* PortOptionTitle(EGameOption option) {
     return L"Crosshair Size";
   case kPO_SkippableCutscenes:
     return L"Skippable Cutscenes";
+  case kPO_ElevatorRide:
+    return L"Elevator Ride";
   default:
     return L"";
   }
@@ -309,7 +318,7 @@ static int GetPortOption(EGameOption option) {
   case kPO_WidescreenHUD:
     return PortDebug::HudWide() ? 1 : 0;
   case kPO_TwinStick:
-    return PortDebug::TwinStick() ? 1 : 0;
+    return PortDebug::PadTwinStick() ? 1 : 0;
   case kPO_AimSpeed:
     return AimSpeedToStep(PortDebug::StickAimRate());
   case kPO_FastMorph:
@@ -318,6 +327,8 @@ static int GetPortOption(EGameOption option) {
     return PortDebug::LockOnToggle() ? 1 : 0;
   case kPO_StickyCharge:
     return PortDebug::StickyCharge() ? 1 : 0;
+  case kPO_RapidCharge:
+    return PortDebug::RapidCharge() ? 1 : 0;
   case kPO_Fov:
     return static_cast< int >(PortDebug::FirstPersonFov() + 0.5f);
   case kPO_AntiAliasing:
@@ -338,6 +349,8 @@ static int GetPortOption(EGameOption option) {
   case kPO_SkippableCutscenes:
     // Randomized games force it on; show what is in effect.
     return PortSkipCutscenes::Active() ? 1 : 0;
+  case kPO_ElevatorRide:
+    return PortDebug::ElevatorRide();
   case kPO_CrosshairSize:
     return PortDebug::CrosshairSize();
   default:
@@ -370,6 +383,9 @@ static void SetPortOption(EGameOption option, int value) {
   case kPO_StickyCharge:
     PortDebug::SetStickyCharge(value > 0);
     break;
+  case kPO_RapidCharge:
+    PortDebug::SetRapidCharge(value > 0);
+    break;
   case kPO_Fov:
     PortDebug::SetFirstPersonFov(static_cast< float >(value));
     break;
@@ -396,6 +412,9 @@ static void SetPortOption(EGameOption option, int value) {
     break;
   case kPO_SkippableCutscenes:
     PortDebug::SetSkippableCutscenes(value > 0);
+    break;
+  case kPO_ElevatorRide:
+    PortDebug::SetElevatorRide(static_cast< PortDebug::EElevatorRide >(value));
     break;
   case kPO_CrosshairSize:
     PortDebug::SetCrosshairSize(value);
@@ -561,6 +580,7 @@ void CGameOptions::TryRestoreDefaults(const CFinalInput& input, int category, in
         PortDebug::SetRevealMap(false);
         PortDebug::SetMapPickups(false);
         PortDebug::SetSkippableCutscenes(false);
+        PortDebug::SetElevatorRide(PortDebug::kElevatorRide_Original);
         break;
       case 1:
         PortDebug::SetAspectMode(PortDebug::kAspect_4_3);
@@ -577,6 +597,7 @@ void CGameOptions::TryRestoreDefaults(const CFinalInput& input, int category, in
         PortDebug::SetFastMorph(false);
         PortDebug::SetLockOnToggle(false);
         PortDebug::SetStickyCharge(false);
+        PortDebug::SetRapidCharge(false);
         break;
       default:
         break;
@@ -839,8 +860,11 @@ void COptionsScreen::UpdateOptionView() {
       static const wchar_t* const kAspectLabels[] = {L"4:3", L"16:9", L"Window"};
       CGuiTextPane* label =
           static_cast< CGuiTextPane* >(x194_tablegroup_triple->GetWorkerWidget(i));
+      static const wchar_t* const kElevatorLabels[] = {L"Original", L"Fast", L"Skip"};
       if (opt.option == PORT_OPTION(kPO_AspectRatio)) {
         label->TextSupport().SetText(rstl::wstring_l(kAspectLabels[i]));
+      } else if (opt.option == PORT_OPTION(kPO_ElevatorRide)) {
+        label->TextSupport().SetText(rstl::wstring_l(kElevatorLabels[i]));
       } else {
         label->TextSupport().SetText(rstl::wstring_l(xc_pauseStrg.GetString(96 + i)));
       }
@@ -913,6 +937,13 @@ bool SOptionsFrontEndFrame::PumpLoad() {
     CGuiFrame* frame = x4_frme.GetObject();
     if (frame->GetIsFinishedLoading()) {
       x1c_loadedFrame = frame;
+#ifdef TARGET_PC
+      // Port: pillarbox the options like the file select they open over (issue
+      // #14); stretched, their text ran out past the file select's panel.
+      if (CGuiCamera* cam = frame->GetFrameCamera()) {
+        cam->SetAspectMatch(true, false);
+      }
+#endif
       x20_loadedPauseStrg = x10_pauseScreen.GetObject();
       FinishedLoading();
       return true;

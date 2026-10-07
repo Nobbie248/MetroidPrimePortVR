@@ -3,8 +3,10 @@
 
 // Port: Aurora owns the application/window/GPU loop; the game entry is renamed
 // and driven by platform/main.cpp.
+#include <algorithm>
 #include <aurora/aurora.h>
 #include <aurora/event.h>
+#include <aurora/phase.hpp>
 #include <SDL3/SDL_mouse.h>
 #include <SDL3/SDL_timer.h>
 
@@ -18,6 +20,8 @@
 #include "vr/openxr_integration.h"
 #include "vr/prime_vr_policy.h"
 #include "vr/vr_pad.h"
+#include "port_crash.h"
+#include "port_watchdog.h"
 
 #include "stdint.h"
 #include "stdio.h"
@@ -51,6 +55,7 @@
 // Port: drives the streamed-audio AI DMA callback (see platform/ai_dma.cpp).
 extern "C" void AIPortPoll(void);
 #include "port_console.h"
+#include "port_speedrun_timer.h"
 #ifdef MP_ENABLE_SMOKE_DRIVER
 #include "port_smoke.h"
 extern bool PortSmokeFrame(unsigned frame);
@@ -189,13 +194,10 @@ static void ApplyAspectMode() {
   }
   }
   fbWidth &= ~1;
-  // Clamp to 4:3 .. 21:9. Extreme aspects produce degenerate projections and a
-  // blank present.
-  const int minWidth = efbHeight * 4 / 3;
-  const int maxWidth = efbHeight * 21 / 9;
-  if (fbWidth < minWidth) {
-    fbWidth = minWidth;
-  } else if (fbWidth > maxWidth) {
+  // The GX scissor is a 12-bit field biased by 342, so a framebuffer wider than 3754 wraps it to zero
+  // width and clips every draw (an all-black picture). That is ~7.8:1 at 480 lines, far past any real display.
+  const int maxWidth = 3754;
+  if (fbWidth > maxWidth) {
     fbWidth = maxWidth;
   }
   if (fbWidth == renderMode.fbWidth) {
@@ -881,10 +883,26 @@ int CMain::RsMain(int argc, const char* const* argv) {
     uint64_t firstFrameNs = 0;
     const uint64_t loopBeganNs = SDL_GetTicksNS();
     unsigned s_frameLog = 0;
+    // Frame milestones in the log: where a slow start or a slow device shows up.
+    // The counter line above is only the first frame.
+    uint64_t milestoneSpanStartNs = 0;
+    unsigned milestoneSpanStartFrame = 0;
+    uint64_t milestoneWorstNs = 0;
+    // The counter line once a second made most of a play session's log. Only the
+    // first one prints (the game reached its loop), unless a test build or
+    // MP_FRAME_LOG=1 asks for all of them; test scripts time runs by them.
+#ifdef MP_ENABLE_SMOKE_DRIVER
+    const bool frameLogAll = true;
+#else
+    const char* frameLogEnv = getenv("MP_FRAME_LOG");
+    const bool frameLogAll = frameLogEnv != nullptr && frameLogEnv[0] != '\0' && frameLogEnv[0] != '0';
+#endif
+    try {
     while (!x160_24_finished) {
       const uint64_t loopStartNs = SDL_GetTicksNS();
       bool presented = false;
-      if ((s_frameLog++ % 60) == 0) {
+      PortWatchdog::Heartbeat(s_frameLog + 1);
+      if ((s_frameLog++ % 60) == 0 && (frameLogAll || s_frameLog == 1)) {
         fprintf(stderr, "MP frame %u\n", s_frameLog);
       }
 #ifdef MP_ENABLE_SMOKE_DRIVER
@@ -896,7 +914,7 @@ int CMain::RsMain(int argc, const char* const* argv) {
         break;
       }
 #endif
-      // Port: pump Aurora's window/input events.
+      // Port: pump Aurora's window/input events (it marks the watchdog's phase).
       {
         const AuroraEvent* event = aurora_update();
         while (event != nullptr && event->type != AURORA_NONE) {
@@ -922,10 +940,13 @@ int CMain::RsMain(int argc, const char* const* argv) {
           } else if (event->type == AURORA_SDL_EVENT &&
                      (event->sdl.type == SDL_EVENT_MOUSE_BUTTON_DOWN ||
                       event->sdl.type == SDL_EVENT_MOUSE_BUTTON_UP)) {
-            PortDebug::NoteMouseButton(event->sdl.button.which == SDL_TOUCH_MOUSEID ||
-                                           event->sdl.button.which == SDL_PEN_MOUSEID,
-                                       SDL_BUTTON_MASK(event->sdl.button.button),
-                                       event->sdl.button.down);
+            // Android's SDL reports button 0 when its button state is stale.
+            if (event->sdl.button.button != 0) {
+              PortDebug::NoteMouseButton(event->sdl.button.which == SDL_TOUCH_MOUSEID ||
+                                             event->sdl.button.which == SDL_PEN_MOUSEID,
+                                         SDL_BUTTON_MASK(event->sdl.button.button),
+                                         event->sdl.button.down);
+            }
           } else if (event->type == AURORA_SDL_EVENT &&
                      event->sdl.type == SDL_EVENT_MOUSE_REMOVED) {
             PortDebug::ClearMouseButtons();
@@ -996,16 +1017,19 @@ int CMain::RsMain(int argc, const char* const* argv) {
       PortPrompts::Poll();
       const uint64_t inputDoneNs = SDL_GetTicksNS();
       // Port: run ARAM transfer callbacks completed by Aurora's ARQ.
+      aurora::phase::set(aurora::phase::Main, "audio and loader polling");
       ARQPoll();
       // Port: service the streamed-audio AI DMA callback on the main thread.
       AIPortPoll();
       archSupport->GetStopwatch2().Reset();
+      aurora::phase::set(aurora::phase::Main, "resource loading (AsyncIdlePakLoading)");
       gpResourceFactory->GetResLoader().AsyncIdlePakLoading();
       if (gpMemoryCard == nullptr && gpResourceFactory->GetResLoader().AreAllPaksLoaded()) {
         MemoryCardInitializePump();
       }
       CARAMManager::CollectGarbage();
       CARAMToken::UpdateAllDMAs();
+      aurora::phase::set(aurora::phase::Main, "game tick (UpdateTicks)");
       // PortVr: PrimedGun's control scheme on port 0, from the headset
       // controllers, before the ticks read the pads.
       PortVr::VrPadUpdate(PortDebug::StateManager());
@@ -1069,8 +1093,10 @@ int CMain::RsMain(int argc, const char* const* argv) {
           interpolation = -1.f;
         PortDebug::PresentOverride(interpolation);
         CCameraManager::SetPresentationInterpolation(interpolation);
+        aurora::phase::set(aurora::phase::Main, "game draw");
         archSupport->GetIOWinManager().Draw();
         CCameraManager::SetPresentationInterpolation(-1.f);
+        PortSpeedrunTimer::Draw();
         DrawDebugMetrics(t1, archSupport->GetStopwatch2());
 
         double t2 = archSupport->GetStopwatch2().GetElapsedTime();
@@ -1086,6 +1112,7 @@ int CMain::RsMain(int argc, const char* const* argv) {
         AsyncIdle(idleMicros);
 
         gpRender->EndScene();
+        aurora::phase::set(aurora::phase::Main, "after EndScene");
         presented = true;
 
         sVrLastGameFrameDrawn = x161_24_gameFrameDrawn;
@@ -1094,6 +1121,7 @@ int CMain::RsMain(int argc, const char* const* argv) {
           x161_24_gameFrameDrawn = false;
         }
       } else {
+        aurora::phase::set(aurora::phase::Main, "loader idle (frame not drawn)");
         gpResourceFactory->AsyncIdle(1000);
         // A minimized/paused window still services events and audio, but never
         // accumulates a frame's GX commands or advances delayed render frees.
@@ -1143,6 +1171,7 @@ int CMain::RsMain(int argc, const char* const* argv) {
       // two could never be told apart - which is the only thing worth reporting
       // when a frame overruns its budget.
       const uint64_t workEndNs = SDL_GetTicksNS();
+      aurora::phase::set(aurora::phase::Main, "frame pacing");
       if (PortVr::OpenXRIsRunning()) {
         // PortVr: the headset paces the loop. The pacing thread publishes one
         // request per packet it hands Aurora; the loop draws once per request.
@@ -1153,7 +1182,17 @@ int CMain::RsMain(int argc, const char* const* argv) {
         nextFrameDeadline += framePeriodNs;
         const uint64_t now = SDL_GetTicksNS();
         if (nextFrameDeadline > now) {
-          SDL_DelayPrecise(nextFrameDeadline - now);
+          // SDL_DelayPrecise sleeps in 1 ms slices, about sixteen wake-ups a frame at
+          // 60 Hz. One plain sleep up to 2 ms short of the deadline first leaves it only
+          // the last stretch, which saves the wake-ups (and battery on phones).
+          const uint64_t kCoarseMarginNs = 2000000;
+          if (nextFrameDeadline - now > kCoarseMarginNs) {
+            SDL_DelayNS(nextFrameDeadline - now - kCoarseMarginNs);
+          }
+          const uint64_t afterCoarse = SDL_GetTicksNS();
+          if (nextFrameDeadline > afterCoarse) {
+            SDL_DelayPrecise(nextFrameDeadline - afterCoarse);
+          }
         } else if (now - nextFrameDeadline > framePeriodNs) {
           nextFrameDeadline = now;
         }
@@ -1161,6 +1200,26 @@ int CMain::RsMain(int argc, const char* const* argv) {
         nextFrameDeadline = SDL_GetTicksNS();
       }
       PortDebug::RecordFrame(workEndNs - loopStartNs, sTicksAdvanced, presented);
+      {
+        // The whole iteration, pacing included: what a player sees as a frame.
+        const uint64_t frameEndNs = SDL_GetTicksNS();
+        milestoneWorstNs = std::max(milestoneWorstNs, frameEndNs - loopStartNs);
+        if (s_frameLog == 1) {
+          milestoneSpanStartNs = frameEndNs;
+          milestoneSpanStartFrame = 1;
+          milestoneWorstNs = 0;
+        } else if (s_frameLog == 2 || s_frameLog == 10 || s_frameLog == 60 || s_frameLog == 300 ||
+                   s_frameLog == 1800) {
+          const double span = static_cast< double >(frameEndNs - milestoneSpanStartNs) / 1e9;
+          PortLog::Write("port: frame %u at %.2f s (avg fps %.1f over the last %u frames, worst frame %.1f ms)\n",
+                         s_frameLog, static_cast< double >(frameEndNs - loopBeganNs) / 1e9,
+                         span > 0.0 ? (s_frameLog - milestoneSpanStartFrame) / span : 0.0,
+                         s_frameLog - milestoneSpanStartFrame, static_cast< double >(milestoneWorstNs) / 1e6);
+          milestoneSpanStartNs = frameEndNs;
+          milestoneSpanStartFrame = s_frameLog;
+          milestoneWorstNs = 0;
+        }
+      }
       // Port: a stalled loop shows up as input that does nothing and then lands
       // all at once, since SDL and ImGui keep queueing events meanwhile. Say
       // where the time went; on Android this is the only trace a report has.
@@ -1202,6 +1261,12 @@ int CMain::RsMain(int argc, const char* const* argv) {
       }
       if (firstFrameNs == 0 && presented)
         firstFrameNs = SDL_GetTicksNS();
+    }
+    } catch (...) {
+      // Port: an exception out of the loop would unwind into ~CResLoader, which
+      // waits for paks that no longer load and hangs on the logo (issue #8).
+      // Report it and crash instead.
+      PortCrash::AbortOnException("the main loop");
     }
   // What the run cost. The frame log is only a counter, so nothing could report
   // this before; a run that never reached the loop has nothing to say.

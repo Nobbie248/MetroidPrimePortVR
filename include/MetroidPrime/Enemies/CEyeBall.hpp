@@ -68,6 +68,11 @@ private:
   bool mAlert : 1;
   bool mAttackDisabled : 1;
   bool mFiringBeam : 1;
+#ifdef TARGET_PC
+  bool mSweeping : 1;
+  int mLastAnimId;
+  float mLastAnimRemaining;
+#endif
 
   static const char* skEyeLocator;
 #define skMaxRadianAngle CMath::Deg2Rad(45.f)

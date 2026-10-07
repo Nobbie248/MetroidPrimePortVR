@@ -10,7 +10,8 @@
 
 namespace PortModelVariant {
 
-// `key` is the suit (CPlayerState::EPlayerSuit). The id of a variant that is
+// `key` picks the look: the suit (CPlayerState::EPlayerSuit) for Samus, the
+// weapon type for the beam troopers. The id of a variant that is
 // also a retail resource's is never written, so it cannot shadow one.
 inline uint32_t Id(uint32_t retail, int key) {
   uint32_t h = 2166136261u;

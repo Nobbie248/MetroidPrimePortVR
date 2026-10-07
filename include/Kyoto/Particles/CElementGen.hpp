@@ -17,6 +17,10 @@ class CGenDescription;
 class CModVectorElement;
 
 #pragma cpp_extensions on
+#ifdef TARGET_PC
+struct CPortVfxMeshBatch;
+#endif
+
 class CElementGen : public CParticleGen {
 public:
   struct CParticleListItem {
@@ -60,12 +64,28 @@ public:
     float x2c_lineLengthOrSize;
     float x30_lineWidthOrRota;
     CColor x34_color;
+#ifdef TARGET_PC
+    uint xPortSeed; // port-only: fixed per particle, mixes at spawn
+    // port-only VMAT material (CPortVfxData), evaluated where SIZE/COLR are
+    float xPortSsze;       // SSZE: secondary size (= SIZE when the PART has none)
+    float xPortIten;       // ITEN: colour intensity
+    float xPortVpmt[4][4]; // VPMT rows
+    CVector3f xPortLaunchDir; // unit launch velocity (zero if it launched at rest), for VORN 1
+#endif
 
     CParticle()
     : x4_pos(CVector3f::Zero())
     , x10_prevPos(x4_pos)
     , x1c_vel(x10_prevPos)
-    , x34_color(static_cast< u8 >(0xFF), 0x00, 0xFF, 0xFF) {}
+    , x34_color(static_cast< u8 >(0xFF), 0x00, 0xFF, 0xFF)
+#ifdef TARGET_PC
+    , xPortSeed(0)
+    , xPortSsze(0.f)
+    , xPortIten(1.f)
+    , xPortVpmt{}
+    , xPortLaunchDir(CVector3f::Zero())
+#endif
+    {}
   };
   struct CAdvancedValues {
     float values[8];
@@ -102,6 +122,10 @@ public:
   virtual CLight GetLight() const override;
   virtual void DestroyParticles() override;
   virtual uint Get4CharId() const override;
+#ifdef TARGET_PC
+  uint PortFxAsset() const override;
+  void PortFxDescribe(PortFxInfo& out) const override;
+#endif
   int GetMaxParticles() const { return x90_MAXP; }
   void SetZTest(bool enabled) { x26c_28_zTest = enabled; }
   rstl::vector< CParticle >& Particles() { return x30_particles; }
@@ -152,6 +176,16 @@ public:
   static void SetMoveRedToAlphaBuffer(const bool move) { sMoveRedToAlphaBuffer = move; }
 
   static void SetGlobalSeed(const ushort seed) { sSeed = seed; }
+
+#ifdef TARGET_PC
+  // World position for DFCS (the system origin) / DFCP (a system-local particle position).
+  CVector3f PortWorldFromLocal(const CVector3f& local) const {
+    return xe8_globalTranslation + x10c_globalScaleTransform * local;
+  }
+  CVector3f PortSystemOrigin() const { return PortWorldFromLocal(xdc_translation); }
+  // True for a converted Remastered PART (its PIRN marker).
+  bool PortIsRemastered() const;
+#endif
 
 private:
   TLockedToken< CGenDescription > x1c_genDesc;
@@ -244,6 +278,18 @@ private:
   CVector3f xPortPrevGlobalTranslation;
   bool xPortPresenting;
   bool PortBeginPresent(CVector3f& savedGlobal);
+  // VMAT material: VSMT results for this frame (port_vfx_particles.cpp). Bit n of the
+  // mask = slot n was written; slots 0..10 are the Src values, 11+2*tex+k the warp scales.
+  float xPortVsmt[19];
+  uint xPortVsmtMask;
+  void PortVfxUpdateSystem();
+  // XFMD 3/4: the spawn-baked part of the emitter's transform, and moving the live particles from
+  // one such frame to the next.
+  bool PortFollowsEmitter() const;
+  CTransform4f PortEmitterFrame() const;
+  void PortFollowEmitter(const CTransform4f& before);
+  void PortRenderParticlesVfx();
+  void PortRenderMeshesVfx(CPortVfxMeshBatch& batch);
 #endif
 
   static double kTickTime;

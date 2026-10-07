@@ -200,6 +200,21 @@ typedef struct {
   bool hasD3D12AdapterLuid;
   uint32_t d3d12AdapterLuidLow;
   int32_t d3d12AdapterLuidHigh;
+
+  /*
+   * MiB of the shared vertex, index and array buffers set aside for data kept across frames
+   * (GXPortRetainResident), on top of what a frame holds. 0 sets none aside; the device's
+   * limits may allow less.
+   */
+  uint32_t residentGeometryMiB;
+
+  /*
+   * An initial pipeline cache database held in memory (must stay valid for the whole run). When set
+   * it is used instead of <resourcesPath>/initial_pipeline_cache.db, so a stale file left beside the
+   * application cannot override it.
+   */
+  const uint8_t* pipelineCacheSeedData;
+  size_t pipelineCacheSeedSize;
 } AuroraConfig;
 
 typedef struct {
@@ -273,6 +288,9 @@ void aurora_report_producer_paced(bool paced);
 // Android's surfaceDestroyed waits for this, and a swapchain left on a destroyed
 // window can lose the device. Cheap when nothing changed.
 void aurora_release_lost_surface();
+// True while the app is backgrounded or has no surface (Android pause): the main loop
+// may legitimately not run then. Atomics only, so any thread can ask.
+bool aurora_is_suspended();
 
 void aurora_set_log_level(AuroraLogLevel level);
 void aurora_set_pause_on_focus_lost(bool value);
@@ -286,6 +304,19 @@ void aurora_set_timescale(float scale);
 AuroraBackend aurora_get_backend();
 const AuroraBackend* aurora_get_available_backends(size_t* count);
 float aurora_get_timescale();
+
+/**
+ * GPU self-test: renders known patterns offscreen through the game's GX path, reads them back and logs
+ * "gpu selftest: <case>: PASS/FAIL" lines. Call inside a frame (after aurora_begin_frame, before the frame's
+ * own draws); it changes GX state, so the caller must reset its cached state afterwards. Returns false if a
+ * run is already pending or the test could not start. Results arrive a frame or two later. Pipelines compile
+ * asynchronously and skip draws until ready, so call once with warmup (nothing logged), wait for
+ * queuedPipelines to drain, then call again for the real run.
+ */
+bool aurora_gpu_selftest_run(bool warmup);
+bool aurora_gpu_selftest_pending();
+/** Copies the last run's one-line summary ("X/Y passed ...", empty before the first run); returns its length. */
+size_t aurora_gpu_selftest_summary(char* buf, size_t size);
 
 #ifdef __cplusplus
 }

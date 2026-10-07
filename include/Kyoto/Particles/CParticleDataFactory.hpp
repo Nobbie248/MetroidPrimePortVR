@@ -39,6 +39,10 @@ public:
   GetSwooshGeneratorDesc(CInputStream& in, CSimplePool* pool);
   static rstl::optional_object< TToken< CElectricDescription > >
   GetElectricGeneratorDesc(CInputStream& in, CSimplePool* pool);
+#ifdef TARGET_PC
+  static bool PortReadVfxProperty(FourCC clsId, std::unique_ptr< CPortVfxData >& vfx,
+                                  CInputStream& in, CSimplePool* pool);
+#endif
 };
 
 #endif // _CPARTICLEDATAFACTORY

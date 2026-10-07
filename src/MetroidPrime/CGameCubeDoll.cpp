@@ -1,3 +1,4 @@
+#include "MetroidPrime/Cameras/CGameCamera.hpp"
 #include "MetroidPrime/CGameCubeDoll.hpp"
 
 #include "MetroidPrime/CActorLights.hpp"
@@ -67,7 +68,10 @@ void CGameCubeDoll::Draw(float alpha) {
 
   float alphaFader = alpha * x1c_fader;
 
-  gpRender->SetPerspective(55.f, CGraphics::GetViewport().mWidth, CGraphics::GetViewport().mHeight,
+  gpRender->SetPerspective(
+      CGameCamera::VertPlusFov(55.f, static_cast< float >(CGraphics::GetViewport().mWidth) /
+                                              static_cast< float >(CGraphics::GetViewport().mHeight)),
+      CGraphics::GetViewport().mWidth, CGraphics::GetViewport().mHeight,
                            0.2f, 4096.f);
 
   CGraphics::SetViewPointMatrix(CTransform4f::Translate(0.f, -2.f, 0.f));

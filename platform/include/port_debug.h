@@ -9,6 +9,7 @@
 // and the in-game debug window can toggle them live.
 
 class CStateManager;
+class CGuiModel;
 
 namespace PortDebug {
 
@@ -24,6 +25,9 @@ int PbrViewCount();
 const char* PbrViewName(int view);
 int PbrView();
 void SetPbrView(int view);
+// "drawid" is the last view: every draw is its serial in a flat colour (see PortDrawLog). Called by SetPbrView
+// so the model draws know to number themselves.
+void NoteDrawIdMode(bool on);
 // Requests an area change; consumed and executed by the game update so it does
 // not run from the render/UI path.
 void RequestTeleport(int areaId);
@@ -64,20 +68,33 @@ float SimPeriod();
 // tick-for-tick. Experimental.
 bool SimAdaptive();
 void SetSimAdaptive(bool enabled);
+// Smooth uncapped frames (port_settings.ini smooth_frames, on by default): sets
+// the four parts below together. Setting a part on its own (console `interp`)
+// is for testing and isn't saved.
+bool SmoothFrames();
+void SetSmoothFrames(bool enabled);
 // Per-frame look (docs/FRAME_INTERPOLATION.md, phase 1): with the frame limiter
 // off, frames between ticks show the look input the next tick will apply.
 bool FrameInterpolation();
 void SetFrameInterpolation(bool enabled);
 // Actor transform smoothing (phase 2): with the frame limiter off, actors draw
-// at a blend of their previous and current tick transforms. Off by default.
+// at a blend of their previous and current tick transforms.
 bool ActorInterpolation();
 void SetActorInterpolation(bool enabled);
 // Pose smoothing (phase 3): with the frame limiter off, skinned models draw a
-// blend of their previous and current tick poses. Off by default.
+// blend of their previous and current tick poses.
 bool PoseInterpolation();
 void SetPoseInterpolation(bool enabled);
+// Keeps a room geometry mod's models on the GPU instead of sending them every frame
+// (port_settings.ini room_geo_gpu; an old room_geo_resident=1 still counts). On by default.
+// Aurora sizes its buffers for it at
+// startup, so a change applies from the next start: RoomGeoResidentAtStartup reads the
+// settings file before the rest of them are loaded.
+bool RoomGeoResident();
+void SetRoomGeoResident(bool enabled);
+bool RoomGeoResidentAtStartup();
 // Particle smoothing (phase 4): with the frame limiter off, particle systems
-// draw between their previous and current tick frames. Off by default.
+// draw between their previous and current tick frames.
 bool ParticleInterpolation();
 void SetParticleInterpolation(bool enabled);
 // Frame interpolation tests (phase 5). MP_PRESENT_T=<0..1> or "cycle" (console
@@ -129,9 +146,14 @@ void SetFullscreen(bool enabled);
 // 0 = auto (native, driven by the display scale), otherwise a fixed multiplier.
 float RenderScale();
 void SetRenderScale(float scale);
+// Dynamic resolution: draws the EFB between DynamicResMin and RenderScale to
+// hold DynamicResTarget fps (0 = the frame cap). False when off.
+bool DynamicRes();
+int DynamicResTarget();
+float DynamicResMin();
 // Rendering aspect ratio. kAspect_4_3 is the game's original 640x480.
 // kAspect_16_9 widens to 16:9; kAspect_Window follows the window and updates
-// live as it is resized.
+// live as it is resized (the default).
 enum EAspectMode {
   kAspect_4_3 = 0,
   kAspect_16_9,
@@ -152,6 +174,10 @@ inline int FourThreeWidth(int width, int height) {
 // the aspect-matched in-game HUD frames.
 bool HudWide();
 void SetHudWide(bool enabled);
+// Scripted 16:9 cutscene bars (CCameraFilterPass kFS_CinemaBars). Off by default:
+// below 16:9 the cinematic camera already renders the full shot, so it fills the
+// screen instead.
+bool CinemaBars();
 // HUD scale in percent (50-100). Compact HUD elements shrink toward the nearest
 // screen edge or corner; screen-spanning decoration keeps its size. Only the
 // combat/scan/ball HUD frames and the minimap, not the helmet or menus.
@@ -207,6 +233,18 @@ void SetApSuitDamage(int mode);
 // (PortSkipCutscenes::Active).
 bool SkippableCutscenes();
 void SetSkippableCutscenes(bool enabled);
+// The language of the game's text: "" for the disc's English, else one of the
+// codes in PortRemastered::kTextLanguages, which a Remastered import adds to the
+// string tables. A table without it shows English. Read at every
+// CStringTable::GetString, so a change applies to text fetched afterwards.
+// MP_LANGUAGE sets it for one run.
+const char* TextLanguage();
+void SetTextLanguage(const char* code);
+// The elevator ride between worlds (CWorldTransManager). Retail holds it at
+// least 5 s whatever the load takes; the port loads in well under that.
+enum EElevatorRide { kElevatorRide_Original, kElevatorRide_Fast, kElevatorRide_Skip };
+EElevatorRide ElevatorRide();
+void SetElevatorRide(EElevatorRide mode);
 // First-person vertical field of view in degrees (retail 55). The arm cannon is
 // drawn at the retail FOV whatever this is, like a view-model FOV.
 const float kFovRetail = 55.f;
@@ -220,6 +258,11 @@ int Msaa();
 void SetMsaa(int samples);
 int Anisotropy();
 void SetAnisotropy(int level);
+// Setting `opengles`: start on Dawn's OpenGL ES backend instead of Vulkan, for
+// drivers that draw wrong on Vulkan (Adreno 7xx, issue #7). Read at window
+// creation, so it takes a restart; aurora falls back to Vulkan if it fails.
+bool OpenGles();
+void SetOpenGles(bool enabled);
 // Extras normally earned by finishing the game (or, for the Fusion Suit, by a
 // GBA link to Metroid Fusion). They only change what the title screen offers;
 // nothing is written into the save's persistent flags.
@@ -238,7 +281,21 @@ void SetMouseAim(bool enabled);
 // Twin-stick: the right stick aims the first-person camera directly (through the
 // same aim state as the mouse) and is consumed, so it no longer drives the
 // game's free-look. Works with or without mouse aim.
+// Reads false while touch is in use (TouchActive), as do SwapScanXray, ShiftBinding(2) (-1)
+// and PadAltButton (-1): the touch overlay always does its GameCube-labelled actions.
 bool TwinStick();
+// The stored pad Twin Stick setting, whatever the touch layout: what the pause option edits.
+bool PadTwinStick();
+// Android: touch was the last input and the F1 menu is closed. False on desktop.
+bool TouchActive();
+// True on Android when the modern (non-classic) touch layout is the active device: drag aims like a mouse.
+bool TouchDirectAim();
+// The direct aim path is active: mouse aim, twin stick or the modern touch layout.
+bool DirectAim();
+bool TouchClassic();
+void SetTouchClassic(bool on);
+bool TouchTwinStick();
+void SetTouchTwinStick(bool on);
 void SetTwinStick(bool enabled);
 // Right stick Y (-1..1) before twin-stick consumed it, for the Spring Ball;
 // 0 when twin-stick is off (the game input still carries it then).
@@ -247,6 +304,8 @@ void SetTwinStickRightY(float y);
 // The bound beam shift is held in game this poll (no overlay, window focused),
 // which springs the Spring Ball in morph ball, as X does in Remastered.
 bool BeamShiftHeld();
+// The touch twin layout's Beam button is held: the D-pad picks beams (false off Android / without touch).
+bool TouchBeamShift();
 void SetBeamShiftHeld(bool held);
 // Spring Ball (C-stick up in morph ball, as in Metroid Prime Trilogy) once the
 // Morph Ball Bombs are held. A connected Archipelago seed overrides it.
@@ -284,14 +343,16 @@ void SetLiveSplitAddress(const std::string& address);
 // application id (digits only) is set.
 bool DiscordPresence();
 void SetDiscordPresence(bool enabled);
-std::string DiscordAppId();
-void SetDiscordAppId(const std::string& id);
 // Mods folder (port_mods.h): all mods on or off, and the folder names turned
 // off, '/'-separated. Both take effect on the next launch.
 bool ModsEnabled();
 void SetModsEnabled(bool enabled);
 std::string ModsDisabled();
 void SetModsDisabled(const std::string& list);
+// Starts a Remastered import (port_remastered_import.h) with the mods unloaded
+// while it runs; they load again, the new import included, when it ends.
+// False when one is already running or there is no mods folder.
+bool StartRemasteredImport(const std::string& image, const std::string& keys);
 // Memory card transfer to and from Dolphin (port_gci.h), for the overlay and
 // the console. Each returns a message for the user. Imports are refused in
 // game; `path` may be a .gci, a raw card image, a folder of .gci files or an
@@ -302,7 +363,7 @@ std::string CardImport(const std::string& path);
 std::string CardExport(const std::string& dest);
 std::string CardImportDolphin();
 std::string CardExportDolphin();
-// Cheat: the player takes no damage (F1 > Debug > cheats, MP_GODMODE, console `god`).
+// Cheat: the player takes no damage (F1 > Debug > Cheats, MP_GODMODE, console `god`).
 bool Invulnerable();
 void SetInvulnerable(bool enabled);
 // Cheats: Samus's energy back to full; every item, full missiles, power bombs and energy
@@ -326,6 +387,11 @@ bool LockOnToggle();
 void SetLockOnToggle(bool enabled);
 bool StickyCharge();
 void SetStickyCharge(bool enabled);
+// Remastered charge: holding fire first shoots a few quick shots (Power 2,
+// Wave 1, Plasma 1, Ice none), then charges faster, with Remastered's per-beam
+// timings (CPlayerGun::PortRapidCharge*).
+bool RapidCharge();
+void SetRapidCharge(bool enabled);
 // Spring Ball on a gyro flick (pad or phone tilted up sharply, like Trilogy's
 // nunchuk flick), on top of C-stick up. Rate is the pitch speed in rad/s a flick
 // must pass. The gyro source is the aim's.
@@ -393,6 +459,68 @@ void SetMouseSensitivity(float radiansPerPixel);
 void AddMouseDelta(float dx, float dy);
 // Called once per simulated frame to latch the deltas for that frame.
 void BeginFrameMouse();
+// Touch aim (Android drag-to-turn): finger travel in dp, right/down positive.
+// Thread-safe; drained by BeginFrameMouse.
+bool TouchAim();
+void SetTouchAim(bool on);
+float TouchAimSpeed();
+void SetTouchAimSpeed(float pixelsPerDp);
+void AddTouchAim(float dxDp, float dyDp);
+// GameCube scheme (neither mouse aim nor twin stick): CPlayer turns by the touch
+// travel and holds a free-look pitch while a touch-aim finger is down.
+// TakeTouchLook returns this tick's world yaw/pitch change in radians (once per
+// tick) and whether touch aim is usable. The finger state comes from the Android
+// overlay, or HoldTouchAim (console) for that many seconds.
+void SetTouchAimDown(bool down);
+void HoldTouchAim(float seconds);
+bool TouchAimDown();
+bool TakeTouchLook(float& dyaw, float& dpitch);
+// Tap the minimap to open the map (Android touch overlay). The HUD publishes the
+// minimap's screen rect (0..1 of the window, origin top-left) each frame it is
+// drawn; MinimapRect fills x0,y0,x1,y1 and returns false when it isn't shown.
+// `drawn` is false where the map opens but the minimap isn't drawn (the visors
+// other than Combat): the overlay shows a map button in the rect instead.
+// Hold-and-slide beam and visor wheels on the Android overlay. The player
+// publishes WheelState each frame (bits 0-3 visors owned in EPlayerVisor order
+// Combat/X-Ray/Scan/Thermal, 4-7 beams owned in EBeamId order Power/Ice/Wave/
+// Plasma, 8-9 current visor, 10-11 current beam, 12 valid, 13 morphed or
+// morphing; 0 when stale). A
+// request is read by ControlMapper for ~120 ms as a press of that command.
+bool TouchWheels();
+void SetTouchWheels(bool on);
+bool TouchVisorTapScan();
+void SetTouchVisorTapScan(bool on);
+void SetWheelState(uint32_t mask);
+uint32_t WheelState();
+// CInGameGuiManager publishes each frame whether the pause menu is up (stale = closed).
+void SetPauseScreenOpen(bool open);
+bool PauseScreenOpen();
+void RequestVisor(int visor);
+void RequestBeam(int beam);
+// The HUD's beam/visor menu icons for the touch wheels (Android), decoded to RGBA8 when the HUD
+// frame is up. wheel 0 = visor, 1 = beam; icons[i] is the menu item i's icon widget (EPlayerVisor
+// / EBeamId order). Game thread, each frame until all four are taken.
+void CaptureWheelIcons(int wheel, CGuiModel* const* icons);
+bool VisorRequested(int visor);
+bool BeamRequested(int beam);
+bool TouchMapTap();
+void SetTouchMapTap(bool on);
+void SetMinimapRect(bool valid, bool drawn, float x0, float y0, float x1, float y1);
+bool MinimapRect(float* out4, bool* drawn = nullptr);
+void RequestMapTap();
+// Pad poll hook: true for the one poll where a requested tap reads Z held.
+bool ConsumeMapTapZ();
+// Drag to pan the map screen: CAutoMapper publishes SetMapScreenOpen each frame,
+// the overlay (or the console's mappan) adds dp deltas with the view height in
+// dp, and CAutoMapper drains them with TakeMapPan (true while a finger is on it).
+void SetMapScreenOpen(bool open);
+bool MapScreenOpen();
+void AddMapPan(float dxDp, float dyDp, float viewHeightDp, int holdMs = 250);
+void AddMapRotate(float radians);
+float TakeMapRotate();
+void AddMapZoom(float ratio);
+float TakeMapZoom();
+bool TakeMapPan(float* dxDp, float* dyDp, float* viewHeightDp);
 void GetFrameMouseDelta(float& dx, float& dy);
 // The yaw/pitch change (radians) the next tick's look input will apply, as seen
 // a fraction of a tick after the last one. False when there is none to show.
@@ -420,14 +548,30 @@ void SaveSettingsNow();
 // Marks the settings file dirty from outside the overlay (the VR settings
 // store), so it is written on exit or by SaveSettingsNow like any other change.
 void MarkVrSettingsDirty();
+// The last session ended because a read of the disc image failed: the overlay
+// shows a red alert for a while once the game runs.
+void NoteDiscReadFailedLastSession();
 // Thread-safe snapshot of the overlay's visibility, for the Android touch
 // controls. Unlike Visible() it performs no lazy initialization, so it is safe
 // to call from the UI thread.
 bool OverlayVisible();
-// Thread-safe snapshot of the twin-stick setting, for the Android touch overlay
-// to choose a controller layout. Like OverlayVisible(), performs no lazy
+// Same, for whether the Android touch overlay draws the GameCube pad's colours
+// rather than plain translucent buttons. Like OverlayVisible(), performs no lazy
 // initialization, so it is safe to call from the UI thread.
-bool TwinStickFlag();
+bool TouchColorsFlag();
+// Whether it writes each button's function under its letter. Same rules.
+bool TouchLabelsFlag();
+// The touch overlay's side margin, the left stick's extra inset and the face
+// buttons' extra inset, in dp. Also safe to call from the UI thread.
+float TouchSideMarginDp();
+float TouchStickInsetDp();
+float TouchButtonInsetDp();
+// Per-control offset and size, an opaque `<id>:<dx>,<dy>,<scale>;...` string the
+// Android touch view owns. Setting it saves the config on the next frame.
+std::string TouchLayout();
+void SetTouchLayout(const std::string& layout);
+// True once after F1's "Edit layout" was pressed.
+bool TakeTouchEditRequested();
 void Toggle();
 // Asks for the overlay to be toggled on the next frame. Safe to call from any
 // thread, unlike Toggle(), which touches ImGui state.
@@ -435,6 +579,13 @@ void RequestToggle();
 // Feeds the pad into ImGui's gamepad navigation, applies any requested toggle,
 // and handles F1. Call once per frame before the frame is built.
 void UpdateControllerNav();
+
+// GPU self-test (F1 > Video > Quality, console `gpuselftest`, or MP_GPU_SELFTEST=1 once after the first
+// frames): renders known patterns offscreen, reads them back and logs "gpu selftest: <case>: PASS|FAIL".
+void RequestGpuSelfTest();
+// Runs a requested self-test. Call right after a frame begins, before the game draws; it resets the
+// game's cached GX state when it ran.
+void RunGpuSelfTestIfRequested();
 
 // Builds the debug windows for the current ImGui frame. Call once per presented
 // frame, after Aurora begins the frame and before it ends it.

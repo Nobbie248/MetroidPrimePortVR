@@ -4,13 +4,20 @@
 
 This is an installable 64-bit Android port. It cross-compiles `arm64-v8a`
 native code, packages the SDL Java sources, manifest, pipeline cache and
-replacement textures, and produces a signed debug APK:
+replacement textures, and produces a signed APK, built with:
+
+```sh
+tools/android_apk.sh :app:assembleRelease
+```
+
+Release output:
 
 ```
-android/app/build/outputs/apk/debug/app-debug.apk
+android/app/build/outputs/apk/release/app-release.apk
 ```
 
-The Gradle project lives in `android/`, and `tools/android_apk.sh` locates the
+Release signing uses this project's own key; see `docs/RELEASING.md`. The Gradle
+project lives in `android/`, and `tools/android_apk.sh` locates the
 SDK and NDK and drives Gradle. The native link was first proven by a feasibility
 probe before the packaging layer was added; see [Probe history](#probe-history).
 
@@ -38,9 +45,9 @@ ANDROID_SDK_ROOT=/path/to/sdk ANDROID_NDK_HOME=/path/to/ndk \
 
 Set `ANDROID_SDK_ROOT` (the script also accepts `ANDROID_HOME`) and
 `ANDROID_NDK_HOME` (also `ANDROID_NDK_ROOT`). The script writes `sdk.dir` and
-passes the selected NDK to Gradle, then runs Gradle with `--no-daemon`. The nod
-stub is on by default; pass `-PandroidNodStub=false` to build the real `nod`,
-which needs the Rust target above.
+passes the selected NDK to Gradle, then runs Gradle with `--no-daemon`. The real
+`nod` is the default; pass `-PandroidNodStub=true` for the ABI-only stub,
+which needs no Rust toolchain.
 
 Optional dependency cache:
 
@@ -217,37 +224,21 @@ This was the open question behind the Android `wss://` plan, and it is settled.
 Android's `SSL_CTX_set_default_verify_paths` points at a compiled-in
 `OPENSSLDIR` that does not exist, returns success, and loads nothing — so the
 port's "could not load the system TLS trust store" check never fires and every
-public server then fails obscurely. The port must enumerate the certificates
-itself. From inside the app's own sandbox on API 34:
-
-```sh
-adb shell run-as org.metroidprime.port ls /apex/com.android.conscrypt/cacerts | wc -l
-# 134
-adb shell "run-as org.metroidprime.port head -c 4 \
-  /apex/com.android.conscrypt/cacerts/\$(ls /apex/com.android.conscrypt/cacerts | head -1)"
-# ----            i.e. the start of -----BEGIN CERTIFICATE-----
-```
-
-So the app can both list and read them, under SELinux: the files carry
-`u:object_r:system_security_cacerts_file:s0` and the app runs in
-`untrusted_app`. `/system/etc/security/cacerts` holds the same 134 as a
-fallback. The names are 8 hex digits plus `.0` (`01419da9.0`).
-
-That naming is why the loader must read each file directly rather than hand the
-directory to OpenSSL: hashed-directory lookup is lazy, so there is nothing to
-count and nothing to fail on, and a hash-convention mismatch would surface only
-as a verification error — the same silent trap as above. Enumerating also makes
-it possible to **fail loudly when zero certificates load**, naming the
-directories tried. On API 34+ the APEX copy is authoritative and replaces the
-`/system` one, so use the first directory that yields at least one certificate
-rather than merging them.
+public server then fails obscurely. The port enumerates the certificates itself
+from `/apex/com.android.conscrypt/cacerts` (134 PEM files on API 34,
+`/system/etc/security/cacerts` as fallback), reading each file directly rather
+than handing the directory to OpenSSL, whose hashed-directory lookup is lazy and
+fails silently on a convention mismatch. On API 34+ the APEX copy is
+authoritative, so the loader uses the first directory that yields at least one
+certificate rather than merging them. **Zero certificates loaded is a loud error
+naming the directories tried**, not an obscure verification failure later.
 
 ## Nod stub
 
-`-PandroidNodStub=true` (the default) builds a `nod` ABI shim that provides only
+`-PandroidNodStub=true` builds a `nod` ABI shim that provides only
 the interface Aurora calls. It cannot read a disc, so the package is not
 playable; it exists to isolate link/packaging problems from a reproducible
-`nod` cross-build. Use `-PandroidNodStub=false` for a playable build.
+`nod` cross-build. The default is the real `nod`.
 
 ## Archipelago and the disc path (2026-09-26)
 
@@ -259,19 +250,10 @@ building and running it:
   and Winsock both supply it through `<netdb.h>`. Until that include was added
   the whole WebSocket client, and so the whole Archipelago feature, was missing
   from the Android build.
-- `wss://` still does not work there. The NDK has no OpenSSL, so the build has
-  no `MP_HAVE_OPENSSL` and the client refuses a `wss://` server by design rather
-  than downgrading it. A JNI `SSLSocket` backend or a vendored TLS library is
-  what that needs; nothing about the port's protocol code blocks it.
-- The remembered disc path is Android-specific: `ResolveDiscPath` accepts a
-  `content://` URI from the file picker, and the remembered value is handed
-  straight to `aurora_dvd_open`. On a device whose saved URI no longer opens -
-  the picker grants access to a document, and that grant can lapse - the app
-  prints `failed to open disc image: content://…` and exits, and it does the
-  same on every later launch, because the failing value is exactly what it
-  remembers. That needs a directed fix: fall back to asking again when a
-  remembered `content://` URI fails to open, rather than retrying it forever.
-  It is not fixed here because it cannot be verified without a device.
+- The remembered disc path issue is fixed: `ResolveDiscPath` in
+  `platform/main.cpp` prefers the local `disc.iso` copy and checks `exists()`
+  before reuse, so a lapsed `content://` grant falls back instead of exiting
+  every launch.
 - The port's own diagnostics used to go to stderr, which Android discards
   entirely, so a device run that exits during startup reports nothing about why.
   They now go to logcat under the `metroidprime` tag (`PortLog::Write`), which
@@ -319,14 +301,14 @@ building and running it:
 - **There is no "unidentified" card bug.** The report was a misreading of
   Metroid Prime's opening narration: the game displays "Unidentified distress
   beacon has been transmitted" as part of its story setup, and that sentence is
-  not about the card. Captured and confirmed — see `PORT_NOTES.md`. The card
+  not about the card. Captured and confirmed. The card
   itself is found, and a save on it is opened, both on desktop and through the
   same code path Android uses.
 - **Saving works**, verified end to end on that same path: a real save is written
   to the card carrying its comment and a timestamp, and the next boot opens it
   without reporting corruption. Only slot B fails, which is correct — nothing has
   ever been written there. Loading a save from the **title screen's Continue** is
-  still unverified; see `PORT_NOTES.md`.
+  still unverified.
 - The port logs the directory it resolved the card to on every platform, so a
   device run can confirm where saves go in one line:
   `memory card: storing under <path>`. The same code falls back to the app's
@@ -344,44 +326,10 @@ building and running it:
 
 ## Probe history
 
-The native target was first proven as a feasibility scaffold that configured and
-linked `arm64-v8a` as `build/android-aarch64/libmetroid_prime_port.so`. That
-probe required NDK r29 or newer and used `build/review-tools/bin/cmake` and
-`ninja`:
-
-```sh
-ANDROID_NDK_HOME=/path/to/android-ndk-r29 tools/android_probe.sh
-```
-
-It completed on 2026-09-21 with Android NDK r29 (Clang 21.0.0). CMake selected
-Aurora's pinned `dawn-android-aarch64` package, built vendored SDL 3.4.10 with
-its Android video, audio, input and Vulkan backends, and completed the 1,243-step
-native build graph. The result was verified as:
-
-```text
-ELF 64-bit LSB shared object, ARM aarch64, dynamically linked,
-for Android 28, built by NDK r29
-```
-
-Its dynamic dependencies are Android platform libraries (`libc`, `libm`,
-`libz`, `libandroid`, `liblog`, OpenSL ES, GLES, and `libdl`); no host library
-leaked into the result. Two build-system issues were found and addressed:
-
-- Aurora's provider accepted host `pkg-config` results for libpng and Freetype
-  during cross-compilation. The provider now skips pkg-config fallbacks when
-  `CMAKE_CROSSCOMPILING` and builds the pinned sources instead.
-- An SDL Android app is a JNI-loaded shared library, not a standalone ELF.
-  `metroid_prime_port` is therefore a shared library only when `ANDROID` is set;
-  desktop targets remain executables.
-
-GitHub archive downloads returned transient HTTP 504 responses during that run.
-Matching pinned source checkouts were supplied through CMake's
-`FETCHCONTENT_SOURCE_DIR_*` overrides to finish the probe. This was a network
-failure rather than an Android build incompatibility and no local cache paths are
-embedded in the scaffold.
-
-At that point the `nod` source build could not be validated: Aurora fetches
-`nod-ffi` (nod 2.0.0-alpha.12 and Corrosion 0.6.1) and builds it with Cargo, but
-Cargo and the Android Rust target were not installed. The stub provided only the
-nod ABI and always failed disc access. Both gaps are now covered by the APK
-build above.
+The native link was first proven on 2026-09-21 as a feasibility scaffold
+(`tools/android_probe.sh`): NDK r29, `arm64-v8a`, vendored SDL 3.4.10, Aurora's
+pinned `dawn-android-aarch64`, 1,243 build steps, verified as an Android aarch64
+shared object linked only against platform libraries. Two cross-compilation
+issues found then (host `pkg-config` fallbacks, shared-library-vs-executable
+target) are fixed in the tree. The `nod` source build, unvalidated at the time
+for lack of a Rust toolchain, is now covered by the APK build above.

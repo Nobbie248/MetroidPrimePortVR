@@ -49,7 +49,9 @@ void render(const DrawData& data, const wgpu::RenderPassEncoder& pass) {
   const auto& resources = gfx::detail::resources();
   pass.SetImmediates(0, &data.immediateData, sizeof(data.immediateData));
   gfx::bind_gx_uniform(pass, resources.uniformBindGroup, data.uniformRange.offset);
-  gfx::bind_gx_textures(pass, data.bindGroups.textureBindGroup);
+  // A shadow receiver's group 2 has its own layout, so a draw without a group of its own can't
+  // inherit it (bind_gx_textures puts the empty group back).
+  gfx::bind_gx_textures(pass, data.bindGroups.textureBindGroup, data.shadowGroup);
   gfx::bind_gx_geometry(pass, data.cachedGeometry);
   if (data.nativeVertices) {
     gfx::bind_gx_native_vertices(pass);
@@ -81,7 +83,7 @@ void render_eye(const DrawData& data, const wgpu::RenderPassEncoder& pass, uint3
   }
   if (eyeClip) {
     DrawImmediateData immediates = data.immediateData;
-    immediates.eyeMask = eye;
+    set_eye_mask(immediates, eye);
     pass.SetImmediates(0, &immediates, sizeof(immediates));
     gfx::bind_gx_uniform(pass, resources.multiviewUniformBindGroup, uniformOffset);
   } else {
@@ -90,7 +92,7 @@ void render_eye(const DrawData& data, const wgpu::RenderPassEncoder& pass, uint3
   }
   const gfx::BindGroupRef textureBindGroup =
       data.stereoTextureBindGroup[eye] ? data.stereoTextureBindGroup[eye] : data.bindGroups.textureBindGroup;
-  gfx::bind_gx_textures(pass, textureBindGroup);
+  gfx::bind_gx_textures(pass, textureBindGroup, data.shadowGroup);
   gfx::bind_gx_geometry(pass, data.cachedGeometry);
   if (data.nativeVertices) {
     gfx::bind_gx_native_vertices(pass);
@@ -123,7 +125,7 @@ void render_multiview(const DrawData& data, const wgpu::RenderPassEncoder& pass)
   // pair of eye copies from this offset (MultiviewFull; the mono uniform as
   // element 0 when the eye mask is 0).
   gfx::bind_gx_uniform(pass, resources.multiviewUniformBindGroup, uniformOffset);
-  gfx::bind_gx_textures(pass, data.stereoTextureBindGroup[0]);
+  gfx::bind_gx_textures(pass, data.stereoTextureBindGroup[0], data.shadowGroup, true);
   gfx::bind_gx_geometry(pass, data.cachedGeometry);
   if (data.nativeVertices) {
     gfx::bind_gx_native_vertices(pass);

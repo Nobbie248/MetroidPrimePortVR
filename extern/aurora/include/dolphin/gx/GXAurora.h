@@ -180,11 +180,31 @@ extern "C" {
 #define GX_AURORA_SET_PBR_VOLUME 0x004D
 
 /**
+ * Port extension: baked lightmaps, a 2D-array texture (L0 and L1 x/y/z) which PBR draws read
+ * through a vertex attribute's UV (see GXCreatePBRLightmap). CREATE takes the id, the width,
+ * height, layer count, the format and a pointer to a heap block the command owns; DESTROY
+ * takes the id. SET selects the lightmap of the following PBR draws: the id, four floats
+ * (the rect) and nine (the axes, row by row); id 0 turns it off. Stays in effect until changed.
+ */
+#define GX_AURORA_CREATE_PBR_LIGHTMAP 0x0064
+#define GX_AURORA_DESTROY_PBR_LIGHTMAP 0x0065
+#define GX_AURORA_SET_PBR_LIGHTMAP 0x0066
+// The vertex attribute holding the lightmap UV (see GXSetPBRLightmapAttr). Payload: u8 GXAttr.
+#define GX_AURORA_SET_PBR_LIGHTMAP_ATTR 0x0067
+
+/**
  * Port extension: the tone curve of the following PBR draws, as three vec4f (see
  * GXSetPBRTone). A slope of 0 (x of the second) goes back to the built-in highlight
  * roll-off. Stays in effect until changed.
  */
 #define GX_AURORA_SET_PBR_TONE 0x004E
+
+/**
+ * Port extension: a table for the PBR environment specular's scale and bias in place of
+ * the analytic fit (see GXSetPBRBrdfLut). Payload: u64 a heap std::vector<u8> the command
+ * owns, empty to go back to the fit. Stays in effect until changed.
+ */
+#define GX_AURORA_SET_PBR_BRDF_LUT 0x0054
 
 // Distance-field texturing for the following draws: every texture sample is read as
 // a signed distance (red, edge at 0.5) and becomes coverage, one screen pixel wide:
@@ -193,45 +213,144 @@ extern "C" {
 //   u8 edge (distance of the outer edge x 255; 128 = the shape itself, 0 = off)
 #define GX_AURORA_SET_SDF 0x004F
 
+// Names the following draws for diagnostics (see GXSetDrawTag); changes no state.
+// Payload:
+//   u32 asset id, u32 model index, u32 material
+#define GX_AURORA_SET_DRAW_TAG 0x0050
+
+// Lights the following PBR draws leave out (see GXSetPBRLightSkip). Stays in effect until
+// changed.
+// Payload:
+//   u32 mask (bit n: GX_LIGHTn)
+#define GX_AURORA_SET_PBR_LIGHT_SKIP 0x0051
+
+// Scales the diffuse colour and the F0 of the following PBR draws (see GXSetPBRLightScale);
+// both 1 is neutral, and their alpha's fade (1, 0 is neutral). Stays in effect until changed.
+// Payload:
+//   f32 diffuse, f32 f0, f32 alpha, u32 alphaReplaces
+#define GX_AURORA_SET_PBR_LIGHT_SCALE 0x0053
+
+// Port extension: Remastered's bloom, colour grade and frame average over the EFB as drawn so
+// far (see GXPortPostProcess). Queued, so the game thread does not wait for the FIFO to be
+// processed before it can record it.
+// Payload:
+//   32 u32: aurora::gfx::bloom::Params, word for word
+#define GX_AURORA_PORT_POST_PROCESS 0x0052
+
+// Replaces one light's colour, position and attenuation in the following PBR draws with a
+// Remastered HDR light's (see GXSetPBRLightHdr); other draws keep the GX light. Stays in effect
+// until changed.
+// Payload:
+//   u32 light (its GX_LIGHTn bit), f32 r, g, b (linear), f32 view-space x, y, z,
+//   f32 inner radius, f32 outer radius (0 = off), u32 falloff (0 none, 1 linear, 2 quadratic,
+//   3 1 - smoothstep)
+#define GX_AURORA_SET_PBR_LIGHT_HDR 0x0056
+
+// Multiplies the baked light of the following PBR draws (see GXSetPBRBakedLightModulation).
+// Stays in effect until changed; 1, 1, 1 is neutral.
+// Payload:
+//   f32 r, g, b (linear)
+#define GX_AURORA_SET_PBR_BAKED_LIGHT_MODULATION 0x0057
+
+// Remastered's character backlight of the following PBR draws (see GXSetPBRBacklight).
+// Stays in effect until changed.
+// Payload:
+//   f32 height plane x, y, z, w (view space), f32 back colour direction x, y, z (view space),
+//   f32 back strength, f32 top strength
+#define GX_AURORA_SET_PBR_BACKLIGHT 0x0058
+
+// The constants of a PBR kind 14 material (Remastered's BoundaryShield; see GXSetPBRShield).
+// Stays in effect until changed.
+// Payload:
+//   8 x (f32 x, y, z, w)
+#define GX_AURORA_SET_PBR_SHIELD 0x005D
+
+// Port extension: Remastered's volumetric fog over the EFB as drawn so far (see
+// GXPortVolumetricFog). Queued like GX_AURORA_PORT_POST_PROCESS.
+// Payload:
+//   132 u32: aurora::gfx::volfog::Params, word for word
+#define GX_AURORA_PORT_VOLUMETRIC_FOG 0x0059
+
+// Port extension: the draws after GX_AURORA_PORT_VOLUMETRIC_FOG fog themselves through its
+// froxels until this (see GXPortVolumetricFogEnd).
+// Payload: none
+#define GX_AURORA_PORT_VOLUMETRIC_FOG_END 0x005A
+
+// Port extension: draws the following opaque surfaces in two passes (see GXPortSetDepthPrepass).
+// Payload:
+//   u8 pass (0 = off, 1 = depth only, 2 = shade where the depth is equal)
+#define GX_AURORA_PORT_DEPTH_PREPASS 0x0055
+
+// Port extension: the serial of the following draws (see GXPortSetDrawSerial). Stays in effect until
+// changed; 0 is none. Shown as a colour by the "drawid" mode.
+// Payload:
+//   u32 serial (24 bits)
+#define GX_AURORA_PORT_DRAW_SERIAL 0x005B
+
+// Port extension: the "drawid" debug view (see GXPortSetDrawIdMode): every draw is its serial as a flat
+// colour, with no blend, fog or post-processing.
+// Payload:
+//   u8 on
+#define GX_AURORA_PORT_DRAW_ID_MODE 0x005C
+
+// Port extension: data kept on the GPU across frames (GXPortRetainResident).
+// RETAIN payload: u64 the game's pointer, u64 a heap std::vector<u8> copy the processor takes.
+// RELEASE payload: u64 the pointer.
+// CALL_DL payload: u64 the pointer of a retained display list, u32 its size; drawn as
+// GXCallDisplayList would draw it.
+#define GX_AURORA_RESIDENT_RETAIN 0x0060
+#define GX_AURORA_RESIDENT_RELEASE 0x0061
+#define GX_AURORA_RESIDENT_CALL_DL 0x0062
+
+// Port extension: the sun's shadow (see GXPortSetShadowCaster, GXPortSetShadowFrame and
+// GXPortRenderShadowMap).
+// CASTER payload: u8 on. Stays in effect until changed.
+// FRAME payload: 19 f32: world -> view (3 rows of 4), the sun's direction (world, the way its light
+// travels), the radius around the camera the map covers (<= 0: no sun), its colour (rgb).
+// RENDER payload: none.
+#define GX_AURORA_PORT_SHADOW_CASTER 0x005E
+#define GX_AURORA_PORT_SHADOW_FRAME 0x005F
+#define GX_AURORA_PORT_SHADOW_RENDER 0x0063
+
 #define GX2_SET_POLYGON_OFFSET 0x1000
 
 /**
  * Stereo replay draw route for the draws that follow (AuroraStereoDrawRoute in aurora/gfx.h).
  * Must be followed by one u8.
  */
-#define GX_AURORA_STEREO_DRAW_ROUTE 0x0050
+#define GX_AURORA_STEREO_DRAW_ROUTE 0x0068
 
 /**
  * The plane in front of the head that AURORA_STEREO_ROUTE_HEAD_LOCKED_2D lays orthographic draws on and takes EFB
  * copies through (AuroraSetStereoHeadLockedPlane). Must be followed by three f32.
  */
-#define GX_AURORA_STEREO_HEAD_LOCKED_PLANE 0x0051
+#define GX_AURORA_STEREO_HEAD_LOCKED_PLANE 0x0069
 
 /**
  * A texture matrix of the draws that follow projects positions onto the screen (AuroraSetStereoScreenTexMtx), so
  * the stereo replay derives it again per eye. Must be followed by two u8: the texture matrix slot (0-9, 0xFF for
  * none) and the position matrix slot (0-9) it projects through.
  */
-#define GX_AURORA_STEREO_SCREEN_TEX_MTX 0x0052
+#define GX_AURORA_STEREO_SCREEN_TEX_MTX 0x006A
 
 /**
  * Ordered map triangles: POS/NRM carry both line endpoints, CLR0 the colour,
  * TEX0 the signed logical line width and endpoint selector (negative for fills).
  * A u8 enables/disables this shader variant; fills retain GX culling, lines do not.
  */
-#define GX_AURORA_MAP_BATCH 0x0053
+#define GX_AURORA_MAP_BATCH 0x006B
 
 /**
  * A static world surface's display list, read where it lives by the FIFO processor instead of being copied
  * into the FIFO: u32 geometry set (nonzero, one per CCubeRenderer area list item), u64 address, u32 byte
  * size. The display list and the arrays it indexes stay valid until the set is freed.
  */
-#define GX_AURORA_CALL_CACHED_DL 0x0054
+#define GX_AURORA_CALL_CACHED_DL 0x006C
 /**
  * Frees a geometry set (u32): nothing of it is drawn afterwards, and the FIFO processor drops what it
  * kept for the set.
  */
-#define GX_AURORA_FREE_GEOMETRY_SET 0x0055
+#define GX_AURORA_FREE_GEOMETRY_SET 0x006D
 
 
 /*

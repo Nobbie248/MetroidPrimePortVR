@@ -51,7 +51,13 @@
 
   <content_rating type="oars-1.1"/>
 
+  <!-- Newest first. A release adds its entry here when it bumps versionName in
+       android/app/build.gradle; tools/make_flatpak.sh refuses to build when the
+       two differ, since Flatpak reports the newest entry as the app's version. -->
   <releases>
+    <release version="0.18.0" date="2026-10-07">
+      <url type="details">https://github.com/Odrannnn/MetroidPrimePort/releases/tag/v0.18.0</url>
+    </release>
     <release version="0.1.0" date="2026-09-26">
       <description>
         <p>First packaged release.</p>

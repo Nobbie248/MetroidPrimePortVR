@@ -13,14 +13,17 @@
 #include <dolphin/vi.h>
 #include <dolphin/dvd.h>
 
+#include "port_env.h"
+#include "port_embedded.h"
+#include "port_crash.h"
 #include "port_debug.h"
 #include "port_paths.h"
+#include "port_actor_collision_bounds.h"
 #include "port_apclient.h"
 #include "port_randomizer.h"
 #include "port_textures.h"
 #include "port_prompts.h"
 #include "port_build_info.h"
-#include "crash_handler.h"
 #include "port_log.h"
 #include "port_log_file.h"
 #include "port_mods.h"
@@ -34,14 +37,20 @@
 #include <SDL3/SDL_filesystem.h>
 #include <SDL3/SDL_hints.h>
 #include <SDL3/SDL_iostream.h>
+#include <SDL3/SDL_messagebox.h>
 #include <SDL3/SDL_properties.h>
 #include <SDL3/SDL_timer.h>
 
 #if defined(__ANDROID__)
 #include <android/log.h>
+#include <sys/system_properties.h>
+#endif
+#if defined(__linux__) && !defined(__ANDROID__)
+#include <sys/utsname.h>
 #endif
 
 #include <algorithm>
+#include <array>
 #include <atomic>
 #include <cctype>
 #include <cstdio>
@@ -49,7 +58,11 @@
 #include <cstring>
 #include <exception>
 #include <filesystem>
+#include <fstream>
+#include <functional>
+#include <span>
 #include <string>
+#include <string_view>
 #include <vector>
 
 extern "C" int metroid_main(int argc, char** argv);
@@ -281,6 +294,215 @@ void ReportDiscOpenFailure(const char* path) {
                     header[2], header[3], header[4], header[5], header[6], header[7]);
 }
 
+// Whether the disc was named on the command line or by MP_DISC, as opposed to
+// remembered, found or picked: a wrong one there is the caller's to fix.
+bool ResolveDiscFromArgs(int argc, char** argv) {
+    for (int i = 1; i < argc; ++i) {
+        if (argv[i][0] != '-' && argv[i][0] != '\0') {
+            return true;
+        }
+    }
+    const char* env = std::getenv("MP_DISC");
+    return env != nullptr && env[0] != '\0';
+}
+
+bool IsSupportedId(const char* id6, unsigned diskNumber, unsigned version) {
+    return std::memcmp(id6, "GM8E01", 6) == 0 && diskNumber == 0 && version == 0;
+}
+
+// The disc id's game name and maker as one six-character id.
+std::array<char, 6> DiscId6(const DVDDiskID& id) {
+    std::array<char, 6> id6{};
+    std::memcpy(id6.data(), id.gameName, 4);
+    std::memcpy(id6.data() + 4, id.company, 2);
+    return id6;
+}
+
+bool IsSupportedDisc(const DVDDiskID* id) {
+    return id != nullptr && IsSupportedId(DiscId6(*id).data(), id->diskNumber, id->gameVersion);
+}
+
+// A compressed image (RVZ, WIA, GCZ) cut short by an interrupted download or
+// copy still opens, since the header is at the front, and the game only finds
+// out a few frames in, when a read fails (issue #8). Containers store the disc
+// in order, so a cut loses the files that end last first: reading the last
+// byte of those catches it at the disc check. (Reading every file's last byte
+// took 4 s for an LZMA RVZ on a desktop.)
+// Returns the first file that can't be read, or an empty string.
+std::string FindUnreadableDiscFile() {
+    constexpr size_t kFilesToCheck = 8;
+    const Uint64 start = SDL_GetTicks();
+    const s32 count = aurora_dvd_base_entry_count();
+    std::vector<std::pair<int64_t, s32>> ends; // (end offset, entry), the last ones first
+    for (s32 entry = 1; entry < count; ++entry) {
+        const int64_t offset = aurora_dvd_base_offset(entry);
+        if (offset < 0) {
+            continue; // a directory
+        }
+        void* file = aurora_dvd_base_open(entry);
+        const int64_t size = file != nullptr ? aurora_dvd_base_seek(file, 0, SEEK_END) : -1;
+        aurora_dvd_base_close(file);
+        ends.emplace_back(offset + std::max<int64_t>(size, 0), entry);
+    }
+    std::sort(ends.begin(), ends.end(), std::greater<>());
+    ends.resize(std::min(ends.size(), kFilesToCheck));
+    for (const auto& [end, entry] : ends) {
+        void* file = aurora_dvd_base_open(entry);
+        const int64_t size = file != nullptr ? aurora_dvd_base_seek(file, 0, SEEK_END) : -1;
+        uint8_t last = 0;
+        const bool ok = size == 0 || (size > 0 && aurora_dvd_base_seek(file, size - 1, SEEK_SET) == size - 1 &&
+                                      aurora_dvd_base_read(file, &last, 1) == 1);
+        aurora_dvd_base_close(file);
+        if (!ok) {
+            char path[256] = {};
+            return DVDConvertEntrynumToPath(entry, path, sizeof(path)) ? std::string(path) : "entry " + std::to_string(entry);
+        }
+    }
+    PortLog::Write("metroid_prime_port: disc image is complete (its last %zu files read in %llu ms)\n", ends.size(),
+                   static_cast<unsigned long long>(SDL_GetTicks() - start));
+    return {};
+}
+
+constexpr const char* kSupportedDisc = "Only Metroid Prime for the GameCube, USA version 1.00\n(GM8E01, revision 0), is supported.";
+
+// What the user picked instead, in words: the usual mistakes are another
+// region or a later revision of the same game.
+std::string DescribeDisc(const char* id6, unsigned version) {
+    char id[7] = {};
+    for (int i = 0; i < 6; ++i) {
+        const char c = id6[i];
+        id[i] = (c >= '0' && c <= '9') || (c >= 'A' && c <= 'Z') ? c : '?';
+    }
+    std::string text;
+    if (std::memcmp(id, "GM8", 3) == 0) {
+        const char* region = id[3] == 'E' ? "USA" : id[3] == 'P' ? "European" : id[3] == 'J' ? "Japanese" : "another";
+        text = std::string("This is the ") + region + " release of Metroid Prime (" + id + ", revision " +
+               std::to_string(version) + ").";
+    } else {
+        text = std::string("This disc image is not Metroid Prime (game id ") + id + ").";
+    }
+    return text;
+}
+
+std::string DescribeUnsupportedDisc(const DVDDiskID* id) {
+    if (id == nullptr) {
+        return "This disc image has no readable game id.";
+    }
+    return DescribeDisc(DiscId6(*id).data(), id->gameVersion);
+}
+
+// Shows a disc message and asks whether to pick a disc image (true) or close
+// the game. With offerPick false the box only has Close. Skipped when nothing
+// can show it (headless, or the scripted runs that set MP_NO_DISC_DIALOG), as
+// the disc dialog is; the answer is then offerPick, which is what happened
+// before the box had a choice.
+bool AskPickDisc(const char* title, const std::string& message, const char* pickLabel, bool offerPick) {
+    if (port::EnvFlag("MP_NO_DISC_DIALOG")) {
+        return offerPick;
+    }
+    int windowCount = 0;
+    SDL_Window** windows = SDL_GetWindows(&windowCount);
+    SDL_Window* window = windows != nullptr && windowCount > 0 ? windows[0] : nullptr;
+    SDL_free(windows);
+    if (window == nullptr) {
+        return offerPick;
+    }
+    // Escape (and Back on Android) closes: the box is in the way of nothing else,
+    // so leaving it is leaving the game.
+    enum { kClose, kPick };
+    const SDL_MessageBoxButtonData buttons[] = {
+        {SDL_MESSAGEBOX_BUTTON_RETURNKEY_DEFAULT, kPick, pickLabel},
+        {SDL_MESSAGEBOX_BUTTON_ESCAPEKEY_DEFAULT | (offerPick ? 0u : SDL_MESSAGEBOX_BUTTON_RETURNKEY_DEFAULT), kClose,
+         "Close"},
+    };
+    SDL_MessageBoxData data{};
+    data.flags = SDL_MESSAGEBOX_ERROR;
+    data.window = window;
+    data.title = title;
+    data.message = message.c_str();
+    data.numbuttons = offerPick ? 2 : 1;
+    data.buttons = offerPick ? buttons : buttons + 1;
+    int answer = -1;
+    if (!SDL_ShowMessageBox(&data, &answer)) {
+        PortLog::Write("metroid_prime_port: could not show the disc message: %s\n", SDL_GetError());
+        return offerPick;
+    }
+    return offerPick && answer == kPick;
+}
+
+// Says on screen why the disc was refused (without it a refused disc looked
+// like a crash on start) and asks whether to pick another or close the game.
+bool ShowDiscError(const std::string& problem, const std::string& path, bool askNext) {
+    // Short lines: some message boxes do not wrap (SDL's X11 one).
+    const std::string message = problem + "\n\n" + path + "\n\n" + kSupportedDisc;
+    return AskPickDisc("Metroid Prime: wrong disc image", message, "Pick another disc", askNext);
+}
+
+// Drops a refused disc so the next launch does not open it again. On Android
+// the copy made from a picked file goes too: ResolveDiscPath prefers it over
+// the remembered setting, and it is 1.4 GB of the wrong game.
+void ForgetDisc(const std::string& path) {
+    bool forget = false;
+    if (const char* remembered = PortDebug::DiscPath(); remembered != nullptr && path == remembered) {
+        forget = true;
+    }
+#if defined(__ANDROID__)
+    if (!PortPaths::UserFolder().empty() && path == PortPaths::UserFolder() + "disc.iso") {
+        std::error_code ec;
+        if (std::filesystem::remove(path, ec)) {
+            PortLog::Write("metroid_prime_port: deleted the copy of the refused disc\n");
+        }
+        forget = true;
+    }
+#endif
+    if (forget) {
+        PortDebug::SetDiscPath("");
+        PortDebug::SaveSettingsNow();
+        PortLog::Write("metroid_prime_port: forgot the remembered disc image\n");
+    }
+}
+
+// A read of the image that fails mid-game (damage the mount check missed)
+// ends the session, and the same image would end every later one. So the
+// failure is noted in a file naming the image, and the next launch refuses
+// that image and asks for another.
+std::string DiscReadFailedMarker() {
+    return PortPaths::UserFolder().empty() ? std::string() : PortPaths::UserFolder() + "disc-read-failed";
+}
+
+std::string s_mountedDisc;
+
+void NoteDiscReadFailure() {
+    PortLog::Write("metroid_prime_port: a read of the disc image failed\n");
+    const std::string marker = DiscReadFailedMarker();
+    if (marker.empty()) {
+        return;
+    }
+    if (FILE* file = std::fopen(marker.c_str(), "wb"); file != nullptr) {
+        std::fputs(s_mountedDisc.c_str(), file);
+        std::fclose(file);
+    }
+}
+
+// Whether the last session failed to read this image. Clears the note, and
+// has the overlay say why the last session ended whichever image it was.
+bool DiscReadFailedLastTime(const std::string& path) {
+    const std::string marker = DiscReadFailedMarker();
+    if (marker.empty()) {
+        return false;
+    }
+    std::ifstream in(marker, std::ios::binary);
+    if (!in) {
+        return false;
+    }
+    const std::string failed((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
+    in.close();
+    std::error_code ec;
+    std::filesystem::remove(marker, ec);
+    PortDebug::NoteDiscReadFailedLastSession();
+    return failed == path;
+}
+
 #if defined(__ANDROID__)
 // Android's picker hands back a content:// URI, not a path. Opening one is
 // possible (SDL routes SDL_IOFromFile through ContentResolver) but it depends
@@ -307,6 +529,29 @@ std::string CopyDiscFromContentUri(const std::string& uri) {
         PortLog::Write( "metroid_prime_port: could not read the picked image: %s: %s\n", uri.c_str(),
                         SDL_GetError());
         return {};
+    }
+    // A plain image names its game in the first bytes: refuse a wrong one
+    // before minutes of copying. Containers (RVZ, WBFS, CISO) are checked once
+    // mounted instead; returning nothing leaves the URI for that check.
+    Uint8 header[8] = {};
+    if (SDL_ReadIO(in, header, sizeof(header)) == sizeof(header)) {
+        const bool container = std::memcmp(header, "RVZ", 3) == 0 || std::memcmp(header, "WIA", 3) == 0 ||
+                               std::memcmp(header, "WBFS", 4) == 0 || std::memcmp(header, "CISO", 4) == 0;
+        if (!container && !IsSupportedId(reinterpret_cast<const char*>(header), header[6], header[7])) {
+            PortLog::Write("metroid_prime_port: not copying the picked image: %s Expected GM8E01 revision 0.\n",
+                           DescribeDisc(reinterpret_cast<const char*>(header), header[7]).c_str());
+            SDL_CloseIO(in);
+            return {};
+        }
+    }
+    if (SDL_SeekIO(in, 0, SDL_IO_SEEK_SET) != 0) {
+        // Some providers hand out a pipe, which cannot seek: start over.
+        SDL_CloseIO(in);
+        in = SDL_IOFromFile(uri.c_str(), "rb");
+        if (in == nullptr) {
+            PortLog::Write("metroid_prime_port: could not reopen the picked image: %s\n", SDL_GetError());
+            return {};
+        }
     }
     const Sint64 total = SDL_GetIOSize(in);
     SDL_IOStream* out = SDL_IOFromFile(partial.string().c_str(), "wb");
@@ -399,15 +644,22 @@ std::string CopyDiscFromContentUri(const std::string& uri) {
 // Asks for the disc image with the platform's file dialog and remembers the
 // choice. SDL delivers the result on another thread, so this pumps events until
 // it arrives; the callback also fires with an empty list if the dialog fails.
-std::string AskForDiscImage() {
+// *cancelled is set when the user closed the dialog without a pick (Back on
+// Android), as against a dialog that failed, timed out or was quit.
+std::string AskForDiscImage(bool* cancelled = nullptr) {
     static std::atomic< bool > answered{false};
+    static std::atomic< bool > dismissed{false};
     static std::string chosen;
+    if (cancelled != nullptr) {
+        *cancelled = false;
+    }
     // Static because the callback cannot capture, but reset on every call: the
     // stale-disc retry asks a second time, and without this it would return the
     // first answer at once without showing a dialog. A first call only returns
     // early (timeout, quit, no window) on the way to exiting, so no callback
     // from it can still be pending here.
     answered.store(false);
+    dismissed.store(false);
     chosen.clear();
     // Static: SDL reads the filters until the dialog closes, which can be after
     // a timed-out wait has returned.
@@ -415,7 +667,7 @@ std::string AskForDiscImage() {
         {"Metroid Prime disc image (iso, gcm, rvz, wbfs, ciso, nkit)", "iso;gcm;rvz;wbfs;ciso;nkit"},
         {"All files", "*"},
     };
-    if (const char* env = std::getenv("MP_NO_DISC_DIALOG"); env != nullptr && env[0] == '1') {
+    if (port::EnvFlag("MP_NO_DISC_DIALOG")) {
         // For scripted runs with a window, such as the packaged startup check
         // on a build runner, where the dialog would sit open until it times out.
         PortLog::Write( "metroid_prime_port: not asking for a disc image (MP_NO_DISC_DIALOG)\n");
@@ -446,6 +698,8 @@ std::string AskForDiscImage() {
             if (files != nullptr && files[0] != nullptr) {
                 chosen = files[0];
             }
+            // An empty list is a cancel; a null one is SDL's error.
+            dismissed.store(files != nullptr && files[0] == nullptr);
             answered.store(true);
         },
         nullptr, props);
@@ -488,8 +742,30 @@ std::string AskForDiscImage() {
         // overlay's draw path, which never runs if the game cannot frame.
         PortDebug::SaveSettingsNow();
         PortLog::Write( "metroid_prime_port: disc image set to %s\n", chosen.c_str());
+    } else if (dismissed.load()) {
+        PortLog::Write("metroid_prime_port: no disc image picked\n");
+        if (cancelled != nullptr) {
+            *cancelled = true;
+        }
     }
     return chosen;
+}
+
+// Asks for the disc image until one is picked or the user chooses to close.
+// A picker closed without a pick used to end the game at once, which on Android
+// (Back in the picker) looked like a crash.
+std::string PickDisc() {
+    for (;;) {
+        bool cancelled = false;
+        std::string disc = AskForDiscImage(&cancelled);
+        if (!disc.empty() || !cancelled) {
+            return disc;
+        }
+        if (!AskPickDisc("Metroid Prime: no disc image", std::string("No disc image was picked.\n\n") + kSupportedDisc,
+                         "Pick a disc", true)) {
+            return {};
+        }
+    }
 }
 
 // Default texture-replacement folder next to the executable.
@@ -517,13 +793,34 @@ const char* DefaultTexturesPath() {
 } // namespace
 
 int main(int argc, char** argv) {
-    // A symbolised stack and a minidump for any crash, before anything else runs.
-    PortInstallCrashHandler();
+#if defined(_WIN32)
+    if ((argc == 4 || argc == 5) && std::strcmp(argv[1], "--log-copy") == 0) {
+        return PortLogFile::RunCopy(argv[2], argv[3], argc == 5 ? argv[4] : nullptr);
+    }
+    PortLogFile::AttachParentConsole();
+#endif
     if (argc == 2 && std::strcmp(argv[1], "--version") == 0) {
         std::printf("Metroid Prime native port %s\n", MP_BUILD_REVISION);
         return 0;
     }
-#if !defined(__ANDROID__)
+#if defined(__ANDROID__)
+    // An app gets no environment of its own, so debug runs pass MP_* variables as
+    // `adb shell setprop debug.mport.env 'K=V K=V'` (and .env2: a value holds 91 bytes).
+    for (const char* prop : {"debug.mport.env", "debug.mport.env2"}) {
+        char value[PROP_VALUE_MAX] = {};
+        __system_property_get(prop, value);
+        std::string_view rest = value;
+        while (!rest.empty()) {
+            const size_t space = rest.find(' ');
+            const std::string pair(rest.substr(0, space));
+            rest = space == std::string_view::npos ? std::string_view{} : rest.substr(space + 1);
+            if (const size_t eq = pair.find('='); eq != std::string::npos && eq != 0) {
+                setenv(pair.substr(0, eq).c_str(), pair.c_str() + eq + 1, 1);
+                __android_log_print(ANDROID_LOG_INFO, "MetroidPrime", "%s: %s", prop, pair.c_str());
+            }
+        }
+    }
+#else
     // --import [name [argument]]: run a mod importer (port_importers.h) from
     // the terminal, without starting the game.
     if (argc >= 2 && std::strcmp(argv[1], "--import") == 0) {
@@ -559,13 +856,16 @@ int main(int argc, char** argv) {
 #endif
     // The file log starts first so it holds everything after it, build id included.
     {
-        const char* e = std::getenv("MP_LOG_FILE");
-        const bool logFile = e != nullptr ? e[0] != '\0' && std::strcmp(e, "0") != 0 : PortDebug::LogFile();
+        const bool logFile = port::EnvFlag("MP_LOG_FILE", PortDebug::LogFile());
         if (logFile && !PortLogFile::Start()) {
             PortLog::Write("port: cannot write the log to %s\n", PortLogFile::Path().c_str());
         }
     }
+    PortCrash::Install();
     PortLog::Write( "metroid_prime_port: build %s\n", MP_BUILD_REVISION);
+    for (const std::string& line : PortPaths::MigrationLog()) {
+        PortLog::Write("port: portable data: %s\n", line.c_str());
+    }
     PortRandomizer::EnsureLoaded();
     PortAp::EnsureLoaded();
     // A 16:9 window when widescreen is requested; the game's render mode is
@@ -573,8 +873,7 @@ int main(int argc, char** argv) {
     const bool widescreen = PortDebug::AspectMode() != PortDebug::kAspect_4_3;
     // MP_DUMP_TEXTURES=1 writes every source texture to
     // <cachePath>/texture_dumps as DDS, so replacement packs can be authored.
-    const char* dumpEnv = std::getenv("MP_DUMP_TEXTURES");
-    const bool dumpTextures = dumpEnv != nullptr && dumpEnv[0] != '\0' && std::strcmp(dumpEnv, "0") != 0;
+    const bool dumpTextures = port::EnvFlag("MP_DUMP_TEXTURES");
     std::string resourcesPath;
 #if defined(__ANDROID__)
     if (char* pref = SDL_GetPrefPath(nullptr, "Metroid Prime")) {
@@ -602,23 +901,42 @@ int main(int argc, char** argv) {
     const bool roomGeometry = PortMods::HasRoomGeometry();
     uint32_t mem1Size = MEM1_DEFAULT_SIZE;
     {
-        const char* e = std::getenv("MP_MEM1_MB");
-        const unsigned long mb = e != nullptr ? std::strtoul(e, nullptr, 10) : roomGeometry ? kRoomGeoMem1MB : 0;
+        const int envMb = port::EnvInt("MP_MEM1_MB", -1);
+        const unsigned long mb = envMb >= 0 ? static_cast<unsigned long>(envMb) : roomGeometry ? kRoomGeoMem1MB : 0;
         if (mb > MEM1_DEFAULT_SIZE / (1024 * 1024)) {
             mem1Size = static_cast<uint32_t>(std::min(mb, 1024UL) * 1024 * 1024);
             PortLog::Write("port: MEM1 arena raised to %u MB (%s)\n", mem1Size / (1024 * 1024),
-                           e != nullptr ? "MP_MEM1_MB" : "room geometry");
+                           envMb >= 0 ? "MP_MEM1_MB" : "room geometry");
         }
     }
-    uint32_t frameBufferScale = roomGeometry ? kRoomGeoFrameBuffers : 1;
-    if (const char* e = std::getenv("MP_FRAME_BUFFERS")) {
-        frameBufferScale = static_cast<uint32_t>(std::clamp(std::strtoul(e, nullptr, 10), 1UL, 16UL));
+    // With room_geo_resident (or MP_ROOM_GEO_RESIDENT=1), a room geometry mod's models stay on
+    // the GPU from when they load, in kResidentMiB set aside for them, and a frame only sends
+    // what is not kept: the frame's buffers need kResidentFrameBuffers times their size, a
+    // margin for anything that falls back to being sent. MP_ROOM_GEO_RESIDENT_MB sets the room.
+#if defined(__ANDROID__)
+    const unsigned long kResidentMiB = 128;
+#else
+    const unsigned long kResidentMiB = 256;
+#endif
+    const unsigned long kResidentFrameBuffers = 2;
+    bool resident = roomGeometry && PortDebug::RoomGeoResidentAtStartup();
+    resident = roomGeometry && port::EnvFlag("MP_ROOM_GEO_RESIDENT", resident);
+    uint32_t residentMiB = 0;
+    if (resident) {
+        const int envMiB = port::EnvInt("MP_ROOM_GEO_RESIDENT_MB", -1);
+        residentMiB = static_cast<uint32_t>(
+            envMiB >= 0 ? std::clamp(static_cast<unsigned long>(envMiB), 16UL, 2048UL) : kResidentMiB);
+    }
+    uint32_t frameBufferScale = !roomGeometry ? 1 : resident ? kResidentFrameBuffers : kRoomGeoFrameBuffers;
+    const int envFrameBuffers = port::EnvInt("MP_FRAME_BUFFERS", -1);
+    if (envFrameBuffers >= 0) {
+        frameBufferScale = static_cast<uint32_t>(std::clamp(static_cast<unsigned long>(envFrameBuffers), 1UL, 16UL));
     }
     if (frameBufferScale > 1) {
         PortLog::Write("port: frame buffers at %ux (%s)\n", frameBufferScale,
-                       std::getenv("MP_FRAME_BUFFERS") != nullptr ? "MP_FRAME_BUFFERS" : "room geometry");
+                       envFrameBuffers >= 0 ? "MP_FRAME_BUFFERS" : "room geometry");
     }
-    // Settings, mods, save states and the shader caches sit next to the
+    // Settings, mods, save states and the shader caches sit in user/ beside the
     // executable when that folder can be written to (port_paths.h).
     const std::string& userFolder = PortPaths::UserFolder();
     const char* cacheEnv = std::getenv("MP_CACHE_PATH");
@@ -634,37 +952,87 @@ int main(int argc, char** argv) {
 #if defined(__ANDROID__)
                    PortPaths::IsPortable() ? " (shared storage)" : "");
 #else
-                   PortPaths::IsPortable() ? " (next to the executable)" : "");
+                   PortPaths::IsPortable() ? " (portable)" : "");
 #endif
-    AuroraConfig config = {
-        .appName = "Metroid Prime",
-        .userPath = userFolder.empty() ? nullptr : userFolder.c_str(),
-        .cachePath = cacheFolder.empty() ? nullptr : cacheFolder.c_str(),
-        .resourcesPath = resourcesPath.empty() ? nullptr : resourcesPath.c_str(),
-        .desiredBackend = BACKEND_AUTO,
-        .vsync = false,
-        .allowTextureDumps = dumpTextures,
-        // Keep the internal framebuffer at the game's logical size so its two
-        // framebuffer allocations fit in MEM1; Aurora upscales to the window.
-        .windowWidth = static_cast<uint32_t>(widescreen ? 854 : 640),
-        .windowHeight = 480,
-        .mem1Size = mem1Size,
-        .mem2Size = ARAM_DEFAULT_SIZE,
-        .frameBufferScale = frameBufferScale,
-    };
+#if defined(__ANDROID__)
+    // Device identifiers for GPU-driver triage (issues #7, #8): the log alone
+    // should say which SoC and driver build drew the world.
+    {
+        std::string deviceInfo;
+        for (const char* prop : {"ro.product.manufacturer", "ro.product.model", "ro.product.device",
+                                 "ro.soc.manufacturer", "ro.soc.model", "ro.board.platform", "ro.hardware",
+                                 "ro.build.version.release", "ro.build.version.sdk", "ro.build.fingerprint",
+                                 "ro.hardware.vulkan", "ro.hardware.egl", "ro.gfx.driver.0"}) {
+            char value[PROP_VALUE_MAX] = {};
+            if (__system_property_get(prop, value) > 0 && value[0] != '\0') {
+                deviceInfo += "\n  ";
+                deviceInfo += prop;
+                deviceInfo += ": ";
+                deviceInfo += value;
+            }
+        }
+        PortLog::Write("port: device:%s\n", deviceInfo.empty() ? " (no properties)" : deviceInfo.c_str());
+    }
+#elif defined(__linux__)
+    {
+        struct utsname uts = {};
+        if (uname(&uts) == 0) {
+            PortLog::Write("port: host %s %s %s\n", uts.sysname, uts.release, uts.machine);
+        }
+    }
+#endif
+    const std::span<const uint8_t> embeddedSeed = PortEmbedded::Find("initial_pipeline_cache.db");
 #if !defined(__ANDROID__)
     // The window icon, for a bare binary that no desktop entry describes.
     // Android takes its icon from the APK.
     static uint8_t windowIcon[] = {
 #include "port_window_icon.inc"
     };
-    config.iconRGBA8 = windowIcon;
-    config.iconWidth = 64;
-    config.iconHeight = 64;
 #endif
-    config.startFullscreen = PortDebug::Fullscreen();
-    config.msaa = static_cast<uint32_t>(PortDebug::Msaa());
-    config.maxTextureAnisotropy = static_cast<uint16_t>(PortDebug::Anisotropy());
+    AuroraConfig config = {
+        .appName = "Metroid Prime",
+        .userPath = userFolder.empty() ? nullptr : userFolder.c_str(),
+        .cachePath = cacheFolder.empty() ? nullptr : cacheFolder.c_str(),
+        .resourcesPath = resourcesPath.empty() ? nullptr : resourcesPath.c_str(),
+        // MP_OPENGLES=0/1 overrides the setting for one run.
+        .desiredBackend = port::EnvFlag("MP_OPENGLES", PortDebug::OpenGles()) ? BACKEND_OPENGLES : BACKEND_AUTO,
+        .msaa = static_cast<uint32_t>(PortDebug::Msaa()),
+        .maxTextureAnisotropy = static_cast<uint16_t>(PortDebug::Anisotropy()),
+        .vsync = false,
+        .startFullscreen = PortDebug::Fullscreen(),
+        .allowJoystickBackgroundEvents = false,
+        .pauseOnFocusLost = false,
+        .allowTextureDumps = dumpTextures,
+        .allowCpuAdapter = false,
+        // Let SDL place the window. The default 0,0 is the client area's corner on
+        // Windows, which puts the title bar above the top of the screen.
+        .windowPosX = -1,
+        .windowPosY = -1,
+        // 720p by default (the F1 overlay's sidebar needs the height); Aurora
+        // shrinks it to fit a smaller desktop.
+        .windowWidth = static_cast<uint32_t>(widescreen ? 1280 : 960),
+        .windowHeight = 720,
+#if !defined(__ANDROID__)
+        .iconRGBA8 = windowIcon,
+        .iconWidth = 64,
+        .iconHeight = 64,
+#else
+        .iconRGBA8 = nullptr,
+        .iconWidth = 0,
+        .iconHeight = 0,
+#endif
+        // Android sets its log callback below.
+        .logCallback = nullptr,
+        .logLevel = LOG_DEBUG,
+        .imGuiInitCallback = nullptr,
+        .mem1Size = mem1Size,
+        .mem2Size = ARAM_DEFAULT_SIZE,
+        .frameBufferScale = frameBufferScale,
+        .residentGeometryMiB = residentMiB,
+        // An embedded seed wins over a stale initial_pipeline_cache.db beside the executable.
+        .pipelineCacheSeedData = embeddedSeed.data(),
+        .pipelineCacheSeedSize = embeddedSeed.size(),
+    };
 
 #if defined(_WIN32)
     // SDL's Windows joystick thread held the joystick lock while the game
@@ -728,12 +1096,39 @@ int main(int argc, char** argv) {
             return 1;
         }
     }
+    // PortVr: with the headset, OpenXRPrepareAurora has set its own backend, so the
+    // OpenGL ES marker below only applies without one.
+    // A driver can crash outright while Dawn starts on OpenGL ES (Mesa does), and the
+    // setting would then crash every launch with no way back to the F1 menu. The marker
+    // outlives such a crash, so the next start turns the setting off and uses Vulkan.
+    const std::filesystem::path glesMarker =
+        std::filesystem::path(userFolder.empty() ? "." : userFolder) / "opengles_starting";
+    if (config.desiredBackend == BACKEND_OPENGLES) {
+        std::error_code ec;
+        if (std::filesystem::exists(glesMarker, ec)) {
+            PortLog::Write("port: the last start on OpenGL ES did not finish; turning it off\n");
+            PortDebug::SetOpenGles(false);
+            config.desiredBackend = BACKEND_AUTO;
+            std::filesystem::remove(glesMarker, ec);
+        } else {
+            std::ofstream(glesMarker) << "1\n";
+        }
+    }
     const AuroraInfo auroraInfo = aurora_initialize(argc, argv, &config);
+    if (config.desiredBackend == BACKEND_OPENGLES) {
+        std::error_code ec;
+        std::filesystem::remove(glesMarker, ec);
+    }
     // From what the device gave, which can be less than was asked for.
     if (aurora_get_frame_buffer_scale() != frameBufferScale) {
         PortLog::Write("port: frame buffers at %ux, all this device allows\n", aurora_get_frame_buffer_scale());
     }
     PortRoomGeo::SetBuffersReady(aurora_get_frame_buffer_scale() > 1);
+    if (resident) {
+        const uint32_t got = aurora_get_resident_geometry_mib();
+        PortRoomGeo::SetResident(got != 0);
+        PortLog::Write("port: room geometry kept on the GPU in %u MiB\n", got);
+    }
     // Apply the persisted render scale. Vsync is applied on the first drawn
     // frame (once the swapchain surface exists) so it uses real capabilities.
     VISetFrameBufferScale(PortDebug::RenderScale());
@@ -746,9 +1141,13 @@ int main(int argc, char** argv) {
     // (tex1_<w>x<h>_<texhash>[_<tluthash>]_<format>.dds/.png); a per-device
     // subfolder is selected from the connected controller. Aurora also accepts
     // Dolphin format names such as CMPR and RGBA8.
+    // MP_TEXTURES wins. Otherwise a build that carries the set (MP_EMBED_RESOURCES)
+    // passes no folder, so PortTextures/PortPrompts use the built-in copy and a stale
+    // `textures` folder left in an old install is ignored; any other build reads the
+    // folder next to the executable.
     const char* textures = std::getenv("MP_TEXTURES");
     if (textures == nullptr || textures[0] == '\0') {
-        textures = DefaultTexturesPath();
+        textures = PortEmbedded::Under("textures/").empty() ? DefaultTexturesPath() : nullptr;
     }
     // The user's own pack, over the built-in set. Kept in the user folder, under
     // a name updates never replace (the built-in set is read-only in an AppImage or
@@ -770,7 +1169,7 @@ int main(int argc, char** argv) {
     if (const char* resolved = ResolveDiscPath(argc, argv); resolved != nullptr) {
         discImage = resolved;
     } else {
-        discImage = AskForDiscImage();
+        discImage = PickDisc();
     }
     if (discImage.empty()) {
         PortLog::Write(
@@ -782,48 +1181,55 @@ int main(int argc, char** argv) {
     }
     const char* discPath = discImage.c_str();
 
-    if (!aurora_dvd_open(discPath)) {
-        ReportDiscOpenFailure(discPath);
-        // A remembered disc goes stale whenever its permission lapses: on Android
-        // the provider can reclaim a persisted URI grant, and on desktop the file
-        // may have been moved or deleted. Retrying once through the picker turns
-        // an unexplained exit into a recoverable prompt.
-        const bool fromArgs = argc > 1 || std::getenv("MP_DISC") != nullptr;
-        // DiscPath() is null when no disc is remembered, and comparing a
-        // std::string with a null pointer is undefined (it calls strlen(NULL)).
-        const char* rememberedDisc = PortDebug::DiscPath();
-        if (rememberedDisc != nullptr && discImage == rememberedDisc && !fromArgs) {
-            PortLog::Write( "metroid_prime_port: asking for the disc image again\n");
-            PortDebug::SetDiscPath("");
-            PortDebug::SaveSettingsNow();
-            discImage = AskForDiscImage();
-            if (discImage.empty()) {
-                PortLog::Write( "metroid_prime_port: no disc image given.\n"
-                                "  usage: %s <path to Metroid Prime (USA) (v1.00).iso>\n",
-                                argv[0]);
-                aurora_shutdown();
-                return 1;
+    // A disc that will not open, or is not the one game this runs, is said on
+    // screen and forgotten, then asked for again. Exiting instead left the
+    // remembered path in place, so every later launch opened the same wrong
+    // image and closed without a word (on Android, with no terminal, the app
+    // just opened and shut).
+    const bool discFromArgs = ResolveDiscFromArgs(argc, argv);
+    for (;;) {
+        std::string problem;
+        if (!aurora_dvd_open(discPath)) {
+            ReportDiscOpenFailure(discPath);
+            problem = "This file could not be read as a GameCube disc image.";
+        } else if (!IsSupportedDisc(DVDGetCurrentDiskID())) {
+            problem = DescribeUnsupportedDisc(DVDGetCurrentDiskID());
+            PortLog::Write("metroid_prime_port: unsupported disc: %s Expected GM8E01 revision 0.\n", problem.c_str());
+            aurora_dvd_close();
+        } else if (DiscReadFailedLastTime(discImage)) {
+            PortLog::Write("metroid_prime_port: refused the disc image: a read of it failed last session\n");
+            problem = "Part of this disc image couldn't be read last time, so it's damaged.\n"
+                      "Copy the file again, or check it in Dolphin (Properties > Verify).";
+            aurora_dvd_close();
+        } else if (const std::string unreadable = FindUnreadableDiscFile(); !unreadable.empty()) {
+            PortLog::Write("metroid_prime_port: disc image is incomplete: %s can't be read\n", unreadable.c_str());
+            problem = "This disc image is incomplete or damaged: part of it (" + unreadable +
+                      ") can't be read.\nIt's probably an interrupted download or copy. Copy the file again.";
+            aurora_dvd_close();
+        }
+        if (problem.empty()) {
+            break;
+        }
+        ForgetDisc(discImage);
+        if (!ShowDiscError(problem, discImage, !discFromArgs)) {
+            if (!discFromArgs) {
+                PortLog::Write("metroid_prime_port: closed at the disc message\n");
             }
-            discPath = discImage.c_str();
-            if (!aurora_dvd_open(discPath)) {
-                ReportDiscOpenFailure(discPath);
-                aurora_shutdown();
-                return 1;
-            }
-        } else {
             aurora_shutdown();
             return 1;
         }
+        PortLog::Write("metroid_prime_port: asking for the disc image again\n");
+        discImage = PickDisc();
+        if (discImage.empty()) {
+            PortLog::Write("metroid_prime_port: no disc image given.\n");
+            aurora_shutdown();
+            return 1;
+        }
+        discPath = discImage.c_str();
     }
     std::printf("metroid_prime_port: disc mounted: %s\n", discPath);
-    const DVDDiskID* discId = DVDGetCurrentDiskID();
-    if (discId == nullptr || std::memcmp(discId->gameName, "GM8E", 4) != 0 ||
-        std::memcmp(discId->company, "01", 2) != 0 || discId->diskNumber != 0 || discId->gameVersion != 0) {
-        PortLog::Write( "metroid_prime_port: unsupported disc; expected GM8E01 USA revision 0.\n");
-        aurora_dvd_close();
-        aurora_shutdown();
-        return 1;
-    }
+    s_mountedDisc = discImage;
+    aurora_dvd_set_read_error_callback(NoteDiscReadFailure);
     // A Remastered import finished in the last session becomes the mod now,
     // before anything has a file of the old one open.
     if (PortRemastered::ApplyPendingImport()) {
@@ -845,6 +1251,42 @@ int main(int argc, char** argv) {
         }
     }
     PortMods::Initialize();
+    // Video-relevant settings in one line, so GPU-driver triage (issues #7,
+    // #8) needs nothing but the log.
+    {
+        bool remastered = false;
+        const PortMods::Status& status = PortMods::CurrentStatus();
+        if (status.active) {
+            for (const PortMods::ModInfo& mod : status.mods) {
+                if (mod.enabled && mod.import) {
+                    remastered = true;
+                    break;
+                }
+            }
+        }
+        char dynamicRes[64];
+        if (PortDebug::DynamicRes()) {
+            std::snprintf(dynamicRes, sizeof(dynamicRes), "on (target %d, min %.2f)", PortDebug::DynamicResTarget(),
+                          static_cast<double>(PortDebug::DynamicResMin()));
+        } else {
+            std::snprintf(dynamicRes, sizeof(dynamicRes), "off");
+        }
+        char scale[16] = "auto";
+        if (PortDebug::RenderScale() > 0.f) {
+            std::snprintf(scale, sizeof(scale), "%.2fx", static_cast<double>(PortDebug::RenderScale()));
+        }
+        PortLog::Write("port: settings: backend %s, msaa %d, anisotropy %d, scale %s, dynamic-res %s, "
+                       "smoothing %s (interp %s), vsync %s, frame-cap %s, remastered-models %s\n",
+                       config.desiredBackend == BACKEND_OPENGLES ? "opengles" : "auto", PortDebug::Msaa(),
+                       PortDebug::Anisotropy(), scale, dynamicRes,
+                       PortDebug::SmoothFrames() ? "on" : "off", PortDebug::FrameInterpolation() ? "on" : "off",
+                       PortDebug::VsyncEnabled() ? "on" : "off", PortDebug::FrameLimitEnabled() ? "60" : "off",
+                       remastered ? "on" : "off");
+    }
+    // The index that gives solid actors their disc model's collision box reads
+    // the base disc, so it belongs to the disc's lifecycle rather than to a
+    // mods reload: drop anything an earlier disc left open.
+    PortActorCollisionBounds::Reset();
 
     // Prime the window/event state so the game's first aurora_begin_frame can
     // succeed (the game submits GX during early init, before its main loop).
@@ -883,6 +1325,7 @@ int main(int argc, char** argv) {
     AIPortShutdown();
     // An import still running reads the disc.
     PortRemastered::StopImport();
+    PortActorCollisionBounds::Reset();
     aurora_dvd_close();
     aurora_shutdown();
     return result;

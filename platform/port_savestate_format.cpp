@@ -1,4 +1,5 @@
 #include "port_savestate.h"
+#include "port_bytes.h"
 
 #include <cstring>
 
@@ -13,27 +14,17 @@ constexpr uint32_t kVersion = 1;
 constexpr uint32_t kMaxBlob = 1u << 20;
 constexpr uint32_t kMaxLabel = 256;
 
-void PutU32(std::string& out, uint32_t v) {
-  for (int i = 0; i < 4; ++i)
-    out += static_cast< char >((v >> (i * 8)) & 0xFF);
-}
-void PutU64(std::string& out, uint64_t v) {
-  PutU32(out, static_cast< uint32_t >(v));
-  PutU32(out, static_cast< uint32_t >(v >> 32));
-}
-void PutF32(std::string& out, float f) {
-  uint32_t v;
-  std::memcpy(&v, &f, 4);
-  PutU32(out, v);
-}
+using port::AppendLE32;
+using port::AppendLE64;
+using port::AppendLEFloat;
 void PutF64(std::string& out, double d) {
   uint64_t v;
   std::memcpy(&v, &d, 8);
-  PutU64(out, v);
+  AppendLE64(out, v);
 }
 void PutString(std::string& out, const std::string& s) {
   const std::string cut = s.substr(0, kMaxLabel);
-  PutU32(out, static_cast< uint32_t >(cut.size()));
+  AppendLE32(out, static_cast< uint32_t >(cut.size()));
   out += cut;
 }
 
@@ -87,19 +78,19 @@ struct Reader {
 
 std::string Encode(const Header& header, const std::vector< uint8_t >& blob) {
   std::string out(kMagic, 4);
-  PutU32(out, kVersion);
-  PutU32(out, header.worldId);
-  PutU32(out, static_cast< uint32_t >(header.areaId));
+  AppendLE32(out, kVersion);
+  AppendLE32(out, header.worldId);
+  AppendLE32(out, static_cast< uint32_t >(header.areaId));
   for (float f : header.position)
-    PutF32(out, f);
+    AppendLEFloat(out, f);
   for (float f : header.forward)
-    PutF32(out, f);
-  PutU32(out, header.morphed ? 1 : 0);
+    AppendLEFloat(out, f);
+  AppendLE32(out, header.morphed ? 1 : 0);
   PutF64(out, header.playTime);
-  PutU64(out, static_cast< uint64_t >(header.savedAt));
+  AppendLE64(out, static_cast< uint64_t >(header.savedAt));
   PutString(out, header.world);
   PutString(out, header.room);
-  PutU32(out, static_cast< uint32_t >(blob.size()));
+  AppendLE32(out, static_cast< uint32_t >(blob.size()));
   out.append(reinterpret_cast< const char* >(blob.data()), blob.size());
   return out;
 }

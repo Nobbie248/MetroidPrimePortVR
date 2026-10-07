@@ -18,7 +18,7 @@ ships no disc image, and neither does any package or release built from it.
 - Graphics options: first-person FOV, MSAA and anisotropic filtering, HUD scale,
   and toggles to hide the helmet and the visor effects
 - Mouse aim and twin-stick aiming, with sensitivity, inversion and crosshair size
-- A Controls tab for rebinding keyboard, mouse and controller, with a second key
+- A Controls page for rebinding keyboard, mouse and controller, with a second key
   per action, conflict warnings, controller presets (GameCube, Modern,
   Southpaw), deadzones and gyro aim
 - Optional gameplay tweaks, all off by default: Fast Morph (quick morph and
@@ -39,9 +39,9 @@ ships no disc image, and neither does any package or release built from it.
   follow the input bound to each action
 - Discord Rich Presence on desktop (bring your own Discord application id)
 - The common options sit in pause > Options beside the game's own; the F1
-  overlay holds everything, in pages for Input, Controls, Render, Performance,
-  Extras, Tracker, States, Session, Chat and Debug (cheats sit behind a "Show
-  cheats" box)
+  overlay holds everything, in pages for Game, Controls, Video, Remastered,
+  Mods, Archipelago, Tracker, Save states, System and Debug (cheats sit behind
+  a "Show cheats" box)
 - A touch overlay on Android, with a virtual controller for the sticks, triggers,
   shoulders and face buttons
 
@@ -52,12 +52,12 @@ Both are supported, on all three platforms.
 - **Randomizer** — item placement is driven by a seed file. `tools/rando_seed.py`
   generates one and `docs/RANDOMIZER.md` covers the format.
 - **Archipelago multiworld** — the Metroid Prime AP world's item and location
-  tables are built in. Open F1 > Session, enter the server (`host:port`), your
+  tables are built in. Open F1 > Archipelago, enter the server (`host:port`), your
   slot name and the password if any, and connect; no seed file is needed. The
   seed's options are applied and a new game starts at the Landing Site with
   the intro skipped. Each seed and slot gets its own memory card, checks made
   offline are sent on the next connect, Recent games resumes an earlier seed,
-  and the Chat page shows the server log and sends messages such as `!hint`.
+  and the Chat sub-tab shows the server log and sends messages such as `!hint`.
   DeathLink is supported.
 
   `wss://` needs no extra setup on any platform: OpenSSL is vendored and linked

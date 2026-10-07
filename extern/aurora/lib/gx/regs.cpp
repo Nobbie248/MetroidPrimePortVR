@@ -133,10 +133,10 @@ void bp_tev_ind(u8 reg, u32 value) noexcept {
 void bp_scissor(u8, u32) noexcept {
   const u32 scis0 = g_gxState.bpRegCache[0x20];
   const u32 scis1 = g_gxState.bpRegCache[0x21];
-  const s32 tp = static_cast<s32>(reg_get(scis0, 11, 0)) - 342;
-  const s32 lf = static_cast<s32>(reg_get(scis0, 11, 12)) - 342;
-  const s32 bm = static_cast<s32>(reg_get(scis1, 11, 0)) - 342;
-  const s32 rt = static_cast<s32>(reg_get(scis1, 11, 12)) - 342;
+  const s32 tp = static_cast<s32>(reg_get(scis0, 12, 0)) - 342;
+  const s32 lf = static_cast<s32>(reg_get(scis0, 12, 12)) - 342;
+  const s32 bm = static_cast<s32>(reg_get(scis1, 12, 0)) - 342;
+  const s32 rt = static_cast<s32>(reg_get(scis1, 12, 12)) - 342;
   const s32 wd = std::max(rt - lf + 1, 0);
   const s32 ht = std::max(bm - tp + 1, 0);
   set_logical_scissor({lf, tp, wd, ht});

@@ -41,6 +41,7 @@
 #include "port_apclient.h"
 #include "port_debug.h"
 #include "port_model_variant.h"
+#include "port_remastered_ball_light.h"
 #include "Kyoto/Math/CPlane.hpp"
 #include "Kyoto/Math/CRelAngle.hpp"
 #include "Kyoto/Math/CTransform4f.hpp"
@@ -409,6 +410,9 @@ CMorphBall::CMorphBall(CPlayer& player, float radius)
 
   LoadAnimationTokens(rstl::string_l(skSamusBall));
   InitializeWakeEffects();
+#ifdef TARGET_PC
+  PortRemasteredBallLight::Reset();
+#endif
 }
 
 CMorphBall::~CMorphBall() {}
@@ -1553,12 +1557,18 @@ void CMorphBall::UpdateEffects(float dt, CStateManager& mgr) {
       ballLight->SetTranslation(swooshToWorld.GetTranslation() + CVector3f(0.f, 0.f, ballRadius));
 
       rstl::optional_object< CLight > light;
+#ifdef TARGET_PC
+      bool innerGlowLight = false;
+#endif
       if (IsMorphBallTransitionFlashValid() &&
           x19dc_morphBallTransitionFlashGen->SystemHasLight()) {
         light = x19dc_morphBallTransitionFlashGen->GetLight();
       } else if (x19d0_ballInnerGlowGen.get() != nullptr &&
                  x19d0_ballInnerGlowGen->SystemHasLight()) {
         light = x19d0_ballInnerGlowGen->GetLight();
+#ifdef TARGET_PC
+        innerGlowLight = true;
+#endif
       }
 
       if (light.valid()) {
@@ -1580,6 +1590,51 @@ void CMorphBall::UpdateEffects(float dt, CStateManager& mgr) {
         } else {
           lightCopy.SetColor(CColor::Lerp(lightColor, CColor::White(), x1c34_boostLightFactor));
         }
+
+#ifdef TARGET_PC
+        // Remastered lights its PBR scenery with the inner glow's light as an HDR light of its
+        // own (see port_remastered_ball_light.h), at the ball's centre rather than on top.
+        lightCopy.ClearPortHdr();
+        if (innerGlowLight && PortRemasteredBallLight::Enabled()) {
+          float fade = 1.f;
+          if (x0_player.GetMorphballTransitionState() == CPlayer::kMS_Unmorphing) {
+            fade = 1.f - x0_player.GetMorphBallTransitionFactor();
+          } else if (x0_player.GetMorphballTransitionState() == CPlayer::kMS_Morphing) {
+            fade = rstl::min_val(2.f * x0_player.GetMorphBallTransitionFactor(), 1.f);
+          }
+          float boost = 0.f;
+          if (x1df4_boostDrainTime != 0.f) {
+            boost = 1.f - x1df4_boostDrainTime / gpTweakBall->GetBoostBallDrainTime();
+          } else if (x1de8_boostChargeTime != 0.f) {
+            boost = x1de8_boostChargeTime / gpTweakBall->GetBoostBallMaxChargeTime();
+          }
+          bool normalWater = false;
+          if (x0_player.IsInFluid()) {
+            if (const CScriptWater* water =
+                    TCastToConstPtr< CScriptWater >(mgr.GetObjectById(x0_player.InFluidId()))) {
+              normalWater =
+                  water->GetFluidPlane().GetFluidType() == CFluidPlane::kFT_NormalWater;
+            }
+          }
+          const uint idx = rstl::min_val< uint >(x8_ballGlowColorIdx, 4);
+          const SColorRgb& rgb = skBallLightModulationColors[idx];
+          const float srgb[3] = {rgb.x0_r / 255.f, rgb.x1_g / 255.f, rgb.x2_b / 255.f};
+          PortRemasteredBallLight::Inputs in;
+          in.glowIndex = static_cast< int >(idx);
+          in.srgb = srgb;
+          in.boost = boost;
+          in.submerged = x0_player.IsInsideFluid();
+          in.inNormalWater = normalWater;
+          in.depthUnderWater = x0_player.GetDistanceUnderWater();
+          in.ballRadius = ballRadius;
+          in.fade = fade;
+          in.dt = dt;
+          float color[3];
+          PortRemasteredBallLight::Update(in, color);
+          lightCopy.SetPortHdr(color, CVector3f(0.f, 0.f, -ballRadius), 0.f,
+                               PortRemasteredBallLight::kOuterRadius, CLight::kPHF_Quadratic);
+        }
+#endif
 
         ballLight->SetLight(lightCopy);
       }
@@ -2918,7 +2973,9 @@ void CMorphBall::TakeDamage(float damage) {
 }
 
 void CMorphBall::SelectMorphBallSounds(const CMaterialList& materials) {
-  short rollSfx;
+  // ushort, not short: a short 0xffff is -1 and never equals 0xffff, so a
+  // surface with no roll sound would stop the current one (Metaforce: u16).
+  ushort rollSfx;
   if (x0_player.x9c5_30_selectFluidBallSound) {
     if (x0_player.x82c_inLava) {
       rollSfx = SFXsam_b_rollllava_lp_00;

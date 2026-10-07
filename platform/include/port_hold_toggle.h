@@ -20,8 +20,8 @@ struct Output {
 class Toggle {
 public:
   // active: gameplay has control and the option applies (unmorphed, input not
-  // disabled). locked: the player was locked on (any orbit or grapple state) at
-  // the end of the previous tick.
+  // disabled). locked: the player was locked on an object or grappling at the end
+  // of the previous tick (orbiting a carcass or a point is not a lock).
   Output Update(bool active, bool held, bool pressed, bool locked) {
     if (!active) {
       Reset();

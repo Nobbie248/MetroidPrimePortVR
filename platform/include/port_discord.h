@@ -158,10 +158,13 @@ std::string GameTextToUtf8(const Char* text) {
 struct Presence {
   std::string details; // first line
   std::string state;   // second line (may be empty)
+  std::string hover;   // the large image's tooltip, empty = the default one
+  std::string image;   // large image asset, empty = the logo (then no small image)
   int64_t start = 0;   // Unix seconds the elapsed timer counts from, 0 = none
 
   bool operator==(const Presence& other) const {
-    return details == other.details && state == other.state && start == other.start;
+    return details == other.details && state == other.state && hover == other.hover &&
+           image == other.image && start == other.start;
   }
   bool operator!=(const Presence& other) const { return !(*this == other); }
 };
@@ -179,8 +182,16 @@ inline std::string ActivityPayload(long pid, const Presence& presence, const std
     activity += ",\"state\":" + JsonString(FitField(presence.state));
   if (presence.start > 0)
     activity += ",\"timestamps\":{\"start\":" + std::to_string(presence.start) + "}";
-  activity += ",\"assets\":{\"large_image\":" + JsonString(kLargeImage) +
-              ",\"large_text\":\"Metroid Prime native port\"}}";
+  const std::string defaultText = "Metroid Prime native port";
+  activity += ",\"assets\":{\"large_image\":" +
+              JsonString(presence.image.empty() ? std::string(kLargeImage) : presence.image) +
+              ",\"large_text\":" +
+              JsonString(presence.hover.empty() ? defaultText : FitField(presence.hover));
+  // A world picture takes the large image, so the logo moves to the corner.
+  if (!presence.image.empty())
+    activity += ",\"small_image\":" + JsonString(kLargeImage) +
+                ",\"small_text\":" + JsonString(defaultText);
+  activity += "}}";
   return "{\"cmd\":\"SET_ACTIVITY\",\"args\":{\"pid\":" + std::to_string(pid) +
          ",\"activity\":" + activity + "},\"nonce\":" + JsonString(nonce) + "}";
 }
@@ -191,18 +202,48 @@ inline std::string ClearPayload(long pid, const std::string& nonce) {
          "},\"nonce\":" + JsonString(nonce) + "}";
 }
 
-// The in-game lines: area on top, then world, item percentage and hard mode.
-inline Presence GamePresence(const std::string& world, const std::string& area, int percent,
-                             bool hard, int64_t start) {
+// The art asset for a world's picture (MLVL id), or empty for one with none
+// (the end cinema). The player uploads these to their Discord application.
+inline const char* WorldImage(uint32_t mlvl) {
+  switch (mlvl) {
+  case 0x158EFE17u: return "world_frigate";
+  case 0x39F2DE28u: return "world_tallon";
+  case 0x83F6FF6Fu: return "world_chozo";
+  case 0x3EF8237Cu: return "world_magmoor";
+  case 0xA8BE6291u: return "world_phendrana";
+  case 0xB1AC4D65u: return "world_mines";
+  case 0xC13B09D1u: return "world_crater";
+  default: return "";
+  }
+}
+
+// What the game reports each tick.
+struct GameInfo {
+  std::string world;
+  std::string area;
+  uint32_t worldId = 0; // MLVL
+  int percent = 0;   // items collected
+  bool hard = false;
+  int energy = 0;    // total, tanks included
+  int missiles = -1; // -1 = no launcher yet
+};
+
+// The in-game lines: area on top, then energy, missiles and item percentage.
+// The world and hard mode go in the logo's tooltip (the world goes on top
+// while the area name loads).
+inline Presence GamePresence(const GameInfo& info, int64_t start) {
+  const std::string dot = " \xc2\xb7 ";
   Presence presence;
-  presence.details = !area.empty() ? area : (!world.empty() ? world : "In game");
-  std::string state = area.empty() ? std::string() : world;
-  if (!state.empty())
-    state += " \xc2\xb7 ";
-  state += std::to_string(percent) + "% items";
-  if (hard)
-    state += " \xc2\xb7 Hard";
+  presence.details = !info.area.empty() ? info.area : (!info.world.empty() ? info.world : "In game");
+  std::string state = std::to_string(info.energy) + " energy";
+  if (info.missiles >= 0)
+    state += dot + std::to_string(info.missiles) + (info.missiles == 1 ? " missile" : " missiles");
+  state += dot + std::to_string(info.percent) + "% items";
   presence.state = state;
+  presence.hover = info.area.empty() ? std::string() : info.world;
+  if (info.hard)
+    presence.hover += presence.hover.empty() ? "Hard mode" : dot + "Hard mode";
+  presence.image = WorldImage(info.worldId);
   presence.start = start;
   return presence;
 }
@@ -244,6 +285,9 @@ bool Supported();
 EStatus Status();
 // The last error (no Discord running, bad application id), or empty.
 std::string LastError();
+// The port's own Discord application ("Metroid Prime"), which has the logo and
+// world_* art assets.
+inline constexpr const char* kDefaultAppId = "1557127540030701690";
 // Connects while enabled and an application id is set, reconnecting every few
 // seconds; clears the presence and disconnects when not.
 void Configure(bool enabled, const std::string& appId);
@@ -252,7 +296,7 @@ bool Enabled();
 // What the game shows: the front end, or a world and area. Sent when it
 // changes, at most once every few seconds (Discord's rate limit).
 void SetMenu();
-void SetGame(const std::string& world, const std::string& area, int percent, bool hard);
+void SetGame(const GameInfo& info);
 // The presence as last set, for the overlay and console ("details / state").
 std::string CurrentText();
 

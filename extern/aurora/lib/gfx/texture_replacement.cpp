@@ -116,6 +116,7 @@ struct SelectedCache {
   uint64_t bytes = 0;
   std::list<ReplacementKey>::iterator lruIt;
   Tier tier = Tier::Full;
+  uint64_t lastUseFrame = 0;
 };
 
 struct EntryLoadSnapshot {
@@ -165,6 +166,8 @@ absl::flat_hash_set<uint64_t> s_failedIds;
 absl::flat_hash_set<TextureSourceKey, SourceKeyHash> s_reportedMisses;
 std::list<ReplacementKey> s_replacementLru;
 uint64_t s_replacementCacheBytes = 0;
+// Counts end_frame calls, for the idle sweep (sweep_idle_cache).
+uint64_t s_replacementFrame = 0;
 uint64_t s_nextRegistrationId = 1;
 uint64_t s_nextSequence = 1;
 uint32_t s_sourceEntryCount = 0;
@@ -1033,7 +1036,7 @@ gfx::TextureHandle create_converted_texture_handle(const EntryLoadSnapshot& entr
   };
   const wgpu::TextureDescriptor textureDescriptor{
       .label = label.c_str(),
-      .usage = wgpu::TextureUsage::TextureBinding | wgpu::TextureUsage::CopyDst,
+      .usage = wgpu::TextureUsage::TextureBinding | wgpu::TextureUsage::CopyDst | wgpu::TextureUsage::CopySrc,
       .dimension = wgpu::TextureDimension::e2D,
       .size = size,
       .format = replacement.format,
@@ -1092,6 +1095,7 @@ void erase_cache_locked(const ReplacementKey& key) noexcept {
 }
 
 void touch_cached_replacement(decltype(s_cacheByKey)::iterator it) noexcept {
+  it->second.lastUseFrame = s_replacementFrame;
   if (it->second.lruIt != s_replacementLru.begin()) {
     s_replacementLru.splice(s_replacementLru.begin(), s_replacementLru, it->second.lruIt);
     it->second.lruIt = s_replacementLru.begin();
@@ -1125,6 +1129,7 @@ void cache_replacement_locked(const ReplacementKey& key, uint64_t id, gfx::Textu
                                 .bytes = replacementBytes,
                                 .lruIt = s_replacementLru.begin(),
                                 .tier = tier,
+                                .lastUseFrame = s_replacementFrame,
                             });
   s_replacementCacheBytes += replacementBytes;
   evict_replacement_cache_if_needed();
@@ -1792,6 +1797,35 @@ using namespace aurora::texture;
 void shutdown() noexcept {
   clear_replacements();
   stop_worker_pool();
+}
+
+// Port: the cache otherwise frees nothing until it reaches its budget (4 GiB on a desktop),
+// so a session's replacement memory climbed room by room. A replacement nothing else holds
+// any more (the texture object caches let go of a texture some seconds after its last use)
+// and not looked up for a minute is freed; it loads again if a room asks for it.
+void sweep_idle_cache() noexcept {
+  constexpr uint64_t kSweepFrames = 600;
+  constexpr uint64_t kIdleFrames = 3600;
+  constexpr uint64_t kKeepBytes = uint64_t(256) << 20;
+  if (++s_replacementFrame % kSweepFrames != 0) {
+    return;
+  }
+  std::lock_guard lock{s_registryMutex};
+  if (s_replacementCacheBytes <= kKeepBytes) {
+    return;
+  }
+  for (auto lru = s_replacementLru.end(); lru != s_replacementLru.begin() && s_replacementCacheBytes > kKeepBytes;) {
+    --lru;
+    const auto cache = s_cacheByKey.find(*lru);
+    if (cache == s_cacheByKey.end() || cache->second.handle.use_count() > 1 ||
+        s_replacementFrame - cache->second.lastUseFrame < kIdleFrames) {
+      continue;
+    }
+    // erase_cache_locked removes this list node; step past it first.
+    const auto key = *lru;
+    lru = std::next(lru);
+    erase_cache_locked(key);
+  }
 }
 
 StreamingStats process_streaming() noexcept {

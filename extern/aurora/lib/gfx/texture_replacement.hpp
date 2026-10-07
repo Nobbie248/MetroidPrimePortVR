@@ -18,6 +18,8 @@ struct StreamingStats {
 
 void shutdown() noexcept;
 StreamingStats process_streaming() noexcept;
+// Frees cached replacements that nothing has used for a while; called once a frame.
+void sweep_idle_cache() noexcept;
 std::optional<ReplacementResult> find_pointer_replacement(const GXTexObj_& obj) noexcept;
 std::optional<ReplacementResult> find_source_replacement(const GXTexObj_& obj,
                                                          const texture::TextureSourceKey& sourceKey) noexcept;

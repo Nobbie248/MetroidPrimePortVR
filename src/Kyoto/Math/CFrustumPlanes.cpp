@@ -18,7 +18,21 @@ CFrustumPlanes::CFrustumPlanes(const CTransform4f& xf, float fov, float aspect, 
   const float sinV = CCast::ToReal32(sin(halfFov));
   const float verticalLength = nearZ / cosV;
   const float height = verticalLength * sinV;
+#ifdef TARGET_PC
+  {
+    // Port: retail scales the angle (halfFov * aspect) instead of its tangent. For aspect >= 1
+    // that is wider than the true horizontal half-angle, which is harmless slack, but past 90
+    // degrees (windows wider than ~3.3:1 at 55 deg, ~2:1 at 90 deg) the side planes flip and
+    // everything off-centre is culled. Keep retail's angle while it is safe, and cap it at
+    // max(true angle, 80 deg) beyond that, which is continuous and always below 90.
+    const float retailH = halfFov * aspect;
+    const float exactH = CCast::ToReal32(atan(tan(halfFov) * aspect));
+    const float capH = exactH > 1.3962634f ? exactH : 1.3962634f;
+    halfFov = retailH < capH ? retailH : capH;
+  }
+#else
   halfFov *= aspect;
+#endif
   const float cosH = CCast::ToReal32(cos(halfFov));
   const float sinH = CCast::ToReal32(sin(halfFov));
   float width = nearZ / cosH;

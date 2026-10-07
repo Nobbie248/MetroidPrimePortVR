@@ -266,8 +266,49 @@ const char* ControlMapper::GetDescriptionForCommand(ECommands command) {
   return "UNKNOWN";
 }
 
+#ifdef TARGET_PC
+#include "port_debug.h"
+
+// The touch wheels' pick, mapping-independent: the command (not its button) is
+// what the visor and beam code read, so Swap Scan/X-Ray does not apply.
+static bool VisorCommandRequested(ControlMapper::ECommands command) {
+  switch (command) {
+  case ControlMapper::kC_NoVisor:
+    return PortDebug::VisorRequested(0);
+  case ControlMapper::kC_XrayVisor:
+    return PortDebug::VisorRequested(1);
+  case ControlMapper::kC_EnviroVisor:
+    return PortDebug::VisorRequested(2);
+  case ControlMapper::kC_ThermoVisor:
+    return PortDebug::VisorRequested(3);
+  default:
+    return false;
+  }
+}
+
+static bool BeamCommandRequested(ControlMapper::ECommands command) {
+  switch (command) {
+  case ControlMapper::kC_PowerBeam:
+    return PortDebug::BeamRequested(0);
+  case ControlMapper::kC_IceBeam:
+    return PortDebug::BeamRequested(1);
+  case ControlMapper::kC_WaveBeam:
+    return PortDebug::BeamRequested(2);
+  case ControlMapper::kC_PlasmaBeam:
+    return PortDebug::BeamRequested(3);
+  default:
+    return false;
+  }
+}
+#endif
+
 float ControlMapper::GetAnalogInput(ECommands command, const CFinalInput& input) {
   if (gCommandFilterFlag[command]) {
+#ifdef TARGET_PC
+    if (BeamCommandRequested(command)) {
+      return 1.f;
+    }
+#endif
     if (gAnalogInputs[gpTweakPlayerControlCurrent->GetMapping(command)] != nullptr) {
       return (input.*gAnalogInputs[gpTweakPlayerControlCurrent->GetMapping(command)])();
     }
@@ -286,6 +327,11 @@ bool ControlMapper::GetDigitalInput(ECommands command, const CFinalInput& input)
 
 bool ControlMapper::GetPressInput(ECommands command, const CFinalInput& input) {
   if (gCommandFilterFlag[command]) {
+#ifdef TARGET_PC
+    if (VisorCommandRequested(command)) {
+      return true;
+    }
+#endif
     if (gPressInputs[gpTweakPlayerControlCurrent->GetMapping(command)] != nullptr) {
       return (input.*gPressInputs[gpTweakPlayerControlCurrent->GetMapping(command)])();
     }

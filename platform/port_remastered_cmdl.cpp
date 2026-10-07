@@ -3,6 +3,7 @@
 // retrotool/lib/src/format/) and of the decoding half of `retrotool cmdl convert`.
 
 #include "port_remastered_cmdl.h"
+#include "port_bytes.h"
 
 #include <cstring>
 #include <functional>
@@ -12,20 +13,10 @@ namespace {
 
 // Every scalar in the format is little endian and the vertex data is interleaved
 // without guarantees worth trusting, so all reads go through these.
-uint16_t ReadLE16(const uint8_t* p) { return uint16_t(p[0]) | uint16_t(uint16_t(p[1]) << 8); }
-
-uint32_t ReadLE32(const uint8_t* p) {
-  return uint32_t(p[0]) | (uint32_t(p[1]) << 8) | (uint32_t(p[2]) << 16) | (uint32_t(p[3]) << 24);
-}
-
-uint64_t ReadLE64(const uint8_t* p) { return uint64_t(ReadLE32(p)) | (uint64_t(ReadLE32(p + 4)) << 32); }
-
-float ReadLEFloat(const uint8_t* p) {
-  const uint32_t bits = ReadLE32(p);
-  float value = 0.0f;
-  std::memcpy(&value, &bits, sizeof(value));
-  return value;
-}
+using port::ReadLE16;
+using port::ReadLE32;
+using port::ReadLE64;
+using port::ReadLEFloat;
 
 // An IEEE half, the width most of the Remastered vertex data uses, widened to
 // float. Exact, so the result matches any other correct decoder bit for bit.
@@ -834,6 +825,8 @@ struct MeshDecl {
   uint32_t indexCount = 0;
   uint16_t unkC = 0;
   uint16_t unkE = 0;
+  uint8_t bits2 = 0;  // this mesh's two bits of the first bitmap after the meshes
+  bool twoSided = false;  // its bit of the second: drawn with culling off
 };
 
 bool ParseMesh(Cursor& cursor, std::vector<MeshDecl>& meshes, std::vector<ModelLod>& lods,
@@ -853,9 +846,20 @@ bool ParseMesh(Cursor& cursor, std::vector<MeshDecl>& meshes, std::vector<ModelL
     mesh.unkC = cursor.U16();
     mesh.unkE = cursor.U16();
   }
-  // Two bitmaps follow the meshes, each rounded up to whole bytes.
-  cursor.Skip((meshCount + 3) / 4);
-  cursor.Skip((meshCount + 7) / 8);
+  // Two bitmaps follow the meshes, each rounded up to whole bytes: two bits per
+  // mesh, then one.
+  for (uint32_t i = 0; i < (meshCount + 3) / 4; ++i) {
+    const uint8_t byte = cursor.U8();
+    for (uint32_t j = 0; j < 4 && i * 4 + j < meshCount; ++j) {
+      meshes[i * 4 + j].bits2 = (byte >> (j * 2)) & 3;
+    }
+  }
+  for (uint32_t i = 0; i < (meshCount + 7) / 8; ++i) {
+    const uint8_t byte = cursor.U8();
+    for (uint32_t j = 0; j < 8 && i * 8 + j < meshCount; ++j) {
+      meshes[i * 8 + j].twoSided = (byte >> j) & 1;
+    }
+  }
   const uint32_t listCount = cursor.U32();
   if (!cursor.ok() || listCount > cursor.remaining() / 2) {
     return cursor.Fail("implausible LOD mesh list length");
@@ -1054,6 +1058,8 @@ bool ReadMeshes(const std::vector<MeshDecl>& decls, const std::vector<uint32_t>&
     mesh.indexCount = decl.indexCount;
     mesh.unkC = decl.unkC;
     mesh.unkE = decl.unkE;
+    mesh.bits2 = decl.bits2;
+    mesh.twoSided = decl.twoSided;
     if (decl.indexBuffer >= indexTypes.size() || decl.indexBuffer >= buffers.size()) {
       error = "remastered model: mesh " + std::to_string(i) + " names index buffer " +
               std::to_string(decl.indexBuffer) + " of " + std::to_string(indexTypes.size());
@@ -1208,6 +1214,16 @@ bool ParseModel(const uint8_t* data, size_t size, Model& out, std::string& error
                         }
                         if (magic == kChunkSkhd) {
                           out.skinned = true;
+                        }
+                        if (magic == kChunkHead && content.ok()) {
+                          const size_t left = content.remaining();
+                          const uint8_t* rest = content.Peek(left);
+                          for (size_t i = 0; rest != nullptr && i + 4 < left; ++i) {
+                            if (std::memcmp(rest + i, "ANUV", 4) == 0) {
+                              out.anuv.assign(rest + i + 4, rest + left);
+                              break;
+                            }
+                          }
                         }
                         sawHeader = true;
                         return content.ok();

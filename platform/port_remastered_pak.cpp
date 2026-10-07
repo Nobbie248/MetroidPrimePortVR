@@ -13,6 +13,7 @@
 // `skip` of padding before their data.
 
 #include "port_remastered_pak.h"
+#include "port_bytes.h"
 
 #include <cstring>
 #include <string>
@@ -72,17 +73,9 @@ struct Chunk {
 
 // FourCCs are byte arrays in the format, and this port packs them big endian so
 // they can be compared and printed like the retail PAK's resource types.
-uint32_t ReadBE32(const uint8_t* p) {
-  return (uint32_t(p[0]) << 24) | (uint32_t(p[1]) << 16) | (uint32_t(p[2]) << 8) | uint32_t(p[3]);
-}
-
-uint32_t ReadLE32(const uint8_t* p) {
-  return uint32_t(p[0]) | (uint32_t(p[1]) << 8) | (uint32_t(p[2]) << 16) | (uint32_t(p[3]) << 24);
-}
-
-uint64_t ReadLE64(const uint8_t* p) {
-  return uint64_t(ReadLE32(p)) | (uint64_t(ReadLE32(p + 4)) << 32);
-}
+using port::ReadBE32;
+using port::ReadLE32;
+using port::ReadLE64;
 
 Form ParseForm(const uint8_t* p) {
   Form form;

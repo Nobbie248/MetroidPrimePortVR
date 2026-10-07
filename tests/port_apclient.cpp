@@ -122,7 +122,7 @@ int main() {
   Config defaults = ParseConfig(R"({"server":"ws://localhost","slot":"Default"})");
   Check(defaults.valid && defaults.game == "Metroid Prime" && defaults.password.empty() &&
             defaults.itemsHandling == 7 && defaults.versionMajor == 0 &&
-            defaults.versionMinor == 6 && defaults.versionBuild == 0 && defaults.tags.empty() &&
+            defaults.versionMinor == 6 && defaults.versionBuild == 8 && defaults.tags.empty() &&
             defaults.tlsCa.empty(),
         "optional configuration defaults apply");
   Config tlsCa = ParseConfig(

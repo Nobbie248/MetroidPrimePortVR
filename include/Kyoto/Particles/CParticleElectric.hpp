@@ -51,6 +51,10 @@ public:
   CLight GetLight() const override;
   void DestroyParticles() override;
   uint Get4CharId() const override;
+#ifdef TARGET_PC
+  uint PortFxAsset() const override;
+  void PortFxDescribe(PortFxInfo& out) const override;
+#endif
 
   class CLineManager {
     friend class CParticleElectric;

@@ -73,6 +73,7 @@ modules:
       # relative to where the script runs.
       - install -Dm644 ../extern/aurora/LICENSE /app/share/licenses/metroid-prime-port/aurora.txt
       - install -Dm644 ../extern/musyx/LICENSE /app/share/licenses/metroid-prime-port/musyx.txt
+      - install -Dm644 ../extern/astcenc/LICENSE.txt /app/share/licenses/metroid-prime-port/astcenc.txt
       # The fetched dependencies were unpacked by this manifest into their own
       # directories at the source root, so that is where their notices are. The
       # previous loop looked in _deps/*-src, which is where FetchContent would

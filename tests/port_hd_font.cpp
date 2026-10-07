@@ -7,6 +7,8 @@
 #include "port_hd_font.h"
 #include "port_remastered_font.h"
 
+#include "port_font_accent.h"
+
 #include <cmath>
 #include <cstdio>
 #include <cstdlib>
@@ -229,6 +231,199 @@ int Convert(char** argv) {
 }
 }  // namespace
 
+void TestStandIns() {
+  bool e = false;
+  bool euro = false;
+  bool ascii = false;
+  for (const PortHdFont::StandIn& standIn : PortHdFont::StandIns()) {
+    e = e || (standIn.character == 0xE9 && standIn.base == 'e');
+    euro = euro || (standIn.character == 0x20AC && standIn.base == 'E');
+    ascii = ascii || standIn.character < 0x80 || uint8_t(standIn.base) < 0x20 || uint8_t(standIn.base) >= 0x7F;
+  }
+  Check(e && euro, "accented letters and symbols stand on their base letter");
+  Check(!ascii, "stand-ins are for characters outside ASCII, on printable ones");
+
+  PortHdFont::Font font = SmallFont();
+  PortHdFont::Glyph wide = CapitalH();
+  wide.character = 0x152;  // OE
+  wide.advance = 30.f;
+  font.glyphs.insert(font.glyphs.begin() + 1, wide);
+  Check(Close(PortHdFont::AdvanceRatio(font, 0x152, 'H'), 1.5f), "the advance scales by the typeface's ratio");
+  Check(Close(PortHdFont::AdvanceRatio(font, 0xE9, 'H'), 1.f), "a missing glyph keeps the base's advance");
+  wide.advance = 1000.f;
+  font.glyphs[1] = wide;
+  Check(Close(PortHdFont::AdvanceRatio(font, 0x152, 'H'), 4.f), "the ratio is clamped");
+}
+
+void TestAccents() {
+  using namespace PortFontAccent;
+  Check(MarkFor(0xE9) == Mark::Acute, "e-acute takes an acute");
+  Check(MarkFor(0xC0) == Mark::Grave, "A-grave takes a grave");
+  Check(MarkFor(0xEA) == Mark::Circumflex, "e-circumflex takes a circumflex");
+  Check(MarkFor(0xFC) == Mark::Diaeresis, "u-diaeresis takes a diaeresis");
+  Check(MarkFor(0xF1) == Mark::Tilde, "n-tilde takes a tilde");
+  Check(MarkFor(0xE5) == Mark::Ring, "a-ring takes a ring");
+  Check(MarkFor(0xE7) == Mark::Cedilla, "c-cedilla takes a cedilla");
+  Check(MarkFor(0xF8) == Mark::Slash, "o-stroke takes a slash");
+  Check(MarkFor(0xE6) == Mark::None && MarkFor(0x153) == Mark::None, "ligatures keep the plain copy");
+  Check(MarkFor(0xDF) == Mark::None && MarkFor(0xD0) == Mark::None && MarkFor(0xFE) == Mark::None,
+        "eszett, eth and thorn keep the plain copy");
+  Check(MarkFor(0x20AC) == Mark::None && MarkFor('e') == Mark::None, "symbols keep the plain copy");
+
+  // A tiled C4 round trip: the high nibble comes first.
+  std::vector<uint8_t> tiled(32, 0);
+  Check(Encode(tiled.data(), tiled.size(), Format::C4, 8, 8, 0, 0, 1), "a texel is written");
+  Check(Encode(tiled.data(), tiled.size(), Format::C4, 8, 8, 1, 0, 2), "and its neighbour");
+  Check(Encode(tiled.data(), tiled.size(), Format::C4, 8, 8, 7, 7, 3), "and the last one");
+  uint8_t v = 0;
+  Check(Decode(tiled.data(), tiled.size(), Format::C4, 8, 8, 0, 0, v) && v == 1, "the first reads back");
+  Check(Decode(tiled.data(), tiled.size(), Format::C4, 8, 8, 1, 0, v) && v == 2, "and the second");
+  Check(Decode(tiled.data(), tiled.size(), Format::C4, 8, 8, 7, 7, v) && v == 3, "and the last");
+  Check(tiled[0] == 0x12, "nibbles share a byte, high first");
+  Check(!Decode(tiled.data(), tiled.size(), Format::C4, 8, 8, 8, 0, v), "outside is refused");
+  int bw = 0, bh = 0, bpp = 0;
+  Check(BlockInfo(Format::C4, bw, bh, bpp) && bw == 8 && bh == 8 && bpp == 4, "C4 blocks are 8x8");
+  Check(BlockInfo(Format::C8, bw, bh, bpp) && bw == 8 && bh == 4 && bpp == 8, "C8 blocks are 8x4");
+  Check(BlockInfo(Format::I8, bw, bh, bpp) && bpp == 8, "intensity formats decode too");
+
+  // A fake lowercase 'e': a 6x8 block of ink (1) with an outline (2) above it,
+  // in a 12x22 cell.
+  Grid base;
+  base.w = 12;
+  base.h = 22;
+  base.v.assign(12 * 22, 0);
+  for (int y = 8; y < 16; ++y) {
+    for (int x = 3; x < 9; ++x) {
+      base.v[size_t(y) * 12 + size_t(x)] = 1;
+    }
+  }
+  for (int x = 3; x < 9; ++x) {
+    base.v[size_t(7) * 12 + size_t(x)] = 2;
+  }
+  Grid out;
+  int shift = -1, cellH = -1;
+  Check(Composite(base, Mark::Acute, 12, 22, 1, 2, true, out, shift, cellH), "an acute composites");
+  Check(shift == 0 && cellH == 22, "a lowercase-topped letter needs no new rows");
+  bool markAbove = false, inkKept = true, outlineMade = false;
+  for (int y = 0; y < 8; ++y) {
+    for (int x = 0; x < 12; ++x) {
+      if (out.v[size_t(y) * 12 + size_t(x)] == 1) {
+        markAbove = true;
+      }
+    }
+  }
+  for (int y = 8; y < 16; ++y) {
+    for (int x = 3; x < 9; ++x) {
+      if (out.v[size_t(y + shift) * 12 + size_t(x)] != 1) {
+        inkKept = false;
+      }
+    }
+  }
+  for (uint8_t q : out.v) {
+    outlineMade = outlineMade || q == 2;
+  }
+  Check(markAbove, "the mark sits above the ink");
+  Check(inkKept, "the letter is kept where it was");
+  Check(outlineMade, "the mark gets an outline");
+
+  // A fake capital: ink from row 1 to row 20, no room for the mark.
+  Grid cap = base;
+  cap.v.assign(12 * 22, 0);
+  for (int y = 1; y < 21; ++y) {
+    for (int x = 3; x < 9; ++x) {
+      cap.v[size_t(y) * 12 + size_t(x)] = 1;
+    }
+  }
+  Grid capOut;
+  int capShift = -1, capH = -1;
+  Check(Composite(cap, Mark::Acute, 12, 22, 1, 1, false, capOut, capShift, capH),
+        "a capital composites");
+  Check(capShift == 6 && capH == 27, "a capital-topped letter shifts down and the cell grows");
+  bool capMark = false, capInk = true;
+  for (int y = 0; y < 6; ++y) {
+    for (int x = 0; x < 12; ++x) {
+      capMark = capMark || capOut.v[size_t(y) * 12 + size_t(x)] == 1;
+    }
+  }
+  for (int y = 1; y < 21; ++y) {
+    for (int x = 3; x < 9; ++x) {
+      capInk = capInk && capOut.v[size_t(y + capShift) * 12 + size_t(x)] == 1;
+    }
+  }
+  Check(capMark && capInk, "the mark is on top and the letter below it, on the same line");
+
+  Grid low;
+  int lowShift = -1, lowH = -1;
+  Check(Composite(base, Mark::Diaeresis, 12, 22, 1, 2, false, low, lowShift, lowH),
+        "a diaeresis composites");
+  Check(lowShift == 0 && lowH == 22, "a lowercase-topped letter needs no new rows");
+  int dots = 0;
+  for (int y = 0; y < 8; ++y) {
+    for (int x = 0; x < 12; ++x) {
+      dots += low.v[size_t(y) * 12 + size_t(x)] == 1 ? 1 : 0;
+    }
+  }
+  Check(dots >= 4, "both dots are drawn");
+
+  Grid ced;
+  int cedShift = 0, cedH = 0;
+  Check(Composite(base, Mark::Cedilla, 12, 22, 1, 2, false, ced, cedShift, cedH),
+        "a cedilla composites");
+  bool hookBelow = false;
+  for (int y = 16; y < cedH; ++y) {
+    for (int x = 0; x < 12; ++x) {
+      hookBelow = hookBelow || ced.v[size_t(y) * 12 + size_t(x)] == 1;
+    }
+  }
+  Check(cedShift == 0 && hookBelow, "the cedilla hangs below the letter");
+
+  Grid slash;
+  int slashShift = -1, slashH = -1;
+  Check(Composite(base, Mark::Slash, 12, 22, 1, 1, false, slash, slashShift, slashH),
+        "a slash composites");
+  Check(slashShift == 0 && slashH == 22, "the slash needs no new rows");
+
+  Grid ring;
+  int ringShift = -1, ringH = -1;
+  Check(Composite(base, Mark::Ring, 12, 22, 1, 1, false, ring, ringShift, ringH),
+        "a ring composites");
+  int ringInk = 0;
+  for (int y = 0; y < 8; ++y) {
+    for (int x = 0; x < 12; ++x) {
+      ringInk += ring.v[size_t(y) * 12 + size_t(x)] == 1 ? 1 : 0;
+    }
+  }
+  Check(ringShift == 0 && ringInk >= 6, "the ring is a loop above the letter");
+
+  for (Mark m : {Mark::Grave, Mark::Circumflex, Mark::Tilde}) {
+    Grid g;
+    int sh = -1, hh = -1;
+    int before = 0;
+    for (uint8_t q : base.v) {
+      before += q == 1 ? 1 : 0;
+    }
+    Check(Composite(base, m, 12, 22, 1, 1, false, g, sh, hh), "every top mark composites");
+    int after = 0;
+    for (int y = 0; y < 8; ++y) {
+      for (int x = 0; x < 12; ++x) {
+        after += g.v[size_t(y) * 12 + size_t(x)] == 1 ? 1 : 0;
+      }
+    }
+    Check(sh == 0 && hh == 22 && after > 0 && int(g.v.size()) == 12 * 22, "above the ink, in place");
+    (void)before;
+  }
+
+  Grid none;
+  Check(!Composite(base, Mark::None, 12, 22, 1, 2, false, none, shift, cellH),
+        "no mark composites nothing");
+  Grid empty;
+  empty.w = 12;
+  empty.h = 22;
+  empty.v.assign(12 * 22, 0);
+  Check(!Composite(empty, Mark::Acute, 12, 22, 1, 2, false, none, shift, cellH),
+        "a blank cell composites nothing");
+}
+
 int main(int argc, char** argv) {
   if (argc == 6) {
     return Convert(argv);
@@ -236,6 +431,8 @@ int main(int argc, char** argv) {
   TestFile();
   TestFit();
   TestAsset();
+  TestStandIns();
+  TestAccents();
   if (sFailures == 0) {
     std::puts("port_hd_font tests passed");
   }

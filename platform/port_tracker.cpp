@@ -111,6 +111,11 @@ int UpdateRoomNames(const CWorld& world) {
 
 } // namespace
 
+const std::vector< std::string >& RoomNames(const CWorld& world) {
+  UpdateRoomNames(world);
+  return sRooms->names;
+}
+
 const char* ScanGroupName(int group) {
   static const char* const names[kScan_Count] = {"Pirate Data", "Chozo Lore", "Creatures",
                                                  "Research", "Artifacts"};

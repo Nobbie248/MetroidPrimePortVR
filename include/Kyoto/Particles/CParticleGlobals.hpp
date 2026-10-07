@@ -36,7 +36,15 @@ public:
     return mParticleLifetimePercentageRemainder;
   }
   static CElementGen::CParticle* GetCurrentParticle() { return mCurrentParticle; }
+#ifdef TARGET_PC
+  // GC reads address 0 harmlessly when no ADV values are bound; read zeros instead.
+  static float* GetParticleAccessParameters() {
+    static float sZeros[8] = {};
+    return mParticleAccessParameters != nullptr ? mParticleAccessParameters : sZeros;
+  }
+#else
   static float* GetParticleAccessParameters() { return mParticleAccessParameters; }
+#endif
   static SParticleSystem* GetCurrentParticleSystem() { return mCurrentParticleSystem; }
   static void SetCurrentParticleSystem(SParticleSystem* system) { mCurrentParticleSystem = system; }
 
@@ -51,6 +59,18 @@ public:
   static CElementGen::CParticle* mCurrentParticle;
   static float* mParticleAccessParameters;
   static SParticleSystem* mCurrentParticleSystem;
+#ifdef TARGET_PC
+  // port-only: the particle a per-particle GetValueUV call is for (null = none)
+  static CElementGen::CParticle* xPortUVParticle;
+  // port-only: the particle the elements are being evaluated for, set only while a generator with
+  // PIRN is evaluating per-particle elements (null otherwise). IRND elements then give a value
+  // fixed per (particle, element) instead of relying on being read at frame 0.
+  static const CElementGen::CParticle* xPortIrndParticle;
+  // A deterministic uniform in [0, 1) from the particle's seed and the element's address, and the
+  // raw 32-bit hash it comes from.
+  static u32 PortIrndBits(const CElementGen::CParticle* particle, const void* element);
+  static float PortIrndUnit(const CElementGen::CParticle* particle, const void* element);
+#endif
 };
 
 #endif // _CPARTICLEGLOBALS

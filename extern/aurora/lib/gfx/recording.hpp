@@ -79,6 +79,11 @@ struct ConvRequest;
 }
 void queue_palette_conv(tex_palette_conv::ConvRequest req);
 
+// What the push functions return when the frame's mapped buffer has no room left for the data
+// (a mapped buffer cannot grow). The caller drops whatever needed it.
+inline constexpr Range OverflowRange{UINT32_MAX, 0};
+constexpr bool overflowed(const Range& range) noexcept { return range.offset == OverflowRange.offset; }
+
 Range push_verts(const uint8_t* data, size_t length, size_t alignment);
 template <typename T>
 Range push_verts(ArrayRef<T> data, size_t alignment) {
@@ -111,6 +116,23 @@ Range push_texture_data(const uint8_t* data, uint32_t bytesPerRow, uint32_t rows
 
 template <typename DrawData>
 void push_draw_command(DrawData data);
+// push_encoder_task's recording, for the FIFO processor, which is where the commands before
+// it have already been recorded (push_encoder_task drains the FIFO to get there). The task
+// type must be registered and the payload checked by the caller.
+bool record_encoder_task(uint64_t type, const void* payload, size_t payloadSize); // type: an EncoderTaskId
+// record_encoder_task, with the custom draw drawType (registered, no payload) first in the pass
+// that follows, which clears its colour instead of loading it: the draw must cover every pixel.
+// depth says what that pass does with the sealed pass's depth.
+enum class DepthAfter : uint8_t {
+  Load,
+  Clear, // and drops the sealed pass's depth store
+  // Clear if the frame ends in that pass and no draw there may test against the old depth (one
+  // with depth compare whose viewport depth range reaches the nearest depth the EFB was given),
+  // else Load. The sealed pass and the task wait for the render worker until that is known.
+  IfUnread,
+};
+bool record_encoder_task_overwriting(uint64_t type, const void* payload, size_t payloadSize, uint64_t drawType,
+                                     DepthAfter depth = DepthAfter::Load);
 template <typename DrawData>
 DrawData* get_last_draw_command();
 template <typename PipelineConfig>

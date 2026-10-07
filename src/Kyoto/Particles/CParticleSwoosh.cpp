@@ -20,6 +20,8 @@
 #include "MetroidPrime/CActor.hpp"
 #include "MetroidPrime/Cameras/CCameraManager.hpp"
 #include "port_debug.h"
+#include "port_fx_debug.h"
+#include "port_vfx_particles.h"
 #endif
 
 uint CParticleSwoosh::mSwooshAliveCount = 0;
@@ -137,6 +139,13 @@ CParticleSwoosh::~CParticleSwoosh() { --mSwooshAliveCount; }
 bool CParticleSwoosh::IsLargeEnough() const { return x1b4_LENG >= 2 && x1b8_SIDE >= 2; }
 
 const bool CParticleSwoosh::Update(double dt) {
+#ifdef TARGET_PC
+  PortFx::UpdateScope fxScope(dt);
+  if (fxScope.skip) {
+    return false;
+  }
+  dt = fxScope.dt;
+#endif
   if (!IsLargeEnough()) {
     return false;
   }
@@ -218,7 +227,17 @@ void CParticleSwoosh::UpdateTranslationAndOrientation() {
   x208_maxRadius = 0.f;
   x1f0_aabbMin = CVector3f(FLT_MAX, FLT_MAX, FLT_MAX);
   x1fc_aabbMax = CVector3f(-FLT_MAX, -FLT_MAX, -FLT_MAX);
+#ifdef TARGET_PC
+  // Remastered runs a swoosh point's KEWS over the live points (newest 0, oldest 1).
+  CParticleGlobals::SetParticleLifetime(x1c_desc->xPortIrnd ? rstl::max_val(x1ac_particleCount - 1, 1)
+                                                            : x1b4_LENG);
+  const bool portVfx = PortVfxSwoosh();
+  if (portVfx && xPortVfxPts.size() != size_t(x15c_swooshes.capacity())) {
+    xPortVfxPts.assign(x15c_swooshes.capacity(), SPortVfxPoint());
+  }
+#else
   CParticleGlobals::SetParticleLifetime(x1b4_LENG);
+#endif
   CParticleGlobals::SetEmitterTime(x28_curFrame);
   int i = 0;
   CVector3f offset(0.f, 0.f, 0.f);
@@ -275,6 +294,12 @@ void CParticleSwoosh::UpdateTranslationAndOrientation() {
     if (x1c_desc->x14_COLR) {
       x1c_desc->x14_COLR->GetValue(swoosh.mFrame, swoosh.mColor);
     }
+#ifdef TARGET_PC
+    if (portVfx) {
+      SPortVfxPoint& point = xPortVfxPts[i];
+      PortVfxEvalPoint(*x1c_desc->xPortVfx, swoosh.mFrame, point.iten, point.vpmt);
+    }
+#endif
     swoosh.mLeftRad = GetLeftRadius(i);
     UpdateMaxRadius(swoosh.mLeftRad);
     if (x1d0_28_LLRD) {
@@ -322,6 +347,10 @@ bool CParticleSwoosh::IsSystemDeletable() const {
 
 void CParticleSwoosh::Render() {
 #ifdef TARGET_PC
+  PortFx::RenderScope fxScope;
+  if (PortFx::gMuteActive && PortFx::IsMuted(*this)) {
+    return;
+  }
   const CVector3f portGlobalTranslation = xa4_globalTranslation;
   const CTransform4f portGlobalOrientation = xb0_globalOrientation;
   const bool portPresenting = PortBeginPresent();
@@ -341,6 +370,13 @@ void CParticleSwoosh::Render() {
                               xb0_globalOrientation * xec_scaleXf *
                               CTransform4f::Scale(x14c_localScale));
     CGraphics::SetCullMode(kCM_None);
+#ifdef TARGET_PC
+    if (PortVfxSwoosh()) {
+      PortRenderVfx();
+      CGraphics::SetAlphaCompare(kAF_Always, 0, kAO_And, kAF_Always, 0);
+    } else
+#endif
+    {
     if (x1c_desc->x3c_TEXR) {
       {
         TToken< CTexture > tex = x1c_desc->x3c_TEXR->GetValueTexture(x28_curFrame);
@@ -392,6 +428,7 @@ void CParticleSwoosh::Render() {
       } else {
         RenderNSidedNoSpline();
       }
+    }
     }
     x1c8_ = timer.GetElapsedTime();
     CGraphics::SetCullMode(kCM_Front);
@@ -498,6 +535,167 @@ void CParticleSwoosh::PortEndPresent() {
     swoosh.mTranslation = saved.pos;
     swoosh.mUseOffset = saved.useOffset;
     swoosh.mInitialRot = saved.rot;
+  }
+}
+
+static inline float fast_sine(float x);
+static inline float fast_cosine(float x);
+
+bool CParticleSwoosh::PortVfxSwoosh() const {
+  const CPortVfxData* vfx = x1c_desc->xPortVfx.get();
+  return vfx != nullptr && vfx->mat.version == 2 && x1b8_SIDE >= 4 && !x1c_desc->x44_29_WIRE;
+}
+
+// RenderNSidedSpline's geometry through the swoosh's VFX material (VMAT). The base uv is
+// retail's (u along the trail, TSPN segments per repeat; v 0..1 across), run through VTMT.
+// Colour, ITEN and the VPMT rows run from the segment's point to the next older one, as
+// Remastered evaluates them per point.
+void CParticleSwoosh::PortRenderVfx() {
+  const CPortVfxData& vfx = *x1c_desc->xPortVfx;
+  float vsmt[19] = {};
+  const uint vsmtMask = PortVfxEvalVsmt(vfx, x28_curFrame, vsmt);
+  aurora::gfx::vfx::DrawDesc desc;
+  if (!PortVfxBuildDesc(vfx, vsmt, vsmtMask, desc)) {
+    return; // a texture is not streamed in yet
+  }
+  if (xPortVfxPts.size() != size_t(x15c_swooshes.capacity())) {
+    return; // not updated yet
+  }
+  if (x1c_desc->x40_TSPN) {
+    x1c_desc->x40_TSPN->GetValue(x28_curFrame, x1ec_TSPN);
+  }
+  if (x1ec_TSPN <= 0) {
+    x1ec_TSPN = x15c_swooshes.size() - 1;
+  }
+  const float uvSpan = x1ec_TSPN > 0 ? 1.f / x1ec_TSPN : 1.f;
+  CPortVfxUvXf uvXf;
+  uvXf.Eval(vfx, x28_curFrame);
+  const float modu[4] = {x20c_moduColor.GetRed(), x20c_moduColor.GetGreen(), x20c_moduColor.GetBlue(),
+                         x20c_moduColor.GetAlpha()};
+
+  const bool cros = x1c_desc->x44_25_CROS && x1b8_SIDE % 2 == 0;
+  const int faces = cros ? x1b8_SIDE / 2 : x1b8_SIDE;
+  const float sideDiv = 360.f / x1b8_SIDE;
+  std::vector< CVector3f > ring[4];
+  for (std::vector< CVector3f >& r : ring) {
+    r.resize(x1b8_SIDE);
+  }
+  std::vector< aurora::gfx::vfx::Vertex > verts;
+  auto emit = [&](const CVector3f& pos, float u, float v, const float color[4], const float extra[4][4]) {
+    aurora::gfx::vfx::Vertex out{};
+    out.pos[0] = pos.GetX();
+    out.pos[1] = pos.GetY();
+    out.pos[2] = pos.GetZ();
+    uvXf.Apply(u, v, out.uv);
+    for (int c = 0; c < 4; ++c) {
+      out.color[c] = color[c];
+      for (int k = 0; k < 4; ++k) {
+        out.extra[c][k] = extra[c][k];
+      }
+    }
+    out.vec[2] = 1.f;
+    verts.push_back(out);
+  };
+
+  int curIdx = x158_curParticle;
+  for (int i = 0; i < x15c_swooshes.size() - 1; ++i) {
+    const int prevIdx = WrapIndex(curIdx - 1);
+    const bool prevActive = x15c_swooshes[prevIdx].mActive;
+    const bool active = x15c_swooshes[WrapIndex(curIdx)].mActive;
+    if (!active || !prevActive) {
+      if (--curIdx < 0) {
+        curIdx = x15c_swooshes.size() - 1;
+      }
+      continue;
+    }
+    // The four ring points, picked as RenderNSidedSpline does.
+    for (int j = 0; j < 4; ++j) {
+      int refIdx = 0;
+      if (j == 0) {
+        refIdx = WrapIndex(curIdx + 1);
+        if (!x15c_swooshes.data()[refIdx].mActive) {
+          refIdx = curIdx;
+        }
+      } else if (j == 1) {
+        refIdx = WrapIndex(curIdx);
+      } else if (j == 2) {
+        refIdx = prevIdx;
+      } else {
+        refIdx = WrapIndex(curIdx - 2);
+        if (!x15c_swooshes.data()[refIdx].mActive) {
+          refIdx = prevIdx;
+        }
+      }
+      if (x1b4_LENG == 2) {
+        if (j == 0) {
+          refIdx = WrapIndex(curIdx);
+        } else if (j == 3) {
+          refIdx = prevIdx;
+        }
+      } else if (curIdx == x158_curParticle && j == 0) {
+        refIdx = x158_curParticle;
+      } else if (WrapIndex(x158_curParticle + 2) == curIdx && j == 3) {
+        refIdx = WrapIndex(x158_curParticle + 1);
+      } else if (i == x1ac_particleCount - 2 && j == 3) {
+        refIdx = 0;
+      }
+      const SSwooshData& swoosh = x15c_swooshes.data()[refIdx];
+      for (int k = 0; k < x1b8_SIDE; ++k) {
+        const float sideAngle = sideDiv * k;
+        const float rawAngle = M_PIF * (sideAngle + (swoosh.mInitialRot + swoosh.mRotm)) / 180.f;
+        const float angle = fabs(rawAngle) > M_PIF ? CMath::WrapPi(rawAngle) : rawAngle;
+        const float radius = sideAngle > 0.f && sideAngle <= 180.f ? swoosh.mLeftRad : swoosh.mRightRad;
+        ring[j][k] = swoosh.mOrientation * CVector3f(radius * fast_cosine(angle), 0.f, radius * fast_sine(angle)) +
+                     swoosh.mTranslation + swoosh.mUseOffset;
+      }
+    }
+
+    const SSwooshData& a = x15c_swooshes.data()[curIdx];
+    const SSwooshData& b = x15c_swooshes.data()[prevIdx];
+    const SPortVfxPoint& pa = xPortVfxPts[curIdx];
+    const SPortVfxPoint& pb = xPortVfxPts[prevIdx];
+    auto pointAt = [&](float t, float color[4], float extra[4][4]) {
+      const float iten = pa.iten + (pb.iten - pa.iten) * t;
+      const float ca[4] = {a.mColor.GetRed(), a.mColor.GetGreen(), a.mColor.GetBlue(), a.mColor.GetAlpha()};
+      const float cb[4] = {b.mColor.GetRed(), b.mColor.GetGreen(), b.mColor.GetBlue(), b.mColor.GetAlpha()};
+      for (int c = 0; c < 4; ++c) {
+        color[c] = (ca[c] + (cb[c] - ca[c]) * t) * (c < 3 ? iten : 1.f) * modu[c];
+        for (int k = 0; k < 4; ++k) {
+          extra[c][k] = pa.vpmt[c][k] + (pb.vpmt[c][k] - pa.vpmt[c][k]) * t;
+        }
+      }
+    };
+
+    float uMin = (x1ec_TSPN > 0 ? i % x1ec_TSPN : i) * uvSpan;
+    const float segUvSpan = uvSpan / (x1b0_SPLN + 1);
+    for (int splineIdx = 0; splineIdx < x1b0_SPLN + 1; ++splineIdx) {
+      const float t0 = splineIdx / static_cast< float >(x1b0_SPLN + 1);
+      const float t1 = (splineIdx + 1) / static_cast< float >(x1b0_SPLN + 1);
+      const float uMax = uMin + segUvSpan;
+      float c0[4], c1[4], e0[4][4], e1[4][4];
+      pointAt(t0, c0, e0);
+      pointAt(t1, c1, e1);
+      for (int face = 0; face < faces; ++face) {
+        const int other = cros ? face + x1b8_SIDE / 2 : (face + 1) % x1b8_SIDE;
+        emit(GetSplinePoint(ring[0][face], ring[1][face], ring[2][face], ring[3][face], t0), uMin, 0.f, c0, e0);
+        emit(GetSplinePoint(ring[0][other], ring[1][other], ring[2][other], ring[3][other], t0), uMin, 1.f, c0, e0);
+        emit(GetSplinePoint(ring[0][other], ring[1][other], ring[2][other], ring[3][other], t1), uMax, 1.f, c1, e1);
+        emit(GetSplinePoint(ring[0][face], ring[1][face], ring[2][face], ring[3][face], t1), uMax, 0.f, c1, e1);
+      }
+      uMin = uMax;
+    }
+    if (--curIdx < 0) {
+      curIdx = x15c_swooshes.size() - 1;
+    }
+  }
+  // draw_quads drops a draw past its limit, so a long trail goes in batches.
+  constexpr size_t kMaxQuadsPerDraw = 16384;
+  const size_t quads = verts.size() / 4;
+  for (size_t first = 0; first < quads; first += kMaxQuadsPerDraw) {
+    const uint32_t count = static_cast< uint32_t >(std::min(quads - first, kMaxQuadsPerDraw));
+    PortFx::gQuads += count;
+    ++PortFx::gDraws;
+    aurora::gfx::vfx::draw_quads(desc, verts.data() + first * 4, count);
   }
 }
 #endif
@@ -1280,3 +1478,21 @@ const CVector3f& CParticleSwoosh::GetGlobalScale() const { return xe0_globalScal
 const CTransform4f& CParticleSwoosh::GetGlobalOrientation() const { return xb0_globalOrientation; }
 const CVector3f& CParticleSwoosh::GetGlobalTranslation() const { return xa4_globalTranslation; }
 const CVector3f& CParticleSwoosh::GetTranslation() const { return x38_translation; }
+
+#ifdef TARGET_PC
+uint CParticleSwoosh::PortFxAsset() const { return CToken(x1c_desc).GetTag().GetId(); }
+
+void CParticleSwoosh::PortFxDescribe(PortFxInfo& out) const {
+  out.kind = 'SWHC';
+  out.asset = PortFxAsset();
+  out.particles = x1ac_particleCount;
+  out.maxParticles = x1b4_LENG;
+  out.frame = x28_curFrame;
+  out.lifetime = x2c_PSLT;
+  out.emitting = x1d0_24_emitting;
+  out.deletable = IsSystemDeletable();
+  out.pos[0] = xa4_globalTranslation.GetX();
+  out.pos[1] = xa4_globalTranslation.GetY();
+  out.pos[2] = xa4_globalTranslation.GetZ();
+}
+#endif

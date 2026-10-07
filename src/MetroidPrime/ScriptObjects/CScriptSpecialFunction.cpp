@@ -38,6 +38,7 @@
 #include "port_apclient.h"
 #include "port_debug.h"
 #include "port_livesplit.h"
+#include "port_room_env.h"
 #include "port_skip_cutscenes.h"
 #include "rstl/algorithm.hpp"
 #include "rstl/iterator.hpp"
@@ -164,6 +165,12 @@ void CScriptSpecialFunction::AddToRenderer(const CFrustumPlanes&, const CStateMa
   }
 
   if (xe8_function == kSF_FogVolume && x1e4_30_) {
+#ifdef TARGET_PC
+    // Remastered's special function draws no fog volume (PortRoomEnv::FogOwnsRoom).
+    if (PortRoomEnv::FogOwnsRoom()) {
+      return;
+    }
+#endif
     EnsureRendered(mgr);
   }
 }

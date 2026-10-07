@@ -518,6 +518,12 @@ void __PADSetDefaultMapping(aurora::input::GameController* controller) /*  NOLIN
   }
 }
 
+// The on-screen touch pad is a virtual gamepad that always uses the default (GameCube-labelled) mapping:
+// never loaded from disk, never saved, and ignoring the setters below.
+static bool is_virtual_controller(const aurora::input::GameController* controller) {
+  return SDL_IsJoystickVirtual(controller->m_index);
+}
+
 void __PADLoadMapping(aurora::input::GameController* controller) /*  NOLINT(*-reserved-identifier) */ {
   int32_t playerIndex = SDL_GetGamepadPlayerIndex(controller->m_controller);
   if (playerIndex < 0 || aurora::g_config.userPath == nullptr) {
@@ -530,6 +536,9 @@ void __PADLoadMapping(aurora::input::GameController* controller) /*  NOLINT(*-re
   }
 
   controller->m_mappingLoaded = true;
+  if (is_virtual_controller(controller)) {
+    return;
+  }
 
   const auto path = aurora::io::fs_path_from_string(aurora::g_config.userPath) /
                     fmt::format("{}_{:04X}_{:04X}.controller", PADGetName(playerIndex), controller->m_vid,
@@ -1199,7 +1208,7 @@ const char* PADGetName(const u32 port) {
 
 void PADSetButtonMapping(const u32 port, const PADButtonMapping mapping) {
   auto* controller = aurora::input::get_controller_for_player(port);
-  if (controller == nullptr) {
+  if (controller == nullptr || is_virtual_controller(controller)) {
     return;
   }
 
@@ -1233,7 +1242,7 @@ PADButtonMapping* PADGetButtonMappings(const u32 port, u32* buttonCount) {
 
 void PADSetAxisMapping(const u32 port, const PADAxisMapping mapping) {
   auto* controller = aurora::input::get_controller_for_player(port);
-  if (controller == nullptr) {
+  if (controller == nullptr || is_virtual_controller(controller)) {
     return;
   }
 
@@ -1486,6 +1495,9 @@ void PADSerializeMappings() {
 
   for (auto& controller : aurora::input::g_GameControllers | std::views::values) {
     EnsureMappingLoaded(&controller);
+    if (is_virtual_controller(&controller)) {
+      continue;
+    }
     const auto filePath =
         basePath / fmt::format("{}_{:04X}_{:04X}.controller", aurora::input::controller_name(controller.m_index),
                                controller.m_vid, controller.m_pid);
@@ -1669,6 +1681,7 @@ void PADRestoreDefaultMapping(const u32 port) {
   if (controller == nullptr) {
     return;
   }
+  // A virtual controller is already at its defaults.
   __PADSetDefaultMapping(controller);
   controller->m_axisMapping = g_defaultAxes;
 }

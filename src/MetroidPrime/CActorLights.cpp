@@ -12,6 +12,7 @@
 
 #include "Collision/CMaterialFilter.hpp"
 #include "Collision/CollisionUtil.hpp"
+#include "Kyoto/Graphics/CCubeMaterial.hpp"
 #include "Kyoto/Graphics/CGraphics.hpp"
 #include "Kyoto/Math/CAABox.hpp"
 #include "Kyoto/Math/CSphere.hpp"
@@ -141,6 +142,9 @@ void CActorLights::ActivateLights() const {
     lightIdx = 1;
     for (int i = 1; i < x0_areaLights.size(); ++i, ++lightIdx)
       CGraphics::LoadLight(static_cast< ERglLight >(i), x0_areaLights[i]);
+#ifdef TARGET_PC
+    CCubeMaterial::sPortAreaLights = (1u << lightIdx) - 1;
+#endif
   }
   for (int i = 0; i < x144_dynamicLights.size(); ++i, ++lightIdx)
     CGraphics::LoadLight(static_cast< ERglLight >(lightIdx), x144_dynamicLights[i]);

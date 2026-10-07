@@ -1,3 +1,4 @@
+#include "MetroidPrime/Cameras/CGameCamera.hpp"
 #include "MetroidPrime/CArtifactDoll.hpp"
 #include "Kyoto/CSimplePool.hpp"
 #include "Kyoto/Graphics/CModel.hpp"
@@ -133,7 +134,10 @@ void CArtifactDoll::Draw(float alpha, const CStateManager& mgr, const bool inArt
   }
 
   const float effectiveAlpha = alpha * mFader;
-  gpRender->SetPerspective(55.f, CGraphics::GetViewportWidth(), CGraphics::GetViewportHeight(),
+  gpRender->SetPerspective(
+      CGameCamera::VertPlusFov(55.f, static_cast< float >(CGraphics::GetViewportWidth()) /
+                                              static_cast< float >(CGraphics::GetViewportHeight())),
+      CGraphics::GetViewportWidth(), CGraphics::GetViewportHeight(),
                           0.2f, 4096.f);
   CGraphics::SetViewPointMatrix(CTransform4f::Translate(0.f, -10.f, 0.f));
   mActorLights->ActivateLights();

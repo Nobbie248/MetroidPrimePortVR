@@ -6,6 +6,7 @@
 #include <algorithm>
 #include <cctype>
 #include <array>
+#include <atomic>
 #include <charconv>
 #include <chrono>
 #include <cmath>
@@ -17,6 +18,16 @@
 #include <random>
 #include <sstream>
 #include <utility>
+
+#ifdef _WIN32
+#ifndef WIN32_LEAN_AND_MEAN
+#define WIN32_LEAN_AND_MEAN
+#endif
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
+#include <windows.h>
+#endif
 
 namespace PortAp {
 namespace Protocol {
@@ -94,14 +105,12 @@ bool WriteFileAtomically(const std::string& path, const std::string& contents) {
     return true;
 #ifdef _WIN32
   // The C rename operation replaces an existing destination on POSIX, but
-  // not on Windows. Retry there after removing the old file.
-  std::error_code filesystemError;
-  if (!std::filesystem::exists(target, filesystemError) || filesystemError)
-    return false;
-  std::filesystem::remove(target, filesystemError);
-  if (filesystemError)
-    return false;
-  return std::rename(temporary.c_str(), path.c_str()) == 0;
+  // not on Windows. MoveFileExW replaces it in one step, so there is never a
+  // moment without the old file or the new one (removing the old file first
+  // lost the state if the game died in between). The paths go through
+  // std::filesystem::path, as the narrow ones above are read by the CRT.
+  return MoveFileExW(std::filesystem::path(temporary).c_str(), target.c_str(),
+                     MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH) != 0;
 #else
   return false;
 #endif
@@ -846,6 +855,65 @@ std::string GameDirectoryName(const std::string& slot, const std::string& seed) 
 
 Session::Session(const Config& config, const State& state) : mConfig(config), mState(state) {}
 
+uint64_t Session::NextWorldRevision() {
+  static std::atomic< uint64_t > next{1};
+  return next.fetch_add(1, std::memory_order_relaxed);
+}
+
+Session::DataPackageNames Session::ParseDataPackage(const PortJson::Value& packet) {
+  DataPackageNames result;
+  try {
+    if (!packet.IsObject())
+      return result;
+    const PortJson::Value* data = Member(packet, "data");
+    const PortJson::Value* games =
+        data != nullptr && data->IsObject() ? Member(*data, "games") : nullptr;
+    if (games == nullptr || !games->IsObject())
+      return result;
+    for (const auto& [game, package] : games->AsObject()) {
+      if (!package.IsObject())
+        continue;
+      // Made even when the package has no tables: the game's names have been
+      // asked for, and Connected does not ask again.
+      GameNames& names = result[game];
+      const auto invert = [&package](const char* field, std::map< int64_t, std::string >& out) {
+        const PortJson::Value* table = Member(package, field);
+        if (table == nullptr || !table->IsObject())
+          return;
+        for (const auto& [name, idValue] : table->AsObject()) {
+          int64_t id = 0;
+          if (Integer(&idValue, id))
+            out[id] = name;
+        }
+      };
+      invert("item_name_to_id", names.items);
+      invert("location_name_to_id", names.locations);
+    }
+  } catch (...) {
+    // A malformed package or an allocation failure keeps what was read so far.
+  }
+  return result;
+}
+
+void Session::MergeDataPackage(DataPackageNames&& names) {
+  try {
+    for (auto& [game, tables] : names) {
+      const auto found = mGameNames.find(game);
+      if (found == mGameNames.end()) {
+        mGameNames.emplace(game, std::move(tables));
+        continue;
+      }
+      // A later package's names win, as they did when read straight in.
+      for (auto& [id, name] : tables.items)
+        found->second.items[id] = std::move(name);
+      for (auto& [id, name] : tables.locations)
+        found->second.locations[id] = std::move(name);
+    }
+  } catch (...) {
+    // An allocation failure keeps the names merged so far.
+  }
+}
+
 void Session::HandlePacket(const PortJson::Value& packet, std::vector<std::string>& outgoing,
                            std::vector<ItemGrant>& granted) try {
   if (!packet.IsObject())
@@ -971,6 +1039,7 @@ void Session::HandlePacket(const PortJson::Value& packet, std::vector<std::strin
       ParseSlotData(*slotData, mSlotData);
       ParseLogicOptions(*slotData, mState.logic);
       mState.hasLogic = true;
+      mWorldRevision = NextWorldRevision(); // first, in case Parse stops part way
       PortApWorld::Parse(*slotData, mState.world);
       mState.hasWorld = true;
       for (const std::string& warning : mSlotData.warnings)
@@ -1040,28 +1109,7 @@ void Session::HandlePacket(const PortJson::Value& packet, std::vector<std::strin
         ReadHints(*value);
     }
   } else if (command == "DataPackage") {
-    const PortJson::Value* data = Member(packet, "data");
-    const PortJson::Value* games =
-        data != nullptr && data->IsObject() ? Member(*data, "games") : nullptr;
-    if (games == nullptr || !games->IsObject())
-      return;
-    for (const auto& [game, package] : games->AsObject()) {
-      if (!package.IsObject())
-        continue;
-      GameNames& names = mGameNames[game];
-      const auto invert = [&package](const char* field, std::map< int64_t, std::string >& out) {
-        const PortJson::Value* table = Member(package, field);
-        if (table == nullptr || !table->IsObject())
-          return;
-        for (const auto& [name, idValue] : table->AsObject()) {
-          int64_t id = 0;
-          if (Integer(&idValue, id))
-            out[id] = name;
-        }
-      };
-      invert("item_name_to_id", names.items);
-      invert("location_name_to_id", names.locations);
-    }
+    MergeDataPackage(ParseDataPackage(packet));
   } else if (command == "LocationInfo") {
     const PortJson::Value* locations = Member(packet, "locations");
     if (locations == nullptr || !locations->IsArray())

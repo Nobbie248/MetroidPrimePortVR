@@ -312,6 +312,15 @@ void CPlayerVisor::DrawThermalEffect(const CStateManager& mgr) const {}
 
 void CPlayerVisor::DrawXRayEffect(const CStateManager& mgr) const { x90_xrayBlur.Draw(); }
 
+// The scan window is authored in pixels of a 448-high 4:3 view. Below 4:3 the view is narrower
+// than that, so the window shrinks to keep its share of the width (and its proportions).
+static float ScanWindowFit(int vpWidth, int vpHeight) {
+  if (vpHeight > 0 && vpWidth * 3 < vpHeight * 4) {
+    return static_cast< float >(vpWidth) * 3.f / (static_cast< float >(vpHeight) * 4.f);
+  }
+  return 1.f;
+}
+
 void CPlayerVisor::DrawScanEffect(const CStateManager& mgr,
                                   const CTargetingManager* const tgtMgr) const {
 #ifdef TARGET_PC
@@ -350,8 +359,9 @@ void CPlayerVisor::DrawScanEffect(const CStateManager& mgr,
   const float divisor = transFactor * ((1.f - t) * x58_scanMagInterp +
                                        t * gpTweakGui->GetScanWindowScanningAspect()) +
                         (1.f - transFactor);
-  const float vpW = 169.218f * x48_interpWindowDims.GetX();
-  const float vpH = 152.218f * x48_interpWindowDims.GetY();
+  const float fit = ScanWindowFit(vpWidth, vpHeight);
+  const float vpW = 169.218f * fit * x48_interpWindowDims.GetX();
+  const float vpH = 152.218f * fit * x48_interpWindowDims.GetY();
 #ifdef TARGET_PC
   // PortVr: the copy is vpW by vpH (the pane's own size) over the divisor, and
   // the pane stretches it back: the divisor is the zoom. With the headset's
@@ -390,7 +400,7 @@ void CPlayerVisor::DrawScanEffect(const CStateManager& mgr,
   gpRender->SetViewportOrtho(true, -1.f, 1.f);
   const CTransform4f windowScale =
       CTransform4f::Scale(x48_interpWindowDims.GetX(), 1.f, x48_interpWindowDims.GetY());
-  const CTransform4f seventeenScale = CTransform4f::Scale(17.f, 1.f, 17.f);
+  const CTransform4f seventeenScale = CTransform4f::Scale(17.f * fit, 1.f, 17.f * fit);
   const CTransform4f mm = seventeenScale * windowScale;
   const CTransform4f verticalFlip = CTransform4f::Scale(1.f, 1.f, -1.f);
   const CTransform4f horizontalFlip = CTransform4f::Scale(-1.f, 1.f, 1.f);
@@ -713,8 +723,9 @@ bool CPlayerVisor::DrawScanObjectIndicators(const CStateManager& mgr) const {
     return false;
   CGraphics::SetDepthRange(0.125f, 1.f);
   gpRender->SetViewportOrtho(true, 0.f, 4096.f);
-  gpRender->SetModelMatrix(CTransform4f::Scale(17.f * x48_interpWindowDims.GetX(), 1.f,
-                                               17.f * x48_interpWindowDims.GetY()));
+  const float fit = ScanWindowFit(CGraphics::GetViewportWidth(), CGraphics::GetViewportHeight());
+  gpRender->SetModelMatrix(CTransform4f::Scale(17.f * fit * x48_interpWindowDims.GetX(), 1.f,
+                                               17.f * fit * x48_interpWindowDims.GetY()));
   shield->Draw(CModelFlags::AlphaBlended(CColor(0)));
 #ifdef TARGET_PC
   // PortVr: the shield above masks the window's part of the view on the plane;
@@ -724,10 +735,10 @@ bool CPlayerVisor::DrawScanObjectIndicators(const CStateManager& mgr) const {
   const CGameCamera& camera = mgr.GetCameraManager()->GetCurrentCamera(mgr);
   CTransform4f cameraXf = mgr.GetCameraManager()->GetCurrentCameraTransform(mgr);
   CGraphics::SetViewPointMatrix(cameraXf);
-  CFrustumPlanes frustum(cameraXf, 0.01745329238474369f * camera.GetFov(), camera.GetAspectRatio(),
+  CFrustumPlanes frustum(cameraXf, 0.01745329238474369f * camera.GetRenderFov(), camera.GetAspectRatio(),
                          1.f, false, 100.f);
   gpRender->SetClippingPlanes(frustum);
-  gpRender->SetPerspective(camera.GetFov(), CGraphics::GetViewportWidth(),
+  gpRender->SetPerspective(camera.GetRenderFov(), CGraphics::GetViewportWidth(),
                            CGraphics::GetViewportHeight(), camera.GetNearClipDistance(),
                            camera.GetFarClipDistance());
   CMatrix3f cameraRotation = cameraXf.BuildMatrix3f();

@@ -1,0 +1,110 @@
+name: Bug report
+description: A crash, a graphics or audio problem, broken controls, or anything else that doesn't work.
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for reporting. The log file is the most useful thing you can attach: please don't skip it.
+
+  - type: dropdown
+    id: platform
+    attributes:
+      label: Platform
+      options:
+        - Android
+        - Windows
+        - Linux (AppImage)
+        - Linux (Flatpak)
+        - Linux (tarball or own build)
+    validations:
+      required: true
+
+  - type: input
+    id: version
+    attributes:
+      label: Version
+      description: |
+        The release (e.g. 0.12.0) and, if you can, the build id: the F1 menu header (also F1 > System > About) shows "Build: …",
+        `metroid_prime_port --version` prints it, and it's in the first lines of the log.
+      placeholder: "0.12.0 (924b6e7f)"
+    validations:
+      required: true
+
+  - type: input
+    id: device
+    attributes:
+      label: Device, GPU and OS
+      description: Phone model and Android version, or CPU/GPU, OS and graphics driver.
+      placeholder: "Samsung Galaxy S23, Android 14 / Ryzen 5 + RX 6600, Fedora 41, Mesa 25.1"
+    validations:
+      required: true
+
+  - type: textarea
+    id: what-happened
+    attributes:
+      label: What happened
+      description: What you saw, and what you expected instead. Screenshots or a short video help a lot for graphics bugs.
+    validations:
+      required: true
+
+  - type: textarea
+    id: steps
+    attributes:
+      label: Steps to reproduce
+      description: Where in the game (area/room), what you did, and whether it happens every time.
+      placeholder: |
+        1. Load the save at Chozo Ruins, Main Plaza
+        2. Switch to the Wave Beam
+        3. The game closes
+    validations:
+      required: false
+
+  - type: dropdown
+    id: when
+    attributes:
+      label: When does it happen?
+      options:
+        - It never starts (closes or errors right away)
+        - Before reaching gameplay (disc picker, menus, intro)
+        - During gameplay
+        - Only with a mod, randomizer or Archipelago
+    validations:
+      required: true
+
+  - type: checkboxes
+    id: setup
+    attributes:
+      label: Setup
+      description: Tick everything that applies.
+      options:
+        - label: My disc is Metroid Prime USA v1.00 (GM8E01, revision 0)
+        - label: Remastered models are imported
+        - label: Using the randomizer or Archipelago
+        - label: Using a controller (not keyboard/mouse or touch)
+        - label: It worked in an earlier version
+
+  - type: textarea
+    id: log
+    attributes:
+      label: Log file
+      description: |
+        Drag `metroid_prime_port.log` into this box (after a crash, the next start renames it to
+        `metroid_prime_port.old.log`, so send that one if you restarted the game). Paths and user names are already removed from it.
+        - **Windows zip, Linux tarball, AppImage:** next to `metroid_prime_port(.exe)` or the `.AppImage` file; if it isn't there, `%APPDATA%\Metroid Prime\` or `~/.local/share/Metroid Prime/`
+        - **Flatpak:** `~/.var/app/io.github.odrannnn.metroidprimeport/data/Metroid Prime/`
+        - **Android:** `Documents/MetroidPrime/` (or `Android/data/org.metroidprime.port/files/` over USB); if you moved the data folder, it's in that folder
+
+        On desktop it's always in the same folder as `port_settings.ini`.
+
+        If there's no log, check that F1 > System > Log > "Write the log to a file" is ticked (it is by default).
+    validations:
+      required: false
+
+  - type: textarea
+    id: extra
+    attributes:
+      label: Anything else
+      description: Settings you changed (resolution, frame rate, EFB scale…), environment variables, other things you tried.
+    validations:
+      required: false

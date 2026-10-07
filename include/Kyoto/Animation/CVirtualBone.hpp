@@ -12,11 +12,21 @@ struct SSkinWeighting {
   : x0_id(in.Get< int >()), x4_weight(in.Get< float >()) {}
 };
 
+// Retail data never has more than three influences a vertex. The PC build holds four so
+// converted Remastered models keep theirs; the GameCube layout is unchanged.
+#ifdef TARGET_PC
+#define SKIN_MAX_WEIGHTS 4
+#else
+#define SKIN_MAX_WEIGHTS 3
+#endif
+
 class CPoseAsTransforms;
 class CVirtualBone {
 public:
   explicit CVirtualBone(CInputStream& in);
-  const rstl::reserved_vector< SSkinWeighting, 3 >& GetWeights() const { return x0_weights; }
+  const rstl::reserved_vector< SSkinWeighting, SKIN_MAX_WEIGHTS >& GetWeights() const {
+    return x0_weights;
+  }
   int GetNumIndices() const { return x1c_vertexCount; }
   const CTransform4f& GetTransform() const { return x20_xf; }
   const CMatrix3f& GetRotation() const { return x50_rotation; }
@@ -28,7 +38,7 @@ public:
   void BuildFinalPosMatrix(const CPoseAsTransforms& pose, const CVector3f* points) const;
 
 private:
-  rstl::reserved_vector< SSkinWeighting, 3 > x0_weights;
+  rstl::reserved_vector< SSkinWeighting, SKIN_MAX_WEIGHTS > x0_weights;
   int x1c_vertexCount;
   mutable CTransform4f x20_xf;
   mutable CMatrix3f x50_rotation;

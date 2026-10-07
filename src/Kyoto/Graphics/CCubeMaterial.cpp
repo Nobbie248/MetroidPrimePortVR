@@ -10,6 +10,10 @@
 #include "Kyoto/Graphics/CModelFlags.hpp"
 #include "Kyoto/Graphics/CTexture.hpp"
 #include "Kyoto/Math/CMath.hpp"
+
+#ifdef TARGET_PC
+#include <algorithm>
+#endif
 #include "Kyoto/Math/CPlane.hpp"
 #include "Kyoto/Math/CTransform4f.hpp"
 
@@ -90,6 +94,64 @@ static void HandleTev(int tevCur, const uint* materialDataCur, const uint* texMa
   CGX::SetTevKColorSel(stage, static_cast< GXTevKColorSel >(matFlags >> 0x8 & 0xFF));
   CGX::SetTevKAlphaSel(stage, static_cast< GXTevKAlphaSel >(matFlags >> 0x10 & 0xFF));
 }
+
+#ifdef TARGET_PC
+static float PortUvFloat(uint word) {
+  const uint host = SBig(word);
+  float f;
+  memcpy(&f, &host, sizeof(f));
+  return f;
+}
+
+// One argument of the port-only UV animation: a constant, or a looping curve of
+// samples read on the seconds clock. Returns the words it takes.
+static uint PortUvArg(const uint* w, float seconds, float& out) {
+  const uint kind = SBig(w[0]);
+  if (kind == 0) {
+    out = PortUvFloat(w[1]);
+    return 2;
+  }
+  const uint count = SBig(w[3]);
+  const float period = PortUvFloat(w[2]);
+  const uint* samples = w + 4;
+  // A curve the converter wrote is well formed; these guard a damaged import from
+  // reading outside its samples.
+  if (count == 0) {
+    out = 0.f;
+    return 4;
+  }
+  float x = 0.f;
+  if (period > 0.f && period < 1e9f) {
+    x = fmodf(seconds * PortUvFloat(w[1]), period);
+    if (x < 0.f) {
+      x += period;
+    }
+  }
+  if (!(x >= 0.f)) {
+    x = 0.f;
+  }
+  const uint last = count - 1;
+  if (kind == 2) {
+    out = PortUvFloat(samples[std::min(static_cast< uint >(floorf(x + 0.5f)), last)]);
+  } else {
+    const float lo = floorf(x);
+    const float frac = x - lo;
+    const uint a = std::min(static_cast< uint >(lo), last);
+    const uint b = std::min(a + 1, last);
+    out = (1.f - frac) * PortUvFloat(samples[a]) + frac * PortUvFloat(samples[b]);
+  }
+  return 4 + count;
+}
+
+// Words of the port-only UV animation starting at `w` (its type word included).
+static uint PortUvAnimSize(const uint* w) {
+  uint size = 1;
+  for (int i = 0; i < 5; ++i) {
+    size += SBig(w[size]) == 0 ? 2 : 4 + SBig(w[size + 3]);
+  }
+  return size;
+}
+#endif
 
 static uint HandleAnimatedUV(const uint* uvAnim, GXTexMtx texMtx, GXPTTexMtx ptTexMtx) {
   static const Mtx postMtx = {
@@ -221,6 +283,34 @@ static uint HandleAnimatedUV(const uint* uvAnim, GXTexMtx texMtx, GXPTTexMtx ptT
     CGX::LoadTexMtxImm(tmpPtMtx, ptTexMtx, GX_MTX3x4);
     return 3;
   }
+#ifdef TARGET_PC
+  case 0x50: {
+    // Port-only: the five TextureTransform2x4 arguments of a Remastered model's ANUV
+    // animation (port_remastered_anuv.h), each a constant or a looping curve.
+    const float seconds = CGraphics::GetSecondsMod900();
+    float v[5];
+    uint size = 1;
+    for (int i = 0; i < 5; ++i) {
+      size += PortUvArg(uvAnim + size, seconds, v[i]);
+    }
+    const float s = sinf(v[4]);
+    const float c = cosf(v[4]);
+    texMtx1[0][0] = c * v[2];
+    texMtx1[0][1] = -s * v[3];
+    texMtx1[0][2] = 0.f;
+    texMtx1[0][3] = (v[0] - 0.5f) * c - (v[1] - 0.5f) * s + 0.5f;
+    texMtx1[1][0] = s * v[2];
+    texMtx1[1][1] = c * v[3];
+    texMtx1[1][2] = 0.f;
+    texMtx1[1][3] = (v[0] - 0.5f) * s + (v[1] - 0.5f) * c + 0.5f;
+    texMtx1[2][0] = 0.f;
+    texMtx1[2][1] = 0.f;
+    texMtx1[2][2] = 1.f;
+    texMtx1[2][3] = 0.f;
+    CGX::LoadTexMtxImm(texMtx1, texMtx, GX_MTX3x4);
+    return size;
+  }
+#endif
   default:
     return 0;
   }
@@ -524,6 +614,63 @@ union scanner_t {
   const uchar* bytes;
 };
 
+#ifdef TARGET_PC
+uint CCubeMaterial::PortKonstCount() const {
+  const uint* words = reinterpret_cast< const uint* >(GetData());
+  if ((SBig(words[0]) & kStateFlag_KonstValues) == 0) {
+    return 0;
+  }
+  words += 2 + SBig(words[1]) + 2; // flags, textures, vertex layout and group
+  return SBig(words[0]);
+}
+
+// Walks the material as SetCurrent does, up to its UV animations.
+bool CCubeMaterial::PortNeedsModelMatrix() const {
+  const uint* words = reinterpret_cast< const uint* >(GetData());
+  const uint matFlags = SBig(words[0]);
+  if ((matFlags & (kStateFlag_Reflection | kStateFlag_ReflectionSurfaceEye)) != 0) {
+    return true;
+  }
+  words += 2 + SBig(words[1]) + 2; // flags, textures, vertex layout and group
+  if ((matFlags & kStateFlag_KonstValues) != 0) {
+    words += SBig(words[0]) + 1;
+  }
+  words += 1; // blend
+  if ((matFlags & kStateFlag_ReflectionIndirectTexture) != 0) {
+    words += 1;
+  }
+  words += SBig(words[0]) + 1; // colour channels
+  const uint tevCount = SBig(*words++);
+  words += tevCount * 6; // the stages and their texture orders
+  words += SBig(words[0]) + 1; // texture coordinate generators
+  const uint animCount = SBig(words[1]);
+  words += 2;
+  for (uint i = 0; i < animCount; ++i) {
+    switch (SBig(*words)) {
+    case 0:
+    case 1:
+    case 7: // the model's rotation and translation reach it through the positions or normals
+      words += SBig(*words) == 7 ? 3 : 1;
+      break;
+    case 2:
+    case 4:
+    case 5:
+      words += 5;
+      break;
+    case 3:
+      words += 3;
+      break;
+    case 0x50: // the port's UV animation takes no model matrix
+      words += PortUvAnimSize(words);
+      break;
+    default: // 6 takes the model's translation on its own
+      return true;
+    }
+  }
+  return false;
+}
+#endif
+
 void CCubeMaterial::SetCurrent(const CModelFlags& flags, const CCubeSurface& surface,
                                const CCubeModel& model) const {
   if (x0_data == sLastMaterialCached) {
@@ -565,11 +712,26 @@ void CCubeMaterial::SetCurrent(const CModelFlags& flags, const CCubeSurface& sur
   if ((flags.GetOtherFlags() & CModelFlags::kF_NoTextureLock) == 0) {
     const rstl::vector< TCachedToken< CTexture > >& textures = model.GetTextures();
     materialDataCur.words += 2;
+#ifdef TARGET_PC
+    // A converted Remastered material samples each map with its own wrap modes: a PBR one
+    // from its record, a TEV one from its 'WRAP' word; anything else repeats.
+    uint wrap = 0x55555555;
+    f32 values[19];
+    model.PortReadPBRMaterial(static_cast< int >(surface.GetMaterialIndex()), values, &wrap);
+    for (uint i = 0; i < texCount; ++i) {
+      const uint bits = i < 8 ? wrap >> (i * 4) : 0x5;
+      textures[SBig(*materialDataCur.words)].GetObject()->PortLoad(
+          static_cast< GXTexMapID >(i), static_cast< CTexture::EClampMode >(bits & 3),
+          static_cast< CTexture::EClampMode >((bits >> 2) & 3));
+      ++materialDataCur.words;
+    }
+#else
     for (uint i = 0; i < texCount; ++i) {
       textures[SBig(*materialDataCur.words)].GetObject()->Load(static_cast< GXTexMapID >(i),
                                                                CTexture::kCM_Repeat);
       ++materialDataCur.words;
     }
+#endif
   } else {
     materialDataCur.words += texCount + 2;
   }
@@ -883,7 +1045,10 @@ void CCubeModel::DisableShadowMaps() { sbRenderModelShadow = false; }
 float CCubeMaterial::sPortPBRProbeWeight = 0.f;
 int CCubeMaterial::sPortPBRProbeMode = -1;
 uint CCubeMaterial::sPortPBRDraws = 0;
+uint CCubeMaterial::sPortPBRProbeDraws = 0;
+bool CCubeMaterial::sPortCapturingProbe = false;
 CCubeMaterial::EPortPBRThermal CCubeMaterial::sPortPBRThermal = CCubeMaterial::kPT_None;
+uint CCubeMaterial::sPortAreaLights = 0;
 
 bool CCubeMaterial::PortPBRAllowed(const CModelFlags& flags) {
   return !sbRenderModelBlack &&

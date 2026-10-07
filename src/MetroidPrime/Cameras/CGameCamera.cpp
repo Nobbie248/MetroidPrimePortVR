@@ -20,6 +20,10 @@
 #include "rstl/algorithm.hpp"
 
 #include "float.h"
+#include <cmath>
+#ifdef TARGET_PC
+#include "port_debug.h"
+#endif
 
 CGameCamera::CGameCamera(const TUniqueId uid, const bool active, const rstl::string& name,
                          const CEntityInfo& info, const CTransform4f& xf, const float fov,
@@ -38,6 +42,9 @@ CGameCamera::CGameCamera(const TUniqueId uid, const bool active, const rstl::str
 , x16c_controllerIdx(controllerIdx)
 , x170_24_perspDirty(true)
 , x170_25_disablesInput(disableInput)
+#ifdef TARGET_PC
+, x170_26_fovIsFitted(false)
+#endif
 , x174_delayTime(0.f)
 , x178_perspInterpRemTime(0.f)
 , x17c_perspInterpDur(0.f)
@@ -59,13 +66,46 @@ float CGameCamera::GetAspectRatio() const {
 }
 #endif
 
+#ifdef TARGET_PC
+float CGameCamera::VertPlusFov(const float fov, const float aspect) {
+  const float kMinAspect = 4.f / 3.f;
+  if (!(aspect > 0.f) || aspect >= kMinAspect) {
+    return fov;
+  }
+  const float kDegToRad = 3.14159265f / 180.f;
+  return 2.f * std::atan(std::tan(0.5f * fov * kDegToRad) * kMinAspect / aspect) / kDegToRad;
+}
+
+float CGameCamera::VertPlusGunDrop(const float aspect) {
+  const float kMinAspect = 4.f / 3.f;
+  if (!(aspect > 0.f) || aspect >= kMinAspect) {
+    return 0.f;
+  }
+  // The gun is drawn at the retail FOV. Its 4:3 bottom edge is at tan(fov/2); the widened one
+  // at tan(fov/2) * (4:3 / aspect).
+  const float kDegToRad = 3.14159265f / 180.f;
+  return std::tan(0.5f * PortDebug::kFovRetail * kDegToRad) * (kMinAspect / aspect - 1.f);
+}
+
+float CGameCamera::GetUnwidenedFov() const {
+  const float kMinAspect = 4.f / 3.f;
+  const float aspect = GetAspectRatio();
+  if (!x170_26_fovIsFitted || !(aspect > 0.f) || aspect >= kMinAspect) {
+    return x15c_currentFov;
+  }
+  const float kDegToRad = 3.14159265f / 180.f;
+  return 2.f * std::atan(std::tan(0.5f * x15c_currentFov * kDegToRad) * aspect / kMinAspect) /
+         kDegToRad;
+}
+#endif
+
 const CMatrix4f& CGameCamera::GetPerspectiveMatrix() const {
 #ifdef TARGET_PC
   GetAspectRatio();
 #endif
   if (x170_24_perspDirty == true) {
     xec_perspectiveMatrix =
-        CGraphics::CalculatePerspectiveMatrix(x15c_currentFov, x168_aspect, x160_znear, x164_zfar);
+        CGraphics::CalculatePerspectiveMatrix(GetRenderFov(), x168_aspect, x160_znear, x164_zfar);
     x170_24_perspDirty = false;
   }
 

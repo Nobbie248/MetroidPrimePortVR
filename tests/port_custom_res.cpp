@@ -202,6 +202,26 @@ int main() {
               Get32(strg->data, 28) == 4,
           "the STRG holds the text as string 0, UTF-16BE");
     Check(Find(kTextBase + 100, disc) == nullptr, "an unregistered text id has no resource");
+
+    // A scan scouted after its STRG was first built shows the new text.
+    const Resource* before = Find(scanId + 1, disc);
+    Check(TextScan(1, "Bob's Hookshot") == scanId && Find(scanId + 1, disc) == before,
+          "the same text keeps the built STRG");
+    Check(TextScan(1, "Missile") == scanId, "the key keeps its id when the text changes");
+    const Resource* after = Find(scanId + 1, disc);
+    const std::u16string missile = u"Missile";
+    bool missileMatches = after != nullptr && after->data.size() == 32 + (missile.size() + 1) * 2;
+    for (size_t i = 0; missileMatches && i <= missile.size(); ++i) {
+      const char16_t unit = char16_t((after->data[32 + 2 * i] << 8) | after->data[33 + 2 * i]);
+      missileMatches = unit == (i < missile.size() ? missile[i] : 0);
+    }
+    Check(missileMatches, "a changed text rebuilds the STRG");
+    Check(before != nullptr && before->type == 0x53545247, "the old STRG stays readable for a loader holding it");
+    // An id asked for before it was registered is found once it is.
+    const uint32_t lateId = kTextBase + 6;
+    Check(Find(lateId + 1, disc) == nullptr && TextScan(3, "Bombs") == kTextBase + 4 &&
+              TextScan(4, "Grapple Beam") == lateId && Find(lateId + 1, disc) != nullptr,
+          "a text id asked for too early is built once registered");
   }
 
   if (sFailures == 0)

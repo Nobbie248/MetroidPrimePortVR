@@ -2,6 +2,8 @@
 // is already initialized and rendered every presented frame, so this only has
 // to build the windows between aurora_begin_frame and aurora_end_frame.
 
+#include "port_env.h"
+#include "port_collision_view.h"
 #include "port_debug.h"
 #include "port_freecam.h"
 #include "port_hd_font.h"
@@ -16,8 +18,11 @@
 #include "port_gci.h"
 #include "port_mods.h"
 #include "port_importers.h"
+#include "port_remastered_effect_import.h"
 #include "port_remastered_import.h"
+#include "port_remastered_text.h"
 #include "port_discord.h"
+#include "port_gallery.h"
 #include "port_livesplit.h"
 #include "port_map_pickups.h"
 #include "port_prompts.h"
@@ -36,6 +41,12 @@
 
 #include "MetroidPrime/Cameras/CCameraManager.hpp"
 #include "Kyoto/Graphics/CCubeMaterial.hpp"
+#include "Kyoto/Graphics/CGX.hpp"
+#include "Kyoto/Graphics/CGraphics.hpp"
+#include "Kyoto/Graphics/CCubeModel.hpp"
+#include "Kyoto/Graphics/CModel.hpp"
+#include "Kyoto/Graphics/CTexture.hpp"
+#include "GuiSys/CGuiModel.hpp"
 #include "MetroidPrime/CHealthInfo.hpp"
 #include "MetroidPrime/CGameArea.hpp"
 #include "MetroidPrime/CMapWorld.hpp"
@@ -46,9 +57,12 @@
 #include "MetroidPrime/Player/CGameState.hpp"
 #include "MetroidPrime/Player/CPlayerState.hpp"
 #include "Kyoto/CResFactory.hpp"
+#include "Kyoto/Audio/CSfxManager.hpp"
+#include "MetroidPrime/SFX/UI.h"
 
 #include <aurora/aurora.h>
 #include <aurora/gfx.h>
+#include <aurora/imgui.h>
 #include <dolphin/gx/GXExtra.h>
 #include <dolphin/pad.h>
 #include <dolphin/vi.h>
@@ -81,6 +95,7 @@
 
 #include <algorithm>
 #include <atomic>
+#include <chrono>
 #include <cmath>
 #include <cstdio>
 #include <cstdlib>
@@ -88,6 +103,7 @@
 #include <ctime>
 #include <filesystem>
 #include <fstream>
+#include <iterator>
 #include <mutex>
 #include <sstream>
 #include <string>
@@ -132,9 +148,26 @@ bool sFullscreen = true;
 bool sFullscreen = false;
 #endif
 bool sOverlayWindowed = false; // desktop: the old floating tabbed window
+// F1 overlay look: 0 auto (Remastered with the Remastered import loaded, else Prime), 1 Prime,
+// 2 Remastered, 3 Plain (stock Dear ImGui dark). Menu sounds are the game's own UI effects.
+int sUiTheme = 0;
+bool sUiSounds = true;
+bool sMainLoopRan = false; // the game loop has run, so CSfxManager is being updated
 float sRenderScale = 1.f;
-PortDebug::EAspectMode sAspectMode = PortDebug::kAspect_4_3;
-bool sHudWide = false;
+// Dynamic resolution: draws the EFB between sDynamicResMin and sRenderScale to hold a frame rate.
+bool sDynamicRes = false;
+int sDynamicResTarget = 0;  // fps; 0 = the 60 fps cap, or the display's rate without it
+float sDynamicResMin = 1.f; // the lowest scale it drops to: 0.5, 0.75 or 1
+float sDynScale = 0.f;      // the scale in use; 0 = sRenderScale
+int sDynSlow = 0, sDynSteady = 0, sDynSettle = 0;
+int sDynRaiseAfter = 4;  // steady seconds before trying a step up; doubles when one fails
+int sDynSinceRaise = -1; // seconds since the last step up, while it is on probation
+double sDynFpsBefore = 0.0; // the rate before the last step down
+int sDynHoldLow = 0;        // seconds left without stepping down (a step down gained nothing)
+int sDynHoldFor = 30;       // the next such hold; doubles each time
+PortDebug::EAspectMode sAspectMode = PortDebug::kAspect_Window;
+bool sHudWide = true;
+bool sCinemaBars = false;
 int sHudScale = PortDebug::kHudScaleMax;
 bool sHideHelmet = true;
 bool sHideVisorEffects = false;
@@ -146,24 +179,35 @@ uint32_t sTimingLoops = 0;
 bool sRevealMap = false;
 bool sMapPickups = false;
 bool sMapLogicColors = true;
+// The Tracker tab's item, scan and room counts. Off so the tab doesn't spoil
+// what is left to find until asked.
+bool sTrackerProgress = false;
 int sApSuitDamage = 1;
 bool sCheats = false;
 bool sSkippableCutscenes = false;
+std::string sTextLanguage;
+int sElevatorRide = PortDebug::kElevatorRide_Original;
 bool sSaveStateHotkeys = true;
 bool sMouseAim = false;
 bool sTwinStick = false;
 float sTwinStickRightY = 0.f;
 bool sBeamShiftHeld = false;
+std::atomic<bool> sTouchBeamShift{false}; // the touch twin layout's held Beam button
 bool sSpringBall = true;
 bool sSwapScanXray = false;
+bool sTouchColors = false; // Android touch overlay: the GameCube pad's colours
+bool sTouchLabels = true;  // and each button's function under its letter
 bool sFastMorph = false;
 bool sInvulnerable = false;
 // MP_GODMODE, for this run only: -1 unset, else 0 or 1. Never saved, and changing the
 // setting ends it.
 int sInvulnerableRun = -1;
-bool sLogFile = false;
+// On by default: a game that closes at launch gives no chance to tick the box
+// first, and a phone or a desktop launcher has no terminal to read.
+bool sLogFile = true;
 bool sLockOnToggle = false;
 bool sStickyCharge = false;
+bool sRapidCharge = false;
 bool sSpringFlick = false;
 float sSpringFlickRate = 6.f;
 float sStickAimRate = 900.f;
@@ -175,6 +219,9 @@ int sAnisotropy = 4;
 #else
 int sAnisotropy = 16;
 #endif
+// Setting `opengles`; sOpenGlesAtStart is what this run was started with.
+bool sOpenGles = false;
+bool sOpenGlesAtStart = false;
 bool sUnlockHardMode = false;
 bool sUnlockFusionSuit = false;
 bool sUnlockGalleries = false;
@@ -182,8 +229,7 @@ bool sSpeedrunTimer = false;
 bool sLiveSplit = false;
 std::string sLiveSplitAddress = "127.0.0.1:16834";
 bool sLiveSplitSplitUpgrades = true;
-bool sDiscord = false;
-std::string sDiscordAppId;
+bool sDiscord = true;
 // Mods folder (port_mods.h): read at startup only.
 bool sModsEnabled = true;
 std::string sModsDisabled;
@@ -192,6 +238,69 @@ std::string sModsDisabled;
 int sGyroMode = 0;
 int sGyroSource = 0;
 float sGyroRate = 600.f;
+// Touch aim (Android): dragging on the free screen area turns the view by the
+// finger's travel. Speed is aim pixels per dp; 2.25 turns ~180 degrees over a
+// 400 dp drag at the default mouse sensitivity (pi / 0.0035 / 400).
+bool sTouchAim = true;
+float sTouchAimSpeed = 2.25f;
+// Tap the minimap to open the map (Android): the HUD publishes the minimap's
+// screen rect, the touch overlay hit-tests it and injects a Z press per tap.
+bool sTouchMapTap = true;
+// Hold-and-slide beam and visor wheels (Android overlay): the player's state is
+// published each frame, the overlay's pick comes back as a request that
+// ControlMapper reads for a few polls as if the command's button were pressed.
+bool sTouchWheels = true;
+// Classic GameCube layout (Android overlay): C-stick, D-pad and the per-option
+// toggles. Off, the overlay has no C-stick and dragging aims like a mouse.
+bool sTouchClassic = false;
+bool sTouchTwinStick = false;  // exclusive with sTouchClassic; classic wins on load
+bool sTouchVisorTapScan = false;
+std::atomic<uint32_t> sWheelMask{0};
+// The touch wheels' icons: ARGB pixels per [wheel][item], filled by the game thread, copied out by
+// the Android UI thread.
+struct WheelIcon {
+  int w = 0;
+  int h = 0;
+  std::vector<uint32_t> argb;
+};
+std::mutex sWheelIconMutex;
+WheelIcon sWheelIcons[2][4];
+std::atomic<uint64_t> sWheelStampNs{0};
+// Whether the pause menu (inventory, logbook) is up; the touch overlay shows R there.
+std::atomic<bool> sPauseScreenOpen{false};
+std::atomic<uint64_t> sPauseScreenStampNs{0};
+std::atomic<int> sVisorRequest{-1};
+std::atomic<uint64_t> sVisorRequestUntilNs{0};
+std::atomic<int> sBeamRequest{-1};
+std::atomic<uint64_t> sBeamRequestUntilNs{0};
+constexpr uint64_t kWheelRequestNs = 120'000'000;
+std::mutex sMinimapMutex;
+bool sMinimapValid = false;
+bool sMinimapDrawn = false;
+float sMinimapRect[4] = {};
+std::chrono::steady_clock::time_point sMinimapStamp;
+std::atomic< int > sMapTapPending{0};
+bool sMapTapHeld = false;
+// Drag to pan the map screen (Android): the overlay sends dp deltas and the view
+// height, CAutoMapper drains them; it publishes whether panning applies.
+std::mutex sMapPanMutex;
+bool sMapScreenOpen = false;
+std::chrono::steady_clock::time_point sMapScreenStamp;
+float sMapPanX = 0.f;
+float sMapPanY = 0.f;
+float sMapPanViewDp = 400.f;
+float sMapZoomPending = 1.f;
+float sMapRotatePending = 0.f;
+std::chrono::steady_clock::time_point sMapPanHeldUntil;
+std::mutex sTouchAimMutex;
+float sTouchAimPendingX = 0.f;
+float sTouchAimPendingY = 0.f;
+// GameCube scheme: this tick's touch travel, and whether a touch-aim finger is down
+// (JNI, or the console's hold timer).
+float sTouchLookFrameX = 0.f;
+float sTouchLookFrameY = 0.f;
+std::atomic<bool> sTouchAimDown{false};
+std::atomic<uint64_t> sTouchAimHoldUntilNs{0};
 bool sMouseCaptured = false;
 bool sMouseGameplayActive = false;
 bool sMouseInvertX = false;
@@ -230,11 +339,26 @@ float sGyroPendingY = 0.f;
 float sStickAimVelX = 0.f;
 float sStickAimVelY = 0.f;
 // Frame interpolation (docs/FRAME_INTERPOLATION.md): uncapped frames show look
-// input before the tick that applies it.
+// input before the tick that applies it. One setting, smooth_frames, turns all
+// four parts on or off; the console's interp command flips them one at a time
+// for testing, which isn't saved.
+bool sSmoothFrames = true;
 bool sFrameInterpolation = true;
-bool sActorInterpolation = false;
-bool sPoseInterpolation = false;
-bool sParticleInterpolation = false;
+bool sActorInterpolation = true;
+bool sPoseInterpolation = true;
+// Faster on a phone (POCO F8 Ultra: 8-27% more fps in the heaviest rooms), even or mixed on a PC.
+constexpr bool kRoomGeoResidentDefault = true;
+bool sRoomGeoResident = kRoomGeoResidentDefault;
+bool sParticleInterpolation = true;
+// The Remastered import's choices. Off on a phone: the rooms have never run on
+// one, and need storage and memory many phones lack (a 256 MB game arena and
+// 12x frame buffers).
+#if defined(__ANDROID__)
+bool sImportGeometry = false;
+#else
+bool sImportGeometry = true;
+#endif
+bool sImportEffects = false;
 float sPresentOverride = -1.f;
 unsigned sPresentCycleFrame = 0;
 bool sTickHold = false;
@@ -256,12 +380,35 @@ std::atomic< int > sWindowFullscreen{-1};
 // Mirrors sVisible for readers on other threads, so they never touch the lazy
 // initialization or the ImGui state owned by the game thread.
 std::atomic< bool > sOverlayVisible{false};
-// Same idea for the twin-stick setting, which the Android touch overlay uses to
-// pick a controller layout.
-std::atomic< bool > sTwinStickFlag{false};
+// Same idea for whether the Android touch overlay draws the GameCube pad's colours.
+std::atomic< bool > sTouchColorsFlag{false};
+std::atomic< bool > sTouchLabelsFlag{true};
+// The Android touch overlay's gap to the side edges for every control, and the
+// left stick's extra gap on top of it, in dp. Read from the UI thread.
+constexpr float kTouchMarginMaxDp = 300.f;
+constexpr float kTouchSideMarginDefault = 16.f;
+constexpr float kTouchStickInsetDefault = 32.f;
+std::atomic< float > sTouchSideMargin{kTouchSideMarginDefault};
+std::atomic< float > sTouchStickInset{kTouchStickInsetDefault};
+// The face buttons' and C-stick's extra gap to the right edge, in dp.
+constexpr float kTouchButtonInsetDefault = 0.f;
+std::atomic< float > sTouchButtonInset{kTouchButtonInsetDefault};
+// Each touch control's own offset and size, as an opaque string the touch view
+// parses (`<id>:<dx>,<dy>,<scale>;...`). Java reads and writes it on the UI thread
+// and the settings file on the game thread, hence the mutex.
+std::mutex sTouchLayoutMutex;
+std::string sTouchLayout;
+constexpr size_t kTouchLayoutMaxLen = 4096;
+// Java's layout change is saved by the game thread's next frame: ImGui's settings
+// path isn't safe from the UI thread.
+std::atomic< bool > sTouchLayoutSavePending{false};
+// The F1 "Edit layout" button; the touch view takes it and opens its editor.
+std::atomic< bool > sTouchEditRequested{false};
 // Set when a real pad, keyboard or mouse is used; the Android touch overlay takes
 // it to get out of the way.
 std::atomic< bool > sPhysicalInput{false};
+// Set while the touch overlay is the active device (cleared by physical input).
+std::atomic< bool > sTouchActive{false};
 // Gyro state: the phone's sensor is looked up once, so the sensor list is not
 // walked on every tick.
 bool sPhoneGyroSearched = false;
@@ -346,18 +493,9 @@ void ApplyLiveSplit() {
   PortLiveSplit::Configure(sLiveSplit, sLiveSplitAddress, sLiveSplitSplitUpgrades);
 }
 
-// Discord application ids are decimal snowflakes; a pasted id may carry spaces.
-std::string DigitsOnly(const std::string& text) {
-  std::string out;
-  for (const char c : text) {
-    if (c >= '0' && c <= '9') {
-      out += c;
-    }
-  }
-  return out;
+void ApplyDiscord() {
+  PortDiscord::Configure(sDiscord, PortDiscord::kDefaultAppId);
 }
-
-void ApplyDiscord() { PortDiscord::Configure(sDiscord, sDiscordAppId); }
 
 void ApplySetting(const std::string& key, const std::string& value) {
   // VR (PrimedGun) settings live in their own table (vr/vr_settings.cpp).
@@ -372,6 +510,13 @@ void ApplySetting(const std::string& key, const std::string& value) {
     sFullscreen = ParseBool(value);
   } else if (key == "overlay_windowed") {
     sOverlayWindowed = ParseBool(value);
+  } else if (key == "ui_theme") {
+    sUiTheme = SDL_strcasecmp(value.c_str(), "prime") == 0        ? 1
+               : SDL_strcasecmp(value.c_str(), "remastered") == 0 ? 2
+               : SDL_strcasecmp(value.c_str(), "plain") == 0      ? 3
+                                                                  : 0;
+  } else if (key == "ui_sounds") {
+    sUiSounds = ParseBool(value);
   } else if (key == "disc_path") {
     sDiscPath = value;
   } else if (key == "remastered_nsp") {
@@ -383,6 +528,15 @@ void ApplySetting(const std::string& key, const std::string& value) {
     if (std::isfinite(f) && f >= 0.f && f <= 4.f) {
       sRenderScale = f;
     }
+  } else if (key == "dynamic_res") {
+    sDynamicRes = ParseBool(value);
+  } else if (key == "dynamic_res_target") {
+    sDynamicResTarget = std::clamp(std::atoi(value.c_str()), 0, 240);
+  } else if (key == "dynamic_res_min") {
+    const float f = static_cast< float >(std::atof(value.c_str()));
+    if (std::isfinite(f)) {
+      sDynamicResMin = std::clamp(f, 0.5f, 1.f);
+    }
   } else if (key == "aspect") {
     if (value == "16:9") {
       sAspectMode = PortDebug::kAspect_16_9;
@@ -391,6 +545,8 @@ void ApplySetting(const std::string& key, const std::string& value) {
     } else if (value == "4:3") {
       sAspectMode = PortDebug::kAspect_4_3;
     }
+  } else if (key == "cinema_bars") {
+    sCinemaBars = ParseBool(value);
   } else if (key == "hud_wide") {
     sHudWide = ParseBool(value);
   } else if (key == "hud_scale") {
@@ -408,6 +564,8 @@ void ApplySetting(const std::string& key, const std::string& value) {
     sRevealMap = ParseBool(value);
   } else if (key == "map_pickups") {
     sMapPickups = ParseBool(value);
+  } else if (key == "tracker_progress") {
+    sTrackerProgress = ParseBool(value);
   } else if (key == "map_logic_colors") {
     sMapLogicColors = ParseBool(value);
   } else if (key == "ap_suit_damage") {
@@ -415,8 +573,15 @@ void ApplySetting(const std::string& key, const std::string& value) {
     sApSuitDamage = mode >= 0 && mode <= 2 ? mode : 1;
   } else if (key == "cheats") {
     sCheats = ParseBool(value);
+  } else if (key == "text_language") {
+    sTextLanguage = value;
   } else if (key == "skippable_cutscenes") {
     sSkippableCutscenes = ParseBool(value);
+  } else if (key == "elevator_ride") {
+    const int mode = std::atoi(value.c_str());
+    sElevatorRide = mode >= PortDebug::kElevatorRide_Original && mode <= PortDebug::kElevatorRide_Skip
+                        ? mode
+                        : PortDebug::kElevatorRide_Original;
   } else if (key == "savestate_hotkeys") {
     sSaveStateHotkeys = ParseBool(value);
   } else if (key == "unlock_hard_mode") {
@@ -427,6 +592,9 @@ void ApplySetting(const std::string& key, const std::string& value) {
     sUnlockGalleries = ParseBool(value);
   } else if (key == "msaa") {
     sMsaa = std::atoi(value.c_str()) >= 4 ? 4 : 1;
+  } else if (key == "opengles") {
+    sOpenGles = ParseBool(value);
+    sOpenGlesAtStart = sOpenGles;
   } else if (key == "anisotropy") {
     const int a = std::atoi(value.c_str());
     if (a >= 1 && a <= 16) {
@@ -441,6 +609,10 @@ void ApplySetting(const std::string& key, const std::string& value) {
     sMouseAim = ParseBool(value);
   } else if (key == "twin_stick") {
     sTwinStick = ParseBool(value);
+  } else if (key == "touch_colors") {
+    sTouchColors = ParseBool(value);
+  } else if (key == "touch_labels") {
+    sTouchLabels = ParseBool(value);
   } else if (key == "stick_aim_rate") {
     const float f = static_cast< float >(std::atof(value.c_str()));
     if (std::isfinite(f) && f >= 50.f && f <= 4000.f) {
@@ -460,6 +632,40 @@ void ApplySetting(const std::string& key, const std::string& value) {
     const float f = static_cast< float >(std::atof(value.c_str()));
     if (std::isfinite(f) && f >= 20.f && f <= 5000.f) {
       sGyroRate = f;
+    }
+  } else if (key == "touch_aim") {
+    sTouchAim = ParseBool(value);
+  } else if (key == "touch_map_tap") {
+    sTouchMapTap = ParseBool(value);
+  } else if (key == "touch_classic_gc") {
+    sTouchClassic = ParseBool(value);
+  } else if (key == "touch_twin_stick") {
+    sTouchTwinStick = ParseBool(value);
+  } else if (key == "touch_wheels") {
+    sTouchWheels = ParseBool(value);
+  } else if (key == "touch_visor_tap_scan") {
+    sTouchVisorTapScan = ParseBool(value);
+  } else if (key == "touch_aim_speed") {
+    const float f = static_cast< float >(std::atof(value.c_str()));
+    if (std::isfinite(f) && f >= 0.25f && f <= 10.f) {
+      sTouchAimSpeed = f;
+    }
+  } else if (key == "touch_side_margin" || key == "touch_stick_inset" ||
+             key == "touch_button_inset") {
+    const float f = static_cast< float >(std::atof(value.c_str()));
+    if (std::isfinite(f) && f >= 0.f && f <= kTouchMarginMaxDp) {
+      (key == "touch_side_margin"   ? sTouchSideMargin
+       : key == "touch_stick_inset" ? sTouchStickInset
+                                    : sTouchButtonInset)
+          .store(f);
+    }
+  } else if (key == "touch_layout") {
+    // Printable ASCII only: JNI's NewStringUTF aborts on invalid UTF-8.
+    const bool ascii = std::all_of(value.begin(), value.end(),
+                                   [](unsigned char c) { return c >= 0x20 && c < 0x7F; });
+    if (ascii && value.size() <= kTouchLayoutMaxLen) {
+      std::lock_guard< std::mutex > lock(sTouchLayoutMutex);
+      sTouchLayout = value;
     }
   } else if (key == "mouse_invert_x") {
     sMouseInvertX = ParseBool(value);
@@ -519,10 +725,9 @@ void ApplySetting(const std::string& key, const std::string& value) {
     }
   } else if (key == "livesplit_split_upgrades") {
     sLiveSplitSplitUpgrades = ParseBool(value);
-  } else if (key == "discord") {
+  } else if (key == "discord_presence") {
+    // Not "discord": 0.16.0 saved discord=0 for everyone while it was opt-in.
     sDiscord = ParseBool(value);
-  } else if (key == "discord_app_id") {
-    sDiscordAppId = DigitsOnly(value);
   } else if (key == "mods") {
     sModsEnabled = ParseBool(value);
   } else if (key == "mods_disabled") {
@@ -531,12 +736,16 @@ void ApplySetting(const std::string& key, const std::string& value) {
     sFastMorph = ParseBool(value);
   } else if (key == "invulnerable") {
     sInvulnerable = ParseBool(value);
-  } else if (key == "log_file") {
+  } else if (key == "logging") {
+    // Not "log_file": builds from before the log was on by default wrote
+    // log_file=0 into every settings file, which kept it off after an update.
     sLogFile = ParseBool(value);
   } else if (key == "lock_on_toggle") {
     sLockOnToggle = ParseBool(value);
   } else if (key == "sticky_charge") {
     sStickyCharge = ParseBool(value);
+  } else if (key == "rapid_charge") {
+    sRapidCharge = ParseBool(value);
   } else if (key == "spring_ball_flick") {
     sSpringFlick = ParseBool(value);
   } else if (key == "spring_ball_flick_rate") {
@@ -551,14 +760,22 @@ void ApplySetting(const std::string& key, const std::string& value) {
     }
   } else if (key == "sim_adaptive") {
     sSimAdaptive = ParseBool(value);
-  } else if (key == "frame_interpolation") {
-    sFrameInterpolation = ParseBool(value);
-  } else if (key == "actor_interpolation") {
-    sActorInterpolation = ParseBool(value);
-  } else if (key == "pose_interpolation") {
-    sPoseInterpolation = ParseBool(value);
-  } else if (key == "particle_interpolation") {
-    sParticleInterpolation = ParseBool(value);
+  } else if (key == "smooth_frames") {
+    sSmoothFrames = ParseBool(value);
+    sFrameInterpolation = sActorInterpolation = sPoseInterpolation = sParticleInterpolation = sSmoothFrames;
+  } else if (key == "room_geo_gpu") {
+    sRoomGeoResident = ParseBool(value);
+  } else if (key == "room_geo_resident") {
+    // The old key, saved as 0 by everyone while it was off by default: only an explicit 1 counts.
+    sRoomGeoResident = sRoomGeoResident || ParseBool(value);
+  } else if (key == "room_geo_min_px") {
+    PortRoomGeo::SetMinPixels(std::strtof(value.c_str(), nullptr));
+  } else if (key == "room_geo_lod") {
+    PortRoomGeo::SetLodDistance(std::strtof(value.c_str(), nullptr));
+  } else if (key == "remastered_import_geometry") {
+    sImportGeometry = ParseBool(value);
+  } else if (key == "remastered_import_effects") {
+    sImportEffects = ParseBool(value);
   } else if (key == "ai_audio") {
     sAiAudioEnabled = ParseBool(value);
   } else if (key == "musyx_audio") {
@@ -604,6 +821,9 @@ void LoadSettings() {
       ApplySetting(key, value);
     }
   }
+  if (sTouchClassic) {
+    sTouchTwinStick = false;
+  }
 }
 
 void SaveSettings() {
@@ -621,19 +841,24 @@ void SaveSettings() {
   file << "# Environment variables (MP_*) override these for a single run.\n";
   file << "aspect=" << aspect << '\n';
   file << "hud_wide=" << (sHudWide ? 1 : 0) << '\n';
+  file << "cinema_bars=" << (sCinemaBars ? 1 : 0) << '\n';
   file << "hud_scale=" << sHudScale << '\n';
   file << "hide_helmet=" << (sHideHelmet ? 1 : 0) << '\n';
   file << "hide_visor_effects=" << (sHideVisorEffects ? 1 : 0) << '\n';
   file << "hide_minimap=" << (sHideMinimap ? 1 : 0) << '\n';
   file << "reveal_map=" << (sRevealMap ? 1 : 0) << '\n';
   file << "map_pickups=" << (sMapPickups ? 1 : 0) << '\n';
+  file << "tracker_progress=" << (sTrackerProgress ? 1 : 0) << '\n';
   file << "map_logic_colors=" << (sMapLogicColors ? 1 : 0) << '\n';
   file << "ap_suit_damage=" << sApSuitDamage << '\n';
   file << "cheats=" << (sCheats ? 1 : 0) << '\n';
   file << "skippable_cutscenes=" << (sSkippableCutscenes ? 1 : 0) << '\n';
+  file << "text_language=" << sTextLanguage << '\n';
+  file << "elevator_ride=" << sElevatorRide << '\n';
   file << "savestate_hotkeys=" << (sSaveStateHotkeys ? 1 : 0) << '\n';
   file << "fov=" << sFirstPersonFov << '\n';
   file << "msaa=" << sMsaa << '\n';
+  file << "opengles=" << (sOpenGles ? 1 : 0) << '\n';
   file << "anisotropy=" << sAnisotropy << '\n';
   file << "unlock_hard_mode=" << (sUnlockHardMode ? 1 : 0) << '\n';
   file << "unlock_fusion_suit=" << (sUnlockFusionSuit ? 1 : 0) << '\n';
@@ -642,23 +867,32 @@ void SaveSettings() {
   file << "livesplit=" << (sLiveSplit ? 1 : 0) << '\n';
   file << "livesplit_address=" << sLiveSplitAddress << '\n';
   file << "livesplit_split_upgrades=" << (sLiveSplitSplitUpgrades ? 1 : 0) << '\n';
-  file << "discord=" << (sDiscord ? 1 : 0) << '\n';
-  file << "discord_app_id=" << sDiscordAppId << '\n';
+  file << "discord_presence=" << (sDiscord ? 1 : 0) << '\n';
   file << "mods=" << (sModsEnabled ? 1 : 0) << '\n';
   file << "mods_disabled=" << sModsDisabled << '\n';
   file << "vsync=" << (sVsyncEnabled ? 1 : 0) << '\n';
   file << "fullscreen=" << (sFullscreen ? 1 : 0) << '\n';
   file << "overlay_windowed=" << (sOverlayWindowed ? 1 : 0) << '\n';
+  file << "ui_theme=" << (sUiTheme == 1 ? "prime" : sUiTheme == 2 ? "remastered" : sUiTheme == 3 ? "plain" : "auto")
+       << '\n';
+  file << "ui_sounds=" << (sUiSounds ? 1 : 0) << '\n';
   file << "render_scale=" << sRenderScale << '\n';
+  file << "dynamic_res=" << (sDynamicRes ? 1 : 0) << '\n';
+  file << "dynamic_res_target=" << sDynamicResTarget << '\n';
+  file << "dynamic_res_min=" << sDynamicResMin << '\n';
   file << "frame_limit=" << (sFrameLimitEnabled ? 1 : 0) << '\n';
   file << "sim_rate=" << sSimRate << '\n';
   file << "sim_adaptive=" << (sSimAdaptive ? 1 : 0) << '\n';
-  file << "frame_interpolation=" << (sFrameInterpolation ? 1 : 0) << '\n';
-  file << "actor_interpolation=" << (sActorInterpolation ? 1 : 0) << '\n';
-  file << "pose_interpolation=" << (sPoseInterpolation ? 1 : 0) << '\n';
-  file << "particle_interpolation=" << (sParticleInterpolation ? 1 : 0) << '\n';
+  file << "smooth_frames=" << (sSmoothFrames ? 1 : 0) << '\n';
+  file << "room_geo_gpu=" << (sRoomGeoResident ? 1 : 0) << '\n';
+  file << "room_geo_min_px=" << PortRoomGeo::MinPixels() << '\n';
+  file << "room_geo_lod=" << PortRoomGeo::LodDistance() << '\n';
+  file << "remastered_import_geometry=" << (sImportGeometry ? 1 : 0) << '\n';
+  file << "remastered_import_effects=" << (sImportEffects ? 1 : 0) << '\n';
   file << "mouse_aim=" << (sMouseAim ? 1 : 0) << '\n';
   file << "twin_stick=" << (sTwinStick ? 1 : 0) << '\n';
+  file << "touch_colors=" << (sTouchColors ? 1 : 0) << '\n';
+  file << "touch_labels=" << (sTouchLabels ? 1 : 0) << '\n';
   file << "spring_ball=" << (sSpringBall ? 1 : 0) << '\n';
   file << "swap_scan_xray=" << (sSwapScanXray ? 1 : 0) << '\n';
   file << "shift_key=" << sShiftBindings[0] << '\n';
@@ -671,15 +905,30 @@ void SaveSettings() {
   file << '\n';
   file << "fast_morph=" << (sFastMorph ? 1 : 0) << '\n';
   file << "invulnerable=" << (sInvulnerable ? 1 : 0) << '\n';
-  file << "log_file=" << (sLogFile ? 1 : 0) << '\n';
+  file << "logging=" << (sLogFile ? 1 : 0) << '\n';
   file << "lock_on_toggle=" << (sLockOnToggle ? 1 : 0) << '\n';
   file << "sticky_charge=" << (sStickyCharge ? 1 : 0) << '\n';
+  file << "rapid_charge=" << (sRapidCharge ? 1 : 0) << '\n';
   file << "spring_ball_flick=" << (sSpringFlick ? 1 : 0) << '\n';
   file << "spring_ball_flick_rate=" << sSpringFlickRate << '\n';
   file << "stick_aim_rate=" << sStickAimRate << '\n';
   file << "gyro_mode=" << sGyroMode << '\n';
   file << "gyro_source=" << sGyroSource << '\n';
   file << "gyro_rate=" << sGyroRate << '\n';
+  file << "touch_aim=" << (sTouchAim ? 1 : 0) << '\n';
+  file << "touch_aim_speed=" << sTouchAimSpeed << '\n';
+  file << "touch_side_margin=" << sTouchSideMargin.load() << '\n';
+  file << "touch_stick_inset=" << sTouchStickInset.load() << '\n';
+  file << "touch_button_inset=" << sTouchButtonInset.load() << '\n';
+  {
+    std::lock_guard< std::mutex > lock(sTouchLayoutMutex);
+    file << "touch_layout=" << sTouchLayout << '\n';
+  }
+  file << "touch_map_tap=" << (sTouchMapTap ? 1 : 0) << '\n';
+  file << "touch_classic_gc=" << (sTouchClassic ? 1 : 0) << '\n';
+  file << "touch_twin_stick=" << (sTouchTwinStick ? 1 : 0) << '\n';
+  file << "touch_wheels=" << (sTouchWheels ? 1 : 0) << '\n';
+  file << "touch_visor_tap_scan=" << (sTouchVisorTapScan ? 1 : 0) << '\n';
   file << "mouse_invert_x=" << (sMouseInvertX ? 1 : 0) << '\n';
   file << "mouse_invert_y=" << (sMouseInvertY ? 1 : 0) << '\n';
   file << "mouse_buttons=" << (sMouseButtons ? 1 : 0) << '\n';
@@ -805,6 +1054,7 @@ bool SDLCALL debug_event_watch(void*, SDL_Event* event) {
   }
   if (IsPhysicalInput(*event)) {
     sPhysicalInput.store(true, std::memory_order_release);
+    sTouchActive.store(false, std::memory_order_release);
   }
   // Port: a phone or headset app going to the background may be killed without
   // another word, so unsaved settings are written now. SDL delivers these on the
@@ -823,15 +1073,18 @@ void EnsureInitialized() {
   LoadSettings();
 
   // Environment variables are explicit per-run overrides and win over the file.
-  if (std::getenv("MP_TRACE_TIMING") != nullptr) {
+  if (port::EnvFlag("MP_TRACE_TIMING")) {
     sTraceTiming = true;
   }
-  if (std::getenv("MP_FAST_BOOT") != nullptr) {
+  if (port::EnvFlag("MP_FAST_BOOT")) {
     sFastBoot = true;
   }
-  if (const char* turbo = std::getenv("MP_TURBO")) {
+  if (const char* language = std::getenv("MP_LANGUAGE")) {
+    sTextLanguage = language;
+  }
+  if (port::EnvFlag("MP_TURBO")) {
     sTurbo = true;
-    const long ticks = std::strtol(turbo, nullptr, 10);
+    const int ticks = port::EnvInt("MP_TURBO", 0);
     if (ticks >= 1 && ticks <= 16) {
       sTurboTicks = static_cast< unsigned >(ticks);
     }
@@ -849,13 +1102,13 @@ void EnsureInitialized() {
   // Cutscene skipping is a test aid only: skipping on the first frame of each
   // cinematic left script state unbalanced (stuck visor filters, missing
   // music), so it is no longer a player setting.
-  if (std::getenv("MP_SKIP_CUTSCENES") != nullptr) {
+  if (port::EnvFlag("MP_SKIP_CUTSCENES")) {
     sSkipCutscenes = true;
   }
   if (const char* god = std::getenv("MP_GODMODE")) {
     sInvulnerableRun = ParseBool(god) ? 1 : 0;
   }
-  if (std::getenv("MP_SHOW_DEBUG_UI") != nullptr) {
+  if (port::EnvFlag("MP_SHOW_DEBUG_UI")) {
     sVisible = true;
   }
   if (const char* aspect = std::getenv("MP_ASPECT")) {
@@ -866,52 +1119,50 @@ void EnsureInitialized() {
     } else if (std::strcmp(aspect, "4:3") == 0) {
       sAspectMode = PortDebug::kAspect_4_3;
     }
-  } else if (std::getenv("MP_WIDESCREEN") != nullptr) {
+  } else if (port::EnvFlag("MP_WIDESCREEN")) {
     sAspectMode = PortDebug::kAspect_16_9;
   }
-  if (std::getenv("MP_HUD_WIDE") != nullptr) {
-    sHudWide = true;
-  }
-  if (std::getenv("MP_MOUSE_AIM") != nullptr) {
+  sHudWide = port::EnvFlag("MP_HUD_WIDE", sHudWide);
+  sCinemaBars = port::EnvFlag("MP_CINEMA_BARS", sCinemaBars);
+  sRapidCharge = port::EnvFlag("MP_RAPID_CHARGE", sRapidCharge);
+  if (port::EnvFlag("MP_MOUSE_AIM")) {
     sMouseAim = true;
   }
-  if (std::getenv("MP_TWIN_STICK") != nullptr) {
+  if (port::EnvFlag("MP_TWIN_STICK")) {
     sTwinStick = true;
   }
-  if (std::getenv("MP_MOUSE_INVERT_X") != nullptr) {
+  if (port::EnvFlag("MP_MOUSE_INVERT_X")) {
     sMouseInvertX = true;
   }
-  if (std::getenv("MP_MOUSE_INVERT_Y") != nullptr) {
+  if (port::EnvFlag("MP_MOUSE_INVERT_Y")) {
     sMouseInvertY = true;
   }
-  if (std::getenv("MP_DISABLE_MOUSE_BUTTONS") != nullptr) {
+  if (port::EnvFlag("MP_DISABLE_MOUSE_BUTTONS")) {
     sMouseButtons = false;
   }
-  if (std::getenv("MP_DISABLE_MOUSE_CROSSHAIR") != nullptr) {
+  if (port::EnvFlag("MP_DISABLE_MOUSE_CROSSHAIR")) {
     sMouseCrosshair = false;
   }
-  if (const char* sens = std::getenv("MP_MOUSE_SENS")) {
-    const float value = static_cast< float >(std::atof(sens));
+  {
+    const float value = port::EnvFloat("MP_MOUSE_SENS", 0.f);
     if (std::isfinite(value) && value > 0.f) {
       sMouseSensitivity = value;
     }
   }
-  if (std::getenv("MP_DISABLE_AI_AUDIO") != nullptr) {
+  if (port::EnvFlag("MP_DISABLE_AI_AUDIO")) {
     sAiAudioEnabled = false;
   }
-  if (const char* speed = std::getenv("MP_CUTSCENE_SPEED")) {
-    const float value = static_cast< float >(std::atof(speed));
+  {
+    const float value = port::EnvFloat("MP_CUTSCENE_SPEED", 0.f);
     if (std::isfinite(value) && value >= 1.f && value <= 32.f) {
       sCutsceneSpeed = value;
     }
-  }
-  if (const char* rate = std::getenv("MP_SIM_RATE")) {
-    const long value = std::strtol(rate, nullptr, 10);
-    if (value >= 30 && value <= 480) {
-      sSimRate = static_cast< unsigned >(value);
+    const int rate = port::EnvInt("MP_SIM_RATE", 0);
+    if (rate >= 30 && rate <= 480) {
+      sSimRate = static_cast< unsigned >(rate);
     }
   }
-  if (std::getenv("MP_SIM_ADAPTIVE") != nullptr) {
+  if (port::EnvFlag("MP_SIM_ADAPTIVE")) {
     sSimAdaptive = true;
   }
 
@@ -1012,7 +1263,97 @@ bool FrameLimitEnabled() {
   return sFrameLimitEnabled;
 }
 
+static double DynamicResTargetFps() {
+  double target = sDynamicResTarget;
+  if (target <= 0.0) {
+    const SDL_DisplayMode* mode = SDL_GetCurrentDisplayMode(SDL_GetPrimaryDisplay());
+    target = mode != nullptr && mode->refresh_rate > 0.f ? mode->refresh_rate : 60.0;
+  }
+  return sFrameLimitEnabled ? std::min(target, 60.0) : target;
+}
+
+static void ResetDynamicRes() {
+  sDynSlow = sDynSteady = sDynSettle = sDynHoldLow = 0;
+  sDynRaiseAfter = 4;
+  sDynHoldFor = 30;
+  sDynSinceRaise = -1;
+  sDynFpsBefore = 0.0;
+  if (sDynScale > 0.f) {
+    sDynScale = 0.f;
+    VISetFrameBufferScale(sRenderScale);
+  }
+}
+
+// Once a second, from the presented rate. Each step reallocates the EFB and waits for the
+// GPU, so it steps rarely: down after two slow seconds, up after a steady stretch that
+// doubles each time a step up turns out too slow.
+static void UpdateDynamicRes(double fps, unsigned frames) {
+  const float top = sRenderScale;
+  const float bottom = std::min(sDynamicResMin, top);
+  if (!sDynamicRes || top <= bottom || sTurbo) {
+    ResetDynamicRes();
+    return;
+  }
+  // Paused or loading: nothing to go on.
+  if (frames < 10) {
+    return;
+  }
+  // The second after a step holds its reallocation stall.
+  if (sDynSettle > 0) {
+    --sDynSettle;
+    return;
+  }
+  const float scale = sDynScale > 0.f ? sDynScale : top;
+  // Half steps above 2x, where a quarter step changes the pixel count by little.
+  const float stepUp = scale >= 2.f ? 0.5f : 0.25f;
+  const float stepDown = scale > 2.f ? 0.5f : 0.25f;
+  const double target = DynamicResTargetFps();
+  if (sDynHoldLow > 0) {
+    --sDynHoldLow;
+  }
+  float next = scale;
+  if (sDynFpsBefore > 0.0) {
+    // The first reading after a step down: no gain means the GPU's pixels were not what
+    // held the frame back, so go back up and stay there for a while.
+    if (fps < sDynFpsBefore * 1.03) {
+      next = scale + stepUp;
+      sDynHoldLow = sDynHoldFor;
+      sDynHoldFor = std::min(sDynHoldFor * 2, 240);
+    }
+    sDynFpsBefore = 0.0;
+  } else if (fps < target * 0.93) {
+    sDynSteady = 0;
+    if (sDynSinceRaise >= 0) {
+      next = scale - stepDown;
+      sDynRaiseAfter = std::min(sDynRaiseAfter * 2, 64);
+      sDynSinceRaise = -1;
+    } else if (++sDynSlow >= 2 && sDynHoldLow == 0 && scale > bottom) {
+      next = scale - stepDown;
+      sDynFpsBefore = fps;
+    }
+  } else {
+    sDynSlow = 0;
+    if (sDynSinceRaise >= 0 && ++sDynSinceRaise >= 3) {
+      sDynSinceRaise = -1;
+    }
+    if (sDynSinceRaise < 0 && fps >= target * 0.97 && scale < top && ++sDynSteady >= sDynRaiseAfter) {
+      next = scale + stepUp;
+      sDynSteady = 0;
+      sDynSinceRaise = 0;
+    }
+  }
+  next = std::clamp(next, bottom, top);
+  if (next != scale) {
+    sDynSlow = 0;
+    sDynScale = next;
+    sDynSettle = 1;
+    VISetFrameBufferScale(next);
+    PortLog::Write("port: dynamic resolution %.2fx (%.0f fps, target %.0f)\n", next, fps, target);
+  }
+}
+
 void RecordFrame(uint64_t durationNs, unsigned ticks, bool presented) {
+  sMainLoopRan = true;
   sTimingNs += durationNs;
   sTimingTicks += ticks;
   ++sTimingLoops;
@@ -1022,7 +1363,7 @@ void RecordFrame(uint64_t durationNs, unsigned ticks, bool presented) {
   // throughput, which is what the process can *produce*; dividing by wall time
   // reports what reaches the screen. The two agree while the 60 Hz cap is
   // waiting more than the frame costs, and part company exactly when a frame
-  // overruns its budget - which is the case someone opens the Performance tab
+  // overruns its budget - which is the case someone opens the Video > Frame rate page
   // to diagnose. One of the two numbers without the other is misleading there.
   {
     const uint64_t nowNs = SDL_GetTicksNS();
@@ -1031,12 +1372,17 @@ void RecordFrame(uint64_t durationNs, unsigned ticks, bool presented) {
     }
     sTimingWallLastNs = nowNs;
   }
-  if (sTimingNs >= 1000000000ull) {
+  // Also on wall time: a light frame under the cap took several seconds to
+  // gather one second of work, so the readout lagged that far behind.
+  if (sTimingNs >= 1000000000ull || sTimingWallNs >= 1000000000ull) {
     const double seconds = static_cast<double>(sTimingNs) / 1000000000.0;
     const double wallSeconds = static_cast<double>(sTimingWallNs) / 1000000000.0;
     sActualFps = sTimingFrames / (wallSeconds > 0.0 ? wallSeconds : seconds);
     sThroughputFps = sTimingFrames / seconds;
-    sActualTps = sTimingTicks / seconds;
+    // Ticks per wall second: the simulation's rate is what the player sees, not
+    // what it could reach. Over the frame's own time it read above the target
+    // whenever the cap or vsync left the loop idle.
+    sActualTps = sTimingTicks / (wallSeconds > 0.0 ? wallSeconds : seconds);
     for (int i = 0; i < kPhaseCount; ++i) {
       sPhaseMs[i] = sTimingLoops > 0 ? static_cast<double>(sPhaseNs[i]) / 1.0e6 / sTimingLoops : 0.0;
       sPhaseNs[i] = 0;
@@ -1047,6 +1393,7 @@ void RecordFrame(uint64_t durationNs, unsigned ticks, bool presented) {
                    "[timing] presented=%.1f FPS throughput=%.1f FPS simulation=%.1f ticks/s cap=%s\n",
                    sActualFps, sThroughputFps, sActualTps, sFrameLimitEnabled ? "60" : "off");
     }
+    UpdateDynamicRes(sActualFps, sTimingFrames);
     sTimingNs = 0;
     sTimingWallNs = 0;
     sTimingFrames = sTimingTicks = 0;
@@ -1101,7 +1448,24 @@ void SetRenderScale(float scale) {
     return;
   }
   sRenderScale = scale;
+  sDynScale = 0.f;
+  ResetDynamicRes();
   VISetFrameBufferScale(scale);
+}
+
+bool DynamicRes() {
+  EnsureInitialized();
+  return sDynamicRes;
+}
+
+int DynamicResTarget() {
+  EnsureInitialized();
+  return sDynamicResTarget;
+}
+
+float DynamicResMin() {
+  EnsureInitialized();
+  return sDynamicResMin;
 }
 
 EAspectMode AspectMode() {
@@ -1124,6 +1488,11 @@ void SetHudWide(bool enabled) {
   EnsureInitialized();
   sHudWide = enabled;
   MarkDirty();
+}
+
+bool CinemaBars() {
+  EnsureInitialized();
+  return sCinemaBars;
 }
 
 int HudScale() {
@@ -1227,6 +1596,34 @@ void SetSkippableCutscenes(bool enabled) {
   MarkDirty();
 }
 
+const char* TextLanguage() {
+  EnsureInitialized();
+  for (size_t i = 0; i < PortRemastered::kTextLanguageCount; ++i) {
+    if (sTextLanguage == PortRemastered::kTextLanguages[i].code) {
+      return PortRemastered::kTextLanguages[i].code;
+    }
+  }
+  return "";
+}
+
+void SetTextLanguage(const char* code) {
+  EnsureInitialized();
+  sTextLanguage = code;
+  MarkDirty();
+}
+
+EElevatorRide ElevatorRide() {
+  EnsureInitialized();
+  return static_cast< EElevatorRide >(sElevatorRide);
+}
+
+void SetElevatorRide(EElevatorRide mode) {
+  EnsureInitialized();
+  sElevatorRide = mode >= kElevatorRide_Original && mode <= kElevatorRide_Skip ? mode
+                                                                               : kElevatorRide_Original;
+  MarkDirty();
+}
+
 float FirstPersonFov() {
   EnsureInitialized();
   return sFirstPersonFov;
@@ -1251,6 +1648,19 @@ void SetMsaa(int samples) {
   if (sMsaa != samples) {
     sMsaa = samples;
     aurora_set_graphics_quality(static_cast< uint32_t >(sMsaa), static_cast< uint16_t >(sAnisotropy));
+    MarkDirty();
+  }
+}
+
+bool OpenGles() {
+  EnsureInitialized();
+  return sOpenGles;
+}
+
+void SetOpenGles(bool enabled) {
+  EnsureInitialized();
+  if (sOpenGles != enabled) {
+    sOpenGles = enabled;
     MarkDirty();
   }
 }
@@ -1314,7 +1724,38 @@ void SetMouseAim(bool enabled) {
   ResetMouseAim();
 }
 
+bool TouchDirectAim() {
+#if defined(__ANDROID__)
+  return !sTouchClassic && sTouchActive.load(std::memory_order_acquire) && !Visible();
+#else
+  return false;
+#endif
+}
+
+bool TouchActive() {
+#if defined(__ANDROID__)
+  return sTouchActive.load(std::memory_order_acquire) && !Visible();
+#else
+  return false;
+#endif
+}
+
+bool DirectAim() { return MouseAim() || TwinStick() || TouchDirectAim(); }
+
+// The pad-preset getters below read as the GameCube preset (off / unbound) while touch is in use: the
+// touch overlay always does what its buttons say. The F1 menu (Visible) sees the stored values.
 bool TwinStick() {
+  EnsureInitialized();
+#if defined(__ANDROID__)
+  // Touch has its own twin stick (the right stick aims), apart from the pad preset.
+  if (TouchActive()) {
+    return sTouchTwinStick;
+  }
+#endif
+  return sTwinStick && !TouchActive();
+}
+
+bool PadTwinStick() {
   EnsureInitialized();
   return sTwinStick;
 }
@@ -1331,6 +1772,8 @@ void SetTwinStickRightY(float y) { sTwinStickRightY = y; }
 
 bool BeamShiftHeld() { return sBeamShiftHeld; }
 
+bool TouchBeamShift() { return sTouchBeamShift.load(std::memory_order_acquire) && TouchActive(); }
+
 void SetBeamShiftHeld(bool held) { sBeamShiftHeld = held; }
 
 bool SpringBall() {
@@ -1346,7 +1789,7 @@ void SetSpringBall(bool enabled) {
 
 bool SwapScanXray() {
   EnsureInitialized();
-  return sSwapScanXray;
+  return sSwapScanXray && !TouchActive();
 }
 
 void SetSwapScanXray(bool enabled) {
@@ -1357,6 +1800,9 @@ void SetSwapScanXray(bool enabled) {
 
 int ShiftBinding(int slot) {
   EnsureInitialized();
+  if (slot == 2 && TouchActive()) {
+    return -1;
+  }
   return slot >= 0 && slot < 3 ? sShiftBindings[slot] : -1;
 }
 
@@ -1370,7 +1816,7 @@ void SetShiftBinding(int slot, int code) {
 
 int PadAltButton(int bit) {
   EnsureInitialized();
-  return bit >= 0 && bit < kPadAltCount ? sPadAltButtons[bit] : -1;
+  return bit >= 0 && bit < kPadAltCount && !TouchActive() ? sPadAltButtons[bit] : -1;
 }
 
 void SetPadAltButton(int bit, int code) {
@@ -1429,18 +1875,6 @@ bool DiscordPresence() {
 void SetDiscordPresence(bool enabled) {
   EnsureInitialized();
   sDiscord = enabled;
-  ApplyDiscord();
-  MarkDirty();
-}
-
-std::string DiscordAppId() {
-  EnsureInitialized();
-  return sDiscordAppId;
-}
-
-void SetDiscordAppId(const std::string& id) {
-  EnsureInitialized();
-  sDiscordAppId = DigitsOnly(id);
   ApplyDiscord();
   MarkDirty();
 }
@@ -1538,6 +1972,17 @@ void SetStickyCharge(bool enabled) {
   MarkDirty();
 }
 
+bool RapidCharge() {
+  EnsureInitialized();
+  return sRapidCharge;
+}
+
+void SetRapidCharge(bool enabled) {
+  EnsureInitialized();
+  sRapidCharge = enabled;
+  MarkDirty();
+}
+
 bool SpringBallFlick() {
   EnsureInitialized();
   return sSpringFlick;
@@ -1587,7 +2032,7 @@ void SetStickAimRate(float pixelsPerSecond) {
 
 void AddStickAim(float x, float y, float dt) {
   EnsureInitialized();
-  if (!sTwinStick || Visible() || !std::isfinite(x) || !std::isfinite(y) || !std::isfinite(dt) ||
+  if (!TwinStick() || Visible() || !std::isfinite(x) || !std::isfinite(y) || !std::isfinite(dt) ||
       dt <= 0.f) {
     return;
   }
@@ -1759,11 +2204,13 @@ void PollGyro() {
   if (sSpringFlickLatch > 0.f) {
     sSpringFlickLatch -= dt;
   }
-  // Gyro feeds the same aim state the mouse and twin stick use, so aiming only
-  // has an effect where that is driving the camera. Flicks need no aim.
-  const bool aim = sGyroMode != 0 && (sMouseAim || sTwinStick);
+  // Gyro feeds the same aim state the mouse, twin stick and the touch layout's
+  // drag aim use, so aiming only has an effect where that is driving the
+  // camera. Flicks need no aim. The raw sTwinStick: TwinStick() reads false
+  // while touch is in use, yet touch keeps the direct aim path.
+  const bool aim = sGyroMode != 0 && (sMouseAim || sTwinStick || TouchDirectAim());
   if (!aim && !sSpringFlick) {
-    sGyroStatus = sGyroMode == 0 ? "off" : "needs mouse aim or twin stick";
+    sGyroStatus = sGyroMode == 0 ? "off" : "needs mouse aim, twin stick or touch controls";
     return;
   }
 
@@ -1788,7 +2235,7 @@ void PollGyro() {
   }
   if (!aim) {
     if (sGyroMode != 0) {
-      sGyroStatus = "flicks only (aim needs mouse aim or twin stick)";
+      sGyroStatus = "flicks only (aim needs mouse aim, twin stick or touch controls)";
     }
     return;
   }
@@ -1823,10 +2270,18 @@ void ResetMouseAim() {
   sMouseGameplayActive = false;
   sMouseButtonGate.Reset();
   sMousePendingX = sMousePendingY = sMouseFrameX = sMouseFrameY = 0.f;
+  sTouchLookFrameX = sTouchLookFrameY = 0.f;
   sGyroPendingX = sGyroPendingY = sStickAimVelX = sStickAimVelY = 0.f;
+  std::lock_guard lock(sTouchAimMutex);
+  sTouchAimPendingX = sTouchAimPendingY = 0.f;
 }
 
 void SetMouseCaptured(bool captured) {
+  // A button held across a capture change can lose its release (Android drops
+  // it when pointer capture ends mid-press, e.g. a boss dying under a charge
+  // shot), and the weapon gate would then wait for a neutral that never comes.
+  // Anything still physically held is ignored by the gate anyway.
+  if (captured != sMouseCaptured) sMouseHeldButtons.Clear();
   sMouseCaptured = captured;
   if (!captured) {
     sMouseButtonGate.Reset();
@@ -1895,14 +2350,386 @@ void AddMouseDelta(float dx, float dy) {
   sMousePendingY += dy;
 }
 
+bool TouchAim() {
+  EnsureInitialized();
+  return sTouchAim;
+}
+
+void SetTouchAim(bool on) {
+  EnsureInitialized();
+  sTouchAim = on;
+  MarkDirty();
+}
+
+bool TouchMapTap() {
+  EnsureInitialized();
+  return sTouchMapTap;
+}
+
+void SetTouchMapTap(bool on) {
+  EnsureInitialized();
+  sTouchMapTap = on;
+  MarkDirty();
+}
+
+bool TouchClassic() {
+  EnsureInitialized();
+  return sTouchClassic;
+}
+
+void SetTouchClassic(bool on) {
+  EnsureInitialized();
+  sTouchClassic = on;
+  if (on) {
+    sTouchTwinStick = false;
+  }
+  MarkDirty();
+}
+
+bool TouchTwinStick() {
+  EnsureInitialized();
+  return sTouchTwinStick;
+}
+
+void SetTouchTwinStick(bool on) {
+  EnsureInitialized();
+  sTouchTwinStick = on;
+  if (on) {
+    sTouchClassic = false;
+  }
+  MarkDirty();
+}
+
+bool TouchWheels() {
+  EnsureInitialized();
+  return sTouchWheels;
+}
+
+void SetTouchWheels(bool on) {
+  EnsureInitialized();
+  sTouchWheels = on;
+  MarkDirty();
+}
+
+bool TouchVisorTapScan() {
+  EnsureInitialized();
+  return sTouchVisorTapScan;
+}
+
+void SetTouchVisorTapScan(bool on) {
+  EnsureInitialized();
+  sTouchVisorTapScan = on;
+  MarkDirty();
+}
+
+// Game thread, once per frame from CPlayer::Think.
+void SetWheelState(uint32_t mask) {
+  sWheelMask.store(mask);
+  sWheelStampNs.store(SDL_GetTicksNS());
+}
+
+// Not refreshed for a while (no player, paused) reads as 0: wheels disabled.
+uint32_t WheelState() {
+  const uint64_t now = SDL_GetTicksNS();
+  return now - sWheelStampNs.load() < 500'000'000 ? sWheelMask.load() : 0;
+}
+
+// Game thread, once per frame from CInGameGuiManager::Update.
+void SetPauseScreenOpen(bool open) {
+  sPauseScreenOpen.store(open);
+  sPauseScreenStampNs.store(SDL_GetTicksNS());
+}
+
+// Not refreshed for a while (left the game) counts as closed.
+bool PauseScreenOpen() {
+  return sPauseScreenOpen.load() && SDL_GetTicksNS() - sPauseScreenStampNs.load() < 300'000'000;
+}
+
+void RequestVisor(int visor) {
+  if (visor < 0 || visor > 3) {
+    return;
+  }
+  sVisorRequest.store(visor);
+  sVisorRequestUntilNs.store(SDL_GetTicksNS() + kWheelRequestNs);
+}
+
+void RequestBeam(int beam) {
+  if (beam < 0 || beam > 3) {
+    return;
+  }
+  sBeamRequest.store(beam);
+  sBeamRequestUntilNs.store(SDL_GetTicksNS() + kWheelRequestNs);
+}
+
+void CaptureWheelIcons(int wheel, CGuiModel* const* icons) {
+  if (wheel < 0 || wheel > 1) {
+    return;
+  }
+  for (int i = 0; i < 4; ++i) {
+    {
+      std::lock_guard<std::mutex> lock(sWheelIconMutex);
+      if (!sWheelIcons[wheel][i].argb.empty()) {
+        continue;
+      }
+    }
+    if (icons[i] == nullptr || !icons[i]->GetModel().valid()) {
+      continue;
+    }
+    // The model is locked at construction and caches on its first draw; an icon the player
+    // doesn't own yet isn't drawn, so take it here once it has loaded.
+    TCachedToken<CModel>& modelToken = const_cast<TCachedToken<CModel>&>(*icons[i]->GetModel());
+    modelToken.TryCache();
+    CModel* model = modelToken.GetObject();
+    uint texId = 0;
+    const CTexture* tex = model != nullptr ? model->PortFirstTexture(&texId) : nullptr;
+    // A mod's picture replaces the texels the game holds; those are a stub. Load the retail
+    // icon from the disc by id instead (the ids the retail models use).
+    static const uint kRetailIcons[2][4] = {
+        {0x2DDA38B8, 0x04503F39, 0xD518730E, 0x2EA5AE14},
+        {0x8865D14F, 0x5C595218, 0x07183B57, 0xC156B36E},
+    };
+    static TCachedToken<CTexture>* retailTokens[2][4] = {};
+    if (tex != nullptr && tex->PortNativeId() != 0 && gpSimplePool != nullptr) {
+      if (retailTokens[wheel][i] == nullptr) {
+        // Kept for the run: the icon texture stays loaded.
+        retailTokens[wheel][i] = new TCachedToken<CTexture>(
+            gpSimplePool->GetObj(SObjectTag('TXTR', kRetailIcons[wheel][i])));
+        retailTokens[wheel][i]->Lock();
+      }
+      TCachedToken<CTexture>& tok = *retailTokens[wheel][i];
+      if (!tok.TryCache()) {
+        tok.ForceCache();
+      }
+      tex = tok.GetObject();
+      texId = kRetailIcons[wheel][i];
+    }
+    if (tex == nullptr || tex->PortNativeId() != 0) {
+      continue;
+    }
+    uint32_t w = 0;
+    uint32_t h = 0;
+    std::vector<uint8_t> rgba(256 * 256 * 4);
+    if (!aurora_gx_texobj_rgba8(tex->PortTexObj(), &w, &h, rgba.data(), rgba.size())) {
+      continue;
+    }
+    WheelIcon icon;
+    icon.w = static_cast<int>(w);
+    icon.h = static_cast<int>(h);
+    icon.argb.resize(size_t(w) * h);
+    // The HUD models map these textures bottom row first; flip to upright.
+    for (uint32_t y = 0; y < h; ++y) {
+      for (uint32_t x = 0; x < w; ++x) {
+        const uint8_t* c = &rgba[(size_t(h - 1 - y) * w + x) * 4];
+        icon.argb[size_t(y) * w + x] =
+            uint32_t(c[3]) << 24 | uint32_t(c[0]) << 16 | uint32_t(c[1]) << 8 | c[2];
+      }
+    }
+    PortLog::Write("port: touch wheel icon %d/%d: %ux%u fmt %d id %08X\n", wheel, i, w, h,
+                  int(tex->GetTexelFormat()), texId);
+    std::lock_guard<std::mutex> lock(sWheelIconMutex);
+    sWheelIcons[wheel][i] = std::move(icon);
+  }
+}
+
+bool VisorRequested(int visor) {
+  return sVisorRequest.load() == visor && SDL_GetTicksNS() < sVisorRequestUntilNs.load();
+}
+
+bool BeamRequested(int beam) {
+  return sBeamRequest.load() == beam && SDL_GetTicksNS() < sBeamRequestUntilNs.load();
+}
+
+// Game thread, once per HUD draw (valid=false when the minimap isn't shown).
+void SetMinimapRect(bool valid, bool drawn, float x0, float y0, float x1, float y1) {
+  std::lock_guard lock(sMinimapMutex);
+  sMinimapDrawn = drawn;
+  sMinimapValid = valid && std::isfinite(x0) && std::isfinite(y0) && std::isfinite(x1) &&
+                  std::isfinite(y1);
+  sMinimapRect[0] = x0;
+  sMinimapRect[1] = y0;
+  sMinimapRect[2] = x1;
+  sMinimapRect[3] = y1;
+  sMinimapStamp = std::chrono::steady_clock::now();
+}
+
+// A rect not refreshed for a while (HUD not drawn at all) counts as gone.
+bool MinimapRect(float* out4, bool* drawn) {
+  std::lock_guard lock(sMinimapMutex);
+  if (!sMinimapValid ||
+      std::chrono::steady_clock::now() - sMinimapStamp > std::chrono::milliseconds(300)) {
+    return false;
+  }
+  if (out4 != nullptr) {
+    std::copy(sMinimapRect, sMinimapRect + 4, out4);
+  }
+  if (drawn != nullptr) {
+    *drawn = sMinimapDrawn;
+  }
+  return true;
+}
+
+void RequestMapTap() {
+  sMapTapPending.fetch_add(1);
+}
+
+// Game thread, once per frame from CAutoMapper::Update.
+void SetMapScreenOpen(bool open) {
+  std::lock_guard lock(sMapPanMutex);
+  sMapScreenOpen = open;
+  sMapScreenStamp = std::chrono::steady_clock::now();
+}
+
+// Not refreshed for a while (paused, left the game) counts as closed.
+bool MapScreenOpen() {
+  std::lock_guard lock(sMapPanMutex);
+  return sMapScreenOpen &&
+         std::chrono::steady_clock::now() - sMapScreenStamp < std::chrono::milliseconds(300);
+}
+
+// UI thread. A call with zero deltas still marks the finger as down, for holdMs.
+void AddMapPan(float dxDp, float dyDp, float viewHeightDp, int holdMs) {
+  if (!std::isfinite(dxDp) || !std::isfinite(dyDp) || !(viewHeightDp > 0.f) ||
+      !MapScreenOpen()) {
+    return;
+  }
+  std::lock_guard lock(sMapPanMutex);
+  sMapPanX += dxDp;
+  sMapPanY += dyDp;
+  sMapPanViewDp = viewHeightDp;
+  sMapPanHeldUntil = std::chrono::steady_clock::now() + std::chrono::milliseconds(holdMs);
+}
+
+// UI thread: a pinch's finger-distance ratio (>1 zooms in); factors multiply.
+void AddMapZoom(float ratio) {
+  if (!std::isfinite(ratio) || !(ratio > 0.f) || !MapScreenOpen()) {
+    return;
+  }
+  std::lock_guard lock(sMapPanMutex);
+  sMapZoomPending = std::clamp(sMapZoomPending * std::clamp(ratio, 0.1f, 10.f), 0.01f, 100.f);
+}
+
+// UI thread: a twist's angle in radians; positive turns the map as the stick's
+// right does. Angles add.
+void AddMapRotate(float radians) {
+  if (!std::isfinite(radians) || radians == 0.f || !MapScreenOpen()) {
+    return;
+  }
+  std::lock_guard lock(sMapPanMutex);
+  sMapRotatePending = std::clamp(sMapRotatePending + radians, -6.3f, 6.3f);
+}
+
+// Game thread: the pending twist (0 = none), cleared.
+float TakeMapRotate() {
+  std::lock_guard lock(sMapPanMutex);
+  const float radians = sMapRotatePending;
+  sMapRotatePending = 0.f;
+  return radians;
+}
+
+// Game thread: the pending zoom factor (1 = none), cleared.
+float TakeMapZoom() {
+  std::lock_guard lock(sMapPanMutex);
+  const float ratio = sMapZoomPending;
+  sMapZoomPending = 1.f;
+  return ratio;
+}
+
+// Game thread. Drains the pending pan; true while a finger is on the map (a pan
+// within the last 250 ms), so the map doesn't drift back to its area meanwhile.
+bool TakeMapPan(float* dxDp, float* dyDp, float* viewHeightDp) {
+  std::lock_guard lock(sMapPanMutex);
+  *dxDp = sMapPanX;
+  *dyDp = sMapPanY;
+  *viewHeightDp = sMapPanViewDp;
+  sMapPanX = 0.f;
+  sMapPanY = 0.f;
+  return std::chrono::steady_clock::now() < sMapPanHeldUntil;
+}
+
+// Game thread, once per pad poll. Returns true for the poll that should read Z
+// held: a tap presses for one poll and releases on the next, so each tap is
+// one press edge.
+bool ConsumeMapTapZ() {
+  if (sMapTapHeld) {
+    sMapTapHeld = false;
+    return false;
+  }
+  if (sMapTapPending.load() > 0) {
+    sMapTapPending.fetch_sub(1);
+    sMapTapHeld = true;
+    return true;
+  }
+  return false;
+}
+
+float TouchAimSpeed() {
+  EnsureInitialized();
+  return sTouchAimSpeed;
+}
+
+void SetTouchAimSpeed(float pixelsPerDp) {
+  EnsureInitialized();
+  if (std::isfinite(pixelsPerDp)) {
+    sTouchAimSpeed = std::clamp(pixelsPerDp, 0.25f, 10.f);
+    MarkDirty();
+  }
+}
+
+// Called from the Android UI thread; the game thread drains it in
+// BeginFrameMouse.
+void AddTouchAim(float dxDp, float dyDp) {
+  if ((!sTouchAim && sTouchClassic) || Visible() || !std::isfinite(dxDp) ||
+      !std::isfinite(dyDp)) {
+    return;
+  }
+  std::lock_guard lock(sTouchAimMutex);
+  sTouchAimPendingX += dxDp * sTouchAimSpeed;
+  sTouchAimPendingY += dyDp * sTouchAimSpeed;
+}
+
 void BeginFrameMouse() {
-  sMouseFrameX = sMousePendingX + sGyroPendingX;
-  sMouseFrameY = sMousePendingY + sGyroPendingY;
+  float touchX = 0.f;
+  float touchY = 0.f;
+  {
+    std::lock_guard lock(sTouchAimMutex);
+    touchX = sTouchAimPendingX;
+    touchY = sTouchAimPendingY;
+    sTouchAimPendingX = sTouchAimPendingY = 0.f;
+  }
+  // On the direct aim path (mouse aim, twin stick, or the modern touch layout) the
+  // touch travel joins the mouse's; in the classic GameCube scheme
+  // CPlayer::UpdateTouchLook takes it instead (TakeTouchLook).
+  const bool directAim = DirectAim();
+  sTouchLookFrameX = directAim ? 0.f : touchX;
+  sTouchLookFrameY = directAim ? 0.f : touchY;
+  sMouseFrameX = sMousePendingX + sGyroPendingX + (directAim ? touchX : 0.f);
+  sMouseFrameY = sMousePendingY + sGyroPendingY + (directAim ? touchY : 0.f);
   sMousePendingX = sMousePendingY = 0.f;
   sGyroPendingX = sGyroPendingY = 0.f;
   // AddStickAim sets it again during this tick's input update.
   sStickAimVelX = sStickAimVelY = 0.f;
   sAimAppliedLastTick = false;
+}
+
+void SetTouchAimDown(bool down) { sTouchAimDown = down; }
+
+void HoldTouchAim(float seconds) {
+  sTouchAimHoldUntilNs = SDL_GetTicksNS() + static_cast<uint64_t>(std::max(seconds, 0.f) * 1e9);
+}
+
+bool TouchAimDown() {
+  return sTouchAimDown || SDL_GetTicksNS() < sTouchAimHoldUntilNs;
+}
+
+bool TakeTouchLook(float& dyaw, float& dpitch) {
+  dyaw = dpitch = 0.f;
+  const float x = sTouchLookFrameX;
+  const float y = sTouchLookFrameY;
+  sTouchLookFrameX = sTouchLookFrameY = 0.f;
+  // Same signs and scale as the mouse aim: right/down travel in, world yaw/pitch out.
+  dyaw = x * MouseSensitivity() * (MouseInvertX() ? 1.f : -1.f);
+  dpitch = y * MouseSensitivity() * (MouseInvertY() ? 1.f : -1.f);
+  return sTouchAim && !Visible();
 }
 
 bool PresentedAimDelta(float fraction, float& dyaw, float& dpitch) {
@@ -1914,8 +2741,15 @@ bool PresentedAimDelta(float fraction, float& dyaw, float& dpitch) {
   // What the next tick will consume: the mouse and gyro travel so far, plus the
   // stick's travel over the part of the tick already shown.
   const float ahead = std::min(fraction, 1.f) * TickPeriod();
-  const float dx = sMousePendingX + sGyroPendingX + sStickAimVelX * ahead;
-  const float dy = sMousePendingY + sGyroPendingY + sStickAimVelY * ahead;
+  float touchX = 0.f;
+  float touchY = 0.f;
+  {
+    std::lock_guard lock(sTouchAimMutex);
+    touchX = sTouchAimPendingX;
+    touchY = sTouchAimPendingY;
+  }
+  const float dx = sMousePendingX + sGyroPendingX + touchX + sStickAimVelX * ahead;
+  const float dy = sMousePendingY + sGyroPendingY + touchY + sStickAimVelY * ahead;
   float yaw = 0.f;
   float pitch = 0.f;
   if (!sMouseAimState.Preview(dx, dy, MouseSensitivity(), MouseInvertX(), MouseInvertY(), yaw,
@@ -1935,6 +2769,17 @@ bool FrameInterpolation() {
 void SetFrameInterpolation(bool enabled) {
   EnsureInitialized();
   sFrameInterpolation = enabled;
+}
+
+bool SmoothFrames() {
+  EnsureInitialized();
+  return sSmoothFrames;
+}
+
+void SetSmoothFrames(bool enabled) {
+  EnsureInitialized();
+  sSmoothFrames = enabled;
+  sFrameInterpolation = sActorInterpolation = sPoseInterpolation = sParticleInterpolation = enabled;
   MarkDirty();
 }
 
@@ -1946,7 +2791,6 @@ bool ActorInterpolation() {
 void SetActorInterpolation(bool enabled) {
   EnsureInitialized();
   sActorInterpolation = enabled;
-  MarkDirty();
 }
 
 bool PoseInterpolation() {
@@ -1957,7 +2801,38 @@ bool PoseInterpolation() {
 void SetPoseInterpolation(bool enabled) {
   EnsureInitialized();
   sPoseInterpolation = enabled;
+}
+
+bool RoomGeoResident() {
+  EnsureInitialized();
+  return sRoomGeoResident;
+}
+
+void SetRoomGeoResident(bool enabled) {
+  EnsureInitialized();
+  sRoomGeoResident = enabled;
   MarkDirty();
+}
+
+bool RoomGeoResidentAtStartup() {
+  std::ifstream file(SettingsFilePath());
+  std::string line;
+  bool on = kRoomGeoResidentDefault;
+  while (std::getline(file, line)) {
+    const size_t separator = line.find('=');
+    if (separator == std::string::npos) {
+      continue;
+    }
+    const std::string key = Trim(line.substr(0, separator));
+    std::string value = line.substr(separator + 1);
+    value.erase(std::min(value.find('#'), value.size()));
+    if (key == "room_geo_gpu") {
+      on = ParseBool(Trim(value));
+    } else if (key == "room_geo_resident") {
+      on = on || ParseBool(Trim(value));
+    }
+  }
+  return on;
 }
 
 bool ParticleInterpolation() {
@@ -1968,7 +2843,6 @@ bool ParticleInterpolation() {
 void SetParticleInterpolation(bool enabled) {
   EnsureInitialized();
   sParticleInterpolation = enabled;
-  MarkDirty();
 }
 
 bool PresentOverride(float& t) {
@@ -2092,15 +2966,21 @@ bool ViewRay(float origin[3], float forward[3]) {
 
 namespace {
 const char* const kPbrViews[] = {"off",     "albedo",     "normal", "rough",    "metal", "ao",
-                                 "ambient", "reflection", "glow",   "exposure", "kind"};
+                                 "ambient", "reflection", "glow",   "exposure", "kind",
+                                 "sun",     "drawid"};
+// The last entry is not a shader view but Aurora's draw id mode (GXPortSetDrawIdMode).
+constexpr int kDrawIdView = 12;
 int sPbrView = 0;
 } // namespace
+void NoteDrawIdMode(bool on) { CCubeModel::PortSetDrawIds(on); }
 int PbrViewCount() { return int(sizeof(kPbrViews) / sizeof(kPbrViews[0])); }
 const char* PbrViewName(int view) { return view >= 0 && view < PbrViewCount() ? kPbrViews[view] : "?"; }
 int PbrView() { return sPbrView; }
 void SetPbrView(int view) {
   sPbrView = view >= 0 && view < PbrViewCount() ? view : 0;
-  GXSetPBRDebugView(u32(sPbrView));
+  GXSetPBRDebugView(sPbrView == kDrawIdView ? 0u : u32(sPbrView));
+  GXPortSetDrawIdMode(sPbrView == kDrawIdView ? GX_TRUE : GX_FALSE);
+  PortDebug::NoteDrawIdMode(sPbrView == kDrawIdView);
 }
 void RequestTeleport(int areaId) { sPendingTeleport = areaId; }
 bool ConsumeTeleportRequest(int& areaId) {
@@ -2147,15 +3027,13 @@ void SetSweepLayer(CStateManager& mgr, CWorld* world, TAreaId area, int layer) {
 }
 
 bool SweepLayersEnabled() {
-  const char* value = std::getenv("MP_RANDO_SWEEP_LAYERS");
-  return value != nullptr && value[0] != '\0' && std::strcmp(value, "0") != 0;
+  return port::EnvFlag("MP_RANDO_SWEEP_LAYERS");
 }
 
 bool ConsumeWorldSweepRequest(CStateManager& mgr) {
   // This entry point is called only by gameplay, never the frontend or UI.
   static const bool envChecked = [] {
-    const char* value = std::getenv("MP_RANDO_SWEEP");
-    if (value != nullptr && value[0] != '\0' && std::strcmp(value, "0") != 0)
+    if (port::EnvFlag("MP_RANDO_SWEEP"))
       RequestWorldSweep();
     return true;
   }();
@@ -2391,7 +3269,29 @@ bool Visible() {
 
 bool OverlayVisible() { return sOverlayVisible.load(std::memory_order_acquire); }
 
-bool TwinStickFlag() { return sTwinStickFlag.load(std::memory_order_acquire); }
+bool TouchColorsFlag() { return sTouchColorsFlag.load(std::memory_order_acquire); }
+bool TouchLabelsFlag() { return sTouchLabelsFlag.load(std::memory_order_acquire); }
+float TouchSideMarginDp() { return sTouchSideMargin.load(); }
+float TouchStickInsetDp() { return sTouchStickInset.load(); }
+float TouchButtonInsetDp() { return sTouchButtonInset.load(); }
+
+std::string TouchLayout() {
+  std::lock_guard< std::mutex > lock(sTouchLayoutMutex);
+  return sTouchLayout;
+}
+
+void SetTouchLayout(const std::string& layout) {
+  if (layout.size() > kTouchLayoutMaxLen) {
+    return;
+  }
+  {
+    std::lock_guard< std::mutex > lock(sTouchLayoutMutex);
+    sTouchLayout = layout;
+  }
+  sTouchLayoutSavePending.store(true, std::memory_order_release);
+}
+
+bool TakeTouchEditRequested() { return sTouchEditRequested.exchange(false, std::memory_order_acq_rel); }
 
 void SaveSettingsNow() {
   EnsureInitialized();
@@ -2402,15 +3302,20 @@ void SaveSettingsNow() {
 // occasion the overlay would, as for any of its own settings.
 void MarkVrSettingsDirty() { sSettingsDirty = true; }
 
+// Set while the disc is mounted, before the first frame.
+bool sDiscReadFailedLastSession = false;
+
+void NoteDiscReadFailedLastSession() { sDiscReadFailedLastSession = true; }
+
 // The overlay is a full-screen panel with a page list instead of tabs, which
 // fits a touchscreen and reads better on the desktop too. The desktop can go
-// back to the old floating tabbed window (Render > Overlay as a floating
+// back to the old floating tabbed window (System > Overlay as a floating
 // window); MP_TOUCH_UI forces the page layout regardless.
 bool PageLayout() {
 #if defined(__ANDROID__)
   return true;
 #else
-  static const bool sForced = std::getenv("MP_TOUCH_UI") != nullptr;
+  static const bool sForced = port::EnvFlag("MP_TOUCH_UI");
   return sForced || !sOverlayWindowed;
 #endif
 }
@@ -2455,6 +3360,289 @@ void ApplyTouchStyle(ImGuiStyle& style) {
   style.TabRounding = 5.f;
 }
 
+// --- F1 overlay themes ---------------------------------------------------------------------------
+
+enum UiThemeId { kThemeAuto = 0, kThemePrime = 1, kThemeRemastered = 2, kThemePlain = 3 };
+
+// The scale UpdateUiScale has applied to the style so far. Border sizes and rounding are set
+// here in unscaled units times this, so they stay consistent with the sizes ScaleAllSizes made.
+float sUiAppliedScale = 1.f;
+int sThemeApplied = -1;        // the resolved theme the style holds, -1 = none yet
+float sThemeAppliedScale = 0.f;
+int sThemeResolved = kThemePrime; // what Auto resolves to now; read by the colour helpers
+
+// Whether the Remastered import is loaded: the mods are on, and a mod made by the import is
+// enabled. CurrentStatus is in memory (rescanned only on a reload), so this is cheap per frame.
+bool RemasteredImportLoaded() {
+  const PortMods::Status& status = PortMods::CurrentStatus();
+  if (!status.active || PortMods::Suspended()) {
+    return false;
+  }
+  for (const PortMods::ModInfo& mod : status.mods) {
+    if (mod.import && mod.enabled) {
+      return true;
+    }
+  }
+  return false;
+}
+
+int ResolveTheme() {
+  if (sUiTheme != kThemeAuto) {
+    return sUiTheme;
+  }
+  return RemasteredImportLoaded() ? kThemeRemastered : kThemePrime;
+}
+
+// Colours for one theme. Every ImGuiCol_ is derived from these so none is left at the stock value.
+struct ThemeRgb {
+  float x, y, z;
+  ThemeRgb() : x(0.f), y(0.f), z(0.f) {}
+  ThemeRgb(float x_, float y_, float z_) : x(x_), y(y_), z(z_) {}
+};
+
+struct ThemePalette {
+  ThemeRgb bg;     // window background (alpha below)
+  float bgAlpha;
+  ThemeRgb deep;   // child / title / menu background
+  ThemeRgb frame;  // frames, buttons, tabs
+  ThemeRgb frameHi; // hovered frames
+  ThemeRgb accent;
+  ThemeRgb text;
+  ThemeRgb textDim;
+};
+
+ImVec4 Rgba(const ThemeRgb& c, float a) { return ImVec4(c.x, c.y, c.z, a); }
+
+void FillThemeColors(ImGuiStyle& style, const ThemePalette& p) {
+  ImVec4* c = style.Colors;
+  const ThemeRgb a = p.accent;
+  c[ImGuiCol_Text] = Rgba(p.text, 1.f);
+  c[ImGuiCol_TextDisabled] = Rgba(p.textDim, 1.f);
+  c[ImGuiCol_WindowBg] = Rgba(p.bg, p.bgAlpha);
+  c[ImGuiCol_ChildBg] = Rgba(p.deep, 0.55f);
+  c[ImGuiCol_PopupBg] = Rgba(p.bg, 0.97f);
+  c[ImGuiCol_Border] = Rgba(a, 0.55f);
+  c[ImGuiCol_BorderShadow] = ImVec4(0.f, 0.f, 0.f, 0.f);
+  c[ImGuiCol_FrameBg] = Rgba(p.frame, 0.90f);
+  c[ImGuiCol_FrameBgHovered] = Rgba(p.frameHi, 0.95f);
+  c[ImGuiCol_FrameBgActive] = Rgba(a, 0.35f);
+  c[ImGuiCol_TitleBg] = Rgba(p.deep, 1.f);
+  c[ImGuiCol_TitleBgActive] = Rgba(p.frame, 1.f);
+  c[ImGuiCol_TitleBgCollapsed] = Rgba(p.deep, 0.75f);
+  c[ImGuiCol_MenuBarBg] = Rgba(p.deep, 1.f);
+  c[ImGuiCol_ScrollbarBg] = ImVec4(0.f, 0.f, 0.f, 0.30f);
+  c[ImGuiCol_ScrollbarGrab] = Rgba(p.frameHi, 1.f);
+  c[ImGuiCol_ScrollbarGrabHovered] = Rgba(a, 0.60f);
+  c[ImGuiCol_ScrollbarGrabActive] = Rgba(a, 0.90f);
+  c[ImGuiCol_CheckMark] = Rgba(a, 1.f);
+  c[ImGuiCol_SliderGrab] = Rgba(a, 0.85f);
+  c[ImGuiCol_SliderGrabActive] = Rgba(a, 1.f);
+  c[ImGuiCol_Button] = Rgba(p.frame, 0.90f);
+  c[ImGuiCol_ButtonHovered] = Rgba(p.frameHi, 1.f);
+  c[ImGuiCol_ButtonActive] = Rgba(a, 0.55f);
+  c[ImGuiCol_Header] = Rgba(p.frame, 0.80f);
+  c[ImGuiCol_HeaderHovered] = Rgba(a, 0.35f);
+  c[ImGuiCol_HeaderActive] = Rgba(a, 0.55f);
+  c[ImGuiCol_Separator] = Rgba(a, 0.35f);
+  c[ImGuiCol_SeparatorHovered] = Rgba(a, 0.70f);
+  c[ImGuiCol_SeparatorActive] = Rgba(a, 1.f);
+  c[ImGuiCol_ResizeGrip] = Rgba(a, 0.30f);
+  c[ImGuiCol_ResizeGripHovered] = Rgba(a, 0.65f);
+  c[ImGuiCol_ResizeGripActive] = Rgba(a, 0.90f);
+  c[ImGuiCol_TabHovered] = Rgba(a, 0.50f);
+  c[ImGuiCol_Tab] = Rgba(p.frame, 0.85f);
+  c[ImGuiCol_TabSelected] = Rgba(a, 0.40f);
+  c[ImGuiCol_TabSelectedOverline] = Rgba(a, 1.f);
+  c[ImGuiCol_TabDimmed] = Rgba(p.deep, 0.90f);
+  c[ImGuiCol_TabDimmedSelected] = Rgba(a, 0.25f);
+#ifdef IMGUI_HAS_DOCK
+  c[ImGuiCol_TabDimmedSelectedOverline] = Rgba(a, 0.55f);
+  c[ImGuiCol_DockingPreview] = Rgba(a, 0.45f);
+  c[ImGuiCol_DockingEmptyBg] = Rgba(p.deep, 1.f);
+#endif
+  c[ImGuiCol_PlotLines] = Rgba(a, 0.90f);
+  c[ImGuiCol_PlotLinesHovered] = Rgba(p.text, 1.f);
+  c[ImGuiCol_PlotHistogram] = Rgba(a, 0.80f);
+  c[ImGuiCol_PlotHistogramHovered] = Rgba(p.text, 1.f);
+  c[ImGuiCol_TableHeaderBg] = Rgba(p.frame, 1.f);
+  c[ImGuiCol_TableBorderStrong] = Rgba(a, 0.50f);
+  c[ImGuiCol_TableBorderLight] = Rgba(a, 0.20f);
+  c[ImGuiCol_TableRowBg] = ImVec4(0.f, 0.f, 0.f, 0.f);
+  c[ImGuiCol_TableRowBgAlt] = ImVec4(1.f, 1.f, 1.f, 0.035f);
+  c[ImGuiCol_TextLink] = Rgba(a, 1.f);
+  c[ImGuiCol_TextSelectedBg] = Rgba(a, 0.35f);
+  c[ImGuiCol_DragDropTarget] = Rgba(a, 0.90f);
+  c[ImGuiCol_NavCursor] = Rgba(a, 1.f);
+  c[ImGuiCol_NavWindowingHighlight] = ImVec4(1.f, 1.f, 1.f, 0.70f);
+  c[ImGuiCol_NavWindowingDimBg] = Rgba(p.bg, 0.55f);
+  c[ImGuiCol_ModalWindowDimBg] = Rgba(p.bg, 0.60f);
+}
+
+// Only colours, borders and rounding; paddings and sizes stay ApplyTouchStyle's. Border and
+// rounding values are unscaled units times the scale applied so far (ScaleAllSizes never runs here).
+void ApplyPrimeTheme(ImGuiStyle& style, int theme) {
+  const float scale = sUiAppliedScale;
+  if (theme == kThemePlain) {
+    ImGui::StyleColorsDark(&style);
+    style.WindowBorderSize = style.ChildBorderSize = style.PopupBorderSize = std::round(scale);
+    style.FrameBorderSize = 0.f;
+    style.TabBorderSize = 0.f;
+    style.WindowRounding = style.ChildRounding = style.PopupRounding = 0.f;
+    // ApplyTouchStyle's values, which a switch from another theme must restore.
+    style.FrameRounding = style.GrabRounding = style.TabRounding = 5.f * scale;
+    style.ScrollbarRounding = 9.f * scale;
+    return;
+  }
+  ThemePalette p;
+  if (theme == kThemeRemastered) {
+    // Cooler glass HUD: dark navy, ice-blue accent.
+    p.bg = ThemeRgb(0.035f, 0.055f, 0.105f);
+    p.bgAlpha = 0.88f;
+    p.deep = ThemeRgb(0.045f, 0.075f, 0.140f);
+    p.frame = ThemeRgb(0.075f, 0.140f, 0.240f);
+    p.frameHi = ThemeRgb(0.110f, 0.210f, 0.340f);
+    p.accent = ThemeRgb(0.373f, 0.847f, 1.000f); // #5FD8FF
+    p.text = ThemeRgb(0.97f, 0.99f, 1.00f);
+    p.textDim = ThemeRgb(0.50f, 0.60f, 0.72f);
+  } else {
+    // Retail pause / scan visor: near-black blue, teal frames, amber accent.
+    p.bg = ThemeRgb(0.020f, 0.063f, 0.102f); // #05101A
+    p.bgAlpha = 0.92f;
+    p.deep = ThemeRgb(0.030f, 0.090f, 0.140f);
+    p.frame = ThemeRgb(0.045f, 0.170f, 0.230f);
+    p.frameHi = ThemeRgb(0.070f, 0.260f, 0.340f);
+    p.accent = ThemeRgb(1.000f, 0.604f, 0.180f); // #FF9A2E
+    p.text = ThemeRgb(0.95f, 0.91f, 0.82f);
+    p.textDim = ThemeRgb(0.45f, 0.55f, 0.65f);
+  }
+  FillThemeColors(style, p);
+  const float round = theme == kThemeRemastered ? 8.f : 2.f;
+  style.WindowBorderSize = style.ChildBorderSize = style.PopupBorderSize = style.FrameBorderSize =
+      std::max(1.f, std::round(scale));
+  style.TabBorderSize = 0.f;
+  style.WindowRounding = style.ChildRounding = style.PopupRounding = round * scale;
+  style.FrameRounding = style.GrabRounding = style.TabRounding = (theme == kThemeRemastered ? 7.f : 2.f) * scale;
+  style.ScrollbarRounding = (theme == kThemeRemastered ? 9.f : 2.f) * scale;
+}
+
+// Called every frame: restyles only when the resolved theme or the UI scale changed.
+void ApplyThemeIfChanged() {
+  if (ImGui::GetCurrentContext() == nullptr) {
+    return;
+  }
+  sThemeResolved = ResolveTheme();
+  if (sThemeResolved == sThemeApplied && sUiAppliedScale == sThemeAppliedScale) {
+    return;
+  }
+  sThemeApplied = sThemeResolved;
+  sThemeAppliedScale = sUiAppliedScale;
+  ApplyPrimeTheme(ImGui::GetStyle(), sThemeResolved);
+}
+
+// Status colours that stay legible on the current theme. Plain returns `plain`, the old values.
+ImVec4 ThemeWarnColor(const ImVec4& plain = ImVec4(1.f, 0.8f, 0.3f, 1.f)) {
+  switch (sThemeResolved) {
+  case kThemePrime: return ImVec4(1.f, 0.88f, 0.32f, 1.f); // yellow, apart from the amber accent
+  case kThemeRemastered: return ImVec4(1.f, 0.82f, 0.38f, 1.f);
+  default: return plain;
+  }
+}
+
+ImVec4 ThemeGoodColor(const ImVec4& plain = ImVec4(0.4f, 1.f, 0.4f, 1.f)) {
+  switch (sThemeResolved) {
+  case kThemePrime: return ImVec4(0.45f, 0.95f, 0.55f, 1.f);
+  case kThemeRemastered: return ImVec4(0.45f, 1.f, 0.80f, 1.f);
+  default: return plain;
+  }
+}
+
+ImVec4 ThemeBadColor(const ImVec4& plain = ImVec4(1.f, 0.5f, 0.3f, 1.f)) {
+  switch (sThemeResolved) {
+  case kThemePrime: return ImVec4(1.f, 0.42f, 0.35f, 1.f);
+  case kThemeRemastered: return ImVec4(1.f, 0.45f, 0.52f, 1.f);
+  default: return plain;
+  }
+}
+
+// --- F1 overlay sounds ---------------------------------------------------------------------------
+//
+// The game's own UI effects (group UI_AGSC 40, preloaded at boot, so loaded at the title screen and
+// in game), started through CSfxManager like the pause screen does. Chosen by name and by what
+// CPauseScreenBlur does:
+//   open  -> SFXui_x_pause_00   (the map/pause screen opening)
+//   close -> SFXui_x_pause_01   (the same screen closing)
+//   click / activate (button, checkbox, combo, tab, selectable) -> SFXui_x_invchoos_00 (choose)
+//   keyboard/pad focus move  -> SFXui_x_invscrol_00 (scroll between inventory items)
+//   back (Esc, pad B)        -> SFXui_x_invback_00
+// CSfxManager::Update runs in the main loop even while the overlay is open (the overlay holds the
+// simulation, not the audio), so these play with F1 up. They queue into the current channel.
+enum MenuSound { kMenuOpen, kMenuClose, kMenuChoose, kMenuMove, kMenuBack };
+
+// `always` skips the rate limit: opening and closing are rare and must not be swallowed by the
+// press that caused them.
+void PlayMenuSound(MenuSound sound, bool always = false) {
+  if (!sUiSounds || sThemeResolved == kThemePlain || !sMainLoopRan) {
+    return;
+  }
+  static uint64_t sLastMs = 0;
+  const uint64_t now = SDL_GetTicks();
+  if (!always && sLastMs != 0 && now - sLastMs < 50) {
+    return;
+  }
+  sLastMs = now;
+  ushort id = 0;
+  switch (sound) {
+  case kMenuOpen: id = SFXui_x_pause_00; break;
+  case kMenuClose: id = SFXui_x_pause_01; break;
+  case kMenuChoose: id = SFXui_x_invchoos_00; break;
+  case kMenuMove: id = SFXui_x_invscrol_00; break;
+  case kMenuBack: id = SFXui_x_invback_00; break;
+  }
+  CSfxManager::SfxStart(id, 127, 64, false, CSfxManager::kMedPriority);
+}
+
+// Derives sounds from ImGui's own state once a frame instead of hooking widgets: a new active item
+// is a press (a held slider is one press, not one per frame), and a nav focus change with the nav
+// cursor showing is a keyboard or pad move (mouse hover never moves nav focus or shows the cursor).
+// `visible` is whether the overlay is open this frame; call it at the end of DrawUI.
+void UpdateMenuSounds(bool visible) {
+  static bool sWasVisible = false;
+  static ImGuiID sPrevActive = 0;
+  static ImGuiID sPrevNav = 0;
+  if (visible != sWasVisible) {
+    sWasVisible = visible;
+    sPrevActive = sPrevNav = 0;
+    // A back press that closes the overlay is the close, not a second sound: this branch returns
+    // before the back check below, and the close ignores the rate limit.
+    PlayMenuSound(visible ? kMenuOpen : kMenuClose, true);
+    return;
+  }
+  if (!visible || ImGui::GetCurrentContext() == nullptr) {
+    return;
+  }
+  ImGuiContext& g = *ImGui::GetCurrentContext();
+  const ImGuiID active = g.ActiveId;
+  const ImGuiID nav = g.NavId;
+  bool pressed = active != 0 && active != sPrevActive;
+  if (pressed && g.ActiveIdWindow != nullptr) {
+    // Dragging a window by its title, or a scrollbar, is not a choice.
+    ImGuiWindow* window = g.ActiveIdWindow;
+    pressed = active != window->MoveId && active != ImGui::GetWindowScrollbarID(window, ImGuiAxis_X) &&
+              active != ImGui::GetWindowScrollbarID(window, ImGuiAxis_Y);
+  }
+  const bool moved = nav != 0 && nav != sPrevNav && g.NavCursorVisible && active == 0;
+  const bool back = ImGui::IsKeyPressed(ImGuiKey_Escape, false) || ImGui::IsKeyPressed(ImGuiKey_GamepadFaceRight, false);
+  sPrevActive = active;
+  sPrevNav = nav;
+  if (back) {
+    PlayMenuSound(kMenuBack);
+  } else if (pressed) {
+    PlayMenuSound(kMenuChoose);
+  } else if (moved) {
+    PlayMenuSound(kMenuMove);
+  }
+}
+
 // Phones report a density of roughly 3, which leaves ImGui's default 13px font
 // unreadably small, so scale the overlay to match the display. The scale is not
 // known on the first frame, so keep watching for it instead of latching once.
@@ -2463,7 +3651,6 @@ void UpdateUiScale() {
     return;
   }
   static bool sInitialized = false;
-  static float sAppliedScale = 1.f;
   if (!sInitialized) {
     sInitialized = true;
     // The overlay has to size itself to the scaled font, so do not restore a
@@ -2479,16 +3666,59 @@ void UpdateUiScale() {
   }
   const float displayScale = SDL_GetWindowDisplayScale(window);
   const float uiScale = std::clamp(displayScale, 1.f, 4.f);
-  if (uiScale == sAppliedScale) {
+  if (uiScale == sUiAppliedScale) {
     return;
   }
-  const float ratio = uiScale / sAppliedScale;
-  sAppliedScale = uiScale;
+  const float ratio = uiScale / sUiAppliedScale;
+  sUiAppliedScale = uiScale;
   ImGui::GetStyle().ScaleAllSizes(ratio);
   ImGui::GetIO().FontGlobalScale *= ratio;
 }
 
 void RequestToggle() { sToggleRequested.store(true, std::memory_order_release); }
+
+static std::atomic<bool> sGpuSelfTestRequested{false};
+
+void RequestGpuSelfTest() { sGpuSelfTestRequested.store(true, std::memory_order_release); }
+
+void RunGpuSelfTestIfRequested() {
+  // Pipelines compile asynchronously and a draw is skipped until its pipeline is ready, so a request first
+  // runs a silent warm-up pass, waits for the compile queue to drain, then runs the logged pass.
+  enum class Stage { Idle, WarmingUp };
+  static Stage stage = Stage::Idle;
+  static unsigned waited = 0;
+  static unsigned frames = 0;
+  static const bool envRun = port::EnvFlag("MP_GPU_SELFTEST");
+  if (envRun && ++frames == 120) {
+    RequestGpuSelfTest();
+  }
+  bool runReal = false;
+  if (stage == Stage::WarmingUp) {
+    if (aurora_gpu_selftest_pending()) {
+      return;
+    }
+    // Let the pipelines the warm-up queued finish (a few frames at least, and not forever).
+    const bool drained = aurora_get_stats()->queuedPipelines == 0;
+    if (++waited < 3 || (!drained && waited < 1800)) {
+      return;
+    }
+    stage = Stage::Idle;
+    runReal = true;
+  } else if (sGpuSelfTestRequested.exchange(false, std::memory_order_acq_rel)) {
+    if (aurora_gpu_selftest_run(true)) {
+      stage = Stage::WarmingUp;
+      waited = 0;
+      CGX::ResetGXStatesFull();
+      CGraphics::SetViewMatrix();
+    }
+    return;
+  }
+  if (runReal && aurora_gpu_selftest_run(false)) {
+    // The test left its own GX state behind: drop the game's cached copy of it.
+    CGX::ResetGXStatesFull();
+    CGraphics::SetViewMatrix();
+  }
+}
 
 void UpdateControllerNav() {
   EnsureInitialized();
@@ -2501,6 +3731,7 @@ void UpdateControllerNav() {
     SDL_AddEventWatch(debug_event_watch, nullptr);
   }
   UpdateUiScale();
+  ApplyThemeIfChanged();
   if (sToggleRequested.exchange(false, std::memory_order_acq_rel)) {
     Toggle();
   }
@@ -2524,7 +3755,8 @@ void UpdateControllerNav() {
     }
   }
   sOverlayVisible.store(sVisible, std::memory_order_release);
-  sTwinStickFlag.store(sTwinStick, std::memory_order_release);
+  sTouchColorsFlag.store(sTouchColors, std::memory_order_release);
+  sTouchLabelsFlag.store(sTouchLabels, std::memory_order_release);
 
   ImGuiIO& io = ImGui::GetIO();
   io.BackendFlags |= ImGuiBackendFlags_HasGamepad;
@@ -2596,10 +3828,49 @@ void Toggle() {
   EnsureInitialized();
   sVisible = !sVisible;
   SetMouseCaptured(false);
+  // A press that never got its release (seen on the Android tablet with a mouse
+  // while the pointer was captured) leaves ImGui holding the button, and every
+  // later tap is ignored. Opening the overlay drops held mouse buttons and keys,
+  // as a focus loss would.
+  if (sVisible && ImGui::GetCurrentContext() != nullptr) {
+    ImGuiIO& io = ImGui::GetIO();
+    io.AddFocusEvent(false);
+    io.AddFocusEvent(true);
+  }
 }
 
+namespace {
+// What a setting does. A tooltip on the desktop; a tap shows none, so Android
+// prints it, dimmed, under the setting instead.
+#if defined(__ANDROID__)
+constexpr bool kInlineHelp = true;
+#else
+constexpr bool kInlineHelp = false;
+#endif
+
+void ItemHelp(const char* text) {
+  if (kInlineHelp) {
+    ImGui::PushStyleColor(ImGuiCol_Text, ImGui::GetStyleColorVec4(ImGuiCol_TextDisabled));
+    ImGui::TextWrapped("%s", text);
+    ImGui::PopStyleColor();
+  } else if (ImGui::BeginItemTooltip()) {
+    ImGui::PushTextWrapPos(ImGui::GetFontSize() * 32.f);
+    ImGui::TextUnformatted(text);
+    ImGui::PopTextWrapPos();
+    ImGui::EndTooltip();
+  }
+}
+
+// SameLine, except after an ItemHelp that printed its text on Android.
+void SameLineAfterHelp() {
+  if (!kInlineHelp) {
+    ImGui::SameLine();
+  }
+}
+} // namespace
+
 void DrawPerformanceTab() {
-  ImGui::Text("Build: %s", MP_BUILD_REVISION);
+  ImGui::SeparatorText("Frame rate");
   bool frameLimit = sFrameLimitEnabled;
   if (ImGui::Checkbox("60 FPS cap (target)", &frameLimit)) {
     SetFrameLimitEnabled(frameLimit);
@@ -2609,72 +3880,46 @@ void DrawPerformanceTab() {
   // machine produces once the pacing wait is excluded; presented is what
   // reaches the screen. A player seeing stutter wants the second one, and the
   // gap between them is the headroom.
-  ImGui::Text("Presented: %.1f FPS", sActualFps);
-  ImGui::Text("Throughput: %.1f FPS (headroom at the current frame cost)", sThroughputFps);
+  ImGui::Text("Presented %.1f FPS    Throughput %.1f FPS    Frame %.2f ms", sActualFps, sThroughputFps,
+              static_cast< double >(ImGui::GetIO().DeltaTime) * 1000.0);
+  ImGui::SetItemTooltip("Presented is what reaches the screen. Throughput leaves out the wait for the\n"
+                        "frame cap: the gap between the two is the headroom at the current frame cost.");
   if (sSimAdaptive) {
-    ImGui::Text("Measured simulation: %.1f ticks/s (adaptive)", sActualTps);
+    ImGui::Text("Simulation %.1f ticks/s (adaptive)", sActualTps);
   } else {
-    ImGui::Text("Measured simulation: %.1f ticks/s (target %u)", sActualTps, sSimRate);
+    ImGui::Text("Simulation %.1f ticks/s (target %u)", sActualTps, sSimRate);
   }
-  ImGui::Text("Frame time: %.2f ms", static_cast< double >(ImGui::GetIO().DeltaTime) * 1000.0);
   ImGui::Text("Game thread per frame: update %.2f ms, world draw %.2f ms, HUD draw %.2f ms", sPhaseMs[kPhaseUpdate],
               sPhaseMs[kPhaseDrawWorld], sPhaseMs[kPhaseDrawGui]);
 
-  bool interpolate = sFrameInterpolation;
-  if (ImGui::Checkbox("Per-frame look (uncapped)", &interpolate)) {
-    PortDebug::SetFrameInterpolation(interpolate);
+  bool smooth = sSmoothFrames;
+  if (ImGui::Checkbox("Smooth uncapped frames", &smooth)) {
+    PortDebug::SetSmoothFrames(smooth);
   }
-  if (ImGui::IsItemHovered()) {
-    ImGui::SetTooltip("With the FPS cap off, mouse, gyro and twin-stick look turn the view "
-                      "on every frame instead of every 60 Hz tick. Aim and shots are unchanged.");
-  }
-  bool smoothActors = sActorInterpolation;
-  if (ImGui::Checkbox("Smooth actor motion (uncapped, experimental)", &smoothActors)) {
-    PortDebug::SetActorInterpolation(smoothActors);
-  }
-  if (ImGui::IsItemHovered()) {
-    ImGui::SetTooltip("With the FPS cap off, moving objects, enemies and Samus are drawn between "
-                      "their last two 60 Hz positions.");
-  }
-  bool smoothPoses = sPoseInterpolation;
-  if (ImGui::Checkbox("Smooth animation (uncapped, experimental)", &smoothPoses)) {
-    PortDebug::SetPoseInterpolation(smoothPoses);
-  }
-  if (ImGui::IsItemHovered()) {
-    ImGui::SetTooltip("With the FPS cap off, animated models (Samus, enemies, the arm cannon) are "
-                      "posed between their last two 60 Hz poses.");
-  }
-  bool smoothParticles = sParticleInterpolation;
-  if (ImGui::Checkbox("Smooth particles (uncapped, experimental)", &smoothParticles)) {
-    PortDebug::SetParticleInterpolation(smoothParticles);
-  }
-  if (ImGui::IsItemHovered()) {
-    ImGui::SetTooltip("With the FPS cap off, particle effects and projectile trails are drawn "
-                      "between their last two 60 Hz positions.");
-  }
+  ItemHelp("With the FPS cap off, frames between the game's 60 Hz ticks turn the view with "
+           "mouse, gyro and twin-stick look, and draw moving objects, animation and particles "
+           "between their last two ticks. The game itself still runs at 60 Hz, so aim and "
+           "shots are unchanged.");
 
-  ImGui::Separator();
-  ImGui::TextUnformatted("Experimental: simulation rate");
+  ImGui::SeparatorText("Simulation rate (very experimental)");
+  ImGui::TextColored(ThemeWarnColor(), "For testing only. The game was written for 60 Hz: other rates can\n"
+                                       "break physics, enemy behaviour, cutscenes and scripted events.");
   bool adaptive = sSimAdaptive;
   if (ImGui::Checkbox("Adaptive (follow frame rate)", &adaptive)) {
     PortDebug::SetSimAdaptive(adaptive);
   }
+  ItemHelp("One step per frame with dt = the measured frame time (clamped 30-480 Hz), so a "
+           "variable frame rate is matched exactly. Leave the FPS cap off.");
   ImGui::BeginDisabled(adaptive);
   int simRate = static_cast< int >(sSimRate);
   if (ImGui::SliderInt("Sim Hz", &simRate, 30, 480)) {
     PortDebug::SetSimRate(static_cast< unsigned >(simRate));
   }
   ImGui::EndDisabled();
-  if (adaptive) {
-    ImGui::TextWrapped(
-        "One step per frame with dt = the measured frame time (clamped 30-480 Hz), "
-        "so a variable frame rate is matched exactly. Leave the FPS cap off.");
-  } else if (simRate != 60) {
-    ImGui::TextWrapped(
-        "60 Hz is console-accurate. Higher values step the game logic at the display "
-        "rate instead of interpolating the camera; leave the FPS cap off for it to "
-        "matter.");
-  }
+  ItemHelp("60 Hz is console-accurate and the only rate that's supported. Other values step the "
+           "game logic at that rate instead of smoothing frames between 60 Hz ticks; leave the "
+           "FPS cap off for it to matter. For smooth high frame rates, use Smooth uncapped "
+           "frames instead.");
 }
 
 // Memory card transfer (port_gci.h). The work runs on the main thread; the
@@ -2955,11 +4200,14 @@ void DrawMemoryCard() {
   if (ImGui::Button("Import file...")) {
     OpenCardDialog(kCardPick_Import);
   }
+  ItemHelp("Dolphin .gci saves or a whole card image (.raw). An import replaces the card's saves; "
+           "the old ones move to _replaced in the card folder.");
 #if !defined(__ANDROID__)
   ImGui::SameLine();
   if (ImGui::Button("Import from Dolphin")) {
     sCardStatus = CardImportDolphin();
   }
+  ItemHelp("Dolphin's card is looked for in its user folder (GC/USA/Card A, GC/MemoryCardA.USA.raw).");
 #endif
   ImGui::EndDisabled();
   ImGui::BeginDisabled(busy || saves == 0);
@@ -2968,6 +4216,8 @@ void DrawMemoryCard() {
     sCardExportQueue = PortGci::GameFiles(folder);
     OpenCardDialog(kCardPick_ExportFile);
   }
+  ItemHelp("Saves each file in turn; keep Dolphin's names (01-GM8E-MetroidPrime A.gci) for its GCI "
+           "folder.");
 #else
   if (ImGui::Button("Export to folder...")) {
     OpenCardDialog(kCardPick_ExportFolder);
@@ -2976,6 +4226,7 @@ void DrawMemoryCard() {
   if (ImGui::Button("Export to Dolphin")) {
     sCardStatus = CardExportDolphin();
   }
+  ItemHelp("Close Dolphin first. A raw card is backed up to .raw.bak before it is written.");
 #endif
   ImGui::EndDisabled();
 #if !defined(__ANDROID__)
@@ -2991,22 +4242,11 @@ void DrawMemoryCard() {
   }
 #endif
   if (inGame) {
-    ImGui::TextColored(ImVec4(1.f, 0.8f, 0.3f, 1.f), "Return to the title screen to import.");
+    ImGui::TextColored(ThemeWarnColor(), "Return to the title screen to import.");
   }
   if (!sCardStatus.empty()) {
     ImGui::TextWrapped("%s", sCardStatus.c_str());
   }
-  ImGui::TextWrapped(
-#if defined(__ANDROID__)
-      "Imports Dolphin .gci saves or a whole card image (.raw). Export saves each file "
-      "in turn; keep Dolphin's names (01-GM8E-MetroidPrime A.gci) for its GCI folder. "
-#else
-      "Imports Dolphin .gci saves or a whole card image (.raw). Dolphin's card is looked "
-      "for in its user folder (GC/USA/Card A, GC/MemoryCardA.USA.raw); close Dolphin "
-      "before exporting to it, and a raw card is backed up to .raw.bak first. "
-#endif
-      "An import replaces the card's saves; the old ones move to _replaced in the card "
-      "folder.");
 }
 
 // The Remastered import (port_remastered_import.h): the user's own image and
@@ -3119,6 +4359,261 @@ void DrawModReloadMessage() {
   }
 }
 
+} // namespace
+
+// An import from the panel unloads the mods while it runs (on a tablet, the
+// game holding a room-geometry mod plus the import ran out of memory) and
+// loads them again when it ends, the new import in place of the old.
+static bool sImportWatched = false;
+static bool sImportUnloadedMods = false;
+// A reload is refused where the game can't save (a cutscene, say), so these
+// are asked again every two seconds until one runs.
+static int sReloadAwaited = -1;
+static double sReloadRetry = 0.0;
+
+static void ReloadUntilDone() {
+  sReloadAwaited = PortSaveState::ModReloads();
+  sReloadRetry = ImGui::GetTime() + 2.0;
+  PortSaveState::RequestModReload();
+}
+
+bool StartRemasteredImport(const std::string& image, const std::string& keys) {
+#if defined(__ANDROID__)
+  // Each worker holds a world's models while it converts them; a phone has
+  // the memory for two of those, not for one per core.
+  const bool started = PortRemastered::StartImport(image, keys, 2);
+#else
+  const bool started = PortRemastered::StartImport(image, keys);
+#endif
+  if (!started) {
+    return false;
+  }
+  sImportWatched = true;
+  const PortMods::Status& status = PortMods::CurrentStatus();
+  if (std::any_of(status.mods.begin(), status.mods.end(), [](const PortMods::ModInfo& mod) { return mod.enabled; })) {
+    PortMods::SetSuspended(true);
+    ReloadUntilDone();
+    sImportUnloadedMods = true;
+  }
+  return true;
+}
+
+// Every frame, so the mods come back with the panel closed too.
+static void FinishRemasteredImport() {
+  if (sReloadAwaited >= 0) {
+    if (PortSaveState::ModReloads() != sReloadAwaited) {
+      sReloadAwaited = -1;
+    } else if (ImGui::GetTime() >= sReloadRetry) {
+      sReloadRetry = ImGui::GetTime() + 2.0;
+      PortSaveState::RequestModReload();
+    }
+  }
+  if (!sImportWatched) {
+    return;
+  }
+  const PortRemastered::ImportState state = PortRemastered::ImportStatus();
+  if (state.running) {
+    return;
+  }
+  sImportWatched = false;
+  if (state.ok) {
+    // A mod just imported is wanted, even if it was switched off to import.
+    std::vector<std::string> disabled = PortMods::SplitDisabled(sModsDisabled);
+    const auto kept = std::remove(disabled.begin(), disabled.end(), std::string(PortRemastered::kImportModName));
+    if (kept != disabled.end()) {
+      disabled.erase(kept, disabled.end());
+      SetModsDisabled(PortMods::JoinDisabled(disabled));
+    }
+  }
+  if (state.ok || sImportUnloadedMods) {
+    PortMods::SetSuspended(false);
+    ReloadUntilDone();
+  }
+  sImportUnloadedMods = false;
+}
+
+namespace {
+
+// The Remastered gallery (port_gallery.h): the concept art the Remastered import put in the mods, shown one picture at
+// a time in a window of its own. Only the current picture is decoded.
+bool sGalleryOpen = false;
+std::vector<std::string> sGalleryPaths;
+int sGalleryIndex = 0;
+int sGalleryLoaded = -1;      // the picture sGalleryTexture holds
+ImTextureID sGalleryTexture = 0;
+ImVec2 sGallerySize{0.0f, 0.0f};
+bool sGalleryFailed = false;
+// Textures no longer shown, freed once the frames that drew them are done with.
+struct RetiredTexture {
+  ImTextureID texture;
+  int frames;
+};
+std::vector<RetiredTexture> sGalleryRetired;
+
+void ReleaseGalleryTexture() {
+  if (sGalleryTexture != 0) {
+    sGalleryRetired.push_back({sGalleryTexture, 0});
+    sGalleryTexture = 0;
+  }
+  sGalleryLoaded = -1;
+}
+
+void FreeRetiredGalleryTextures(bool all) {
+  for (size_t i = 0; i < sGalleryRetired.size();) {
+    // Two frames: the one that drew it may still be on its way to the GPU.
+    if (all || ++sGalleryRetired[i].frames > 2) {
+      aurora_imgui_remove_texture(sGalleryRetired[i].texture);
+      sGalleryRetired.erase(sGalleryRetired.begin() + i);
+    } else {
+      ++i;
+    }
+  }
+}
+
+void CloseGallery() {
+  sGalleryOpen = false;
+  // Retired, not freed: this frame may already have drawn it. DrawUI frees it a few frames on.
+  ReleaseGalleryTexture();
+  sGalleryPaths.clear();
+}
+
+void LoadGalleryPicture() {
+  ReleaseGalleryTexture();
+  sGalleryFailed = true;
+  sGalleryLoaded = sGalleryIndex;
+  std::ifstream file(PortGci::PathFromString(sGalleryPaths[sGalleryIndex]), std::ios::binary);
+  const std::vector<uint8_t> jpeg((std::istreambuf_iterator<char>(file)), std::istreambuf_iterator<char>());
+  int width = 0;
+  int height = 0;
+  std::vector<uint8_t> rgba;
+  if (!PortGallery::DecodeGalleryJpeg(jpeg.data(), jpeg.size(), width, height, rgba)) {
+    return;
+  }
+  sGalleryTexture = aurora_imgui_add_texture(uint32_t(width), uint32_t(height), rgba.data());
+  sGallerySize = ImVec2(float(width), float(height));
+  sGalleryFailed = false;
+}
+
+void DrawGalleryWindow() {
+  FreeRetiredGalleryTextures(false);
+  if (!sGalleryOpen) {
+    return;
+  }
+  const int count = int(sGalleryPaths.size());
+  const ImVec2 display = ImGui::GetMainViewport()->Size;
+  ImGui::SetNextWindowSize(ImVec2(display.x * 0.8f, display.y * 0.8f), ImGuiCond_FirstUseEver);
+  ImGui::SetNextWindowPos(ImGui::GetMainViewport()->GetCenter(), ImGuiCond_FirstUseEver, ImVec2(0.5f, 0.5f));
+  bool open = true;
+  if (ImGui::Begin("Gallery##port", &open)) {
+    const bool focused = ImGui::IsWindowFocused(ImGuiFocusedFlags_RootAndChildWindows);
+    int step = 0;
+    if (ImGui::Button("Previous") || (focused && ImGui::IsKeyPressed(ImGuiKey_LeftArrow))) {
+      step = -1;
+    }
+    ImGui::SameLine();
+    if (ImGui::Button("Next") || (focused && ImGui::IsKeyPressed(ImGuiKey_RightArrow))) {
+      step = 1;
+    }
+    ImGui::SameLine();
+    ImGui::Text("%d / %d", sGalleryIndex + 1, count);
+    ImGui::SameLine();
+    if (ImGui::Button("Close")) {
+      open = false;
+    }
+    if (step != 0) {
+      sGalleryIndex = (sGalleryIndex + step + count) % count;
+    }
+    if (sGalleryLoaded != sGalleryIndex) {
+      LoadGalleryPicture();
+    }
+    const ImVec2 avail = ImGui::GetContentRegionAvail();
+    if (sGalleryFailed) {
+      ImGui::TextDisabled("Cannot read this picture.");
+    } else if (avail.x > 1.0f && avail.y > 1.0f) {
+      const float scale = std::min(avail.x / sGallerySize.x, avail.y / sGallerySize.y);
+      const ImVec2 shown(sGallerySize.x * scale, sGallerySize.y * scale);
+      const ImVec2 cursor = ImGui::GetCursorPos();
+      ImGui::SetCursorPos(ImVec2(cursor.x + (avail.x - shown.x) * 0.5f, cursor.y + (avail.y - shown.y) * 0.5f));
+      // The import writes the TXTR rows as stored, bottom row first, so draw them flipped.
+      ImGui::Image(sGalleryTexture, shown, ImVec2(0.f, 1.f), ImVec2(1.f, 0.f));
+    }
+  }
+  ImGui::End();
+  if (!open) {
+    CloseGallery();
+  }
+}
+
+// Once per launch, a few seconds, no input taken: a Remastered import from an older importer.
+void DrawStaleImportToast() {
+  static double sShownAt = -1.0;
+  static bool sDone = false;
+  if (sDone) {
+    return;
+  }
+  const char* name = PortMods::StaleRemasteredImport();
+  if (name == nullptr) {
+    return;
+  }
+  const double now = ImGui::GetTime();
+  if (sShownAt < 0.0) {
+    sShownAt = now;
+  }
+  if (now - sShownAt > 12.0) {
+    sDone = true;
+    return;
+  }
+  const ImGuiViewport* viewport = ImGui::GetMainViewport();
+  ImGui::SetNextWindowPos(ImVec2(viewport->Pos.x + viewport->Size.x * 0.5f, viewport->Pos.y + viewport->Size.y - 24.f),
+                          ImGuiCond_Always, ImVec2(0.5f, 1.f));
+  ImGui::SetNextWindowSize(ImVec2(std::min(viewport->Size.x - 32.f, 560.f), 0.f));
+  ImGui::SetNextWindowBgAlpha(0.8f);
+  if (ImGui::Begin("##stale-import-toast", nullptr,
+                   ImGuiWindowFlags_NoDecoration | ImGuiWindowFlags_NoInputs | ImGuiWindowFlags_NoNav |
+                       ImGuiWindowFlags_NoFocusOnAppearing | ImGuiWindowFlags_NoSavedSettings)) {
+    ImGui::TextWrapped("%s was imported by an older version. Re-import Remastered (F1 > Remastered) to get the latest fixes.",
+                       name);
+  }
+  ImGui::End();
+}
+
+// Once per launch, for longer and in red: the last session ended on a failed disc read.
+void DrawDiscReadFailedAlert() {
+  static double sShownAt = -1.0;
+  if (!sDiscReadFailedLastSession) {
+    return;
+  }
+  const double now = ImGui::GetTime();
+  if (sShownAt < 0.0) {
+    sShownAt = now;
+  }
+  if (now - sShownAt > 20.0) {
+    sDiscReadFailedLastSession = false;
+    return;
+  }
+  const ImGuiViewport* viewport = ImGui::GetMainViewport();
+  ImGui::SetNextWindowPos(ImVec2(viewport->Pos.x + viewport->Size.x * 0.5f, viewport->Pos.y + 24.f), ImGuiCond_Always,
+                          ImVec2(0.5f, 0.f));
+  ImGui::SetNextWindowSize(ImVec2(std::min(viewport->Size.x - 32.f, 640.f), 0.f));
+  ImGui::PushStyleColor(ImGuiCol_WindowBg, ImVec4(0.6f, 0.05f, 0.05f, 0.92f));
+  ImGui::PushStyleColor(ImGuiCol_Border, ImVec4(1.f, 0.35f, 0.35f, 1.f));
+  ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(1.f, 1.f, 1.f, 1.f));
+  ImGui::PushStyleVar(ImGuiStyleVar_WindowBorderSize, 2.f);
+  ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(14.f, 10.f));
+  if (ImGui::Begin("##disc-read-failed-alert", nullptr,
+                   ImGuiWindowFlags_NoDecoration | ImGuiWindowFlags_NoInputs | ImGuiWindowFlags_NoNav |
+                       ImGuiWindowFlags_NoFocusOnAppearing | ImGuiWindowFlags_NoSavedSettings)) {
+    ImGui::SetWindowFontScale(1.4f);
+    ImGui::TextWrapped("The last session crashed: the disc image is damaged.");
+    ImGui::SetWindowFontScale(1.f);
+    ImGui::TextWrapped("Part of it couldn't be read. If the game stops again, copy the image again or check it in "
+                       "Dolphin (Properties > Verify).");
+  }
+  ImGui::End();
+  ImGui::PopStyleVar(2);
+  ImGui::PopStyleColor(3);
+}
+
 void DrawRemasteredImport() {
   static char sImage[1024] = "";
   static char sKeys[1024] = "";
@@ -3180,10 +4675,16 @@ void DrawRemasteredImport() {
     return;
   }
   const PortRemastered::ImportState state = PortRemastered::ImportStatus();
-  ImGui::TextWrapped("Very experimental and currently unsupported: expect wrong or missing models, crashes and "
-                     "heavy memory use. Remove mods/remastered-models to get the retail game back.");
   ImGui::TextWrapped("Converts the models of your own copy of Metroid Prime Remastered into a mod. It needs the "
                      "game's .nsp and your console's key file (prod.keys), and takes a few minutes.");
+  if (PortMods::StaleRemasteredImport() != nullptr) {
+    ImGui::TextColored(ThemeWarnColor(),
+                       "Re-import needed: the installed models were made by an older version.");
+  }
+  ImGui::PushStyleColor(ImGuiCol_Text, ThemeWarnColor(ImVec4(1.f, 0.75f, 0.3f, 1.f)));
+  ImGui::TextWrapped("Very experimental and currently unsupported: expect wrong or missing models, crashes and "
+                     "heavy memory use. Remove mods/remastered-models to get the retail game back.");
+  ImGui::PopStyleColor();
   ImGui::BeginDisabled(state.running);
 #if defined(__ANDROID__)
   // No path to type here: the files are picked, and shown by name.
@@ -3214,32 +4715,46 @@ void DrawRemasteredImport() {
     OpenRemasteredDialog(1);
   }
 #endif
-#if defined(__ANDROID__)
-  // Off on a phone: the rooms have never run on one, and need storage and
-  // memory many phones lack (a 256 MB game arena and 12x frame buffers).
-  static bool sGeometry = false;
-#else
-  static bool sGeometry = true;
-#endif
-  ImGui::Checkbox("Room geometry too##remastered", &sGeometry);
+  if (ImGui::Checkbox("Room geometry too##remastered", &sImportGeometry)) {
+    MarkDirty();
+  }
   if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled)) {
     ImGui::SetTooltip("Also converts the rooms themselves, not only the models in them. About 6.5 GB in place of "
-                      "1 GB, and twice as long. Restart the game afterwards.");
+                      "1 GB, and twice as long.");
   }
 #if defined(__ANDROID__)
   // A tap shows no tooltip, so the warning is spelled out.
-  if (sGeometry) {
-    ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(1.f, 0.75f, 0.3f, 1.f));
+  if (sImportGeometry) {
+    ImGui::PushStyleColor(ImGuiCol_Text, ThemeWarnColor(ImVec4(1.f, 0.75f, 0.3f, 1.f)));
     ImGui::TextWrapped("Untested on phones: needs about 6.5 GB free and lots of RAM, and the game may run slowly "
                        "or be closed by Android. Remove mods/remastered-models to go back.");
     ImGui::PopStyleColor();
   }
 #endif
-  PortRemastered::SetImportGeometry(sGeometry);
+  PortRemastered::SetImportGeometry(sImportGeometry);
+  if (ImGui::Checkbox("Particle effects (experimental)##remastered", &sImportEffects)) {
+    MarkDirty();
+  }
+  if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled)) {
+    ImGui::SetTooltip("Also replaces the disc's particle effects with Remastered's where the two match. Some "
+                      "effects may look wrong. Reload the mods afterwards, as for any import.");
+  }
+  PortRemastered::SetImportEffects(sImportEffects);
+  static bool sReconvert = false;
+  ImGui::Checkbox("Reconvert everything##remastered", &sReconvert);
+  if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled)) {
+    ImGui::SetTooltip("A re-import normally keeps what the last import made where nothing it depends on has "
+                      "changed. This makes everything anew, as the first import did.");
+  }
+  PortRemastered::SetImportReuse(!sReconvert);
   ImGui::EndDisabled();
   if (state.running) {
     ImGui::ProgressBar(state.total > 0 ? float(state.done) / float(state.total) : 0.f, ImVec2(-1.f, 0.f),
                        state.message.c_str());
+    if (sImportUnloadedMods) {
+      ImGui::TextDisabled("The mods are unloaded until the import ends.");
+      DrawModReloadMessage();
+    }
     if (ImGui::Button("Cancel##remastered")) {
       PortRemastered::CancelImport();
     }
@@ -3256,13 +4771,10 @@ void DrawRemasteredImport() {
 #endif
     if (ImGui::Button("Import##remastered")) {
       rememberTyped();
-#if defined(__ANDROID__)
-      // Each worker holds a world's models while it converts them; a phone has
-      // the memory for two of those, not for one per core.
-      PortRemastered::StartImport(sImage, sKeys, 2);
-#else
-      PortRemastered::StartImport(sImage, sKeys);
-#endif
+      StartRemasteredImport(sImage, sKeys);
+    }
+    if (ImGui::IsItemHovered()) {
+      ImGui::SetTooltip("The mods are unloaded while it runs, and loaded again with the new import when it ends.");
     }
     ImGui::SameLine();
     if (ImGui::Button("Import movies##remastered")) {
@@ -3271,26 +4783,26 @@ void DrawRemasteredImport() {
     }
     if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled)) {
 #if defined(__ANDROID__)
-      ImGui::SetTooltip("Only the menu movies, added to the mod already imported.");
+      ImGui::SetTooltip("Only the menu movies and the gallery, added to the mod already imported.");
 #else
-      ImGui::SetTooltip("Only the menu movies, added to the mod already imported. Needs ffmpeg.");
+      ImGui::SetTooltip("Only the menu movies (needs ffmpeg) and the gallery, added to the mod already imported.");
 #endif
     }
     ImGui::EndDisabled();
     if (state.finished && state.ok) {
-      ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.5f, 1.f, 0.5f, 1.f));
+      ImGui::PushStyleColor(ImGuiCol_Text, ThemeGoodColor(ImVec4(0.5f, 1.f, 0.5f, 1.f)));
       ImGui::TextWrapped("%s", state.message.c_str());
       ImGui::PopStyleColor();
-      if (ImGui::Button("Load it now##remastered")) {
+      // It loads on its own when the import ends; this is to load it again
+      // by hand.
+      if (ImGui::Button("Load it again##remastered")) {
         PortSaveState::RequestModReload();
       }
-      ImGui::SameLine();
-      ImGui::TextDisabled("or restart the game");
       DrawModReloadMessage();
     } else if (state.finished && state.cancelled) {
       ImGui::TextDisabled("The import was cancelled.");
     } else if (state.finished) {
-      ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(1.f, 0.5f, 0.3f, 1.f));
+      ImGui::PushStyleColor(ImGuiCol_Text, ThemeBadColor());
       ImGui::TextWrapped("The import failed: %s", state.message.c_str());
       ImGui::PopStyleColor();
     }
@@ -3324,6 +4836,8 @@ void DrawImporters() {
   ImGui::BeginDisabled(state.running);
   ImGui::SetNextItemWidth(ImGui::GetContentRegionAvail().x * 0.6f);
   ImGui::InputTextWithHint("Argument", "optional, e.g. the file to import", sArgument, sizeof(sArgument));
+  ItemHelp("An importer is a program in the importers folder beside the mods folder; it builds a mod "
+           "from files of your own. The argument is passed to it.");
   for (const std::string& name : sNames) {
     if (ImGui::Button(("Run " + name).c_str())) {
       PortImporters::Start(name, sArgument);
@@ -3331,18 +4845,18 @@ void DrawImporters() {
   }
   ImGui::EndDisabled();
   if (state.running) {
-    ImGui::TextColored(ImVec4(1.f, 0.8f, 0.3f, 1.f), "%s is running...", state.name.c_str());
+    ImGui::TextColored(ThemeWarnColor(), "%s is running...", state.name.c_str());
     ImGui::SameLine();
     if (ImGui::Button("Cancel")) {
       PortImporters::Cancel();
     }
   } else if (state.finished && state.exitCode == 0) {
-    ImGui::TextColored(ImVec4(0.5f, 1.f, 0.5f, 1.f), "%s finished. Reload the mods to load it.",
+    ImGui::TextColored(ThemeGoodColor(ImVec4(0.5f, 1.f, 0.5f, 1.f)), "%s finished. Reload the mods to load it.",
                        state.name.c_str());
   } else if (state.finished && state.cancelled) {
     ImGui::TextDisabled("%s was cancelled.", state.name.c_str());
   } else if (state.finished) {
-    ImGui::TextColored(ImVec4(1.f, 0.5f, 0.3f, 1.f), "%s failed (exit code %d).", state.name.c_str(), state.exitCode);
+    ImGui::TextColored(ThemeBadColor(), "%s failed (exit code %d).", state.name.c_str(), state.exitCode);
   }
   if (!state.lines.empty()) {
     // The tail of the output; a failure shows more of it.
@@ -3351,8 +4865,6 @@ void DrawImporters() {
       ImGui::TextWrapped("%s", state.lines[i].c_str());
     }
   }
-  ImGui::TextWrapped("An importer is a program in the importers folder beside the mods folder; it builds a "
-                     "mod from files of your own.");
 }
 #endif
 
@@ -3363,6 +4875,9 @@ void DrawMods() {
   if (ImGui::Checkbox("Load mods", &enabled)) {
     SetModsEnabled(enabled);
   }
+  ItemHelp("Each folder in the mods folder is a mod; later names win. A file at a disc path "
+           "(Metroid1.pak, Audio/..., Video/...) replaces that file, and a resource named by id and "
+           "type (1A2B3C4D.TXTR) replaces it in every PAK. Mods load at startup.");
   // What the settings would load next time, against what this launch loaded.
   std::vector<std::string> disabled = PortMods::SplitDisabled(sModsDisabled);
   bool changed = sModsEnabled != status.active;
@@ -3392,10 +4907,16 @@ void DrawMods() {
     } else {
       ImGui::TextDisabled("not loaded");
     }
+    if (mod.importStale) {
+      ImGui::SameLine();
+      ImGui::TextColored(ThemeWarnColor(), "re-import needed");
+    }
     changed = changed || (sModsEnabled && on) != mod.enabled;
   }
-  if (changed) {
-    ImGui::TextColored(ImVec4(1.f, 0.8f, 0.3f, 1.f), "Reload the mods to apply.");
+  if (PortMods::Suspended()) {
+    ImGui::TextColored(ThemeWarnColor(), "Unloaded while the Remastered import runs; they load again when it ends.");
+  } else if (changed) {
+    ImGui::TextColored(ThemeWarnColor(), "Reload the mods to apply.");
   }
   if (ImGui::Button("Reload mods")) {
     PortSaveState::RequestModReload();
@@ -3403,54 +4924,67 @@ void DrawMods() {
   if (ImGui::IsItemHovered()) {
     ImGui::SetTooltip("Reads the mods folder again and reloads the room, as a save state does.");
   }
+#if !defined(__ANDROID__)
+  if (!status.folder.empty()) {
+    ImGui::SameLine();
+    if (ImGui::Button("Open mods folder")) {
+      std::string url = status.folder.front() == '/' ? "file://" : "file:///";
+      for (const char c : status.folder) {
+        url += c == ' ' ? std::string("%20") : std::string(1, c == '\\' ? '/' : c);
+      }
+      SDL_OpenURL(url.c_str());
+    }
+  }
+#endif
   DrawModReloadMessage();
   for (const std::string& message : status.messages) {
-    ImGui::TextColored(ImVec4(1.f, 0.5f, 0.3f, 1.f), "%s", message.c_str());
+    ImGui::TextColored(ThemeBadColor(), "%s", message.c_str());
   }
   if (PortMods::NativeTextureCount() > 0) {
     ImGui::TextDisabled("Native textures: %zu, %zu in use", PortMods::NativeTextureCount(), PortMods::NativeTexturesBound());
   }
+  ImGui::PushStyleColor(ImGuiCol_Text, ImGui::GetStyleColorVec4(ImGuiCol_TextDisabled));
   ImGui::TextWrapped("Folder: %s", status.folder.c_str());
-#if !defined(__ANDROID__)
-  if (!status.folder.empty() && ImGui::Button("Open mods folder")) {
-    std::string url = status.folder.front() == '/' ? "file://" : "file:///";
-    for (const char c : status.folder) {
-      url += c == ' ' ? std::string("%20") : std::string(1, c == '\\' ? '/' : c);
-    }
-    SDL_OpenURL(url.c_str());
-  }
-#endif
-  ImGui::TextWrapped(
-      "Each folder in the mods folder is a mod; later names win. A file at a disc path "
-      "(Metroid1.pak, Audio/..., Video/...) replaces that file, and a resource named "
-      "by id and type (1A2B3C4D.TXTR) replaces it in every PAK. Mods load at startup.");
-  DrawRemasteredImport();
+  ImGui::PopStyleColor();
 #if !defined(__ANDROID__)
   DrawImporters();
 #endif
 }
 } // namespace
 
-void DrawExtrasTab() {
+void DrawGameSection();
+
+void DrawCutscenesSection() {
   ImGui::SeparatorText("Cutscenes");
   bool skippable = sSkippableCutscenes;
   if (ImGui::Checkbox("Skippable cutscenes", &skippable)) {
     SetSkippableCutscenes(skippable);
   }
+  ItemHelp("Every cutscene can be skipped with Start or A, including the ones the game never "
+           "lets you skip (randomprime's room patches). Applies to rooms loaded after the change.");
   if (PortSkipCutscenes::Forced()) {
-    ImGui::SameLine();
+    SameLineAfterHelp();
     ImGui::TextDisabled("(on in randomized games)");
   }
-  ImGui::TextWrapped(
-      "Every cutscene can be skipped with the usual button, including the ones the "
-      "game never lets you skip (randomprime's room patches). Applies to rooms "
-      "loaded after the change.");
+  int elevatorRide = sElevatorRide;
+  if (ImGui::Combo("Elevator ride", &elevatorRide, "Original\0Fast\0Skip\0")) {
+    SetElevatorRide(static_cast< EElevatorRide >(elevatorRide));
+  }
+  ItemHelp("The ride shown between worlds. Original lasts at least 5 s even though the port loads "
+           "far faster; Fast ends it about 2 s in, once the next area is loaded; Skip shows black "
+           "until the area is loaded. The cinematic played in the elevator room before the ride is "
+           "not affected.");
 
+}
+
+void DrawUnlocksSection() {
   ImGui::SeparatorText("Unlocks");
   bool hardMode = sUnlockHardMode;
   if (ImGui::Checkbox("Hard mode", &hardMode)) {
     SetUnlockHardMode(hardMode);
   }
+  ImGui::SetItemTooltip("Offered when starting a file, as after finishing the game.");
+  ImGui::SameLine();
   bool fusionSuit = sUnlockFusionSuit;
   if (ImGui::Checkbox("Fusion Suit", &fusionSuit)) {
     SetUnlockFusionSuit(fusionSuit);
@@ -3463,27 +4997,34 @@ void DrawExtrasTab() {
       gpGameState->PlayerState()->SetIsFusionEnabled(false);
     }
   }
+  ImGui::SetItemTooltip("Under Fusion Bonus; retail needs a GBA link to Metroid Fusion.");
+  ImGui::SameLine();
   bool galleries = sUnlockGalleries;
   if (ImGui::Checkbox("Image galleries", &galleries)) {
     SetUnlockGalleries(galleries);
   }
-  ImGui::TextWrapped(
-      "Offers what finishing the game normally unlocks: hard mode when starting a "
-      "file, the Fusion Suit under Fusion Bonus (retail needs a GBA link to "
-      "Metroid Fusion), and all four image galleries. Nothing is written into the "
-      "save, so turning an option off locks it again. Metroid (NES) stays locked: "
-      "its emulator can't run in the port.");
+  ImGui::SetItemTooltip("All four of them.");
+  ImGui::TextDisabled("What finishing the game unlocks. Not written into the save.");
+  ItemHelp("Turning an option off locks it again. Metroid (NES) stays locked: its emulator can't run "
+           "in the port.");
 
+}
+
+void DrawSpeedrunSection() {
   ImGui::SeparatorText("Speedrun");
   bool timer = sSpeedrunTimer;
   if (ImGui::Checkbox("On-screen in-game time", &timer)) {
     SetSpeedrunTimer(timer);
   }
+  ItemHelp("The play time the save file shows: it stops in cutscenes, menus and loads.");
   bool liveSplit = sLiveSplit;
   if (ImGui::Checkbox("LiveSplit", &liveSplit)) {
     SetLiveSplit(liveSplit);
   }
-  ImGui::SameLine();
+  ItemHelp("In LiveSplit: right-click, Control > Start TCP Server (port 16834), and compare against "
+           "Game Time. A new file resets and starts the timer, the game time follows the in-game "
+           "time, and it splits on the final blow.");
+  SameLineAfterHelp();
   switch (PortLiveSplit::Status()) {
   case PortLiveSplit::kStatus_Off:
     ImGui::TextDisabled("off");
@@ -3492,10 +5033,10 @@ void DrawExtrasTab() {
     ImGui::TextUnformatted("connecting...");
     break;
   case PortLiveSplit::kStatus_Connected:
-    ImGui::TextColored(ImVec4(0.4f, 1.f, 0.4f, 1.f), "connected");
+    ImGui::TextColored(ThemeGoodColor(), "connected");
     break;
   case PortLiveSplit::kStatus_Failed:
-    ImGui::TextColored(ImVec4(1.f, 0.5f, 0.3f, 1.f), "%s", PortLiveSplit::LastError().c_str());
+    ImGui::TextColored(ThemeBadColor(), "%s", PortLiveSplit::LastError().c_str());
     break;
   }
   // Applied when the field loses focus; until then the text is left alone.
@@ -3510,25 +5051,26 @@ void DrawExtrasTab() {
   if (ImGui::IsItemDeactivatedAfterEdit()) {
     SetLiveSplitAddress(address);
   }
+  ImGui::SameLine();
   bool splitUpgrades = sLiveSplitSplitUpgrades;
   if (ImGui::Checkbox("Split on upgrades", &splitUpgrades)) {
     sLiveSplitSplitUpgrades = splitUpgrades;
     ApplyLiveSplit();
     MarkDirty();
   }
-  ImGui::TextWrapped(
-      "The in-game time is the play time the save file shows: it stops in cutscenes, "
-      "menus and loads. LiveSplit: right-click it, Control > Start TCP Server (port "
-      "16834), and compare against Game Time. A new file resets and starts the timer; "
-      "the game time follows the in-game time; it splits on each new upgrade or "
-      "artifact (not expansions or energy tanks) when enabled, and on the final blow.");
+  ImGui::SetItemTooltip("Also splits on each new upgrade or artifact (not expansions or energy tanks).");
 
+}
+
+void DrawDiscordSection() {
   if (PortDiscord::Supported()) {
     ImGui::SeparatorText("Discord");
     bool discord = sDiscord;
     if (ImGui::Checkbox("Rich Presence", &discord)) {
       SetDiscordPresence(discord);
     }
+    ImGui::SetItemTooltip("Shows the room, world, energy, missiles and item percentage on your "
+                          "Discord profile while the Discord app runs.");
     ImGui::SameLine();
     switch (PortDiscord::Status()) {
     case PortDiscord::kStatus_Off:
@@ -3538,39 +5080,17 @@ void DrawExtrasTab() {
       ImGui::TextUnformatted("connecting...");
       break;
     case PortDiscord::kStatus_Connected:
-      ImGui::TextColored(ImVec4(0.4f, 1.f, 0.4f, 1.f), "connected");
+      ImGui::TextColored(ThemeGoodColor(), "connected");
       break;
     case PortDiscord::kStatus_Failed:
-      ImGui::TextColored(ImVec4(1.f, 0.5f, 0.3f, 1.f), "%s", PortDiscord::LastError().c_str());
+      ImGui::TextColored(ThemeBadColor(), "%s", PortDiscord::LastError().c_str());
       break;
-    }
-    static char appId[64];
-    static bool editingAppId = false;
-    if (!editingAppId) {
-      std::snprintf(appId, sizeof(appId), "%s", sDiscordAppId.c_str());
-    }
-    ImGui::SetNextItemWidth(ImGui::GetFontSize() * 14.f);
-    ImGui::InputText("Application id", appId, sizeof(appId));
-    editingAppId = ImGui::IsItemActive();
-    if (ImGui::IsItemDeactivatedAfterEdit()) {
-      SetDiscordAppId(appId);
     }
     if (sDiscord) {
       ImGui::TextDisabled("Showing: %s", PortDiscord::CurrentText().c_str());
     }
-    ImGui::TextWrapped(
-        "Shows the world, room and item percentage on your Discord profile while the "
-        "Discord app runs. It needs a Discord application: create one at "
-        "discord.com/developers/applications (its name is what Discord shows as the "
-        "game), add an art asset named \"logo\" under Rich Presence, and paste its "
-        "Application ID here.");
   }
 
-#if defined(__ANDROID__)
-  PortDataFolder::DrawPanel();
-#endif
-  DrawMemoryCard();
-  DrawMods();
 }
 
 #if defined(__ANDROID__)
@@ -3617,12 +5137,32 @@ void PickTexturePack() {
 
 void DrawTexturePack();
 
-void DrawRenderTab() {
+// The look of this overlay: the floating window, the theme and the menu sounds.
+void DrawOverlaySection() {
+  ImGui::SeparatorText("Overlay");
 #if !defined(__ANDROID__)
   if (ImGui::Checkbox("Overlay as a floating window", &sOverlayWindowed)) {
     MarkDirty();
   }
 #endif
+  {
+    int theme = sUiTheme;
+    if (ImGui::Combo("Menu theme", &theme, "Auto\0Metroid Prime\0Remastered\0Plain\0")) {
+      sUiTheme = theme;
+      MarkDirty();
+    }
+    ItemHelp("The look of this overlay. Auto uses the Remastered style while the Remastered import is "
+             "loaded and the Metroid Prime pause-screen style otherwise; Plain is stock Dear ImGui.");
+    if (ImGui::Checkbox("Menu sounds", &sUiSounds)) {
+      MarkDirty();
+    }
+    ItemHelp("The game's own menu sounds for opening, choosing and moving through the overlay. Off "
+             "with the Plain theme.");
+  }
+}
+
+void DrawVideoDisplay() {
+  ImGui::SeparatorText("Display");
   bool fullscreen = sFullscreen;
 #if defined(__ANDROID__)
   if (ImGui::Checkbox("Fullscreen (hide the status and navigation bars)", &fullscreen)) {
@@ -3642,15 +5182,20 @@ void DrawRenderTab() {
     SetAspectMode(static_cast< EAspectMode >(aspect));
     MarkDirty();
   }
+  if (ImGui::Checkbox("Cutscene black bars", &sCinemaBars)) {
+    MarkDirty();
+  }
+  ImGui::SetItemTooltip("Off: cutscenes narrower than 16:9 fill the screen with the full shot.\n"
+                        "On: the original 16:9 letterbox.");
 
+  ImGui::SeparatorText("HUD and view");
   bool hudWide = sHudWide;
   if (ImGui::Checkbox("Widescreen HUD (spread to edges)", &hudWide)) {
     SetHudWide(hudWide);
     MarkDirty();
   }
-  ImGui::TextWrapped(
-      "Keeps each HUD element's shape but spreads its position so edge elements "
-      "reach the wide corners. Only affects the in-game HUD, not menus.");
+  ImGui::SetItemTooltip("Keeps each HUD element's shape but spreads its position so edge elements\n"
+                        "reach the wide corners. Only affects the in-game HUD, not menus.");
 
   int hudScale = sHudScale;
   if (ImGui::SliderInt("HUD scale", &hudScale, kHudScaleMin, kHudScaleMax, "%d%%")) {
@@ -3665,13 +5210,12 @@ void DrawRenderTab() {
   if (ImGui::Checkbox("Hide visor effects", &hideVisorFx)) {
     SetHideVisorEffects(hideVisorFx);
   }
+  ImGui::SetItemTooltip("Steam, Samus's reflection, and rain, water and goo on the visor.");
   ImGui::SameLine();
   bool hideMinimap = sHideMinimap;
   if (ImGui::Checkbox("Hide minimap", &hideMinimap)) {
     SetHideMinimap(hideMinimap);
   }
-  ImGui::TextWrapped(
-      "Visor effects: steam, Samus's reflection, and rain, water and goo on the visor.");
 
   float fov = sFirstPersonFov;
   if (ImGui::SliderFloat("Field of view", &fov, kFovMin, kFovMax, "%.0f deg")) {
@@ -3687,15 +5231,59 @@ void DrawRenderTab() {
     const float aspect = CCameraManager::GetDefaultAspectRatio();
     const float hfov = 2.f * std::atan(std::tan(sFirstPersonFov * 0.5f * 0.017453292f) * aspect) /
                        0.017453292f;
-    ImGui::TextWrapped(
-        "First-person vertical FOV (retail 55); about %.0f deg horizontal at this aspect. "
-        "The arm cannon stays at the retail FOV. Morph ball and cutscene cameras are unchanged.",
-        hfov);
+    ImGui::SetItemTooltip("Back to the retail 55 deg.");
+    ImGui::TextDisabled("About %.0f deg horizontal at this aspect.", hfov);
+    ImGui::SetItemTooltip("First-person vertical FOV (retail 55). The arm cannon stays at the retail\n"
+                          "FOV; morph ball and cutscene cameras are unchanged.");
   }
 
+}
+
+void DrawVideoQuality() {
+  ImGui::SeparatorText("Quality");
   int msaa = sMsaa >= 4 ? 1 : 0;
   if (ImGui::Combo("Anti-aliasing", &msaa, "Off\0" "4x MSAA\0")) {
     SetMsaa(msaa == 1 ? 4 : 1);
+  }
+  ImGui::SetItemTooltip("Smooths polygon edges, at about 4x the framebuffer memory.");
+  size_t backendCount = 0;
+  const AuroraBackend* backends = aurora_get_available_backends(&backendCount);
+  if (std::find(backends, backends + backendCount, BACKEND_OPENGLES) != backends + backendCount) {
+    bool gles = sOpenGles;
+    if (ImGui::Checkbox("Use OpenGL ES", &gles)) {
+      SetOpenGles(gles);
+    }
+    ImGui::SetItemTooltip("Renders through OpenGL ES instead of Vulkan. Try it if the world draws black\n"
+                          "or untextured (some Adreno drivers). Takes effect after a restart; if the\n"
+                          "driver crashes starting it, the next start goes back to Vulkan.");
+    const AuroraBackend live = aurora_get_backend();
+    if (sOpenGles != sOpenGlesAtStart) {
+      ImGui::SameLine();
+      ImGui::TextColored(ThemeWarnColor(), "Restart to apply");
+    } else if (sOpenGles && live != BACKEND_OPENGLES) {
+      ImGui::SameLine();
+      ImGui::TextColored(ThemeWarnColor(), "OpenGL ES failed to start; using %s",
+                         live == BACKEND_VULKAN ? "Vulkan" : "another API");
+    }
+  }
+  {
+    const bool pending = aurora_gpu_selftest_pending();
+    ImGui::BeginDisabled(pending);
+    if (ImGui::Button("GPU self-test")) {
+      RequestGpuSelfTest();
+    }
+    ImGui::EndDisabled();
+    ImGui::SetItemTooltip("Renders known patterns offscreen through the game's own GX path, reads them back\n"
+                          "and logs one PASS or FAIL line per feature (indexed vertices, TEV, textures, blend,\n"
+                          "depth, EFB copy). For GPU driver bugs such as a black world; attach the log to a report.");
+    char summary[160];
+    if (pending) {
+      ImGui::SameLine();
+      ImGui::TextDisabled("running...");
+    } else if (aurora_gpu_selftest_summary(summary, sizeof(summary)) != 0) {
+      ImGui::SameLine();
+      ImGui::TextUnformatted(summary);
+    }
   }
   {
     int aniso = 0;
@@ -3705,10 +5293,8 @@ void DrawRenderTab() {
     if (ImGui::Combo("Anisotropic filtering", &aniso, "1x\0" "2x\0" "4x\0" "8x\0" "16x\0")) {
       SetAnisotropy(1 << aniso);
     }
+    ImGui::SetItemTooltip("Keeps textures sharp at grazing angles. Recommended: 16x.");
   }
-  ImGui::TextWrapped(
-      "MSAA smooths polygon edges at about 4x the framebuffer memory; anisotropic "
-      "filtering keeps textures sharp at grazing angles (default 16x).");
 
   bool autoScale = sRenderScale <= 0.f;
   if (ImGui::Checkbox("Auto render scale (native)", &autoScale)) {
@@ -3716,18 +5302,78 @@ void DrawRenderTab() {
     MarkDirty();
   }
   if (!autoScale) {
-    float scale = sRenderScale;
-    if (ImGui::SliderFloat("EFB scale", &scale, 1.f, 2.f, "%.2fx")) {
-      SetRenderScale(scale);
+    // Applied when the slider is let go: each new scale reallocates the EFB targets, which
+    // a drag would otherwise do every frame.
+    static float sPendingScale = 0.f;
+    float scale = sPendingScale > 0.f ? sPendingScale : sRenderScale;
+    if (ImGui::SliderFloat("EFB scale", &scale, 1.f, 4.f, "%.2fx")) {
+      sPendingScale = scale;
+    }
+    if (sPendingScale > 0.f && !ImGui::IsItemActive()) {
+      SetRenderScale(sPendingScale);
+      MarkDirty();
+      sPendingScale = 0.f;
+    }
+    ImGui::SetItemTooltip("Scales the internal EFB; higher values use more GPU memory.\n"
+                          "Above 2x it supersamples, and each step costs much more GPU time.");
+    if (ImGui::Checkbox("Dynamic resolution", &sDynamicRes)) {
+      ResetDynamicRes();
       MarkDirty();
     }
-    ImGui::TextUnformatted("Scales the internal EFB; higher values use more GPU memory.");
+    ImGui::SetItemTooltip("Lowers the EFB scale, down to the lowest scale below, while the frame rate\n"
+                          "is below the target, and raises it back to the scale above when there is\n"
+                          "room. Each change stutters for a frame, so it changes at most once every\n"
+                          "couple of seconds.");
+    if (sDynamicRes) {
+      static const int kTargets[] = {0, 30, 60, 90, 120};
+      int target = 0;
+      for (int i = 0; i < 5; ++i) {
+        if (kTargets[i] == sDynamicResTarget) {
+          target = i;
+        }
+      }
+      ImGui::SameLine();
+      ImGui::SetNextItemWidth(ImGui::GetFontSize() * 7.f);
+      if (ImGui::Combo("Target", &target, "Display\0" "30 fps\0" "60 fps\0" "90 fps\0" "120 fps\0")) {
+        sDynamicResTarget = kTargets[target];
+        ResetDynamicRes();
+        MarkDirty();
+      }
+      ImGui::SetItemTooltip("Display: the screen's refresh rate, or 60 with the 60 FPS cap on.");
+      static const float kLowest[] = {0.5f, 0.75f, 1.f};
+      int lowest = 2;
+      for (int i = 0; i < 3; ++i) {
+        if (kLowest[i] == sDynamicResMin) {
+          lowest = i;
+        }
+      }
+      ImGui::SetNextItemWidth(ImGui::GetFontSize() * 7.f);
+      if (ImGui::Combo("Lowest scale", &lowest, "0.5x\0" "0.75x\0" "1x\0")) {
+        sDynamicResMin = kLowest[lowest];
+        ResetDynamicRes();
+        MarkDirty();
+      }
+      ImGui::SetItemTooltip("Below 1x it draws fewer pixels than the GameCube did and looks softer,\n"
+                            "which lets a phone reach 90 or 120 fps.");
+      ImGui::Text("Drawing at %.2fx (target %.0f fps)", sDynScale > 0.f ? sDynScale : sRenderScale,
+                  DynamicResTargetFps());
+    }
   }
+  bool font = PortHdFont::Enabled();
+  if (ImGui::Checkbox("HD font", &font)) {
+    PortHdFont::SetEnabled(font);
+  }
+  ImGui::SetItemTooltip("Draws the game's text with a sharp, high-resolution font. Recommended: on.\n"
+                        "Not saved: it is on at each start.");
 
+}
+
+// The HD texture set and the user's texture pack: the Mods page.
+void DrawTexturesSection() {
+  ImGui::SeparatorText("Textures");
   ImGui::Text("HD texture set: %s", PortTextures::DeviceName());
-  ImGui::TextWrapped(
-      "Follows the input last used (xbox, playstation, switch, gamecube, "
-      "standard, keyboard); set MP_TEXTURE_DEVICE to override.");
+  ImGui::SetItemTooltip("Follows the input last used (xbox, playstation, switch,\n"
+                        "gamecube, standard, keyboard); set MP_TEXTURE_DEVICE to override.");
   DrawTexturePack();
 }
 
@@ -3735,7 +5381,6 @@ void DrawRenderTab() {
 // On Android the folder is picked with the system folder picker and copied into
 // the data folder; on the desktop the player fills the folder themselves.
 void DrawTexturePack() {
-  ImGui::SeparatorText("Texture pack");
   const char* root = PortTextures::UserRoot();
   if (root[0] == '\0') {
     ImGui::TextUnformatted("No user texture folder.");
@@ -3771,17 +5416,112 @@ void DrawTexturePack() {
 #endif
 }
 
-void DrawInputTab() {
+void DrawControlsOptions() {
+  ImGui::SeparatorText("Buttons");
+  bool lockOnToggle = sLockOnToggle;
+  if (ImGui::Checkbox("Toggle Lock-On", &lockOnToggle)) {
+    SetLockOnToggle(lockOnToggle);
+  }
+  ItemHelp("Press L once to lock on, scan, strafe or grapple, and again to let go. The lock also "
+           "lets go by itself when its target is gone.");
+  bool stickyCharge = sStickyCharge;
+  if (ImGui::Checkbox("Sticky Charge", &stickyCharge)) {
+    SetStickyCharge(stickyCharge);
+  }
+  ItemHelp("Taps fire as usual. Hold fire for a moment and let go, and the beam keeps charging; press "
+           "fire again to shoot. Needs the Charge Beam.");
+  bool rapidCharge = sRapidCharge;
+  if (ImGui::Checkbox("Remastered charge (rapid fire)", &rapidCharge)) {
+    SetRapidCharge(rapidCharge);
+  }
+  ItemHelp("As in Metroid Prime Remastered: holding fire first shoots a few quick shots (Power 2, "
+           "Wave 1, Plasma 1, Ice none), then charges faster, so a full charge takes about as "
+           "long as before. Needs the Charge Beam.");
+  bool swapScanXray = sSwapScanXray;
+  if (ImGui::Checkbox("Swap the Scan and X-Ray visor buttons", &swapScanXray)) {
+    SetSwapScanXray(swapScanXray);
+  }
+  ImGui::SetItemTooltip("Each takes the other's D-pad direction, as in Metroid Prime\n"
+                        "Remastered's Dual Sticks layout. The Remastered controller preset\n"
+                        "turns it on and the other presets off.");
+
+  ImGui::SeparatorText("Morph ball");
+  bool fastMorph = sFastMorph;
+  if (ImGui::Checkbox("Fast Morph", &fastMorph)) {
+    SetFastMorph(fastMorph);
+  }
+  ItemHelp("Morphing and unmorphing take a fraction of a second and keep your momentum, as in "
+           "Metroid Prime 4. Unmorphing on the ground caps speed at walking speed; in the air the "
+           "whole jump arc carries over.");
+  const int springRule = PortAp::SpringBallRule();
+  ImGui::BeginDisabled(springRule >= 0);
+  bool springBall = sSpringBall;
+  if (ImGui::Checkbox("Spring Ball (C-stick up)", &springBall)) {
+    SetSpringBall(springBall);
+  }
+  ImGui::EndDisabled();
+  if (springRule >= 0) {
+    ImGui::SameLine();
+    ImGui::TextDisabled("(set by the Archipelago seed: %s)", springRule == 0   ? "not received yet"
+                                                             : springRule == 1 ? "with the Bombs"
+                                                                               : "unlocked");
+  } else {
+    ItemHelp("A small jump in morph ball, as in Metroid Prime Trilogy, once the Morph Ball Bombs are "
+             "held. Twin stick still passes the right stick up to it, and the beam shift (X in the "
+             "Remastered preset) springs too.");
+  }
+}
+
+void DrawControlsKeyboardMouse() {
+  ImGui::SeparatorText("Mouse aim");
   bool mouseAim = sMouseAim;
   if (ImGui::Checkbox("Mouse aim", &mouseAim)) {
     SetMouseAim(mouseAim);
     MarkDirty();
   }
+  if (ImGui::SliderFloat("Sensitivity", &sMouseSensitivity, 0.0005f, 0.02f, "%.4f rad/px",
+                         ImGuiSliderFlags_Logarithmic)) {
+    MarkDirty();
+  }
+  if (ImGui::Checkbox("Invert X", &sMouseInvertX)) {
+    MarkDirty();
+  }
+  ImGui::SameLine();
+  if (ImGui::Checkbox("Invert Y", &sMouseInvertY)) {
+    MarkDirty();
+  }
+  ImGui::SameLine();
+  if (ImGui::Checkbox("Weapon buttons", &sMouseButtons)) {
+    sMouseButtonGate.Reset();
+    MarkDirty();
+  }
+  ImGui::SetItemTooltip("Mouse buttons are set in Controls > Keyboard & mouse. Existing "
+                        "keyboard/controller weapon bindings also work.");
+  if (ImGui::Checkbox("Crosshair", &sMouseCrosshair)) {
+    MarkDirty();
+  }
+  ImGui::SetItemTooltip("A crosshair at the aim point while mouse aiming.");
+  ImGui::SameLine();
+  int crosshairSize = sCrosshairSize;
+  ImGui::SetNextItemWidth(ImGui::GetFontSize() * 10.f);
+  if (ImGui::SliderInt("Size", &crosshairSize, kCrosshairSizeMin, kCrosshairSizeMax, "%d%%")) {
+    SetCrosshairSize(crosshairSize);
+  }
+  ImGui::SetItemTooltip("Applies under mouse aim and twin stick.");
+
+  PortControls::DrawKeyboardMouse();
+}
+
+void DrawControlsController() {
+  ImGui::SeparatorText("Stick aim");
   bool twinStick = sTwinStick;
   if (ImGui::Checkbox("Twin stick (right stick aims)", &twinStick)) {
     SetTwinStick(twinStick);
     MarkDirty();
   }
+  ItemHelp("Twin stick uses the right stick as a direct camera aim (the same path as the mouse) and "
+           "consumes it, so it no longer free-looks. Fire stays on whatever is bound to A; remap it "
+           "in Controls > Controller.");
   ImGui::BeginDisabled(!sTwinStick);
   float stickRate = sStickAimRate;
   if (ImGui::SliderFloat("Stick aim speed", &stickRate, 100.f, 3000.f, "%.0f px/s",
@@ -3796,81 +5536,122 @@ void DrawInputTab() {
   }
   ImGui::EndDisabled();
   ImGui::EndDisabled();
-  ImGui::TextWrapped(
-      "Twin stick uses the right stick as a direct camera aim (the same path as "
-      "the mouse) and consumes it, so it no longer free-looks. Fire stays on "
-      "whatever is bound to A; remap it in the Controls tab.");
-  ImGui::SeparatorText("Hold or toggle");
-  bool lockOnToggle = sLockOnToggle;
-  if (ImGui::Checkbox("Toggle Lock-On", &lockOnToggle)) {
-    SetLockOnToggle(lockOnToggle);
+  PortControls::DrawController();
+}
+
+void DrawControlsTouchGyro() {
+#if defined(__ANDROID__)
+  ImGui::SeparatorText("Touch controls");
+  if (ImGui::Checkbox("Coloured buttons", &sTouchColors)) {
+    MarkDirty();
   }
-  ImGui::TextWrapped(
-      "Press L once to lock on, scan, strafe or grapple, and again to let go. "
-      "The lock also lets go by itself when its target is gone.");
-  bool stickyCharge = sStickyCharge;
-  if (ImGui::Checkbox("Sticky Charge", &stickyCharge)) {
-    SetStickyCharge(stickyCharge);
+  ItemHelp("Draws the on-screen buttons in the GameCube pad's colours: green A, red B, yellow "
+           "C-stick, purple Z. Off, they are plain and see-through.");
+  if (ImGui::Checkbox("Button descriptions", &sTouchLabels)) {
+    MarkDirty();
   }
-  ImGui::TextWrapped(
-      "Taps fire as usual. Hold fire for a moment and let go, and the beam keeps "
-      "charging; press fire again to shoot. Needs the Charge Beam.");
-  ImGui::SeparatorText("Morph ball");
-  bool fastMorph = sFastMorph;
-  if (ImGui::Checkbox("Fast Morph", &fastMorph)) {
-    SetFastMorph(fastMorph);
+  ItemHelp("Writes what each on-screen button does next to its letter (Fire, Jump, Lock...). "
+           "Off, only the letters are shown.");
+  int touchLayout = sTouchClassic ? 1 : sTouchTwinStick ? 2 : 0;
+  static const char* const kTouchLayouts[] = {"Default", "Classic GameCube", "Twin stick (Remastered)"};
+  if (ImGui::Combo("Layout", &touchLayout, kTouchLayouts, 3)) {
+    SetTouchClassic(touchLayout == 1);
+    SetTouchTwinStick(touchLayout == 2);
+    if (touchLayout == 2) {
+      // Remastered picks beams with Y + the D-pad, so twin starts with the D-pad, not the wheels.
+      SetTouchWheels(false);
+    }
   }
-  ImGui::TextWrapped(
-      "Morphing and unmorphing take a fraction of a second and keep your "
-      "momentum, as in Metroid Prime 4. Unmorphing on the ground caps speed at "
-      "walking speed; in the air the whole jump arc carries over.");
-  const int springRule = PortAp::SpringBallRule();
-  ImGui::BeginDisabled(springRule >= 0);
-  bool springBall = sSpringBall;
-  if (ImGui::Checkbox("Spring Ball (C-stick up)", &springBall)) {
-    SetSpringBall(springBall);
+  ItemHelp("Default: the GameCube pad without a C-stick; drag the free screen area to aim like a "
+           "mouse (the left stick strafes), and beams and visors come from the Visor and Beam "
+           "wheels. Classic GameCube: brings back the C-stick and the D-pad. Twin stick "
+           "(Remastered): a right stick that aims, with Remastered's Dual Sticks buttons (Jump, "
+           "Fire, Morph, Missile, LT Lock) and a D-pad for visors; hold Y (Beam) and press the D-pad to pick "
+           "a beam. The free-area drag stays on; the wheels can replace the D-pad.");
+  ImGui::BeginDisabled(!sTouchClassic);
+  bool touchAim = sTouchAim;
+  if (ImGui::Checkbox("Touch aim", &touchAim)) {
+    SetTouchAim(touchAim);
   }
+  ItemHelp("Drag a finger on the free screen area. Classic layout with twin stick off: dragging "
+           "sideways turns Samus, dragging up or down looks up or down like R free look and "
+           "levels out when you let go. Otherwise the view aims like a mouse, by the distance "
+           "dragged. Not while locked on or in the ball.");
   ImGui::EndDisabled();
-  bool swapScanXray = sSwapScanXray;
-  if (ImGui::Checkbox("Swap the Scan and X-Ray visor buttons", &swapScanXray)) {
-    SetSwapScanXray(swapScanXray);
+  bool touchMapTap = sTouchMapTap;
+  if (ImGui::Checkbox("Tap minimap for map", &touchMapTap)) {
+    SetTouchMapTap(touchMapTap);
   }
-  if (ImGui::IsItemHovered(ImGuiHoveredFlags_ForTooltip)) {
-    ImGui::SetTooltip("Each takes the other's D-pad direction, as in Metroid Prime\n"
-                      "Remastered's Dual Sticks layout. The Remastered controller preset\n"
-                      "turns it on and the other presets off.");
+  ItemHelp("Tapping the minimap opens the map; hides the GameCube layout's Z button.");
+  ImGui::BeginDisabled(!sTouchClassic && !sTouchTwinStick);
+  bool touchWheels = sTouchWheels;
+  if (ImGui::Checkbox("Beam and visor wheels", &touchWheels)) {
+    SetTouchWheels(touchWheels);
   }
-  if (springRule >= 0) {
-    ImGui::TextWrapped("Set by the connected Archipelago seed: %s.",
-                       springRule == 0   ? "off"
-                       : springRule == 1 ? "with the Morph Ball Bombs"
-                                         : "unlocked");
-  } else {
-    ImGui::TextWrapped(
-        "A small jump in morph ball, as in Metroid Prime Trilogy, once the Morph "
-        "Ball Bombs are held. Twin stick still passes the right stick up to it, "
-        "and the beam shift (X in the Remastered preset) springs too.");
-  }
-  bool springFlick = sSpringFlick;
-  if (ImGui::Checkbox("Spring Ball on gyro flick", &springFlick)) {
-    SetSpringBallFlick(springFlick);
-  }
-  ImGui::BeginDisabled(!sSpringFlick);
-  float flickRate = sSpringFlickRate;
-  if (ImGui::SliderFloat("Flick strength", &flickRate, 2.f, 20.f, "%.1f rad/s")) {
-    SetSpringBallFlickRate(flickRate);
-  }
+  ItemHelp("Replaces the D-pad with a Visor and a Beam button. Hold one, slide to a sector, "
+           "let go to pick. Letting go in the middle cancels. Off, the D-pad is back.");
   ImGui::EndDisabled();
-  ImGui::TextWrapped(
-      "Tilt the pad or phone up sharply to spring, like Trilogy's nunchuk flick. "
-      "Uses the gyro source below; gyro aim can stay off. Raise the strength if "
-      "it springs by accident.");
+  ImGui::BeginDisabled(!((!sTouchClassic && !sTouchTwinStick) || sTouchWheels));
+  bool touchVisorTapScan = sTouchVisorTapScan;
+  if (ImGui::Checkbox("Tap Visor for Scan Visor", &touchVisorTapScan)) {
+    SetTouchVisorTapScan(touchVisorTapScan);
+  }
+  ItemHelp("A quick tap on the Visor button (no slide) selects the Scan Visor.");
+  ImGui::EndDisabled();
+  ImGui::BeginDisabled(!(!sTouchClassic || sTouchAim));
+  float touchAimSpeed = sTouchAimSpeed;
+  if (ImGui::SliderFloat("Touch aim speed", &touchAimSpeed, 0.5f, 6.f, "%.2f px/dp",
+                         ImGuiSliderFlags_Logarithmic)) {
+    SetTouchAimSpeed(touchAimSpeed);
+  }
+  ItemHelp("How far the view turns per dp of finger travel. The default turns about 180 degrees "
+           "over a 400 dp drag at the default mouse sensitivity.");
+  ImGui::EndDisabled();
+  float sideMargin = sTouchSideMargin.load();
+  if (ImGui::SliderFloat("Side margin", &sideMargin, 0.f, kTouchMarginMaxDp, "%.0f dp")) {
+    sTouchSideMargin.store(sideMargin);
+    MarkDirty();
+  }
+  ItemHelp("Moves every on-screen control in from the left and right edges, for curved screen "
+           "edges or a case.");
+  float stickInset = sTouchStickInset.load();
+  if (ImGui::SliderFloat("Stick inset", &stickInset, 0.f, kTouchMarginMaxDp, "%.0f dp")) {
+    sTouchStickInset.store(stickInset);
+    MarkDirty();
+  }
+  ItemHelp("Extra room between the left stick and the screen's left edge, on top of the side "
+           "margin.");
+  float buttonInset = sTouchButtonInset.load();
+  if (ImGui::SliderFloat("Button inset", &buttonInset, 0.f, kTouchMarginMaxDp, "%.0f dp")) {
+    sTouchButtonInset.store(buttonInset);
+    MarkDirty();
+  }
+  ItemHelp("Extra room between the face buttons (and the classic C-stick) and the screen's right "
+           "edge, on top of the side margin.");
+  if (ImGui::Button("Reset margins")) {
+    sTouchSideMargin.store(kTouchSideMarginDefault);
+    sTouchStickInset.store(kTouchStickInsetDefault);
+    sTouchButtonInset.store(kTouchButtonInsetDefault);
+    MarkDirty();
+  }
+  if (ImGui::Button("Edit layout")) {
+    // The touch view takes the request and opens its editor over the game.
+    sTouchEditRequested.store(true, std::memory_order_release);
+    RequestToggle();
+  }
+  ItemHelp("Closes this menu and lets you drag each on-screen control to where you want it and "
+           "pinch it to resize. Done saves; Reset all puts everything back.");
+#endif
+
   ImGui::SeparatorText("Gyro aim");
   const char* gyroModes[] = {"Off", "Hold to aim", "Always aim"};
   int gyroMode = sGyroMode;
   if (ImGui::Combo("Mode", &gyroMode, gyroModes, 3)) {
     SetGyroMode(gyroMode);
   }
+  ItemHelp("Tilt the pad or the phone to aim. Hold to aim uses right stick click or left ctrl. Needs "
+           "mouse aim, twin stick or the touch controls (not the classic layout), since the gyro "
+           "feeds that same aim.");
   ImGui::BeginDisabled(sGyroMode == 0 && !sSpringFlick);
   const char* gyroSources[] = {"Auto", "Controller", "Phone"};
   int gyroSource = sGyroSource;
@@ -3886,37 +5667,20 @@ void DrawInputTab() {
                          ImGuiSliderFlags_Logarithmic)) {
     SetGyroRate(gyroRate);
   }
-  ImGui::TextWrapped(
-      "Tilt the pad or the phone to aim. Hold to aim uses right stick click or "
-      "left ctrl. Needs mouse aim or twin stick, since the gyro feeds that same "
-      "aim.");
   ImGui::EndDisabled();
 
-  if (ImGui::Checkbox("Invert mouse X", &sMouseInvertX)) {
-    MarkDirty();
+  bool springFlick = sSpringFlick;
+  if (ImGui::Checkbox("Spring Ball on gyro flick", &springFlick)) {
+    SetSpringBallFlick(springFlick);
   }
-  if (ImGui::Checkbox("Invert mouse Y", &sMouseInvertY)) {
-    MarkDirty();
+  ItemHelp("Tilt the pad or phone up sharply to spring, like Trilogy's nunchuk flick. Uses the gyro "
+           "source below; gyro aim can stay off. Raise the strength if it springs by accident.");
+  ImGui::BeginDisabled(!sSpringFlick);
+  float flickRate = sSpringFlickRate;
+  if (ImGui::SliderFloat("Flick strength", &flickRate, 2.f, 20.f, "%.1f rad/s")) {
+    SetSpringBallFlickRate(flickRate);
   }
-  if (ImGui::Checkbox("Mouse weapon buttons", &sMouseButtons)) {
-    sMouseButtonGate.Reset();
-    MarkDirty();
-  }
-  if (ImGui::Checkbox("Mouse-aim crosshair", &sMouseCrosshair)) {
-    MarkDirty();
-  }
-  int crosshairSize = sCrosshairSize;
-  if (ImGui::SliderInt("Crosshair size", &crosshairSize, kCrosshairSizeMin, kCrosshairSizeMax,
-                       "%d%%")) {
-    SetCrosshairSize(crosshairSize);
-  }
-  ImGui::TextUnformatted("Crosshair size applies under mouse aim and twin stick.");
-  ImGui::TextUnformatted("Mouse buttons are set in Controls > Keyboard & mouse.");
-  ImGui::TextUnformatted("Existing keyboard/controller weapon bindings also work.");
-  if (ImGui::SliderFloat("Sensitivity", &sMouseSensitivity, 0.0005f, 0.02f, "%.4f rad/px",
-                         ImGuiSliderFlags_Logarithmic)) {
-    MarkDirty();
-  }
+  ImGui::EndDisabled();
 }
 
 void DrawAudio() {
@@ -3933,38 +5697,55 @@ void DrawAudio() {
 }
 
 void DrawVoices() {
-  PortMusyxVoice voices[64];
-  const int count = MusyxPortCopyVoices(voices, 64);
-  if (count == 0) {
-    ImGui::TextUnformatted("No active MusyX voices.");
-    return;
-  }
-
   struct Agg {
     PortMusyxVoice voice;
     int instances;
   };
-  std::vector< Agg > aggs;
-  for (int i = 0; i < count; ++i) {
-    bool found = false;
-    for (Agg& agg : aggs) {
-      if (agg.voice.smpId == voices[i].smpId) {
-        ++agg.instances;
-        if (voices[i].rms > agg.voice.rms) {
-          agg.voice = voices[i];
+
+  // Held between frames so "Freeze list" can keep the last collection on screen.
+  // Ordered by id, not loudness: sorting by rms made rows swap places every
+  // frame as the levels moved, which made the checkboxes hard to hit and hid
+  // which sample a row belonged to.
+  static std::vector< Agg > aggs;
+  static bool freeze = false;
+
+  ImGui::Checkbox("Freeze list", &freeze);
+  ImGui::SameLine();
+  ImGui::TextUnformatted("(hold the current list so its rows stay put)");
+  ImGui::SetItemTooltip("Freezing keeps the samples and levels shown right now, so the rows\n"
+                        "stay readable while you look for one. Mute still applies: the\n"
+                        "checkbox reads and writes the live mute state, so you can silence\n"
+                        "a sample whether or not it is still playing. Untick to follow the\n"
+                        "live voices again. Not saved between runs.");
+
+  if (!freeze) {
+    aggs.clear();
+    PortMusyxVoice voices[64];
+    const int count = MusyxPortCopyVoices(voices, 64);
+    for (int i = 0; i < count; ++i) {
+      bool found = false;
+      for (Agg& agg : aggs) {
+        if (agg.voice.smpId == voices[i].smpId) {
+          ++agg.instances;
+          if (voices[i].rms > agg.voice.rms) {
+            agg.voice = voices[i];
+          }
+          found = true;
+          break;
         }
-        found = true;
-        break;
+      }
+      if (!found) {
+        aggs.push_back(Agg{voices[i], 1});
       }
     }
-    if (!found) {
-      aggs.push_back(Agg{voices[i], 1});
-    }
+    std::sort(aggs.begin(), aggs.end(),
+              [](const Agg& a, const Agg& b) { return a.voice.smpId < b.voice.smpId; });
   }
-  std::sort(aggs.begin(), aggs.end(),
-            [](const Agg& a, const Agg& b) { return a.voice.rms > b.voice.rms; });
 
-  ImGui::TextUnformatted("Active samples, loudest first. Mute one to isolate it.");
+  ImGui::TextUnformatted("Active samples, lowest id first. Mute one to isolate it.");
+  if (aggs.empty()) {
+    ImGui::TextUnformatted(freeze ? "No samples in the frozen list." : "No active MusyX voices.");
+  }
   for (const Agg& agg : aggs) {
     ImGui::PushID(static_cast< int >(agg.voice.smpId));
     bool muted = MusyxPortIsSampleMuted(agg.voice.smpId) != 0;
@@ -3978,6 +5759,8 @@ void DrawVoices() {
                 agg.voice.rms, agg.voice.volL, agg.voice.volR, agg.instances);
     ImGui::PopID();
   }
+  // Deliberately not behind the empty-list case above: with nothing playing
+  // there is still a mute set to clear.
   if (ImGui::Button("Unmute all")) {
     MusyxPortClearSampleMutes();
     MarkDirty();
@@ -4001,7 +5784,7 @@ void DrawArchipelagoConnect() {
     SDL_strlcpy(sPassword, saved.password.c_str(), sizeof(sPassword));
   }
 
-  ImGui::SeparatorText("Archipelago");
+  ImGui::SeparatorText("Connect");
   // The server doesn't send this option, so it is set here to match the seed.
   int suitDamage = sApSuitDamage;
   if (ImGui::Combo("Staggered suit damage", &suitDamage, "Default\0Progressive\0Additive\0")) {
@@ -4032,7 +5815,7 @@ void DrawArchipelagoConnect() {
     }
   }
   if (!sResult.empty())
-    ImGui::TextColored(ImVec4(1.0f, 0.45f, 0.4f, 1.0f), "%s", sResult.c_str());
+    ImGui::TextColored(ThemeBadColor(ImVec4(1.f, 0.45f, 0.4f, 1.f)), "%s", sResult.c_str());
   ImGui::TextDisabled("Start a new game after connecting to a new seed.");
 
   // Games played before, each with its own save card. The list is re-read now
@@ -4092,9 +5875,9 @@ ImVec4 ChatLineColor(const std::string& type) {
   if (type == "ServerChat" || type == "CommandResult" || type == "AdminCommandResult")
     return ImVec4(0.55f, 0.85f, 1.0f, 1.0f);
   if (type == "Hint")
-    return ImVec4(1.0f, 0.85f, 0.4f, 1.0f);
+    return ThemeWarnColor(ImVec4(1.0f, 0.85f, 0.4f, 1.0f));
   if (type == "ItemSend" || type == "ItemCheat")
-    return ImVec4(0.6f, 0.95f, 0.6f, 1.0f);
+    return ThemeGoodColor(ImVec4(0.6f, 0.95f, 0.6f, 1.0f));
   if (type == "Goal" || type == "Release" || type == "Collect" || type == "Countdown")
     return ImVec4(1.0f, 0.6f, 1.0f, 1.0f);
   if (type == "port")
@@ -4110,7 +5893,7 @@ void DrawChatTab() {
   static uint64_t sSeenSerial = ~uint64_t{0};
 
   if (!PortAp::Enabled()) {
-    ImGui::TextWrapped("Connect to an Archipelago room in the Session tab to chat.");
+    ImGui::TextWrapped("Connect to an Archipelago room on the Connection page to chat.");
     return;
   }
   uint64_t serial = 0;
@@ -4158,14 +5941,16 @@ void DrawChatTab() {
       sInput[0] = '\0';
   }
   if (!sError.empty())
-    ImGui::TextColored(ImVec4(1.0f, 0.5f, 0.5f, 1.0f), "%s", sError.c_str());
+    ImGui::TextColored(ThemeBadColor(ImVec4(1.f, 0.5f, 0.5f, 1.f)), "%s", sError.c_str());
   ImGui::PushStyleColor(ImGuiCol_Text, ImGui::GetStyleColorVec4(ImGuiCol_TextDisabled));
   ImGui::TextWrapped("Commands: !hint <item>, !hint_location <location>, !remaining, !release, "
                      "!collect, !help");
   ImGui::PopStyleColor();
 }
 
-void DrawSessionTab() {
+// Restart, screenshot and exit, plus the settings file; the top of the Game page (settings are on System).
+void DrawGameSection() {
+  ImGui::SeparatorText("Game");
   if (ImGui::Button("Restart to menu")) {
     RequestReset();
   }
@@ -4194,26 +5979,41 @@ void DrawSessionTab() {
     }
     ImGui::EndPopup();
   }
-  ImGui::Separator();
-  ImGui::TextUnformatted("Settings are saved automatically when changed.");
-  const std::string path = SettingsFilePath();
-  ImGui::TextWrapped("File: %s", path.c_str());
+}
+
+void DrawSettingsSection() {
+  ImGui::SeparatorText("Settings");
   if (ImGui::Button("Save settings now")) {
     sSettingsDirty = true;
     SaveSettings();
   }
   ImGui::SameLine();
   ImGui::TextUnformatted(sSettingsDirty ? "Unsaved changes" : "Saved");
+  ImGui::SetItemTooltip("Settings are saved automatically when changed.");
+  const std::string path = SettingsFilePath();
+  ImGui::PushStyleColor(ImGuiCol_Text, ImGui::GetStyleColorVec4(ImGuiCol_TextDisabled));
+  ImGui::TextWrapped("File: %s", path.c_str());
+  ImGui::PopStyleColor();
+}
 
+// The connection page of the Archipelago tab: the Connect form, recent games,
+// the session's status and the items received.
+void DrawArchipelagoSession() {
   DrawArchipelagoConnect();
   if (PortAp::Enabled()) {
-    ImGui::TextWrapped("Status: %s", PortAp::StatusText());
+    ImGui::SeparatorText("Archipelago status");
+    if (PortAp::Connected()) {
+      ImGui::TextColored(ThemeGoodColor(), "connected");
+    } else {
+      ImGui::TextDisabled("not connected");
+    }
+    ImGui::SameLine();
+    ImGui::TextWrapped("%s", PortAp::StatusText());
     const char* seedName = PortAp::SeedName();
     if (seedName != nullptr && seedName[0] != '\0')
       ImGui::TextWrapped("Seed: %s", seedName);
-    ImGui::Text("Items received: %d", PortAp::ItemCount());
-    ImGui::Text("Location checks sent: %d", PortAp::CheckCount());
-    ImGui::Text("Connection: %s", PortAp::Connected() ? "connected" : "not connected");
+    ImGui::Text("Items received: %d    Location checks sent: %d", PortAp::ItemCount(),
+                PortAp::CheckCount());
     const char* lastMessage = PortAp::LastMessage();
     if (lastMessage != nullptr && lastMessage[0] != '\0')
       ImGui::TextWrapped("Last message: %s", lastMessage);
@@ -4252,6 +6052,24 @@ void DrawSessionTab() {
       }
     }
   }
+}
+
+// Everything Archipelago in one tab: the connection and the multiworld's chat.
+bool SubTab(const char* page, const char* name);
+
+void DrawArchipelagoTab() {
+  if (!ImGui::BeginTabBar("apPages")) {
+    return;
+  }
+  if (SubTab("Archipelago", "Connection")) {
+    DrawArchipelagoSession();
+    ImGui::EndTabItem();
+  }
+  if (SubTab("Archipelago", "Chat")) {
+    DrawChatTab();
+    ImGui::EndTabItem();
+  }
+  ImGui::EndTabBar();
 }
 
 void GrantItem(CPlayerState& ps, CPlayerState::EItemType type, int amount, int capacity) {
@@ -4307,14 +6125,14 @@ void DrawCheats() {
   if (ImGui::Button("Grant everything")) {
     CheatGrantEverything();
   }
+  ImGui::SameLine();
   bool invulnerable = Invulnerable();
   if (ImGui::Checkbox("Invulnerable", &invulnerable)) {
     SetInvulnerable(invulnerable);
   }
-  ImGui::TextWrapped("Samus takes no damage from anything. Stays on until unticked.");
+  ImGui::SetItemTooltip("Samus takes no damage from anything. Stays on until unticked.");
 
-  ImGui::Separator();
-  ImGui::TextUnformatted("Abilities");
+  ImGui::SeparatorText("Abilities");
   struct SItemToggle {
     const char* name;
     CPlayerState::EItemType type;
@@ -4343,16 +6161,27 @@ void DrawCheats() {
       {"Varia Suit", CPlayerState::kIT_VariaSuit},
       {"Phazon Suit", CPlayerState::kIT_PhazonSuit},
   };
+  // As many columns as the widest name allows.
+  float nameWidth = 0.f;
   for (const SItemToggle& item : kItems) {
-    bool owned = ps->HasPowerUp(item.type);
-    if (ImGui::Checkbox(item.name, &owned)) {
-      if (owned) {
-        GrantItem(*ps, item.type, 1, 1);
-      } else {
-        ps->SetPowerUp(item.type, 0);
-        ps->SetPickup(item.type, 0);
+    nameWidth = std::max(nameWidth, ImGui::CalcTextSize(item.name).x);
+  }
+  nameWidth += ImGui::GetFrameHeight() + ImGui::GetStyle().ItemInnerSpacing.x + ImGui::GetStyle().ItemSpacing.x * 2.f;
+  const int columns = std::clamp(int(ImGui::GetContentRegionAvail().x / nameWidth), 1, 4);
+  if (ImGui::BeginTable("##abilities", columns)) {
+    for (const SItemToggle& item : kItems) {
+      ImGui::TableNextColumn();
+      bool owned = ps->HasPowerUp(item.type);
+      if (ImGui::Checkbox(item.name, &owned)) {
+        if (owned) {
+          GrantItem(*ps, item.type, 1, 1);
+        } else {
+          ps->SetPowerUp(item.type, 0);
+          ps->SetPickup(item.type, 0);
+        }
       }
     }
+    ImGui::EndTable();
   }
 
   int missiles = ps->GetItemAmount(CPlayerState::kIT_Missiles);
@@ -4369,8 +6198,7 @@ void DrawCheats() {
     ps->HealthInfo()->SetHP(ps->CalculateHealth());
   }
 
-  ImGui::Separator();
-  ImGui::TextUnformatted("Teleport");
+  ImGui::SeparatorText("Teleport");
   CWorld* world = mgr->World();
   if (world == nullptr) {
     ImGui::TextUnformatted("No world.");
@@ -4381,19 +6209,65 @@ void DrawCheats() {
   }
   const int areaCount = world->IGetAreaCount();
   const int current = world->GetCurrentAreaId().Value();
-  ImGui::Text("Current area: %d of %d", current, areaCount);
-  for (int i = 0; i < areaCount; ++i) {
-    ImGui::PushID(i);
-    if (ImGui::Button(i == current ? "Reload" : "Go")) {
-      PortDebug::RequestTeleport(i);
+  const std::vector< std::string >& roomNames = PortTracker::RoomNames(*world);
+  const auto roomLabel = [&](int i) {
+    char label[160];
+    if (i >= 0 && i < int(roomNames.size()) && !roomNames[i].empty()) {
+      std::snprintf(label, sizeof(label), "%d  %s", i, roomNames[i].c_str());
+    } else {
+      std::snprintf(label, sizeof(label), "Area %d", i);
     }
-    ImGui::SameLine();
-    ImGui::Text("Area %d", i);
-    ImGui::PopID();
+    return std::string(label);
+  };
+  // Only loaded areas (the current one and its neighbours) can be entered in place; any
+  // other area reloads the world straight into it.
+  const auto goToArea = [&](int i) {
+    const bool loaded = world->GetArea(TAreaId(i))->IsPostConstructed();
+    if (loaded || gpGameState == nullptr) {
+      PortDebug::RequestTeleport(i);
+    } else {
+      PortDebug::RequestWorldTeleport(
+          static_cast< uint32_t >(gpGameState->CurrentWorldAssetId()),
+          static_cast< uint32_t >(world->IGetAreaAlways(TAreaId(i))->IGetAreaAssetId()));
+    }
+  };
+  static char sRoomFilter[64] = {};
+  const float goWidth = ImGui::CalcTextSize("Reload").x + ImGui::GetStyle().FramePadding.x * 2.f;
+  ImGui::SetNextItemWidth(ImGui::GetContentRegionAvail().x - goWidth - ImGui::GetStyle().ItemSpacing.x);
+  if (ImGui::BeginCombo("##room", roomLabel(current).c_str(), ImGuiComboFlags_HeightLarge)) {
+#if !defined(__ANDROID__) // it would raise the on-screen keyboard every time
+    if (ImGui::IsWindowAppearing()) {
+      ImGui::SetKeyboardFocusHere();
+    }
+#endif
+    ImGui::SetNextItemWidth(-FLT_MIN);
+    ImGui::InputTextWithHint("##filter", "Filter rooms", sRoomFilter, sizeof(sRoomFilter));
+    for (int i = 0; i < areaCount; ++i) {
+      const std::string label = roomLabel(i);
+      if (sRoomFilter[0] != '\0' && SDL_strcasestr(label.c_str(), sRoomFilter) == nullptr) {
+        continue;
+      }
+      const bool loaded = world->GetArea(TAreaId(i))->IsPostConstructed();
+      ImGui::PushID(i);
+      if (!loaded) {
+        ImGui::PushStyleColor(ImGuiCol_Text, ImGui::GetStyleColorVec4(ImGuiCol_TextDisabled));
+      }
+      if (ImGui::Selectable(label.c_str(), i == current)) {
+        goToArea(i);
+      }
+      if (!loaded) {
+        ImGui::PopStyleColor();
+      }
+      ImGui::PopID();
+    }
+    ImGui::EndCombo();
+  }
+  ImGui::SetItemTooltip("Pick a room to go there. Greyed rooms aren't loaded: going there reloads the world.");
+  ImGui::SameLine();
+  if (ImGui::Button("Reload")) {
+    goToArea(current);
   }
 
-  ImGui::Separator();
-  ImGui::TextUnformatted("Worlds");
   if (gpMemoryCard == nullptr) {
     ImGui::TextUnformatted("(memory card not ready)");
     return;
@@ -4424,17 +6298,25 @@ void DrawCheats() {
     ImGui::TextUnformatted("(loading worlds...)");
     return;
   }
+  const char* currentWorld = "(another world)";
   for (const std::pair< uint32_t, std::string >& entry : sWorldList) {
-    ImGui::PushID(static_cast< int >(entry.first));
-    const bool isCurrent =
-        gpGameState != nullptr && gpGameState->CurrentWorldAssetId() == entry.first;
-    if (ImGui::Button(isCurrent ? "Here" : "Go")) {
-      PortDebug::RequestWorldTeleport(entry.first, 0u);
+    if (gpGameState != nullptr && gpGameState->CurrentWorldAssetId() == entry.first) {
+      currentWorld = entry.second.c_str();
     }
-    ImGui::SameLine();
-    ImGui::TextUnformatted(entry.second.c_str());
-    ImGui::PopID();
   }
+  ImGui::SetNextItemWidth(-FLT_MIN);
+  if (ImGui::BeginCombo("##world", currentWorld)) {
+    for (const std::pair< uint32_t, std::string >& entry : sWorldList) {
+      ImGui::PushID(static_cast< int >(entry.first));
+      const bool isCurrent = gpGameState != nullptr && gpGameState->CurrentWorldAssetId() == entry.first;
+      if (ImGui::Selectable(entry.second.c_str(), isCurrent)) {
+        PortDebug::RequestWorldTeleport(entry.first, 0u);
+      }
+      ImGui::PopID();
+    }
+    ImGui::EndCombo();
+  }
+  ImGui::SetItemTooltip("Pick a world to go to its start.");
 }
 
 // The free camera: the view leaves the player, who stands still meanwhile.
@@ -4483,103 +6365,27 @@ void DrawFreeCam() {
 // The switches and readouts for working on what mods draw: room geometry, room
 // environments, PBR.
 void DrawRendering() {
-  int view = PortDebug::PbrView();
-  if (ImGui::BeginCombo("PBR surfaces show", view == 0 ? "the shaded result" : PortDebug::PbrViewName(view))) {
-    for (int i = 0; i < PortDebug::PbrViewCount(); ++i) {
-      if (ImGui::Selectable(i == 0 ? "the shaded result" : PortDebug::PbrViewName(i), i == view)) {
-        PortDebug::SetPbrView(i);
-      }
-    }
-    ImGui::EndCombo();
+  ImGui::TextDisabled("Hover a setting for what it does and the recommended value. They reset at each start.");
+  static const char* const kCollisionModes[] = {"off", "on top of the world", "only (hide the world)"};
+  int collision = int(PortCollisionView::GetMode());
+  if (ImGui::Combo("Collision", &collision, kCollisionModes, 3)) {
+    PortCollisionView::SetMode(PortCollisionView::Mode(collision));
   }
-  static const char* const kProbes[] = {"off", "on", "mirror", "window"};
-  int probe = std::clamp(CCubeMaterial::sPortPBRProbeMode, 0, 3);
-  if (ImGui::Combo("Reflection probe", &probe, kProbes, 4)) {
-    CCubeMaterial::sPortPBRProbeMode = probe;
-  }
-  bool font = PortHdFont::Enabled();
-  if (ImGui::Checkbox("HD font", &font)) {
-    PortHdFont::SetEnabled(font);
-  }
+  ImGui::SetItemTooltip("Recommended: off.\n"
+                        "Draws what Samus collides with: walls grey, floors blue, ceilings red,\n"
+                        "lava orange, grates yellow, solid objects as orange boxes.");
 
-  static const char* const kModes[] = {"off", "in place of the room", "on top of the room"};
-  int mode = int(PortRoomGeo::GetMode());
-  if (ImGui::Combo("Room geometry", &mode, kModes, 3)) {
-    PortRoomGeo::SetMode(PortRoomGeo::Mode(mode));
-  }
-  bool areaLights = PortRoomGeo::AreaLights();
-  if (ImGui::Checkbox("Room geometry takes the area's lights", &areaLights)) {
-    PortRoomGeo::SetAreaLights(areaLights);
-  }
-  bool env = PortRoomEnv::Enabled();
-  if (ImGui::Checkbox("Room environments", &env)) {
-    PortRoomEnv::SetEnabled(env);
-  }
-  ImGui::BeginDisabled(!env);
-  bool exposed = PortRoomEnv::RoomExposed();
-  if (ImGui::Checkbox("Exposure by room", &exposed)) {
-    PortRoomEnv::SetRoomExposed(exposed);
-  }
-  ImGui::SameLine();
-  bool volumes = PortRoomEnv::VolumesEnabled();
-  if (ImGui::Checkbox("Baked light per pixel", &volumes)) {
-    PortRoomEnv::SetVolumesEnabled(volumes);
-  }
-  float ambient = PortRoomEnv::AmbientScale();
-  if (ImGui::SliderFloat("Baked ambient scale", &ambient, 0.f, 4.f, "%.2f")) {
-    PortRoomEnv::SetAmbientScale(ambient);
-  }
-  static const char* const kVolumeViews[] = {"the shaded surface", "volume coordinates", "the baked light"};
-  int volumeView = std::clamp(PortRoomEnv::VolumeView(), 0, 2);
-  if (ImGui::Combo("Baked surfaces show", &volumeView, kVolumeViews, 3)) {
-    PortRoomEnv::SetVolumeView(volumeView);
-  }
-  ImGui::EndDisabled();
-
-  // What the middle of the screen looks at.
-  static std::string picked;
-  static uint32_t pickedModel = 0;
-  static std::string materials;
-  float origin[3];
-  float forward[3];
-  const bool inWorld = PortDebug::ViewRay(origin, forward);
-  ImGui::BeginDisabled(!inWorld);
-  if (ImGui::Button("Pick the model ahead")) {
-    picked.clear();
-    pickedModel = PortRoomGeo::Pick(CVector3f(origin[0], origin[1], origin[2]),
-                                    CVector3f(forward[0], forward[1], forward[2]), picked);
-    materials = pickedModel != 0 ? PortRoomGeo::Materials(pickedModel) : std::string();
-    if (picked.empty()) {
-      picked = "No room geometry ahead.";
-    }
-  }
-  ImGui::EndDisabled();
-  if (pickedModel != 0) {
-    ImGui::SameLine();
-    if (ImGui::Button("Hide it")) {
-      PortRoomGeo::SetHidden(pickedModel, true);
-    }
-  }
-  ImGui::SameLine();
-  if (ImGui::Button("Show all")) {
-    PortRoomGeo::SetHidden(0, false);
-  }
-  if (!picked.empty()) {
-    ImGui::TextUnformatted(picked.c_str());
-  }
-  if (!materials.empty() && ImGui::TreeNode("Materials of the first")) {
-    ImGui::TextUnformatted(materials.c_str());
-    ImGui::TreePop();
-  }
-
-  if (ImGui::TreeNode("Frame")) {
+  if (ImGui::CollapsingHeader("Frame statistics")) {
     if (const AuroraStats* stats = aurora_get_stats()) {
-      ImGui::Text("%.0f fps, %u draws (%u merged), %u PBR", aurora_get_fps(), stats->drawCallCount,
-                  stats->mergedDrawCallCount, CCubeMaterial::sPortPBRDraws);
+      ImGui::Text("%.0f fps, %u draws (%u merged), %u PBR, %u passes", aurora_get_fps(), stats->drawCallCount,
+                  stats->mergedDrawCallCount, CCubeMaterial::sPortPBRDraws, stats->renderPassCount);
       ImGui::Text("vertices %.1f MiB, indices %.1f, arrays %.1f, uniforms %.1f, texture uploads %.1f",
                   stats->lastVertSize / 1048576.f, stats->lastIndexSize / 1048576.f,
                   stats->lastStorageSize / 1048576.f, stats->lastUniformSize / 1048576.f,
                   stats->lastTextureUploadSize / 1048576.f);
+      if (const uint32_t resident = aurora_get_resident_geometry_mib()) {
+        ImGui::Text("kept on the GPU %.1f of %u MiB", aurora_get_resident_geometry_used() / 1048576.f, resident);
+      }
       ImGui::Text("pipelines %u made, %u waiting", stats->createdPipelines, stats->queuedPipelines);
     }
     AuroraTextureStats textures{};
@@ -4594,27 +6400,349 @@ void DrawRendering() {
     PortRoomGeo::Stats(areas, instances, models, loaded, drawn);
     ImGui::Text("room geometry: %d area(s), %d of %d model(s) loaded, %d of %d instance(s) drawn", areas, loaded,
                 models, drawn, instances);
-    ImGui::TreePop();
   }
-  if (inWorld && ImGui::TreeNode("Room environment here")) {
-    ImGui::TextUnformatted(PortRoomEnv::Info(origin).c_str());
-    ImGui::TreePop();
+}
+void DrawRemasteredWarning() {
+  {
+    const ImVec4 bad = ThemeBadColor();
+    ImGui::PushStyleColor(ImGuiCol_ChildBg, ImVec4(bad.x * 0.25f, bad.y * 0.25f, bad.z * 0.25f, 0.6f));
+    ImGui::PushStyleColor(ImGuiCol_Border, bad);
+    ImGui::PushStyleVar(ImGuiStyleVar_ChildBorderSize, 2.f);
+    ImGui::BeginChild("RemasteredWarning", ImVec2(0.f, 0.f),
+                      ImGuiChildFlags_Borders | ImGuiChildFlags_AutoResizeY | ImGuiChildFlags_AlwaysUseWindowPadding);
+    ImGui::SetWindowFontScale(1.6f);
+    ImGui::TextColored(bad, "EXPERIMENTAL - EXPECT BREAKAGE");
+    ImGui::SetWindowFontScale(1.f);
+    ImGui::TextWrapped("Remastered support is unfinished and broken in places. Expect wrong materials, missing or "
+                       "misplaced models and effects, visual glitches, slowdowns and crashes. Re-imports are often "
+                       "needed after updates.");
+    ImGui::EndChild();
+    ImGui::PopStyleVar();
+    ImGui::PopStyleColor(2);
+  }
+
+}
+
+void DrawLanguageSection() {
+  ImGui::SeparatorText("Language");
+  {
+    int language = 0;
+    const char* current = TextLanguage();
+    for (size_t i = 0; i < PortRemastered::kTextLanguageCount; ++i) {
+      if (std::strcmp(current, PortRemastered::kTextLanguages[i].code) == 0) {
+        language = static_cast< int >(i) + 1;
+      }
+    }
+    const auto name = [](void*, int index) {
+      return index == 0 ? "English" : PortRemastered::kTextLanguages[index - 1].name;
+    };
+    if (ImGui::Combo("Language", &language, name, nullptr,
+                     static_cast< int >(PortRemastered::kTextLanguageCount) + 1)) {
+      SetTextLanguage(language == 0 ? "" : PortRemastered::kTextLanguages[language - 1].code);
+    }
+    ItemHelp("The language of the game's text. Only English is on the disc: the others come with the "
+             "Remastered import (its text), and any text it lacks stays English. Text already on "
+             "screen changes the next time its menu or screen opens.");
+  }
+
+}
+
+// What a player sets for Remastered's rooms; the rest is under Debug.
+void DrawRemasteredRoomModels() {
+  ImGui::SeparatorText("Room models");
+  // The frame's buffers are only sized for room geometry when the game started with some.
+  const bool geoReady = PortRoomGeo::BuffersReady();
+  if (!geoReady && PortMods::RoomGeometryLoaded()) {
+    ImGui::TextColored(ThemeWarnColor(), "Restart the game to see the Remastered rooms.");
+    ImGui::SetItemTooltip("The game started without room geometry installed, so it set no room aside\n"
+                          "for it. Once it starts with some, mods can be changed without a restart.");
+  }
+  ImGui::BeginDisabled(!geoReady);
+  static const char* const kModes[] = {"off", "in place of the room", "on top of the room"};
+  int mode = int(PortRoomGeo::GetMode());
+  if (ImGui::Combo("Room geometry", &mode, kModes, 3)) {
+    PortRoomGeo::SetMode(PortRoomGeo::Mode(mode));
+  }
+  ImGui::SetItemTooltip("Recommended: in place of the room.\n"
+                        "Draws a mod's Remastered room models instead of the original rooms, or on\n"
+                        "top of them to compare the two. Does nothing without a room geometry mod.");
+#ifdef __ANDROID__
+  // The defaults (MSAA off, 1x) are fine; this catches a phone set up for the original rooms.
+  if (PortRoomGeo::GetMode() != PortRoomGeo::Mode::Off && (sMsaa > 1 || sRenderScale <= 0.f || sRenderScale > 2.f)) {
+    ImGui::TextColored(ThemeWarnColor(), "Slow on phones with MSAA or native scale.");
+    ImGui::SameLine();
+    if (ImGui::SmallButton("Use 2x, MSAA off")) {
+      SetMsaa(1);
+      SetRenderScale(2.f);
+      MarkDirty();
+    }
+    ImGui::SetItemTooltip("Turns anti-aliasing off and sets the EFB scale to 2x (the Quality settings).\n"
+                          "The Remastered rooms draw many more models, and a phone's GPU pays for\n"
+                          "each one at every pixel it renders.");
+  }
+#endif
+  bool areaLights = PortRoomGeo::AreaLights();
+  if (ImGui::Checkbox("Take the area's lights", &areaLights)) {
+    PortRoomGeo::SetAreaLights(areaLights);
+  }
+  ImGui::SetItemTooltip("Recommended: off.\n"
+                        "Also lights the Remastered rooms with the game's own lights where the room\n"
+                        "has baked light. Off matches Remastered.");
+  float minPixels = PortRoomGeo::MinPixels();
+  if (ImGui::SliderFloat("Skip small models", &minPixels, 0.f, 8.f, minPixels > 0.f ? "under %.1f px" : "off")) {
+    PortRoomGeo::SetMinPixels(minPixels);
+    MarkDirty();
+  }
+  ImGui::SetItemTooltip("Leaves out room models that look smaller than this on screen (in the game's\n"
+                        "own 480-line pixels, whatever the render scale). Raise it if frames are\n"
+                        "slow; 0 draws everything.");
+  float lodDistance = PortRoomGeo::LodDistance();
+  if (ImGui::SliderFloat("Detail distance", &lodDistance, 0.f, 4.f, lodDistance > 0.f ? "x%.2f" : "full detail")) {
+    PortRoomGeo::SetLodDistance(lodDistance);
+    MarkDirty();
+  }
+  ImGui::SetItemTooltip("Where room models switch to Remastered's simpler versions of themselves\n"
+                        "farther away: 1 is Remastered's own distances, higher keeps the full models\n"
+                        "farther out, 0 never switches. Lower it if frames are slow. Needs an import\n"
+                        "made by this version.");
+  ImGui::EndDisabled();
+  bool resident = sRoomGeoResident;
+  if (ImGui::Checkbox("Keep on the GPU (next start)", &resident)) {
+    PortDebug::SetRoomGeoResident(resident);
+  }
+  ImGui::SetItemTooltip(
+      "Recommended: on.\n"
+      "Uploads a room geometry mod's models once when they load instead of\n"
+      "every frame, so a frame's buffers can be smaller. Takes effect from the\n"
+      "next start.");
+
+}
+
+void DrawRemasteredTab() {
+  DrawRemasteredWarning();
+  ImGui::SeparatorText("Import");
+  DrawRemasteredImport();
+
+  ImGui::SeparatorText("Gallery");
+  {
+    const std::vector<std::string> pictures = PortMods::GalleryPaths();
+    if (pictures.empty()) {
+      ImGui::TextDisabled("Remastered's concept art. It comes with the Remastered import.");
+    } else if (ImGui::Button(("Open gallery (" + std::to_string(pictures.size()) + " pictures)").c_str())) {
+      sGalleryPaths = pictures;
+      sGalleryIndex = std::min(sGalleryIndex, int(pictures.size()) - 1);
+      ReleaseGalleryTexture();
+      sGalleryOpen = true;
+    }
+  }
+
+  DrawRemasteredRoomModels();
+}
+
+// The Remastered pass tests and inspectors, for the Debug page.
+void DrawRemasteredDebug() {
+  ImGui::SeparatorText("Remastered");
+  // What the middle of the screen looks at.
+  float origin[3];
+  float forward[3];
+  const bool inWorld = PortDebug::ViewRay(origin, forward);
+
+  if (ImGui::CollapsingHeader("Remastered room models")) {
+    // The frame's buffers are only sized for room geometry when the game started with some.
+    const bool geoReady = PortRoomGeo::BuffersReady();
+    if (!geoReady && PortMods::RoomGeometryLoaded()) {
+      ImGui::TextColored(ThemeWarnColor(), "Restart the game to see the Remastered rooms.");
+      ImGui::SetItemTooltip("The game started without room geometry installed, so it set no room aside\n"
+                            "for it. Once it starts with some, mods can be changed without a restart.");
+    }
+    ImGui::BeginDisabled(!geoReady);
+    bool merged = PortRoomGeo::MergedDraws();
+    if (ImGui::Checkbox("Draw merged copies", &merged)) {
+      PortRoomGeo::SetMergedDraws(merged);
+    }
+    ImGui::SetItemTooltip("Recommended: on. Not saved.\n"
+                          "Draws repeated props (rocks, grass) near each other as one model, lit as\n"
+                          "a group. Off draws each copy on its own, with its own lights: slower, but a\n"
+                          "way to check whether the merge changes how something looks.");
+    bool frontToBack = PortRoomGeo::FrontToBack();
+    if (ImGui::Checkbox("Draw nearest first", &frontToBack)) {
+      PortRoomGeo::SetFrontToBack(frontToBack);
+    }
+    ImGui::SetItemTooltip("Recommended: on. Not saved.\n"
+                          "Draws the room's solid models nearest first, so the GPU skips shading what\n"
+                          "they hide. Looks the same either way; off is for comparing frame rates.");
+    bool prepass = PortRoomGeo::DepthPrepass();
+    if (ImGui::Checkbox("Depth pre-pass for cut-outs", &prepass)) {
+      PortRoomGeo::SetDepthPrepass(prepass);
+    }
+    ImGui::SetItemTooltip("Recommended: off. Not saved. Needs \"Draw nearest first\".\n"
+                          "Draws grass and leaves once for depth only, then shades just the parts that\n"
+                          "stay in front. Looks the same either way; slower on the phones tried so far.");
+    static constexpr const char* kCostTests[] = {"Off", "Flat", "No lights", "No ambient volume",
+                                                 "No reflections", "No normal maps", "No ORM/emissive maps",
+                                                 "Maps only", "Maps without anisotropy",
+                                                 "Maps without anisotropy or mip blend",
+                                                 "No post-processing", "No screen copies", "No bloom",
+                                                 "Post without the frame copy",
+                                                 "Post without the depth reload",
+                                                 "Post always reloading the depth"};
+    static bool gpuTimes = false;
+    if (ImGui::Checkbox("GPU pass times", &gpuTimes)) {
+      GXPortSetGpuTimes(gpuTimes ? GX_TRUE : GX_FALSE);
+    }
+    ImGui::SetItemTooltip("Not saved. Times each render pass on the GPU (timestamp queries), averaged\n"
+                          "over 60 frames. Total is the sum of the passes; span is first start to last end.");
+    if (gpuTimes) {
+      if (!GXPortGpuTimesSupported()) {
+        ImGui::TextUnformatted("timestamps unsupported");
+      } else {
+        GXPortGpuTime times[32];
+        float total = 0.f;
+        float span = 0.f;
+        const u32 count = GXPortGetGpuTimes(times, 32, &total, &span);
+        if (count == 0) {
+          ImGui::TextUnformatted("collecting...");
+        } else if (ImGui::BeginTable("gputimes", 3, ImGuiTableFlags_SizingFixedFit)) {
+          ImGui::TableSetupColumn("Pass");
+          ImGui::TableSetupColumn("ms");
+          ImGui::TableSetupColumn("x");
+          ImGui::TableHeadersRow();
+          for (u32 i = 0; i < count; ++i) {
+            ImGui::TableNextRow();
+            ImGui::TableNextColumn();
+            ImGui::TextUnformatted(times[i].name);
+            ImGui::TableNextColumn();
+            ImGui::Text("%.3f", times[i].msPerFrame);
+            ImGui::TableNextColumn();
+            ImGui::Text("%.2f", times[i].passesPerFrame);
+          }
+          ImGui::EndTable();
+          ImGui::Text("Total %.3f ms, span %.3f ms", total, span);
+        }
+      }
+    }
+    int costTest = int(GXGetPBRCostTest());
+    if (ImGui::Combo("Shading cost test", &costTest, kCostTests, IM_ARRAYSIZE(kCostTests))) {
+      GXSetPBRCostTest(u32(costTest));
+    }
+    ImGui::SetItemTooltip("Not saved. A speed test: leaves out one part of the Remastered surfaces'\n"
+                          "shading (Flat leaves out all of it but the colour map), so the frame rate\n"
+                          "shows what that part costs. Maps only is Flat with every map still read, to\n"
+                          "tell reading the maps from the maths. Looks wrong on purpose. The two\n"
+                          "without anisotropy shade in full but filter the maps more cheaply, and look a\n"
+                          "little softer. The rest time the frame around the shading: no bloom and\n"
+                          "colour grade, no copies of the screen for effects such as heat haze, and\n"
+                          "then one part of the post-processing at a time: the bloom (the grade stays),\n"
+                          "its copy of the frame, and reloading depth for the HUD after it. The last\n"
+                          "looks right: it reloads the depth even when the HUD doesn't need it.");
+    ImGui::EndDisabled();
+
+    static std::string picked;
+    static uint32_t pickedModel = 0;
+    static std::string materials;
+    ImGui::BeginDisabled(!inWorld);
+    if (ImGui::Button("Pick the model ahead")) {
+      picked.clear();
+      pickedModel = PortRoomGeo::Pick(CVector3f(origin[0], origin[1], origin[2]),
+                                      CVector3f(forward[0], forward[1], forward[2]), picked);
+      materials = pickedModel != 0 ? PortRoomGeo::Materials(pickedModel) : std::string();
+      if (picked.empty()) {
+        picked = "No room geometry ahead.";
+      }
+    }
+    ImGui::SetItemTooltip("Names the room model in the middle of the screen and lists its materials.");
+    ImGui::EndDisabled();
+    if (pickedModel != 0) {
+      ImGui::SameLine();
+      if (ImGui::Button("Hide it")) {
+        PortRoomGeo::SetHidden(pickedModel, true);
+      }
+    }
+    ImGui::SameLine();
+    if (ImGui::Button("Show all")) {
+      PortRoomGeo::SetHidden(0, false);
+    }
+    if (!picked.empty()) {
+      ImGui::TextUnformatted(picked.c_str());
+    }
+    if (!materials.empty() && ImGui::TreeNode("Materials of the first")) {
+      ImGui::TextUnformatted(materials.c_str());
+      ImGui::TreePop();
+    }
+  }
+
+  if (ImGui::CollapsingHeader("Remastered materials and lighting")) {
+    int view = PortDebug::PbrView();
+    if (ImGui::BeginCombo("PBR surfaces show", view == 0 ? "the shaded result" : PortDebug::PbrViewName(view))) {
+      for (int i = 0; i < PortDebug::PbrViewCount(); ++i) {
+        if (ImGui::Selectable(i == 0 ? "the shaded result" : PortDebug::PbrViewName(i), i == view)) {
+          PortDebug::SetPbrView(i);
+        }
+      }
+      ImGui::EndCombo();
+    }
+    ImGui::SetItemTooltip("Recommended: the shaded result.\n"
+                          "The other choices show one input of a mod's PBR materials alone: base colour\n"
+                          "(albedo), normals, roughness, metalness, ambient occlusion, ambient light,\n"
+                          "reflection, glow, exposure, or the material kind.");
+    static const char* const kProbes[] = {"off", "on", "mirror", "window"};
+    int probe = std::clamp(CCubeMaterial::sPortPBRProbeMode, 0, 3);
+    if (ImGui::Combo("Reflection probe", &probe, kProbes, 4)) {
+      CCubeMaterial::sPortPBRProbeMode = probe;
+    }
+    ImGui::SetItemTooltip("Recommended: on.\n"
+                          "Where shiny PBR surfaces get their reflections: the room's own cube when\n"
+                          "the mod has one, otherwise a live capture of the world around the camera.\n"
+                          "Mirror and window draw surfaces as perfect mirrors of it, or windows onto it,\n"
+                          "to check what it holds.");
+
+    bool env = PortRoomEnv::Enabled();
+    if (ImGui::Checkbox("Room environments", &env)) {
+      PortRoomEnv::SetEnabled(env);
+    }
+    ImGui::SetItemTooltip("Recommended: on.\n"
+                          "Uses the lighting a mod brings for each room: its reflection cubes, baked\n"
+                          "ambient light, exposure and bloom.");
+    ImGui::BeginDisabled(!env);
+    ImGui::SameLine();
+    bool exposed = PortRoomEnv::RoomExposed();
+    if (ImGui::Checkbox("Exposure by room", &exposed)) {
+      PortRoomEnv::SetRoomExposed(exposed);
+    }
+    ImGui::SetItemTooltip("Recommended: on.\n"
+                          "Sets the brightness as Remastered does, from the room the camera is in and\n"
+                          "its tone curve. Off exposes every reflection cube to a neutral middle grey.");
+    ImGui::SameLine();
+    bool volumes = PortRoomEnv::VolumesEnabled();
+    if (ImGui::Checkbox("Baked light per pixel", &volumes)) {
+      PortRoomEnv::SetVolumesEnabled(volumes);
+    }
+    ImGui::SetItemTooltip("Recommended: on.\n"
+                          "Lights the Remastered rooms from the room's grid of baked light, so the light\n"
+                          "changes across a surface. Off gives each model one ambient colour.");
+    float ambient = PortRoomEnv::AmbientScale();
+    if (ImGui::SliderFloat("Baked ambient scale", &ambient, 0.f, 4.f, "%.2f")) {
+      PortRoomEnv::SetAmbientScale(ambient);
+    }
+    ImGui::SetItemTooltip("Recommended: 1.\n"
+                          "Multiplies the baked ambient light. 0 uses the game's own ambient instead.");
+    static const char* const kVolumeViews[] = {"the shaded surface", "volume coordinates", "the baked light"};
+    int volumeView = std::clamp(PortRoomEnv::VolumeView(), 0, 2);
+    if (ImGui::Combo("Baked surfaces show", &volumeView, kVolumeViews, 3)) {
+      PortRoomEnv::SetVolumeView(volumeView);
+    }
+    ImGui::SetItemTooltip("Recommended: the shaded surface.\n"
+                          "The others show where each pixel samples the baked light grid, or the baked\n"
+                          "light alone, to check it lines up.");
+    ImGui::EndDisabled();
+    if (inWorld && ImGui::TreeNode("Room environment here")) {
+      ImGui::TextUnformatted(PortRoomEnv::Info(origin).c_str());
+      ImGui::TreePop();
+    }
   }
 }
 
-void DrawDebugTab() {
-  ImGui::SeparatorText("Camera");
-  DrawFreeCam();
-
-  ImGui::SeparatorText("Rendering");
-  DrawRendering();
-
-  ImGui::SeparatorText("Audio");
-  DrawAudio();
-  if (ImGui::CollapsingHeader("Voices")) {
-    DrawVoices();
-  }
-
+void DrawLogSection() {
   ImGui::SeparatorText("Log");
   bool logFile = sLogFile || PortLogFile::Active();
   if (ImGui::Checkbox("Write the log to a file", &logFile)) {
@@ -4624,6 +6752,12 @@ void DrawDebugTab() {
     }
   }
   const std::string logPath = PortLogFile::Path();
+  if (!logPath.empty()) {
+    ImGui::SameLine();
+    if (ImGui::Button("Copy log path")) {
+      ImGui::SetClipboardText(logPath.c_str());
+    }
+  }
   if (PortLogFile::Active()) {
     ImGui::TextWrapped("Writing to %s (last run's: metroid_prime_port.old.log).", logPath.c_str());
     if (!sLogFile) {
@@ -4633,10 +6767,13 @@ void DrawDebugTab() {
     ImGui::TextWrapped("Everything the game logs, including the reason for a crash, goes to %s.",
                        logPath.empty() ? "(no user folder)" : logPath.c_str());
   }
-  if (!logPath.empty() && ImGui::Button("Copy log path")) {
-    ImGui::SetClipboardText(logPath.c_str());
+  if (const std::string shared = PortLogFile::SharedPath(); !shared.empty()) {
+    ImGui::TextWrapped("A copy goes to %s, which the phone's file manager can open.", shared.c_str());
   }
 
+}
+
+void DrawDebugTab() {
   ImGui::SeparatorText("Cheats");
   bool cheats = sCheats;
   if (ImGui::Checkbox("Show cheats (items, health, teleport)", &cheats)) {
@@ -4646,12 +6783,24 @@ void DrawDebugTab() {
   if (sCheats) {
     DrawCheats();
   }
+
+  ImGui::SeparatorText("Camera");
+  DrawFreeCam();
+
+  ImGui::SeparatorText("Rendering");
+  DrawRendering();
+
+  ImGui::SeparatorText("Audio backends");
+  DrawAudio();
+  if (ImGui::CollapsingHeader("Sounds playing")) {
+    DrawVoices();
+  }
 }
 
 void DrawTrackerCount(const char* label, const PortTracker::Count& count) {
   const bool done = count.total > 0 && count.have >= count.total;
   if (done) {
-    ImGui::TextColored(ImVec4(0.4f, 1.f, 0.4f, 1.f), "%s %d/%d", label, count.have, count.total);
+    ImGui::TextColored(ThemeGoodColor(), "%s %d/%d", label, count.have, count.total);
   } else {
     ImGui::Text("%s %d/%d", label, count.have, count.total);
   }
@@ -4668,6 +6817,9 @@ void DrawTrackerLogic() {
   if (ImGui::Checkbox("Colour the map's dots by logic", &colors)) {
     SetMapLogicColors(colors);
   }
+  ItemHelp("Worked out from the items received and the seed's logic options, with the rules of the "
+           "Metroid Prime Archipelago tracker pack. Green is in logic; yellow can be reached with a "
+           "trick the seed doesn't count on; blue can be seen but not collected.");
   static const ImVec4 kColors[] = {
       ImVec4(0.95f, 0.30f, 0.30f, 1.f), // out of logic
       ImVec4(0.35f, 0.60f, 1.00f, 1.f), // inspect
@@ -4695,10 +6847,6 @@ void DrawTrackerLogic() {
   ImGui::TextColored(kColors[0], "%d out of reach", totals[0]);
   ImGui::SameLine();
   ImGui::TextColored(kGrey, "%d checked", checked);
-  ImGui::TextWrapped(
-      "Worked out from the items received and the seed's logic options, with the rules of "
-      "the Metroid Prime Archipelago tracker pack. Green is in logic; yellow can be reached "
-      "with a trick the seed doesn't count on; blue can be seen but not collected.");
 
   // One header per area, holding what can be reached there, best first.
   const char* area = nullptr;
@@ -4743,6 +6891,8 @@ void DrawTrackerLogic() {
       }
     }
   }
+
+  DrawRemasteredDebug();
 }
 
 void DrawTrackerTab() {
@@ -4750,24 +6900,34 @@ void DrawTrackerTab() {
   if (ImGui::Checkbox("Reveal map", &reveal)) {
     SetRevealMap(reveal);
   }
-  ImGui::TextWrapped(
-      "Shows every world's map as if its map station had been used, and lists every "
-      "world on the star map. Rooms a map station leaves hidden stay hidden, and rooms "
-      "you haven't entered keep the unexplored colour. The save is not changed.");
+  ItemHelp("Shows every world's map as if its map station had been used, and lists every world on "
+           "the star map. Rooms a map station leaves hidden stay hidden, and rooms you haven't "
+           "entered keep the unexplored colour. The save is not changed.");
   bool pickups = sMapPickups;
   if (ImGui::Checkbox("Pickup dots on the map", &pickups)) {
     SetMapPickups(pickups);
   }
+  ItemHelp("A white dot marks each item pickup in the rooms the map shows, until you collect it. "
+           "Every item gets the same dot, so it doesn't give away what a pickup holds. An "
+           "Archipelago game colours them by what its logic lets you reach.");
   if (PortMapPickups::Forced()) {
-    ImGui::SameLine();
+    SameLineAfterHelp();
     ImGui::TextDisabled("(on in randomized games)");
   }
-  ImGui::TextWrapped(
-      "A white dot marks each item pickup in the rooms the map shows, until you collect "
-      "it. Every item gets the same dot, so it doesn't give away what a pickup holds. "
-      "An Archipelago game colours them by what its logic lets you reach.");
 
   DrawTrackerLogic();
+
+  ImGui::SeparatorText("Progress");
+  bool progress = sTrackerProgress;
+  if (ImGui::Checkbox("Show progress", &progress)) {
+    sTrackerProgress = progress;
+    MarkDirty();
+  }
+  ItemHelp("Item collection, scans and rooms visited, with what is still missing. Off by default, "
+           "since the counts and lists show how much is left to find.");
+  if (!sTrackerProgress) {
+    return;
+  }
 
   CStateManager* mgr = sStateManager;
   if (mgr == nullptr || mgr->GetPlayerState() == nullptr) {
@@ -4837,12 +6997,11 @@ void DrawTrackerTab() {
 }
 
 void DrawSaveStatesTab() {
-  ImGui::TextWrapped(
-      "Save anywhere and load back to the same spot. A state holds what a memory card save "
-      "holds (items, health, ammo, map, scans, doors and puzzles already solved, in-game time) "
-      "plus where Samus stands and whether she is in morph ball. Loading rebuilds the room as "
-      "a memory card load does, so enemies and moving parts start over. While the game is "
-      "paused, a save or load waits until you unpause.");
+  ImGui::TextDisabled("Save anywhere and load back to the same spot.");
+  ItemHelp("A state holds what a memory card save holds (items, health, ammo, map, scans, doors and "
+           "puzzles already solved, in-game time) plus where Samus stands and whether she is in "
+           "morph ball. Loading rebuilds the room as a memory card load does, so enemies and moving "
+           "parts start over. While the game is paused, a save or load waits until you unpause.");
   bool hotkeys = sSaveStateHotkeys;
   if (ImGui::Checkbox("F5 saves, F9 loads the selected slot", &hotkeys)) {
     sSaveStateHotkeys = hotkeys;
@@ -4919,19 +7078,170 @@ void DrawSaveStatesTab() {
   ImGui::TextDisabled("Folder: %s", PortSaveState::Folder().c_str());
 }
 
+// The game's own volumes, the same as the pause menu's two sliders.
+void DrawGameAudio() {
+  ImGui::SeparatorText("Audio");
+  ImGui::BeginDisabled(gpGameState == nullptr);
+  int music = gpGameState != nullptr ? gpGameState->GameOptions().GetMusicVolume() : 0;
+  int musicPct = (music * 100 + 63) / 127;
+  if (ImGui::SliderInt("Music volume", &musicPct, 0, 100, "%d%%") && gpGameState != nullptr) {
+    gpGameState->GameOptions().SetMusicVolume((musicPct * 127 + 50) / 100, true);
+  }
+  int sfx = gpGameState != nullptr ? gpGameState->GameOptions().GetSfxVolume() : 0;
+  int sfxPct = (sfx * 100 + 63) / 127;
+  if (ImGui::SliderInt("Sound effects volume", &sfxPct, 0, 100, "%d%%") && gpGameState != nullptr) {
+    gpGameState->GameOptions().SetSfxVolume((sfxPct * 127 + 50) / 100, true);
+  }
+  ImGui::EndDisabled();
+  ImGui::SetItemTooltip("The pause menu's volume options. Like them, they are stored in the save\n"
+                        "file the next time you save, and loading a save restores its volumes.");
+}
+
+void DrawGameTab() {
+  DrawGameSection();
+  DrawCutscenesSection();
+  DrawUnlocksSection();
+  DrawGameAudio();
+  DrawLanguageSection();
+  DrawSpeedrunSection();
+}
+
+void DrawControlsTab() {
+  if (!ImGui::BeginTabBar("controlsPages")) {
+    return;
+  }
+  if (SubTab("Controls", "Options")) {
+    DrawControlsOptions();
+    ImGui::EndTabItem();
+  }
+  if (SubTab("Controls", "Keyboard & mouse")) {
+    DrawControlsKeyboardMouse();
+    ImGui::EndTabItem();
+  }
+  if (SubTab("Controls", "Controller")) {
+    DrawControlsController();
+    ImGui::EndTabItem();
+  }
+  if (SubTab("Controls", "Touch & gyro")) {
+    DrawControlsTouchGyro();
+    ImGui::EndTabItem();
+  }
+  ImGui::EndTabBar();
+}
+
+void DrawVideoTab() {
+  if (!ImGui::BeginTabBar("videoPages")) {
+    return;
+  }
+  if (SubTab("Video", "Display")) {
+    DrawVideoDisplay();
+    ImGui::EndTabItem();
+  }
+  if (SubTab("Video", "Quality")) {
+    DrawVideoQuality();
+    ImGui::EndTabItem();
+  }
+  if (SubTab("Video", "Frame rate")) {
+    DrawPerformanceTab();
+    ImGui::EndTabItem();
+  }
+  ImGui::EndTabBar();
+}
+
+void DrawModsTab() {
+  DrawMods();
+  DrawTexturesSection();
+}
+
+void DrawSystemTab() {
+  DrawOverlaySection();
+  DrawSettingsSection();
+  DrawMemoryCard();
+#if defined(__ANDROID__)
+  PortDataFolder::DrawPanel();
+#endif
+  DrawLogSection();
+  DrawDiscordSection();
+  ImGui::SeparatorText("About");
+  ImGui::TextDisabled("Build: %s", MP_BUILD_REVISION);
+}
+
 struct DebugPage {
   const char* name;
   void (*draw)();
 };
 
 const DebugPage kDebugPages[] = {
-    {"Input", DrawInputTab},     {"Controls", PortControls::DrawTab},
-    {"Render", DrawRenderTab},   {"Performance", DrawPerformanceTab},
-    {"Extras", DrawExtrasTab},   {"Tracker", DrawTrackerTab},
-    {"States", DrawSaveStatesTab}, {"Session", DrawSessionTab},
-    {"Chat", DrawChatTab},       {"Debug", DrawDebugTab},
+    {"Game", DrawGameTab},
+    {"Controls", DrawControlsTab},
+    {"Video", DrawVideoTab},
+    {"Remastered", DrawRemasteredTab},
+    {"Mods", DrawModsTab},
+    {"Archipelago", DrawArchipelagoTab},
+    {"Tracker", DrawTrackerTab},
+    {"Save states", DrawSaveStatesTab},
+    {"System", DrawSystemTab},
+    {"Debug", DrawDebugTab},
     {"VR", PortVr::DrawVrDebugTab},
 };
+
+// MP_DEBUG_TAB=<page>[/<sub-tab>], case-insensitive. The old page names are
+// kept: Input, Render, Performance, Extras, States, Session and Chat.
+struct StartTarget {
+  std::string page;
+  std::string sub;
+};
+
+const StartTarget& GetStartTarget() {
+  static const StartTarget target = [] {
+    StartTarget t;
+    const char* env = std::getenv("MP_DEBUG_TAB");
+    if (env == nullptr || *env == '\0') {
+      return t;
+    }
+    std::string raw = env;
+    if (const size_t slash = raw.find('/'); slash != std::string::npos) {
+      t.sub = raw.substr(slash + 1);
+      raw.resize(slash);
+    }
+    struct Alias {
+      const char* from;
+      const char* page;
+      const char* sub;
+    };
+    static const Alias kAliases[] = {
+        {"Input", "Controls", ""},         {"Render", "Video", ""},
+        {"Performance", "Video", "Frame rate"}, {"Extras", "Game", ""},
+        {"States", "Save states", ""},     {"Session", "Archipelago", "Connection"},
+        {"Chat", "Archipelago", "Chat"},
+    };
+    t.page = raw;
+    for (const Alias& alias : kAliases) {
+      if (SDL_strcasecmp(raw.c_str(), alias.from) == 0) {
+        t.page = alias.page;
+        if (t.sub.empty()) {
+          t.sub = alias.sub;
+        }
+      }
+    }
+    return t;
+  }();
+  return target;
+}
+
+// A page's inner tab, opened first when MP_DEBUG_TAB names it. The caller ends
+// the item with EndTabItem when this returns true.
+bool SubTab(const char* page, const char* name) {
+  static bool pending = !GetStartTarget().sub.empty();
+  const StartTarget& target = GetStartTarget();
+  const bool start = pending && SDL_strcasecmp(target.page.c_str(), page) == 0 &&
+                     SDL_strcasecmp(target.sub.c_str(), name) == 0;
+  const bool shown = ImGui::BeginTabItem(name, nullptr, start ? ImGuiTabItemFlags_SetSelected : 0);
+  if (start) {
+    pending = false;
+  }
+  return shown;
+}
 
 // The innermost window under the finger that can actually scroll vertically,
 // climbing out of child windows (a table, the page list) that cannot.
@@ -5091,12 +7401,21 @@ bool DrawPageWindow() {
     const char* const kTitle = "Metroid Prime Port";
     ImGui::AlignTextToFramePadding();
     ImGui::TextUnformatted(kTitle);
+    const char* const kBuild = MP_BUILD_REVISION;
+    const float buildWidth = ImGui::CalcTextSize(kBuild).x;
+    const bool buildFits = ImGui::GetContentRegionAvail().x >
+                           ImGui::CalcTextSize(kTitle).x + buildWidth + closeWidth +
+                               style.ItemSpacing.x * 5.f;
+    if (buildFits) {
+      ImGui::SameLine(0.f, style.ItemSpacing.x * 2.f);
+      ImGui::TextDisabled("%s", kBuild);
+    }
 #if !defined(__ANDROID__)
-    // Only when it fits beside the title and the Close button.
+    // Only when it fits beside the title, the build and the Close button.
     const char* const kKeys = "F1: hide   F10: frame limit   F12: screenshot";
-    if (ImGui::GetContentRegionAvail().x > ImGui::CalcTextSize(kTitle).x +
+    if (ImGui::GetContentRegionAvail().x > ImGui::CalcTextSize(kTitle).x + buildWidth +
                                                ImGui::CalcTextSize(kKeys).x + closeWidth +
-                                               style.ItemSpacing.x * 5.f) {
+                                               style.ItemSpacing.x * 8.f) {
       ImGui::SameLine(0.f, style.ItemSpacing.x * 3.f);
       ImGui::TextDisabled("%s", kKeys);
     }
@@ -5110,14 +7429,14 @@ bool DrawPageWindow() {
 
     static int sPage = 0;
     // MP_DEBUG_TAB=<name> opens on that page, for captures of the overlay.
-    static const char* sStartPage = std::getenv("MP_DEBUG_TAB");
-    if (sStartPage != nullptr) {
+    static bool sStartPending = true;
+    if (sStartPending) {
       for (int i = 0; i < static_cast< int >(ARRAY_SIZE(kDebugPages)); ++i) {
-        if (SDL_strcasecmp(sStartPage, kDebugPages[i].name) == 0) {
+        if (SDL_strcasecmp(GetStartTarget().page.c_str(), kDebugPages[i].name) == 0) {
           sPage = i;
         }
       }
-      sStartPage = nullptr;
+      sStartPending = false;
     }
     float listWidth = 0.f;
     for (const DebugPage& page : kDebugPages) {
@@ -5150,23 +7469,32 @@ bool DrawPageWindow() {
 bool DrawDesktopWindow() {
   ImGui::SetNextWindowPos(ImVec2(8.f, 8.f), ImGuiCond_FirstUseEver);
   ImGui::SetNextWindowSize(ImVec2(440.f, 200.f), ImGuiCond_FirstUseEver);
-  if (std::getenv("MP_DEBUG_TAB") != nullptr) // a capture wants to see the tab
+  if (port::EnvString("MP_DEBUG_TAB") != nullptr) // a capture wants to see the tab
     ImGui::SetNextWindowSize(ImVec2(520.f, 620.f), ImGuiCond_Once);
   bool open = true;
   if (ImGui::Begin("Metroid Prime Port", &open, ImGuiWindowFlags_MenuBar)) {
     if (ImGui::BeginMenuBar()) {
-      ImGui::TextUnformatted("F1: hide   F10: frame limit   F12: screenshot");
+      const char* const kKeys = "F1: hide   F10: frame limit   F12: screenshot";
+      ImGui::TextUnformatted(kKeys);
+      // Only when it fits beside the hotkey hint.
+      const ImGuiStyle& style = ImGui::GetStyle();
+      if (ImGui::GetContentRegionAvail().x >
+          ImGui::CalcTextSize(MP_BUILD_REVISION).x + style.ItemSpacing.x * 3.f) {
+        ImGui::SameLine(0.f, style.ItemSpacing.x * 3.f);
+        ImGui::TextDisabled("%s", MP_BUILD_REVISION);
+      }
       ImGui::EndMenuBar();
     }
 
     if (ImGui::BeginTabBar("##debug_tabs", ImGuiTabBarFlags_FittingPolicyScroll)) {
       // MP_DEBUG_TAB=<name> opens on that tab, for captures of the overlay.
-      static const char* sStartTab = std::getenv("MP_DEBUG_TAB");
+      static bool sStartPending = true;
       for (const DebugPage& page : kDebugPages) {
-        const bool start = sStartTab != nullptr && SDL_strcasecmp(sStartTab, page.name) == 0;
+        const bool start =
+            sStartPending && SDL_strcasecmp(GetStartTarget().page.c_str(), page.name) == 0;
         if (ImGui::BeginTabItem(page.name, nullptr, start ? ImGuiTabItemFlags_SetSelected : 0)) {
           if (start)
-            sStartTab = nullptr;
+            sStartPending = false;
           page.draw();
           ImGui::EndTabItem();
         }
@@ -5176,32 +7504,6 @@ bool DrawDesktopWindow() {
   }
   ImGui::End();
   return open;
-}
-
-// The in-game time in the bottom-right corner while a game runs.
-void DrawSpeedrunTimer() {
-  if (!sSpeedrunTimer || sStateManager == nullptr || gpGameState == nullptr) {
-    return;
-  }
-  const long long cs =
-      static_cast< long long >(std::floor(gpGameState->GetTotalPlayTime() * 100.0));
-  char text[32];
-  if (cs >= 360000) {
-    std::snprintf(text, sizeof(text), "%lld:%02lld:%02lld.%02lld", cs / 360000, cs / 6000 % 60,
-                  cs / 100 % 60, cs % 100);
-  } else {
-    std::snprintf(text, sizeof(text), "%lld:%02lld.%02lld", cs / 6000, cs / 100 % 60, cs % 100);
-  }
-  ImDrawList* draw = ImGui::GetForegroundDrawList();
-  ImFont* font = ImGui::GetFont();
-  const ImVec2 display = ImGui::GetIO().DisplaySize;
-  const float size = std::max(ImGui::GetFontSize() * 1.5f, display.y * 0.035f);
-  const ImVec2 extent = font->CalcTextSizeA(size, FLT_MAX, 0.f, text);
-  const float margin = size * 0.6f;
-  const ImVec2 pos(display.x - extent.x - margin, display.y - extent.y - margin);
-  const float shadow = std::max(1.f, size / 12.f);
-  draw->AddText(font, size, ImVec2(pos.x + shadow, pos.y + shadow), IM_COL32(0, 0, 0, 200), text);
-  draw->AddText(font, size, pos, IM_COL32(255, 255, 255, 230), text);
 }
 
 void DrawUI() {
@@ -5228,27 +7530,43 @@ void DrawUI() {
     MarkDirty();
   }
 #endif
-  DrawSpeedrunTimer();
   ProcessCardPicks();
 #if !defined(__ANDROID__)
   // Every frame, not only with the panel open: an importer stops when its
   // output pipe fills.
   PortImporters::Poll();
 #endif
+  FinishRemasteredImport();
+  DrawStaleImportToast();
+  DrawDiscReadFailedAlert();
+  if (sTouchLayoutSavePending.exchange(false, std::memory_order_acq_rel)) {
+    MarkDirty();
+    SaveSettings();
+  }
   if (!sVisible) {
+    UpdateMenuSounds(false);
     sTouchScroll = TouchScroll{};
+    if (sGalleryOpen) {
+      CloseGallery();
+    }
+    FreeRetiredGalleryTextures(false);
     return;
   }
 
   UpdateTouchScroll();
   const bool open = PageLayout() ? DrawPageWindow() : DrawDesktopWindow();
   ClearTouchHover();
+  DrawGalleryWindow();
 
   if (!open) {
     sVisible = false;
   }
+  UpdateMenuSounds(sVisible);
 
-  if (sSettingsDirty) {
+  // Not while a control is held: a dragged slider changes a setting every frame, and
+  // rewriting the settings file each time is a flash write per frame on a phone. It is
+  // saved the frame the control is let go.
+  if (sSettingsDirty && !ImGui::IsAnyItemActive()) {
     SaveSettings();
   }
 }
@@ -5344,6 +7662,136 @@ Java_org_metroidprime_port_TouchControlsView_nativeVirtualAxis(JNIEnv*, jclass, 
     SDL_SetJoystickVirtualAxis(pad, static_cast< int >(axis), PortTouchPad::AxisValue(value));
   }
 }
+
+extern "C" JNIEXPORT void JNICALL
+Java_org_metroidprime_port_TouchControlsView_nativeTouchAim(JNIEnv*, jclass, jfloat dxDp,
+                                                            jfloat dyDp) {
+  PortDebug::AddTouchAim(dxDp, dyDp);
+}
+
+extern "C" JNIEXPORT void JNICALL
+Java_org_metroidprime_port_TouchControlsView_nativeTouchAimDown(JNIEnv*, jclass, jboolean down) {
+  PortDebug::SetTouchAimDown(down == JNI_TRUE);
+}
+
+extern "C" JNIEXPORT jboolean JNICALL
+Java_org_metroidprime_port_TouchControlsView_nativeTouchAimEnabled(JNIEnv*, jclass) {
+  return PortDebug::TouchAim() ? JNI_TRUE : JNI_FALSE;
+}
+
+extern "C" JNIEXPORT jboolean JNICALL
+Java_org_metroidprime_port_TouchControlsView_nativeTouchClassic(JNIEnv*, jclass) {
+  return PortDebug::TouchClassic() ? JNI_TRUE : JNI_FALSE;
+}
+
+extern "C" JNIEXPORT jboolean JNICALL
+Java_org_metroidprime_port_TouchControlsView_nativeTouchTwinStick(JNIEnv*, jclass) {
+  return PortDebug::TouchTwinStick() ? JNI_TRUE : JNI_FALSE;
+}
+
+extern "C" JNIEXPORT jboolean JNICALL
+Java_org_metroidprime_port_TouchControlsView_nativeTouchWheelsEnabled(JNIEnv*, jclass) {
+  return PortDebug::TouchWheels() ? JNI_TRUE : JNI_FALSE;
+}
+
+extern "C" JNIEXPORT jboolean JNICALL
+Java_org_metroidprime_port_TouchControlsView_nativeTouchVisorTapScan(JNIEnv*, jclass) {
+  return PortDebug::TouchVisorTapScan() ? JNI_TRUE : JNI_FALSE;
+}
+
+// Bits 0-3: visors owned (Combat, X-Ray, Scan, Thermal); 4-7: beams owned
+// (Power, Ice, Wave, Plasma); 8-9 current visor; 10-11 current beam; 12: valid.
+extern "C" JNIEXPORT jint JNICALL
+Java_org_metroidprime_port_TouchControlsView_nativeWheelOwned(JNIEnv*, jclass) {
+  return static_cast< jint >(PortDebug::WheelState());
+}
+
+extern "C" JNIEXPORT void JNICALL
+Java_org_metroidprime_port_TouchControlsView_nativeRequestVisor(JNIEnv*, jclass, jint visor) {
+  PortDebug::RequestVisor(visor);
+}
+
+extern "C" JNIEXPORT void JNICALL
+Java_org_metroidprime_port_TouchControlsView_nativeRequestBeam(JNIEnv*, jclass, jint beam) {
+  PortDebug::RequestBeam(beam);
+}
+
+// {width, height, ARGB pixels...} of a wheel icon (wheel 0 visor, 1 beam; item in the same order as
+// nativeRequestVisor/nativeRequestBeam), or null until the HUD has loaded it.
+extern "C" JNIEXPORT jintArray JNICALL
+Java_org_metroidprime_port_TouchControlsView_nativeWheelIcon(JNIEnv* env, jclass, jint wheel,
+                                                             jint item) {
+  if (wheel < 0 || wheel > 1 || item < 0 || item > 3) {
+    return nullptr;
+  }
+  std::lock_guard<std::mutex> lock(sWheelIconMutex);
+  const WheelIcon& icon = sWheelIcons[wheel][item];
+  if (icon.argb.empty()) {
+    return nullptr;
+  }
+  const jsize count = static_cast<jsize>(icon.argb.size());
+  jintArray out = env->NewIntArray(2 + count);
+  if (out == nullptr) {
+    return nullptr;
+  }
+  const jint dims[2] = {icon.w, icon.h};
+  env->SetIntArrayRegion(out, 0, 2, dims);
+  env->SetIntArrayRegion(out, 2, count, reinterpret_cast<const jint*>(icon.argb.data()));
+  return out;
+}
+
+extern "C" JNIEXPORT jboolean JNICALL
+Java_org_metroidprime_port_TouchControlsView_nativeTouchMapTapEnabled(JNIEnv*, jclass) {
+  return PortDebug::TouchMapTap() ? JNI_TRUE : JNI_FALSE;
+}
+
+extern "C" JNIEXPORT jboolean JNICALL
+Java_org_metroidprime_port_TouchControlsView_nativeMinimapRect(JNIEnv* env, jclass,
+                                                              jfloatArray out) {
+  // x0, y0, x1, y1, then 1 when the minimap is drawn there (0: draw a map button).
+  float rect[5];
+  bool drawn = true;
+  if (!PortDebug::TouchMapTap() || !PortDebug::MinimapRect(rect, &drawn) || out == nullptr ||
+      env->GetArrayLength(out) < 5) {
+    return JNI_FALSE;
+  }
+  rect[4] = drawn ? 1.f : 0.f;
+  env->SetFloatArrayRegion(out, 0, 5, rect);
+  return JNI_TRUE;
+}
+
+extern "C" JNIEXPORT void JNICALL
+Java_org_metroidprime_port_TouchControlsView_nativeMapPan(JNIEnv*, jclass, jfloat dxDp,
+                                                         jfloat dyDp, jfloat viewHeightDp) {
+  PortDebug::AddMapPan(dxDp, dyDp, viewHeightDp, 250);
+}
+
+extern "C" JNIEXPORT void JNICALL
+Java_org_metroidprime_port_TouchControlsView_nativeMapRotate(JNIEnv*, jclass, jfloat radians) {
+  PortDebug::AddMapRotate(radians);
+}
+
+extern "C" JNIEXPORT void JNICALL
+Java_org_metroidprime_port_TouchControlsView_nativeMapZoom(JNIEnv*, jclass, jfloat ratio) {
+  PortDebug::AddMapZoom(ratio);
+}
+
+extern "C" JNIEXPORT jboolean JNICALL
+Java_org_metroidprime_port_TouchControlsView_nativeMapScreenOpen(JNIEnv*, jclass) {
+  return PortDebug::MapScreenOpen() ? JNI_TRUE : JNI_FALSE;
+}
+
+extern "C" JNIEXPORT jboolean JNICALL
+Java_org_metroidprime_port_TouchControlsView_nativePauseScreenOpen(JNIEnv*, jclass) {
+  return PortDebug::PauseScreenOpen() ? JNI_TRUE : JNI_FALSE;
+}
+
+extern "C" JNIEXPORT void JNICALL
+Java_org_metroidprime_port_TouchControlsView_nativeMapTap(JNIEnv*, jclass) {
+  if (PortDebug::TouchMapTap()) {
+    PortDebug::RequestMapTap();
+  }
+}
 #endif
 
 extern "C" JNIEXPORT jboolean JNICALL
@@ -5352,13 +7800,62 @@ Java_org_metroidprime_port_TouchControlsView_nativeDebugOverlayVisible(JNIEnv*, 
 }
 
 extern "C" JNIEXPORT void JNICALL
+Java_org_metroidprime_port_TouchControlsView_nativeTouchBeamShift(JNIEnv*, jclass, jboolean held) {
+  sTouchBeamShift.store(held == JNI_TRUE, std::memory_order_release);
+}
+
+extern "C" JNIEXPORT void JNICALL
 Java_org_metroidprime_port_TouchControlsView_nativeSetTouchDevice(JNIEnv*, jclass, jboolean xbox) {
+  sTouchActive.store(true, std::memory_order_release);
   PortPrompts::NoteTouchInput(xbox == JNI_TRUE);
 }
 
 extern "C" JNIEXPORT jboolean JNICALL
-Java_org_metroidprime_port_TouchControlsView_nativeTwinStick(JNIEnv*, jclass) {
-  return PortDebug::TwinStickFlag() ? JNI_TRUE : JNI_FALSE;
+Java_org_metroidprime_port_TouchControlsView_nativeTouchColors(JNIEnv*, jclass) {
+  return PortDebug::TouchColorsFlag() ? JNI_TRUE : JNI_FALSE;
+}
+
+extern "C" JNIEXPORT jboolean JNICALL
+Java_org_metroidprime_port_TouchControlsView_nativeTouchLabels(JNIEnv*, jclass) {
+  return PortDebug::TouchLabelsFlag() ? JNI_TRUE : JNI_FALSE;
+}
+
+extern "C" JNIEXPORT jfloat JNICALL
+Java_org_metroidprime_port_TouchControlsView_nativeTouchSideMarginDp(JNIEnv*, jclass) {
+  return PortDebug::TouchSideMarginDp();
+}
+
+extern "C" JNIEXPORT jfloat JNICALL
+Java_org_metroidprime_port_TouchControlsView_nativeTouchStickInsetDp(JNIEnv*, jclass) {
+  return PortDebug::TouchStickInsetDp();
+}
+
+extern "C" JNIEXPORT jfloat JNICALL
+Java_org_metroidprime_port_TouchControlsView_nativeTouchButtonInsetDp(JNIEnv*, jclass) {
+  return PortDebug::TouchButtonInsetDp();
+}
+
+extern "C" JNIEXPORT jstring JNICALL
+Java_org_metroidprime_port_TouchControlsView_nativeTouchLayout(JNIEnv* env, jclass) {
+  return env->NewStringUTF(PortDebug::TouchLayout().c_str());
+}
+
+extern "C" JNIEXPORT void JNICALL
+Java_org_metroidprime_port_TouchControlsView_nativeSetTouchLayout(JNIEnv* env, jclass,
+                                                                  jstring layout) {
+  if (layout == nullptr) {
+    return;
+  }
+  const char* chars = env->GetStringUTFChars(layout, nullptr);
+  if (chars != nullptr) {
+    PortDebug::SetTouchLayout(chars);
+    env->ReleaseStringUTFChars(layout, chars);
+  }
+}
+
+extern "C" JNIEXPORT jboolean JNICALL
+Java_org_metroidprime_port_TouchControlsView_nativeTouchEditRequested(JNIEnv*, jclass) {
+  return PortDebug::TakeTouchEditRequested() ? JNI_TRUE : JNI_FALSE;
 }
 
 extern "C" JNIEXPORT void JNICALL

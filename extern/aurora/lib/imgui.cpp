@@ -1,5 +1,6 @@
 #include "imgui.hpp"
 
+#include <algorithm>
 #include <cstddef>
 #include <cmath>
 #include <cstring>
@@ -31,7 +32,11 @@ std::string g_imguiLog{};
 bool g_useSdlRenderer = false;
 
 std::vector<SDL_Texture*> g_sdlTextures;
-std::vector<wgpu::Texture> g_wgpuTextures;
+struct WgpuTexture {
+  ImTextureID id;
+  wgpu::Texture texture;
+};
+std::vector<WgpuTexture> g_wgpuTextures;
 
 wgpu::Buffer create_texture_upload_buffer(uint32_t width, uint32_t height, const uint8_t* data,
                                           uint32_t copyBytesPerRow) {
@@ -297,8 +302,29 @@ ImTextureID add_texture(uint32_t width, uint32_t height, const uint8_t* data) no
     enqueue_texture_upload(create_texture_upload_buffer(width, height, data, copyBytesPerRow), dstView, dataLayout,
                            size);
   }
-  g_wgpuTextures.push_back(texture);
-  return reinterpret_cast<ImTextureID>(textureView.MoveToCHandle());
+  const auto id = reinterpret_cast<ImTextureID>(textureView.MoveToCHandle());
+  g_wgpuTextures.push_back({id, texture});
+  return id;
+}
+
+void remove_texture(ImTextureID id) noexcept {
+  if (g_useSdlRenderer || window::get_sdl_renderer() != nullptr) {
+    const auto found = std::find(g_sdlTextures.begin(), g_sdlTextures.end(), reinterpret_cast<SDL_Texture*>(id));
+    if (found != g_sdlTextures.end()) {
+      SDL_DestroyTexture(*found);
+      g_sdlTextures.erase(found);
+    }
+    return;
+  }
+  const auto found = std::find_if(g_wgpuTextures.begin(), g_wgpuTextures.end(),
+                                  [id](const WgpuTexture& entry) { return entry.id == id; });
+  if (found == g_wgpuTextures.end()) {
+    return;
+  }
+  // The view was handed out as a raw handle; take it back so it is released with the texture.
+  [[maybe_unused]] const auto view = wgpu::TextureView::Acquire(reinterpret_cast<WGPUTextureView>(id));
+  found->texture.Destroy();
+  g_wgpuTextures.erase(found);
 }
 } // namespace aurora::imgui
 
@@ -307,4 +333,6 @@ extern "C" {
 ImTextureID aurora_imgui_add_texture(uint32_t width, uint32_t height, const void* rgba8) {
   return aurora::imgui::add_texture(width, height, static_cast<const uint8_t*>(rgba8));
 }
+
+void aurora_imgui_remove_texture(ImTextureID texture) { aurora::imgui::remove_texture(texture); }
 }

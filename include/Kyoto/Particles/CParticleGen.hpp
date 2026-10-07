@@ -14,8 +14,32 @@ class CTransform4f;
 class CVector3f;
 class CWarp;
 
+#ifdef TARGET_PC
+struct PortFxInfo;
+class CParticleGen;
+namespace PortFx {
+void Register(CParticleGen* gen);
+void Unregister(CParticleGen* gen);
+} // namespace PortFx
+#endif
+
 class CParticleGen {
 public:
+#ifdef TARGET_PC
+  // Debug registry (port_fx_debug.cpp): every generator is in one intrusive list.
+  CParticleGen() { PortFx::Register(this); }
+  // A copy is a new generator with its own registry slot; assignment leaves the links alone.
+  CParticleGen(const CParticleGen& o) : x4_modifiersList(o.x4_modifiersList) { PortFx::Register(this); }
+  CParticleGen& operator=(const CParticleGen& o) {
+    x4_modifiersList = o.x4_modifiersList;
+    return *this;
+  }
+  virtual uint PortFxAsset() const { return 0; }
+  virtual void PortFxDescribe(PortFxInfo&) const {}
+  CParticleGen* xPortFxPrev = nullptr;
+  CParticleGen* xPortFxNext = nullptr;
+  uint xPortFxId = 0;
+#endif
   virtual ~CParticleGen() = 0;
   virtual const bool Update(double) = 0;
   virtual void Render() = 0;
@@ -51,6 +75,10 @@ protected:
   rstl::list< CWarp* > x4_modifiersList;
 };
 
-inline CParticleGen::~CParticleGen() {}
+inline CParticleGen::~CParticleGen() {
+#ifdef TARGET_PC
+  PortFx::Unregister(this);
+#endif
+}
 
 #endif // _CPARTICLEGEN

@@ -370,6 +370,16 @@ bool create_window(AuroraBackend backend) {
   if (height < 480) {
     height = 480;
   }
+  // Shrink a default that doesn't fit the desktop, keeping its aspect ratio.
+  SDL_Rect usable{};
+  if (SDL_GetDisplayUsableBounds(SDL_GetPrimaryDisplay(), &usable) && usable.w > 0 && usable.h > 0) {
+    const float fit = std::min(static_cast<float>(usable.w) / static_cast<float>(width),
+                               static_cast<float>(usable.h) / static_cast<float>(height));
+    if (fit < 1.f) {
+      width = std::max(640, static_cast<Sint32>(static_cast<float>(width) * fit));
+      height = std::max(480, static_cast<Sint32>(static_cast<float>(height) * fit));
+    }
+  }
 
   Sint32 posX = g_config.windowPosX;
   Sint32 posY = g_config.windowPosY;

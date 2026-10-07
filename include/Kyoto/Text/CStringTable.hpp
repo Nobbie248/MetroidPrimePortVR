@@ -14,6 +14,7 @@
 
 #ifdef TARGET_PC
 #include <string>
+#include <vector>
 #endif
 
 class CInputStream;
@@ -24,6 +25,15 @@ class CStringTable {
   rstl::vector< rstl::vector< wchar_t > > mNativeStrings;
 #endif
 #ifdef TARGET_PC
+  // The other language sections, decoded too, so the language can change
+  // while the game runs (mNativeStrings holds the first, English).
+  struct PortSection {
+    uint language;
+    rstl::vector< rstl::vector< wchar_t > > strings;
+  };
+  std::vector< PortSection > mPortSections;
+  // The section PortDebug::TextLanguage() names, else English.
+  const rstl::vector< rstl::vector< wchar_t > >& PortStrings() const;
   // A randomizer STRG (Artifact Temple totem, randomized pickup scan): its
   // last string follows PortHints, whose text can arrive (or change) after
   // the table loaded.

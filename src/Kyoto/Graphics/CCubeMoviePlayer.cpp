@@ -664,6 +664,13 @@ void CMoviePlayer::PortGetMargins(int vpWidth, int vpHeight, int& xMargin, int& 
   if ((width == 640 && height == 480) || width <= 0 || height <= 0 || vpWidth <= 0 || vpHeight <= 0) {
     xMargin = (width - vpWidth) / 2;
     yMargin = (height - vpHeight) / 2;
+    // Narrower than the movie's own 4:3 (a 640x480 viewport is 4:3): draw it at the viewport's
+    // width, centred, rather than at 640 wide, which crops it.
+    if (width > 0 && height > 0 && vpWidth > 0 && vpHeight > 0 && vpWidth * height < vpHeight * width) {
+      const int drawnHeight = vpWidth * height / width;
+      xMargin = 0;
+      yMargin = (drawnHeight - vpHeight) / 2;
+    }
     return;
   }
   // The 4:3 mode shows its 640x448 at 4:3; the wider ones have square pixels.

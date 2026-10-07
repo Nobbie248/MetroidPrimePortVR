@@ -64,9 +64,10 @@ public:
 private:
 #ifdef TARGET_PC
   // Port: randomprime's custom pickup assets (platform/port_custom_res.cpp),
-  // answered for their ids when no PAK has them.
+  // answered for their ids when no PAK has them. `load` is false for type
+  // queries, which keep retail's answer for ids no loaded PAK has.
   bool PortPakResourceExists(CAssetId asset);
-  const PortCustomRes::Resource* PortCustomResource(CAssetId asset);
+  const PortCustomRes::Resource* PortCustomResource(CAssetId asset, bool load = true);
 #endif
 
   rstl::list< rstl::auto_ptr< CPakFile > > x0_aramList;

@@ -426,13 +426,13 @@ void SetMenu() {
   rt.Want(presence);
 }
 
-void SetGame(const std::string& world, const std::string& area, int percent, bool hard) {
+void SetGame(const GameInfo& info) {
   Runtime& rt = GetRuntime();
   if (!rt.inGame) {
     rt.inGame = true;
     rt.gameStart = static_cast<int64_t>(std::time(nullptr));
   }
-  rt.Want(GamePresence(world, area, percent, hard, rt.gameStart));
+  rt.Want(GamePresence(info, rt.gameStart));
 }
 
 std::string CurrentText() {

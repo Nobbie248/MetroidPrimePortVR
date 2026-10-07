@@ -2,10 +2,16 @@
 // (port_remastered_image.h).
 
 #include "port_remastered_image.h"
+#include "port_bytes.h"
 
 #include <algorithm>
+#include <atomic>
 #include <cmath>
+#include <cstdlib>
 #include <cstring>
+#include <memory>
+
+#include "astcenc.h"
 
 namespace PortRemastered {
 namespace {
@@ -68,29 +74,48 @@ uint8_t ToByte(float v) {
   return uint8_t(std::clamp(int(std::lround(v)), 0, 255));
 }
 
+// sRGB <-> linear. The decode is a 256-entry table; the encode is a table over
+// the linear range fine enough (16384 steps, finer than the darkest sRGB step)
+// that a nearest lookup rounds to the same byte as the exact formula.
+constexpr int kInverseSteps = 16384;
+
+struct SrgbTables {
+  float toLinear[256];
+  uint8_t toByte[kInverseSteps + 1];
+  SrgbTables() {
+    for (int i = 0; i < 256; ++i) {
+      const double c = i / 255.0;
+      toLinear[i] = float(c <= 0.04045 ? c / 12.92 : std::pow((c + 0.055) / 1.055, 2.4));
+    }
+    for (int i = 0; i <= kInverseSteps; ++i) {
+      const double l = double(i) / double(kInverseSteps);
+      const double c = l <= 0.0031308 ? l * 12.92 : 1.055 * std::pow(l, 1.0 / 2.4) - 0.055;
+      toByte[i] = uint8_t(std::clamp(int(std::lround(c * 255.0)), 0, 255));
+    }
+  }
+};
+
+const SrgbTables& Tables() {
+  static const SrgbTables tables;
+  return tables;
+}
+
+// Linear light (0..1) to an sRGB byte.
+uint8_t LinearToSrgbByte(float l) {
+  return Tables().toByte[std::clamp(int(std::lround(l * float(kInverseSteps))), 0, kInverseSteps)];
+}
+
 // --- Mips ---------------------------------------------------------------------
 
 // Each level is made from the one above, not from the top: a 2:1 Lanczos step
 // costs a fraction of a reduction from full size and looks the same.
-Image HalfOf(const Image& image) {
-  return Resize(image, std::max(image.width / 2, 1), std::max(image.height / 2, 1));
+Image HalfOf(const Image& image, MapKind kind) {
+  return Resize(image, std::max(image.width / 2, 1), std::max(image.height / 2, 1), kind);
 }
 
-void Put16(std::vector<uint8_t>& out, uint32_t v) {
-  out.push_back(uint8_t(v >> 8));
-  out.push_back(uint8_t(v));
-}
-
-void Put32(std::vector<uint8_t>& out, uint32_t v) {
-  Put16(out, v >> 16);
-  Put16(out, v & 0xFFFF);
-}
-
-void Put32LE(std::vector<uint8_t>& out, uint32_t v) {
-  for (int i = 0; i < 4; ++i) {
-    out.push_back(uint8_t(v >> (8 * i)));
-  }
-}
+using port::AppendBE16;
+using port::AppendBE32;
+using port::AppendLE32;
 
 // --- CMPR ---------------------------------------------------------------------
 
@@ -599,15 +624,218 @@ struct BitWriter {
 // Mode 6 already this close (summed squared error) is not worth a second fit.
 const int kMode1Threshold = 48;
 
+// Fills the colour of a cut-out texture's transparent texels (black in
+// Remastered's grass) from the nearest opaque ones, then their mean. Filtering
+// and the smaller levels mix that colour into the edges, and black there shows
+// as dark specks across distant grass.
+void BleedColour(Image& image) {
+  const int w = image.width, h = image.height;
+  const size_t count = size_t(w) * size_t(h);
+  std::vector<uint8_t> filled(count);
+  double sum[3] = {0, 0, 0};
+  size_t opaque = 0;
+  for (size_t i = 0; i < count; ++i) {
+    if (image.rgba[i * 4 + 3] >= 128) {
+      filled[i] = 1;
+      ++opaque;
+      for (int c = 0; c < 3; ++c) {
+        sum[c] += image.rgba[i * 4 + c];
+      }
+    }
+  }
+  if (opaque == 0 || opaque == count) {
+    return;
+  }
+  // Up to 16 rings outwards, each from the four neighbours (wrapping, as the
+  // textures tile) filled before it.
+  std::vector<uint8_t> next;
+  for (int ring = 0; ring < 16; ++ring) {
+    next = filled;
+    bool grew = false;
+    for (int y = 0; y < h; ++y) {
+      for (int x = 0; x < w; ++x) {
+        const size_t i = size_t(y) * size_t(w) + size_t(x);
+        if (filled[i]) {
+          continue;
+        }
+        const size_t around[4] = {size_t(y) * size_t(w) + size_t((x + 1) % w),
+                                  size_t(y) * size_t(w) + size_t((x + w - 1) % w),
+                                  size_t((y + 1) % h) * size_t(w) + size_t(x),
+                                  size_t((y + h - 1) % h) * size_t(w) + size_t(x)};
+        int acc[3] = {0, 0, 0}, n = 0;
+        for (const size_t j : around) {
+          if (filled[j]) {
+            ++n;
+            for (int c = 0; c < 3; ++c) {
+              acc[c] += image.rgba[j * 4 + c];
+            }
+          }
+        }
+        if (n > 0) {
+          for (int c = 0; c < 3; ++c) {
+            image.rgba[i * 4 + c] = uint8_t((acc[c] + n / 2) / n);
+          }
+          next[i] = 1;
+          grew = true;
+        }
+      }
+    }
+    if (!grew) {
+      break;
+    }
+    filled.swap(next);
+  }
+  for (size_t i = 0; i < count; ++i) {
+    if (!filled[i]) {
+      for (int c = 0; c < 3; ++c) {
+        image.rgba[i * 4 + c] = uint8_t(std::lround(sum[c] / double(opaque)));
+      }
+    }
+  }
+}
+
+// Gives each smaller level of a cut-out (alpha tested at 128) texture a 1-bit
+// alpha with the same share of opaque texels as the top level: opaque where its
+// alpha is in that top share. Halving averages a thin stem's alpha under 128 a
+// few levels down, so a fixed cut thins distant grass and fences to shimmering
+// dashes. Levels are halved from the raw level above, so call this last.
+void KeepCoverage(std::vector<Image>& levels) {
+  const auto& top = levels[0].rgba;
+  size_t opaque = 0;
+  for (size_t i = 3; i < top.size(); i += 4) {
+    opaque += top[i] >= 128;
+  }
+  const size_t texels = top.size() / 4;
+  if (opaque == 0 || opaque == texels) {
+    return;
+  }
+  for (size_t l = 1; l < levels.size(); ++l) {
+    auto& a = levels[l].rgba;
+    size_t histogram[256] = {};
+    for (size_t i = 3; i < a.size(); i += 4) {
+      ++histogram[a[i]];
+    }
+    const double target = double(opaque) / double(texels) * double(a.size() / 4);
+    // The cut whose count of texels at or over it is closest to the target
+    // (many texels can share one value, so none may hit it).
+    int cut = 255;
+    double best = target - double(histogram[255]);
+    for (size_t above = histogram[255], c = 254; c >= 1; --c) {
+      above += histogram[c];
+      if (std::abs(double(above) - target) < std::abs(best)) {
+        best = double(above) - target;
+        cut = int(c);
+      }
+    }
+    for (size_t i = 3; i < a.size(); i += 4) {
+      a[i] = a[i] >= cut ? 255 : 0;
+    }
+  }
+}
+
 }  // namespace
 
-Image Resize(const Image& image, int width, int height) {
+namespace {
+
+// Colour and normal maps are filtered as floats in the space their meaning is
+// linear in: a colour map's RGB in linear light, a normal map's xyz as a
+// vector (renormalised afterwards). Data maps (and every alpha) are filtered as
+// the bytes they are, in Resize's byte path below.
+Image ResizeWide(const Image& image, int width, int height, MapKind kind) {
+  const SrgbTables& tab = Tables();
+  // A normal map with a B channel stores z there; one without (the two-channel
+  // maps, written with B at 0) has it rebuilt from x and y.
+  bool hasZ = false;
+  if (kind == MapKind::Normal) {
+    for (size_t i = 2; i < image.rgba.size() && !hasZ; i += 4) {
+      hasZ = image.rgba[i] != 0;
+    }
+  }
+  const auto toRow = [&](int y, float* row) {
+    const uint8_t* s = &image.rgba[size_t(y) * size_t(image.width) * 4];
+    for (int x = 0; x < image.width; ++x, s += 4, row += 4) {
+      if (kind == MapKind::Colour) {
+        row[0] = tab.toLinear[s[0]];
+        row[1] = tab.toLinear[s[1]];
+        row[2] = tab.toLinear[s[2]];
+      } else {
+        const float nx = s[0] / 255.0f * 2.0f - 1.0f, ny = s[1] / 255.0f * 2.0f - 1.0f;
+        row[0] = nx;
+        row[1] = ny;
+        row[2] = hasZ ? s[2] / 255.0f * 2.0f - 1.0f : std::sqrt(std::max(0.0f, 1.0f - nx * nx - ny * ny));
+      }
+      row[3] = float(s[3]) / 255.0f;
+    }
+  };
+  const Taps tx = MakeTaps(image.width, width);
+  std::vector<float> mid(size_t(width) * size_t(image.height) * 4);
+  std::vector<float> in(size_t(image.width) * 4);
+  for (int y = 0; y < image.height; ++y) {
+    toRow(y, in.data());
+    float* dst = &mid[size_t(y) * size_t(width) * 4];
+    for (int x = 0; x < width; ++x) {
+      const float* w = &tx.weights[size_t(x) * size_t(tx.width)];
+      const float* s = in.data() + size_t(tx.first[size_t(x)]) * 4;
+      float acc[4] = {0, 0, 0, 0};
+      for (int i = 0, n = tx.count[size_t(x)]; i < n; ++i, s += 4) {
+        acc[0] += w[i] * s[0];
+        acc[1] += w[i] * s[1];
+        acc[2] += w[i] * s[2];
+        acc[3] += w[i] * s[3];
+      }
+      std::memcpy(dst + x * 4, acc, sizeof(acc));
+    }
+  }
+  const Taps ty = MakeTaps(image.height, height);
+  Image out;
+  out.width = width;
+  out.height = height;
+  out.rgba.resize(size_t(width) * size_t(height) * 4);
+  std::vector<float> row(size_t(width) * 4);
+  for (int y = 0; y < height; ++y) {
+    std::fill(row.begin(), row.end(), 0.0f);
+    const float* w = &ty.weights[size_t(y) * size_t(ty.width)];
+    for (int i = 0, n = ty.count[size_t(y)]; i < n; ++i) {
+      const float* s = &mid[size_t(ty.first[size_t(y)] + i) * size_t(width) * 4];
+      const float wi = w[i];
+      for (size_t k = 0; k < row.size(); ++k) {
+        row[k] += wi * s[k];
+      }
+    }
+    uint8_t* dst = &out.rgba[size_t(y) * size_t(width) * 4];
+    for (int x = 0; x < width; ++x) {
+      const float* r = &row[size_t(x) * 4];
+      if (kind == MapKind::Colour) {
+        dst[x * 4] = LinearToSrgbByte(r[0]);
+        dst[x * 4 + 1] = LinearToSrgbByte(r[1]);
+        dst[x * 4 + 2] = LinearToSrgbByte(r[2]);
+      } else {
+        // Averaged vectors are shorter than unit; stand them back up.
+        const float len = std::sqrt(r[0] * r[0] + r[1] * r[1] + r[2] * r[2]);
+        const float inv = len > 1e-6f ? 1.0f / len : 0.0f;
+        const float n[3] = {r[0] * inv, r[1] * inv, len > 1e-6f ? r[2] * inv : 1.0f};
+        dst[x * 4] = ToByte((n[0] * 0.5f + 0.5f) * 255.0f);
+        dst[x * 4 + 1] = ToByte((n[1] * 0.5f + 0.5f) * 255.0f);
+        dst[x * 4 + 2] = hasZ ? ToByte((n[2] * 0.5f + 0.5f) * 255.0f) : 0;
+      }
+      dst[x * 4 + 3] = ToByte(r[3] * 255.0f);
+    }
+  }
+  return out;
+}
+
+}  // namespace
+
+Image Resize(const Image& image, int width, int height, MapKind kind) {
   Image out;
   out.width = width;
   out.height = height;
   if (image.width == width && image.height == height) {
     out.rgba = image.rgba;
     return out;
+  }
+  if (kind != MapKind::Data) {
+    return ResizeWide(image, width, height, kind);
   }
   // Across first, then down; the intermediate is 8-bit, as Pillow's is.
   const Taps tx = MakeTaps(image.width, width);
@@ -651,24 +879,34 @@ Image Resize(const Image& image, int width, int height) {
   return out;
 }
 
-std::vector<uint8_t> EncodeTxtrRgba8(const Image& image, int minSize) {
+uint8_t SrgbToLinearByte(uint8_t value) {
+  return uint8_t(std::clamp(int(std::lround(Tables().toLinear[value] * 255.f)), 0, 255));
+}
+
+uint8_t ScaleSrgbByte(uint8_t value, double scale) {
+  return LinearToSrgbByte(Tables().toLinear[value] * float(scale));
+}
+
+std::vector<uint8_t> EncodeTxtrRgba8(const Image& image, int minSize, MapKind kind) {
   std::vector<Image> levels{image};
   while (levels.back().width > minSize && levels.back().height > minSize) {
-    levels.push_back(HalfOf(levels.back()));
+    levels.push_back(HalfOf(levels.back(), kind));
   }
   std::vector<uint8_t> out;
-  Put32(out, 9);
-  Put16(out, uint32_t(image.width));
-  Put16(out, uint32_t(image.height));
-  Put32(out, uint32_t(levels.size()));
+  AppendBE32(out, 9);
+  AppendBE16(out, uint32_t(image.width));
+  AppendBE16(out, uint32_t(image.height));
+  AppendBE32(out, uint32_t(levels.size()));
   for (const Image& lv : levels) {
     // 4x4 blocks: sixteen (alpha, red) pairs, then sixteen (green, blue).
     for (int by = 0; by < lv.height; by += 4) {
       for (int bx = 0; bx < lv.width; bx += 4) {
         for (int pass = 0; pass < 2; ++pass) {
           for (int y = 0; y < 4; ++y) {
-            const uint8_t* p = &lv.rgba[(size_t(by + y) * size_t(lv.width) + size_t(bx)) * 4];
-            for (int x = 0; x < 4; ++x, p += 4) {
+            // A level that is not a multiple of 4 repeats its last row and column.
+            const size_t row = size_t(std::min(by + y, lv.height - 1)) * size_t(lv.width);
+            for (int x = 0; x < 4; ++x) {
+              const uint8_t* p = &lv.rgba[(row + size_t(std::min(bx + x, lv.width - 1))) * 4];
               out.push_back(pass == 0 ? p[3] : p[1]);
               out.push_back(pass == 0 ? p[0] : p[2]);
             }
@@ -680,21 +918,26 @@ std::vector<uint8_t> EncodeTxtrRgba8(const Image& image, int minSize) {
   return out;
 }
 
-std::vector<uint8_t> EncodeTxtrCmpr(const Image& image, bool alpha) {
+std::vector<uint8_t> EncodeTxtrCmpr(const Image& image, bool alpha, MapKind kind) {
   std::vector<Image> levels{image};
   if (!alpha) {
     for (size_t i = 3; i < levels[0].rgba.size(); i += 4) {
       levels[0].rgba[i] = 255;
     }
+  } else {
+    BleedColour(levels[0]);
   }
   while (levels.back().width > 8 && levels.back().height > 8) {
-    levels.push_back(HalfOf(levels.back()));
+    levels.push_back(HalfOf(levels.back(), kind));
+  }
+  if (alpha) {
+    KeepCoverage(levels);
   }
   std::vector<uint8_t> out;
-  Put32(out, 10);
-  Put16(out, uint32_t(image.width));
-  Put16(out, uint32_t(image.height));
-  Put32(out, uint32_t(levels.size()));
+  AppendBE32(out, 10);
+  AppendBE16(out, uint32_t(image.width));
+  AppendBE16(out, uint32_t(image.height));
+  AppendBE32(out, uint32_t(levels.size()));
   for (const Image& lv : levels) {
     // 8x8 tiles of four blocks each.
     for (int ty = 0; ty < lv.height; ty += 8) {
@@ -703,7 +946,10 @@ std::vector<uint8_t> EncodeTxtrCmpr(const Image& image, bool alpha) {
           const int bx = tx + (sub & 1) * 4, by = ty + (sub >> 1) * 4;
           uint8_t px[16][4];
           for (int y = 0; y < 4; ++y) {
-            std::memcpy(px[y * 4], &lv.rgba[(size_t(by + y) * size_t(lv.width) + size_t(bx)) * 4], 16);
+            const size_t row = size_t(std::min(by + y, lv.height - 1)) * size_t(lv.width);
+            for (int x = 0; x < 4; ++x) {
+              std::memcpy(px[y * 4 + x], &lv.rgba[(row + size_t(std::min(bx + x, lv.width - 1))) * 4], 4);
+            }
           }
           uint8_t block[8];
           CmprBlock(px, block);
@@ -862,10 +1108,105 @@ void EncodeBc7Block(const uint8_t* rgba, uint8_t* out) {
   w.Store(out);
 }
 
-std::vector<uint8_t> EncodeDds(const Image& image, DdsFormat format) {
+namespace {
+
+// --- ASTC -----------------------------------------------------------------------
+
+struct AstcContext {
+  astcenc_context* ctx = nullptr;
+  astcenc_swizzle swizzle{ASTCENC_SWZ_R, ASTCENC_SWZ_G, ASTCENC_SWZ_B, ASTCENC_SWZ_A};
+  AstcContext() {
+    astcenc_config cfg;
+    if (astcenc_config_init(ASTCENC_PRF_LDR, 4, 4, 1, ASTCENC_PRE_FAST, ASTCENC_FLG_USE_DECODE_UNORM8, &cfg) !=
+        ASTCENC_SUCCESS) {
+      return;
+    }
+    if (astcenc_context_alloc(&cfg, 1, &ctx, nullptr) != ASTCENC_SUCCESS) {
+      ctx = nullptr;
+    }
+  }
+  ~AstcContext() { astcenc_context_free(ctx); }
+  AstcContext(const AstcContext&) = delete;
+  AstcContext& operator=(const AstcContext&) = delete;
+};
+
+// One level as ASTC 4x4 blocks, appended to `out`. A side under 4 texels is
+// stretched to one block, as for BC. The context is made once a thread (it is
+// not cheap to build) and reset between levels.
+void EncodeAstcLevel(const Image& lv, bool normal, std::vector<uint8_t>& out) {
+  thread_local AstcContext astc;
+  const int bw = std::max(lv.width, 4), bh = std::max(lv.height, 4);
+  std::vector<uint8_t> px(size_t(bw) * size_t(bh) * 4);
+  for (int y = 0; y < bh; ++y) {
+    const int sy = y * lv.height / bh;
+    for (int x = 0; x < bw; ++x) {
+      const int sx = x * lv.width / bw;
+      std::memcpy(&px[(size_t(y) * size_t(bw) + size_t(x)) * 4],
+                  &lv.rgba[(size_t(sy) * size_t(lv.width) + size_t(sx)) * 4], 4);
+    }
+  }
+  if (normal) {
+    for (size_t i = 0; i < size_t(bw) * size_t(bh); ++i) {
+      px[i * 4 + 2] = 0;
+      px[i * 4 + 3] = 255;
+    }
+  }
+  const size_t start = out.size();
+  out.resize(start + size_t(bw / 4) * size_t(bh / 4) * 16);
+  if (astc.ctx != nullptr) {
+    void* slice = px.data();
+    astcenc_image img{unsigned(bw), unsigned(bh), 1, ASTCENC_TYPE_U8, &slice};
+    if (astcenc_compress_image(astc.ctx, &img, &astc.swizzle, &out[start], out.size() - start, 0) == ASTCENC_SUCCESS) {
+      astcenc_compress_reset(astc.ctx);
+      return;
+    }
+    astcenc_compress_reset(astc.ctx);
+  }
+  // Void-extent error blocks of magenta would hide a failure; black is quiet,
+  // but the encoder only fails on a bad argument, which these are not.
+  std::memset(&out[start], 0, out.size() - start);
+}
+
+// --- Format choice ----------------------------------------------------------------
+
+std::atomic<int> sGpuFormat{0};  // 0 unknown, 1 BC, 2 ASTC
+
+}  // namespace
+
+void SetGpuTextureSupport(bool bc, bool astc) { sGpuFormat = bc ? 1 : astc ? 2 : 0; }
+
+TextureFormat WantedTextureFormat() {
+  if (const char* env = std::getenv("MP_REMASTERED_TEXTURE_FORMAT")) {
+    if (std::strcmp(env, "astc") == 0) {
+      return TextureFormat::ASTC;
+    }
+    if (std::strcmp(env, "bc") == 0) {
+      return TextureFormat::BC;
+    }
+  }
+  return sGpuFormat.load() == 2 ? TextureFormat::ASTC : TextureFormat::BC;
+}
+
+const char* TextureFormatName() { return WantedTextureFormat() == TextureFormat::ASTC ? "ASTC 4x4" : "BC7"; }
+
+DdsFormat ColourDdsFormat() {
+  return WantedTextureFormat() == TextureFormat::ASTC ? DdsFormat::ASTC4x4 : DdsFormat::BC7;
+}
+
+DdsFormat NormalDdsFormat() {
+  return WantedTextureFormat() == TextureFormat::ASTC ? DdsFormat::ASTC4x4Normal : DdsFormat::BC5;
+}
+
+std::vector<uint8_t> EncodeDds(const Image& image, DdsFormat format, bool punch, MapKind kind) {
   std::vector<Image> levels{image};
+  if (punch) {
+    BleedColour(levels[0]);
+  }
   while (levels.back().width > 1 || levels.back().height > 1) {
-    levels.push_back(HalfOf(levels.back()));
+    levels.push_back(HalfOf(levels.back(), kind));
+  }
+  if (punch) {
+    KeepCoverage(levels);
   }
   const auto blocks = [](int side) { return size_t(std::max(side, 4) / 4); };
   std::vector<uint8_t> out;
@@ -873,26 +1214,32 @@ std::vector<uint8_t> EncodeDds(const Image& image, DdsFormat format) {
   // DDSD_CAPS|HEIGHT|WIDTH|PIXELFORMAT|MIPMAPCOUNT|LINEARSIZE; DDPF_FOURCC
   // 'DX10'; COMPLEX|TEXTURE|MIPMAP.
   out.insert(out.end(), {'D', 'D', 'S', ' '});
-  Put32LE(out, 124);
-  Put32LE(out, 0x000A1007);
-  Put32LE(out, uint32_t(image.height));
-  Put32LE(out, uint32_t(image.width));
-  Put32LE(out, uint32_t(blocks(image.width) * blocks(image.height) * 16));
-  Put32LE(out, 0);
-  Put32LE(out, uint32_t(levels.size()));
+  AppendLE32(out, 124);
+  AppendLE32(out, 0x000A1007);
+  AppendLE32(out, uint32_t(image.height));
+  AppendLE32(out, uint32_t(image.width));
+  AppendLE32(out, uint32_t(blocks(image.width) * blocks(image.height) * 16));
+  AppendLE32(out, 0);
+  AppendLE32(out, uint32_t(levels.size()));
   out.resize(out.size() + 44);
-  Put32LE(out, 32);
-  Put32LE(out, 4);
+  AppendLE32(out, 32);
+  AppendLE32(out, 4);
   out.insert(out.end(), {'D', 'X', '1', '0'});
   out.resize(out.size() + 20);
-  Put32LE(out, 0x00401008);
+  AppendLE32(out, 0x00401008);
   out.resize(out.size() + 16);
-  Put32LE(out, format == DdsFormat::BC7 ? 98 : 83);  // DXGI format
-  Put32LE(out, 3);                                   // TEXTURE2D
-  Put32LE(out, 0);
-  Put32LE(out, 1);  // array size
-  Put32LE(out, 0);
+  const bool astc = format == DdsFormat::ASTC4x4 || format == DdsFormat::ASTC4x4Normal;
+  // DXGI format: BC7_UNORM, BC5_UNORM, ASTC_4X4_UNORM.
+  AppendLE32(out, astc ? 134 : format == DdsFormat::BC7 ? 98 : 83);
+  AppendLE32(out, 3);  // TEXTURE2D
+  AppendLE32(out, 0);
+  AppendLE32(out, 1);  // array size
+  AppendLE32(out, 0);
   for (const Image& lv : levels) {
+    if (astc) {
+      EncodeAstcLevel(lv, format == DdsFormat::ASTC4x4Normal, out);
+      continue;
+    }
     // A level under 4 texels a side is stretched to one block, which is what
     // its block holds anyway.
     const int bw = std::max(lv.width, 4), bh = std::max(lv.height, 4);
@@ -900,9 +1247,11 @@ std::vector<uint8_t> EncodeDds(const Image& image, DdsFormat format) {
       for (int bx = 0; bx < bw; bx += 4) {
         uint8_t px[64];
         for (int y = 0; y < 4; ++y) {
-          const int sy = (by + y) * lv.height / bh;
+          // A side that is not a multiple of 4 leaves the last block partly
+          // outside the level: repeat the edge pixel there.
+          const int sy = std::min((by + y) * lv.height / bh, lv.height - 1);
           for (int x = 0; x < 4; ++x) {
-            const int sx = (bx + x) * lv.width / bw;
+            const int sx = std::min((bx + x) * lv.width / bw, lv.width - 1);
             std::memcpy(px + (y * 4 + x) * 4, &lv.rgba[(size_t(sy) * size_t(lv.width) + size_t(sx)) * 4], 4);
           }
         }

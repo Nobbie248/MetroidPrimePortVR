@@ -300,6 +300,9 @@ private:
   void SetFadeBlackTimer(float seconds);
   void SetFadeBlackWithMovie();
   void StartSlideShow(CArchitectureQueue& queue);
+#ifdef TARGET_PC
+  void PortReloadMods();
+#endif
 
   EPhase x14_phase;
   uint x18_rndA;

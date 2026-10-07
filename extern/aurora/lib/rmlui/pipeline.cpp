@@ -986,6 +986,7 @@ void render(const DrawData& data, const wgpu::RenderPassEncoder& pass) {
     } else {
       pass.SetBindGroup(2, bindGroup);
     }
+    gfx::forget_texture_group();
   }
 
   if (data.hasBlendConstant != 0) {

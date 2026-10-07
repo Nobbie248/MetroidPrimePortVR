@@ -41,6 +41,7 @@ private:
   EVisorBeamMenu GetSwappedType() const { return x80_24_swapBeamControls ? static_cast< EVisorBeamMenu >(1 - x4_type) : x4_type; }
   bool GetIsVisible() const { return x14_24_visibleDebug && x14_25_visibleGame; }
   void UpdateMenuWidgetTransform(int idx, CGuiWidget& widget, float t);
+  void PortGroupSpread();
   CGuiFrame& x0_baseHud;
   EVisorBeamMenu x4_type;
   int x8_selectedItem;

@@ -15,10 +15,14 @@
 //   <id>.CMDL           one model per mesh widget, unlit, one texture a surface
 //   <id>.dds + .TXTR    each picture once: the native texture and its stub
 //   <FRME id>.hudbars   the bars' strips (port_hud_bars.h)
+// A tinted widget (SetTints) gets its own copy of each picture, multiplied by
+// the tint: the game sets the widget's colour every frame, so the picture is
+// the only place a constant factor can go.
 //
 // As with the model converter, bytes come and go through ConvertIO, and the
 // output is the player's own, made from their copies of both games.
 
+#include <array>
 #include <cstddef>
 #include <cstdint>
 #include <map>
@@ -42,6 +46,13 @@ const std::vector<HudFrame>& HudFrames();
 // not a frame.
 bool HudFrameModel(const uint8_t* guif, size_t size, ModelUuid& model);
 
+// Remastered colours each beam's icon in the beam menu: the game's colour for
+// the icon times the beam's colour from its GUI colour tweak (the LDTA asset
+// TweakGuiColorsMP1), with the default colour assist. The beam icon widgets'
+// lower-case names -> RGBA; false when `ldta` is not that tweak.
+bool HudBeamIconTints(const uint8_t* ldta, size_t size, std::map<std::string, std::array<float, 4>>& out,
+                      std::string& error);
+
 struct HudCounts {
   int widgets = 0;
   int models = 0;
@@ -63,15 +74,23 @@ public:
   // under the given id: for models the game places itself, like the map's compass.
   bool ConvertModel(const Model& model, uint32_t id, HudCounts& counts, std::string& error);
 
+  // Model widgets, by lower-case name, whose pictures are multiplied by a colour
+  // (RGBA, 0..1) in the frames converted after this.
+  using Tint = std::array<float, 4>;
+  void SetTints(std::map<std::string, Tint> tints) { m_tints = std::move(tints); }
+
 private:
   uint32_t NewId(uint32_t& next);
   bool LoadMaterial(std::string& error);
-  // The port id of a Remastered picture (pak byte order), written once; nothing
-  // for one that would not open.
-  std::optional<uint32_t> Texture(const ModelUuid& id, HudCounts& counts, const std::string& owner);
+  // The port id of a Remastered picture (pak byte order) multiplied by `tint`,
+  // written once; nothing for one that would not open.
+  std::optional<uint32_t> Texture(const ModelUuid& id, HudCounts& counts, const std::string& owner,
+                                  const Tint& tint = {1.f, 1.f, 1.f, 1.f});
 
   ConvertIO m_io;
-  std::map<ModelUuid, uint32_t> m_textures;  // by pak-order id; 0 for one that would not open
+  std::map<std::string, Tint> m_tints;
+  // By pak-order id and tint; 0 for one that would not open.
+  std::map<std::pair<ModelUuid, Tint>, uint32_t> m_textures;
   std::vector<uint8_t> m_material;           // the disc material the models are drawn with
   uint32_t m_nextModel;
   uint32_t m_nextTexture;

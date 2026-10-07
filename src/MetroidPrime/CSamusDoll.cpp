@@ -1,3 +1,4 @@
+#include "MetroidPrime/Cameras/CGameCamera.hpp"
 #include "MetroidPrime/CSamusDoll.hpp"
 
 #include "MetroidPrime/CActorLights.hpp"
@@ -382,7 +383,10 @@ void CSamusDoll::Draw(const CStateManager& mgr, float alpha) {
   float itemPulse =
       CMath::Clamp(0.f, 0.5f * (1.f + CMath::FastSinR(5.f * CGraphics::GetSecondsMod900())), 1.f);
   itemPulse *= 1.f - CMath::AbsF(xc4_viewInterp);
-  gpRender->SetPerspective(55.f, static_cast< float >(CGraphics::GetViewportWidth()),
+  gpRender->SetPerspective(
+      CGameCamera::VertPlusFov(55.f, static_cast< float >(CGraphics::GetViewportWidth()) /
+                                              static_cast< float >(CGraphics::GetViewportHeight())),
+      static_cast< float >(CGraphics::GetViewportWidth()),
                            static_cast< float >(CGraphics::GetViewportHeight()), 0.2f, 4096.f);
   CGraphics::SetViewPointMatrix(xb0_userRot.BuildTransform4f(xa4_offset) *
                                 CTransform4f::Translate(0.f, xc0_userZoom, 0.f));

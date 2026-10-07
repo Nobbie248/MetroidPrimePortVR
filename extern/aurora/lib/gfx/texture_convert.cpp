@@ -2,6 +2,7 @@
 
 #include "../internal.hpp"
 #include "../gx/gx_fmt.hpp"
+#include "aurora/gfx.h"
 
 #include <algorithm>
 #include <array>
@@ -730,3 +731,27 @@ ConvertedTexture convert_texture_palette(u32 textureFormat, uint32_t width, uint
   };
 }
 } // namespace aurora::gfx
+
+// Port: a bound GX texture object's base level as RGBA8 (w*h*4 bytes), for the Android touch
+// overlay's icons. Palette formats and PC compressed ones are not decoded (false).
+extern "C" bool aurora_gx_texobj_rgba8(const void* obj, uint32_t* width, uint32_t* height, uint8_t* out, size_t cap) {
+  using namespace aurora::gfx;
+  const auto* o = reinterpret_cast<const GXTexObj_*>(obj);
+  if (o == nullptr || o->data == nullptr || out == nullptr) {
+    return false;
+  }
+  const uint32_t w = o->width();
+  const uint32_t h = o->height();
+  const uint32_t fmt = o->format();
+  if (w == 0 || h == 0 || size_t(w) * h * 4 > cap || fmt == GX_TF_C4 || fmt == GX_TF_C8 || fmt == GX_TF_C14X2 || is_pc_texture_format(fmt)) {
+    return false;
+  }
+  ConvertedTexture px = convert_texture(fmt, w, h, 1, aurora::ArrayRef<uint8_t>{static_cast<const uint8_t*>(o->data), UINT32_MAX});
+  if (px.data.empty() || px.format != wgpu::TextureFormat::RGBA8Unorm || px.data.size() < size_t(w) * h * 4) {
+    return false;
+  }
+  std::memcpy(out, px.data.data(), size_t(w) * h * 4);
+  *width = w;
+  *height = h;
+  return true;
+}

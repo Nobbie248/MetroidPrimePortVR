@@ -7,6 +7,10 @@ class CModVectorElement;
 class CRealElement;
 class CUVElement;
 class CVectorElement;
+#ifdef TARGET_PC
+#include <memory>
+struct CPortVfxData;
+#endif
 class CSwooshDescription {
 public:
   CSwooshDescription();
@@ -40,6 +44,12 @@ public:
   bool x45_24_ZBUF : 1;
   bool x45_25_ORNT : 1;
   bool x45_26_CRND : 1;
+#ifdef TARGET_PC
+  // port-only Remastered material (VMAT etc.; see CGenDescription::xPortVfx)
+  std::unique_ptr< CPortVfxData > xPortVfx;
+  // port-only PIRN: a converted Remastered swoosh, whose COLR runs over the live points
+  bool xPortIrnd = false;
+#endif
 };
 
 #endif // _CSWOOSHDESCRIPTION

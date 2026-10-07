@@ -79,9 +79,17 @@ int main() {
     CHECK(ParseOk(HandshakePayload("123"), value));
     CHECK(value.Find("v")->AsInt() == 1 && value.StringOr("client_id") == "123");
 
-    const Presence game = GamePresence("Tallon Overworld", "Landing Site", 12, true, 1700000000);
+    GameInfo info;
+    info.world = "Tallon Overworld";
+    info.area = "Landing Site";
+    info.percent = 12;
+    info.hard = true;
+    info.energy = 199;
+    info.missiles = 25;
+    const Presence game = GamePresence(info, 1700000000);
     CHECK(game.details == "Landing Site");
-    CHECK(game.state == "Tallon Overworld \xc2\xb7 12% items \xc2\xb7 Hard");
+    CHECK(game.state == "199 energy \xc2\xb7 25 missiles \xc2\xb7 12% items");
+    CHECK(game.hover == "Tallon Overworld \xc2\xb7 Hard mode");
     CHECK(ParseOk(ActivityPayload(42, game, "7"), value));
     CHECK(value.StringOr("cmd") == "SET_ACTIVITY" && value.StringOr("nonce") == "7");
     const PortJson::Value* args = value.Find("args");
@@ -91,11 +99,40 @@ int main() {
     CHECK(activity->StringOr("state") == game.state);
     CHECK(activity->Find("timestamps")->Find("start")->AsInt() == 1700000000);
     CHECK(activity->Find("assets")->StringOr("large_image") == "logo");
+    CHECK(activity->Find("assets")->StringOr("large_text") == game.hover);
+    CHECK(game.image.empty() && activity->Find("assets")->Find("small_image") == nullptr);
 
-    // Names still loading: the world alone, then a generic line.
-    CHECK(GamePresence("Chozo Ruins", "", 0, false, 0).details == "Chozo Ruins");
-    CHECK(GamePresence("Chozo Ruins", "", 0, false, 0).state == "0% items");
-    CHECK(GamePresence("", "", 5, false, 0).details == "In game");
+    // World pictures (always on): the world's asset takes the large image, the logo the
+    // small one. A world without one (the end cinema) keeps the logo.
+    info.worldId = 0x83F6FF6Fu;
+    const Presence pictured = GamePresence(info, 0);
+    CHECK(pictured.image == "world_chozo");
+    CHECK(ParseOk(ActivityPayload(42, pictured, "9"), value));
+    const PortJson::Value* assets = value.Find("args")->Find("activity")->Find("assets");
+    CHECK(assets->StringOr("large_image") == "world_chozo");
+    CHECK(assets->StringOr("small_image") == "logo");
+    CHECK(pictured != game);
+    info.worldId = 0x13D79165u;
+    CHECK(GamePresence(info, 0).image.empty());
+    CHECK(std::strcmp(WorldImage(0x158EFE17u), "world_frigate") == 0);
+    CHECK(std::strcmp(WorldImage(0xC13B09D1u), "world_crater") == 0);
+
+    // Names still loading: the world alone, then a generic line. Without a
+    // launcher there's no missile count; without a world, the default tooltip.
+    GameInfo early;
+    early.world = "Chozo Ruins";
+    early.energy = 99;
+    early.missiles = 1;
+    CHECK(GamePresence(early, 0).details == "Chozo Ruins");
+    CHECK(GamePresence(early, 0).state == "99 energy \xc2\xb7 1 missile \xc2\xb7 0% items");
+    CHECK(GamePresence(early, 0).hover.empty());
+    early.world.clear();
+    early.missiles = -1;
+    CHECK(GamePresence(early, 0).details == "In game");
+    CHECK(GamePresence(early, 0).state == "99 energy \xc2\xb7 0% items");
+    CHECK(ParseOk(ActivityPayload(1, GamePresence(early, 0), "8"), value));
+    CHECK(value.Find("args")->Find("activity")->Find("assets")->StringOr("large_text") ==
+          "Metroid Prime native port");
 
     Presence menu;
     menu.details = "In the menus";

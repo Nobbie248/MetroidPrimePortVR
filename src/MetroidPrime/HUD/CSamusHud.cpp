@@ -1276,7 +1276,13 @@ void CSamusHud::Update(float dt, const CStateManager& mgr, uint helmetVis, bool 
     morphFactor = 1.f - mgr.GetPlayer()->GetMorphBallTransitionFactor();
     break;
   }
-  x504_viewportScaleY = 1.f - morphFactor * gpTweakGui->GetBallViewportYReduction();
+  // The ball view's letterbox is a 4:3 design; below 4:3 (where the HUD spreads over the full
+  // height) the world keeps filling the screen.
+  const float vpWidth = static_cast< float >(CGraphics::GetViewportWidth());
+  const float vpHeight = static_cast< float >(CGraphics::GetViewportHeight());
+  const bool narrow = vpHeight > 0.f && vpWidth < vpHeight * (4.f / 3.f) * 0.999f;
+  x504_viewportScaleY =
+      narrow ? 1.f : 1.f - morphFactor * gpTweakGui->GetBallViewportYReduction();
   if (!x2b0_ballIntf.null()) {
     x2b0_ballIntf->SetBallModeFactor(morphFactor);
   }

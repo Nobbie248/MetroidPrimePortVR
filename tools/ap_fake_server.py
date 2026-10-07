@@ -159,7 +159,7 @@ def handle_session(sock, address, args, item_ids, bounce_sources):
             print("[server] permessage-deflate on", flush=True)
         send_json(sock, {
             "cmd": "RoomInfo",
-            "version": {"major": 0, "minor": 6, "build": 0},
+            "version": {"major": 0, "minor": 6, "build": 8},
             "password": False,
             "games": ["Metroid Prime"],
             "seed_name": "Metroid Prime Port fake seed",

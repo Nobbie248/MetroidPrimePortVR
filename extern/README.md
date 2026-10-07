@@ -7,6 +7,7 @@ be fetched. Keep their license files and source notices when updating them.
 | Directory | Upstream | Snapshot imported into this repository |
 | --- | --- | --- |
 | `aurora` | <https://github.com/encounter/aurora> | Local port fork `d39404c803d28657c94159a8f44addffdd85a781`, based on port snapshot `32c926ca0f59994249ba4dae5d606a66f8bbd87f` |
+| `astcenc` | <https://github.com/ARM-software/astc-encoder> | Release `5.7.0` (`baff485b0ff36d2f95d28961605106502c653966`), Apache-2.0 |
 | `musyx` | <https://github.com/AxioDL/musyx> | Local SDL3 port fork `dc8bed3d6b253113a9f0c7bed57378f91b8dc788`, based on port snapshot `ab6d648668f2c6871eef2c079e8edccf51d7f8ec` |
 
 These commit IDs record provenance; they are not download requirements. Existing
@@ -25,3 +26,9 @@ and synchronous voice retirement before releasing group resources.
 Aurora still obtains its transitive dependencies through its provider system;
 versions are pinned in `aurora/cmake/AuroraDependencyVersions.cmake`. Native CI
 builds the vendored source and does not run `git submodule update`.
+
+`astcenc` is a snapshot of the encoder core only: `Source/astcenc.h` and
+`Source/astcenc_*.{cpp,h}` (no CLI, tests, fuzzers, ThirdParty or images), with
+`LICENSE.txt`. `extern/astcenc/CMakeLists.txt` is ours: a static library, SSE2 on
+x86-64, NEON on arm64, plain C++ elsewhere, with no GCC-only flags on MSVC. It
+writes the Remastered importer's ASTC textures (`platform/port_remastered_image.cpp`).

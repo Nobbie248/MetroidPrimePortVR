@@ -27,6 +27,11 @@ CHudHelmetInterface::CHudHelmetInterface(CGuiFrame& frame)
   x50_BaseWidget_HelmetLight = frame.FindWidget(rstl::string_l(skHelmetLightWidgetName));
   x24_pivotPosition = x44_BaseWidget_Pivot->GetIdleXform().GetTranslation();
   x50_BaseWidget_HelmetLight->SetColor(gpTweakGuiColors->GetHelmetLightColor());
+#ifdef TARGET_PC
+  // Below 4:3 the shell and its glass would slide by their own heights and come apart.
+  frame.SetSpreadSlideTree(x48_BaseWidget_Helmet);
+  frame.SetSpreadSlideTree(x4c_BaseWidget_Glow);
+#endif
 }
 
 void CHudHelmetInterface::SetIsVisibleDebug(const bool helmet, const bool glow) {

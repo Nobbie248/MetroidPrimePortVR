@@ -2,6 +2,7 @@
 
 #include "port_prompts.h"
 
+#include "port_embedded.h"
 #include "port_textures.h"
 
 #include <dolphin/gx.h>
@@ -11,6 +12,7 @@
 #include <SDL3/SDL_events.h>
 #include <SDL3/SDL_gamepad.h>
 #include <SDL3/SDL_scancode.h>
+#include <SDL3/SDL_timer.h>
 
 #include <algorithm>
 #include <atomic>
@@ -22,6 +24,7 @@
 #include <fstream>
 #include <iterator>
 #include <set>
+#include <span>
 #include <string>
 #include <vector>
 
@@ -391,23 +394,53 @@ bool SDLCALL active_input_watch(void*, SDL_Event* event) {
   return true;
 }
 
-// The width and height a DDS header declares, or false if the file is too short
-// to hold one. A DDS opens with the "DDS " magic then a 124-byte header, of
-// which the height and width are the two little-endian uint32 at offset 12.
-bool IconDimensions(const std::string& path, uint32_t& width, uint32_t& height) {
+// True when the icons are served from the executable (PortEmbedded) rather than
+// <textures>/bindings; sBindingsDir is then the embedded folder prefix.
+bool sEmbedded = false;
+
+// The whole file at `path`: an embedded entry, else a file on disk.
+bool ReadIconFile(const std::string& path, std::vector<uint8_t>& out) {
+  if (sEmbedded) {
+    const std::span<const uint8_t> bytes = PortEmbedded::Find(path);
+    out.assign(bytes.begin(), bytes.end());
+    return !out.empty();
+  }
   std::ifstream in(path, std::ios::binary);
   if (!in) {
     return false;
   }
-  char magic[4] = {};
-  if (!in.read(magic, 4) || std::strncmp(magic, "DDS ", 4) != 0) {
+  in.seekg(0, std::ios::end);
+  const std::streamoff size = in.tellg();
+  if (size <= 0) {
     return false;
   }
-  in.seekg(12, std::ios::beg);
+  in.seekg(0, std::ios::beg);
+  out.resize(static_cast<size_t>(size));
+  in.read(reinterpret_cast<char*>(out.data()), size);
+  return !in.fail();
+}
+
+// The file `name` in the bindings folder, or an empty string when it is not there.
+std::string FindIconFile(const std::string& name) {
+  if (sEmbedded) {
+    std::string path = sBindingsDir + "/" + name;
+    return PortEmbedded::Find(path).empty() ? std::string() : path;
+  }
+  const std::filesystem::path path = std::filesystem::path(sBindingsDir) / name;
+  std::error_code ec;
+  return std::filesystem::is_regular_file(path, ec) ? path.string() : std::string();
+}
+
+// The width and height a DDS header declares, or false if the file is too short
+// to hold one. A DDS opens with the "DDS " magic then a 124-byte header, of
+// which the height and width are the two little-endian uint32 at offset 12.
+bool IconDimensions(const std::string& path, uint32_t& width, uint32_t& height) {
+  std::vector<uint8_t> bytes;
+  if (!ReadIconFile(path, bytes) || bytes.size() < 20 || std::memcmp(bytes.data(), "DDS ", 4) != 0) {
+    return false;
+  }
   uint32_t both[2] = {};
-  if (!in.read(reinterpret_cast<char*>(both), sizeof(both))) {
-    return false;
-  }
+  std::memcpy(both, bytes.data() + 12, sizeof(both));
   height = both[0];
   width = both[1];
   return true;
@@ -430,20 +463,7 @@ bool ReadIconBytes(void* userData, const char* path, std::vector<uint8_t>& out) 
   if (path != nullptr && std::strstr(path, "_mip") != nullptr) {
     return false;
   }
-  const auto* filePath = static_cast<const std::string*>(userData);
-  std::ifstream in(*filePath, std::ios::binary);
-  if (!in) {
-    return false;
-  }
-  in.seekg(0, std::ios::end);
-  const std::streamoff size = in.tellg();
-  if (size <= 0) {
-    return false;
-  }
-  in.seekg(0, std::ios::beg);
-  out.resize(static_cast<size_t>(size));
-  in.read(reinterpret_cast<char*>(out.data()), size);
-  return !in.fail();
+  return ReadIconFile(*static_cast<const std::string*>(userData), out);
 }
 
 const char* StemForScancode(int scancode) {
@@ -618,7 +638,46 @@ std::string IconStemForDpad(const char* device) {
   return up == dpadUp ? std::string(device) + "_dpad" : up;
 }
 
+// The touch twin-stick layout's hints. The overlay is no pad, so the real pad's mappings
+// (PADGetButtonMappings) mean nothing here: this is what the overlay sends for each GameCube
+// action, in Remastered's Dual Sticks positions. Z is the Map pill (Menu glyph) and Start the
+// Pause button (View glyph); the overlay draws those glyphs on them. The D-pad picks visors, and
+// with the Beam button (Y) held the beams, so the C-stick's beam hints show the D-pad direction
+// that picks them (the pad preset shows the right stick there, which twin stick consumes).
+std::string TouchTwinStemForPrompt(uint32_t prompt) {
+  switch (prompt) {
+  case PROMPT_STICK: return "xbox_stick_l";
+  case PROMPT_STICK_UP: return "xbox_stick_l_up";
+  case PROMPT_STICK_DOWN: return "xbox_stick_l_down";
+  case PROMPT_STICK_LEFT: return "xbox_stick_l_left";
+  case PROMPT_STICK_RIGHT: return "xbox_stick_l_right";
+  case PROMPT_CSTICK: return "xbox_dpad";
+  case PROMPT_CSTICK_UP: return "xbox_dpad_up";
+  case PROMPT_CSTICK_DOWN: return "xbox_dpad_down";
+  case PROMPT_CSTICK_LEFT: return "xbox_dpad_left";
+  case PROMPT_CSTICK_RIGHT: return "xbox_dpad_right";
+  case PROMPT_DPAD: return "xbox_dpad";
+  case PAD_BUTTON_UP: return "xbox_dpad_up";
+  case PAD_BUTTON_DOWN: return "xbox_dpad_down";
+  case PAD_BUTTON_LEFT: return "xbox_dpad_left";
+  case PAD_BUTTON_RIGHT: return "xbox_dpad_right";
+  case PAD_BUTTON_A: return "xbox_rt";
+  case PAD_BUTTON_B: return "xbox_south";
+  case PAD_BUTTON_X: return "xbox_west";
+  case PAD_BUTTON_Y: return "xbox_rightshoulder";
+  case PAD_TRIGGER_L: return "xbox_lt";
+  case PAD_TRIGGER_R: return "xbox_rightstick";
+  case PAD_TRIGGER_Z: return "xbox_start";
+  case PAD_BUTTON_START: return "xbox_back";
+  default: return {};
+  }
+}
+
 std::string IconStemForPrompt(uint32_t prompt, const char* device) {
+  if (sActiveInput.load(std::memory_order_relaxed) == ActiveInput::TouchXbox &&
+      std::strcmp(device, "xbox") == 0) {
+    return TouchTwinStemForPrompt(prompt);
+  }
   switch (prompt) {
   case PROMPT_STICK: return IconStemForStick(kStickAxes, -1, device);
   case PROMPT_STICK_UP: return IconStemForStick(kStickAxes, 0, device);
@@ -659,13 +718,11 @@ void Apply(size_t index, const std::string& stem) {
   // variants for exactly this reason.
   char sized[160];
   std::snprintf(sized, sizeof(sized), "%s_%ux%u.dds", stem.c_str(), key.width, key.height);
-  const std::filesystem::path base(sBindingsDir);
-  std::error_code existsError;
-  if (std::filesystem::is_regular_file(base / sized, existsError)) {
-    reg.iconPath = (base / sized).string();
-  } else if (std::filesystem::is_regular_file(base / (stem + ".dds"), existsError)) {
-    reg.iconPath = (base / (stem + ".dds")).string();
-  } else {
+  reg.iconPath = FindIconFile(sized);
+  if (reg.iconPath.empty()) {
+    reg.iconPath = FindIconFile(stem + ".dds");
+  }
+  if (reg.iconPath.empty()) {
     // Nothing generated for this action, so nothing is registered. Note that
     // what stays on screen is not necessarily "the game's own art": the static
     // per-device set in <textures>/<device>/ is registered separately, by
@@ -707,7 +764,8 @@ namespace PortPrompts {
 // already is the GameCube set, so only a remapped GC pad button gets an icon
 // (GameCubeStemForButton).
 const char* ActiveDevice() {
-  const char* env = std::getenv("MP_TEXTURE_DEVICE");
+  // Read once: it is asked every frame, and nothing sets it while the game runs.
+  static const char* const env = std::getenv("MP_TEXTURE_DEVICE");
   if (env != nullptr && env[0] != '\0') {
     return env;
   }
@@ -725,17 +783,23 @@ const char* ActiveDevice() {
 }
 
 void Initialize(const char* textureRoot) {
-  if (textureRoot == nullptr || textureRoot[0] == '\0') {
+  const bool embedded = textureRoot == nullptr && !PortEmbedded::Under("textures/bindings/").empty();
+  if (!embedded && (textureRoot == nullptr || textureRoot[0] == '\0')) {
     return;
   }
   // Tracked even without generated icons, since the static set follows it too.
   SDL_AddEventWatch(active_input_watch, nullptr);
-  const std::filesystem::path bindingsDir = std::filesystem::path(textureRoot) / "bindings";
-  std::error_code ec;
-  if (!std::filesystem::is_directory(bindingsDir, ec)) {
-    return;
+  if (embedded) {
+    sBindingsDir = "textures/bindings";
+    sEmbedded = true;
+  } else {
+    const std::filesystem::path bindingsDir = std::filesystem::path(textureRoot) / "bindings";
+    std::error_code ec;
+    if (!std::filesystem::is_directory(bindingsDir, ec)) {
+      return;
+    }
+    sBindingsDir = bindingsDir.string();
   }
-  sBindingsDir = bindingsDir.string();
   sEnabled = true;
   Poll();
 }
@@ -745,6 +809,17 @@ void Poll() {
     return;
   }
   const char* device = ActiveDevice();
+  // Resolving every action's binding builds strings and rescans the bindings, so it runs when
+  // the device changes and otherwise a few times a second, which still follows a rebind.
+  static std::string sLastDevice;
+  static uint64_t sLastResolveNs = 0;
+  const uint64_t nowNs = SDL_GetTicksNS();
+  const bool deviceChanged = sLastDevice != device;
+  if (!deviceChanged && sLastResolveNs != 0 && nowNs - sLastResolveNs < 250000000ull) {
+    return;
+  }
+  sLastDevice = device;
+  sLastResolveNs = nowNs != 0 ? nowNs : 1;
   for (const PromptAction& action : kActions) {
     const std::string stem = IconStemForPrompt(action.prompt, device);
     size_t applied = 0;

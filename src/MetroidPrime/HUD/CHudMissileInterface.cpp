@@ -115,6 +115,9 @@ CHudMissileInterface::CHudMissileInterface(CGuiFrame& hud, int capacity, int mis
   x64_energybart01_missilebar->SetShadowDrainSpeed(gpTweakGui->GetEnergyBarShadowSpeed());
   x64_energybart01_missilebar->SetShadowDrainDelay(gpTweakGui->GetEnergyBarDrainDelay());
   x64_energybart01_missilebar->SetIsAlwaysResetTimer(true);
+#ifdef TARGET_PC
+  hud.SetSpreadStretch(x64_energybart01_missilebar);
+#endif
   if (x68_textpane_missilewarning) {
     x68_textpane_missilewarning->TextSupport().SetFontColor(
         gpTweakGuiColors->GetMissileWarningFont());

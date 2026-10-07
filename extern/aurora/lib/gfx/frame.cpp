@@ -3,6 +3,11 @@
 
 #include "depth_peek.hpp"
 #include "pipeline_cache.hpp"
+#include "bloom.hpp"
+#include "shadow.hpp"
+#include "volfog.hpp"
+#include <aurora/vfx.hpp>
+#include <aurora/water.hpp>
 #include "probe.hpp"
 #include "recording.hpp"
 #include "render_worker.hpp"
@@ -246,6 +251,18 @@ void map_staging_buffer(size_t slot, bool releaseSlotOnCompletion = false) {
 
 const FrameBufferSizes& frame_buffer_sizes() noexcept { return g_bufferSizes; }
 
+Range resident_region(ResidentBuffer kind) noexcept {
+  switch (kind) {
+  case ResidentBuffer::Vertex:
+    return {uint32_t(g_bufferSizes.vertex), uint32_t(g_bufferSizes.residentVertex)};
+  case ResidentBuffer::Index:
+    return {uint32_t(g_bufferSizes.index), uint32_t(g_bufferSizes.residentIndex)};
+  case ResidentBuffer::Storage:
+    return {uint32_t(g_bufferSizes.storage), uint32_t(g_bufferSizes.residentStorage)};
+  }
+  return {};
+}
+
 namespace detail {
 
 Resources& resources() noexcept { return g_resources; }
@@ -427,6 +444,24 @@ void initialize() {
     if (scale != std::max<uint32_t>(g_config.frameBufferScale, 1)) {
       Log.warn("Frame buffer scale {} is beyond this device, using {}", g_config.frameBufferScale, scale);
     }
+    // The resident regions follow a frame's data in the device buffers, which are bound
+    // whole, so they take what the device leaves after it: two fifths each to vertices and
+    // arrays, a fifth to indices.
+    const uint64_t resident = uint64_t(g_config.residentGeometryMiB) * 1024 * 1024;
+    if (resident != 0) {
+      const auto fit = [](uint64_t want, uint64_t frame, uint64_t limit) -> uint64_t {
+        const uint64_t room = limit > frame ? limit - frame : 0;
+        // Offsets into it are u32, and every allocation is 256-aligned.
+        return std::min({want, room, uint64_t(UINT32_MAX) - frame}) & ~uint64_t(255);
+      };
+      const uint64_t bound = std::min(maxBinding, maxBuffer);
+      g_bufferSizes.residentVertex = fit(resident / 5 * 2, g_bufferSizes.vertex, bound);
+      g_bufferSizes.residentStorage = fit(resident / 5 * 2, g_bufferSizes.storage, bound);
+      g_bufferSizes.residentIndex = fit(resident / 5, g_bufferSizes.index, maxBuffer);
+      Log.info("Resident geometry: {} MiB of vertices, {} MiB of arrays, {} MiB of indices",
+               g_bufferSizes.residentVertex >> 20, g_bufferSizes.residentStorage >> 20,
+               g_bufferSizes.residentIndex >> 20);
+    }
   }
 
   const auto createBuffer = [](wgpu::Buffer& out, wgpu::BufferUsage usage, uint64_t size, const char* label) {
@@ -443,12 +478,13 @@ void initialize() {
   createBuffer(g_resources.uniformBuffer, wgpu::BufferUsage::Uniform | wgpu::BufferUsage::CopyDst, g_bufferSizes.uniform,
                "Shared Uniform Buffer");
   createBuffer(g_resources.vertexBuffer,
-               wgpu::BufferUsage::Storage | wgpu::BufferUsage::Vertex | wgpu::BufferUsage::CopyDst, g_bufferSizes.vertex,
-               "Shared Vertex Buffer");
-  createBuffer(g_resources.indexBuffer, wgpu::BufferUsage::Index | wgpu::BufferUsage::CopyDst, g_bufferSizes.index,
+               wgpu::BufferUsage::Storage | wgpu::BufferUsage::Vertex | wgpu::BufferUsage::CopyDst,
+               g_bufferSizes.vertex + g_bufferSizes.residentVertex, "Shared Vertex Buffer");
+  createBuffer(g_resources.indexBuffer, wgpu::BufferUsage::Index | wgpu::BufferUsage::CopyDst,
+               g_bufferSizes.index + g_bufferSizes.residentIndex,
                "Shared Index Buffer");
-  createBuffer(g_resources.storageBuffer, wgpu::BufferUsage::Storage | wgpu::BufferUsage::CopyDst, g_bufferSizes.storage,
-               "Shared Storage Buffer");
+  createBuffer(g_resources.storageBuffer, wgpu::BufferUsage::Storage | wgpu::BufferUsage::CopyDst,
+               g_bufferSizes.storage + g_bufferSizes.residentStorage, "Shared Storage Buffer");
   for (size_t i = 0; i < g_stagingBuffers.size(); ++i) {
     const auto label = fmt::format("Staging Buffer {}", i);
     createBuffer(g_stagingBuffers[i], wgpu::BufferUsage::MapWrite | wgpu::BufferUsage::CopySrc, g_bufferSizes.staging(),
@@ -584,6 +620,11 @@ void shutdown() {
   depth_peek::shutdown();
   tex_copy_conv::shutdown();
   probe::shutdown();
+  bloom::shutdown();
+  volfog::shutdown();
+  shadow::shutdown();
+  vfx::shutdown();
+  water::shutdown();
   tex_palette_conv::shutdown();
   texture_replacement::shutdown();
   gx::shutdown();
@@ -734,6 +775,7 @@ void end_frame(EndFrameCallback callback) {
     packet = {};
     g_resources.stats.drawCallCount = stats.drawCallCount;
     g_resources.stats.mergedDrawCallCount = stats.mergedDrawCallCount;
+    g_resources.stats.renderPassCount = stats.renderPassCount;
     g_resources.stats.lastVertSize = stats.lastVertSize;
     g_resources.stats.lastUniformSize = stats.lastUniformSize;
     g_resources.stats.lastIndexSize = stats.lastIndexSize;
@@ -751,7 +793,10 @@ void end_frame(EndFrameCallback callback) {
 
 uint32_t current_frame() noexcept { return g_frameIndex; }
 
-void after_submit() noexcept { depth_peek::after_submit(); }
+void after_submit() noexcept {
+  depth_peek::after_submit();
+  bloom::after_submit();
+}
 
 void gpu_synchronize() { render_worker::synchronize(); }
 
@@ -792,4 +837,12 @@ const AuroraStats* aurora_get_stats() { return &aurora::gfx::detail::resources()
 uint32_t aurora_get_frame_buffer_scale() {
   return aurora::gfx::frame_buffer_sizes().scale;
 }
+uint32_t aurora_get_resident_geometry_mib() {
+  const auto& sizes = aurora::gfx::frame_buffer_sizes();
+  return static_cast<uint32_t>((sizes.residentVertex + sizes.residentIndex + sizes.residentStorage) >> 20);
+}
 float aurora_get_fps() { return aurora::gfx::calculate_fps(); }
+void aurora_get_texture_support(bool* bc, bool* astc) {
+  *bc = aurora::webgpu::g_bcTexturesSupported;
+  *astc = aurora::webgpu::g_astcTexturesSupported;
+}

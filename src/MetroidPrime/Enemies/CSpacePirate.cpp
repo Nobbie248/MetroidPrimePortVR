@@ -26,6 +26,8 @@
 #include "MetroidPrime/Enemies/CTeamAiMgr.hpp"
 #include "MetroidPrime/Player/CPlayer.hpp"
 #include "port_debug.h"
+#include "port_model_variant.h"
+#include "Kyoto/CResFactory.hpp"
 #include "MetroidPrime/Player/CPlayerState.hpp"
 #include "MetroidPrime/ScriptObjects/CScriptAiJumpPoint.hpp"
 #include "MetroidPrime/ScriptObjects/CScriptCoverPoint.hpp"
@@ -590,6 +592,27 @@ CSpacePirate::CSpacePirate(TUniqueId uid, const rstl::string& name, const CEntit
     }
   }
 }
+
+#ifdef TARGET_PC
+CAssetId CSpacePirate::PortTrooperLook(CAssetId ancs, const CPatternedInfo& pInfo,
+                                       CInputStream& in) {
+  // CSpacePirateData: six floats, then the flags word (0x40000 = trooper).
+  uint flags = 0;
+  if (!in.PortPeekLong(24, flags) || (flags & 0x40000) == 0) {
+    return ancs;
+  }
+  // Same order as the trooper colour in the constructor.
+  const CDamageVulnerability& vulnerability = pInfo.GetDamageVulnerability();
+  static const EWeaponType kOrder[] = {kWT_Plasma, kWT_Ice, kWT_Power, kWT_Wave};
+  for (int i = 0; i < 4; ++i) {
+    if (vulnerability.WeaponHurts(CWeaponMode(kOrder[i]), CDamageVulnerability::kRD_No)) {
+      const CAssetId variant = PortModelVariant::Id(ancs, kOrder[i]);
+      return gpResourceFactory->GetResourceTypeById(variant) == 'ANCS' ? variant : ancs;
+    }
+  }
+  return ancs;
+}
+#endif
 
 ENTITY_ACCEPT_IMPL(CSpacePirate)
 

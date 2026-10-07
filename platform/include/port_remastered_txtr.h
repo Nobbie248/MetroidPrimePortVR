@@ -108,6 +108,28 @@ bool ReadTxtrCubeBc6h(const uint8_t* data, size_t size, TxtrCubeBc6h& out, std::
 bool DecodeVolumeFloat(const uint8_t* compressed, size_t compressedSize, size_t surfaceSize, uint32_t format,
                        uint32_t width, uint32_t height, uint32_t depth, std::vector<float>& rgba,
                        std::string& error);
+// A whole 3D RGBA8 texture, every slice (colour grade LUTs). `data` is the complete RFRM
+// TXTR file; `rgba` gets width * height * depth * 4 bytes, z slowest, x fastest.
+bool DecodeTxtrVolumeRgba8(const uint8_t* data, size_t size, uint32_t& width, uint32_t& height, uint32_t& depth,
+                           std::vector<uint8_t>& rgba, std::string& error);
+// The top mip of every face of an LDR cube map (the materials' REFL cubes) as RGBA8:
+// `rgba` gets 6 faces of edge * edge texels, face slowest, in the file's face order.
+bool DecodeTxtrCubeRgba8(const uint8_t* data, size_t size, uint32_t& edge, std::vector<uint8_t>& rgba,
+                         std::string& error);
+// The top mip of every layer of an array texture (kind 5) as RGBA8: `rgba` gets `layers`
+// images of width * height texels, layer slowest.
+bool DecodeTxtrLayersRgba8(const uint8_t* data, size_t size, uint32_t& width, uint32_t& height,
+                           uint32_t& layers, std::vector<uint8_t>& rgba, std::string& error);
+// A BC6H array texture (kind 5), which is what a room's baked lightmap is: the top mip of
+// every layer, the layers' blocks in stored order (rows of ceil(width / 4) blocks).
+struct TxtrLayersBc6h {
+  uint32_t width = 0, height = 0;
+  bool isSigned = false;
+  std::vector<std::vector<uint8_t>> layers;
+};
+bool ReadTxtrLayersBc6h(const uint8_t* data, size_t size, TxtrLayersBc6h& out, std::string& error);
+// DecodeBc6hFace for a width x height image (any size).
+void DecodeBc6hImage(const uint8_t* blocks, uint32_t width, uint32_t height, bool isSigned, uint16_t* rgba);
 // Decodes one face of BC6H blocks (`texels` on a side) into RGBA half floats, alpha 1.
 void DecodeBc6hFace(const uint8_t* blocks, uint32_t texels, bool isSigned, uint16_t* rgba);
 

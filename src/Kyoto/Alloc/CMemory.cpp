@@ -7,6 +7,21 @@
 
 #include "dolphin/os.h"
 
+#ifdef TARGET_PC
+#include <mutex>
+
+// The guest serialised the heap with OSDisableInterrupts, which is a no-op on PC,
+// and the heap is not only touched by the game thread here: Aurora's DVD worker
+// (CDSPStream::ReadCompleted) and the MusyX mixer thread (CDSPStream::UpdateStream)
+// free one-shot stream buffers. Recursive in case an out-of-memory callback
+// allocates or frees again from inside the allocator. Never destroyed, so a free
+// from a static destructor after main still finds it.
+static std::recursive_mutex& HeapMutex() {
+  static std::recursive_mutex* mutex = new std::recursive_mutex;
+  return *mutex;
+}
+#endif
+
 static CGameAllocator gGameAllocator;
 IAllocator* CMemory::mpAllocator = &gGameAllocator;
 bool CMemory::mInitialized;
@@ -56,6 +71,9 @@ void CMemory::Shutdown() {
 
 void* CMemory::Alloc(size_t len, IAllocator::EHint hint, IAllocator::EScope scope,
                      IAllocator::EType type, const CCallStack& callstack) {
+#ifdef TARGET_PC
+  std::lock_guard< std::recursive_mutex > heapLock(HeapMutex());
+#endif
   volatile bool enabled = OSDisableInterrupts();
   void* ret = mpAllocator->Alloc(len, hint, scope, type, callstack);
   if (ret == nullptr) {
@@ -71,12 +89,30 @@ void* CMemory::Alloc(size_t len, IAllocator::EHint hint, IAllocator::EScope scop
 }
 
 void CMemory::Free(const void* ptr) {
+#ifdef TARGET_PC
+  std::lock_guard< std::recursive_mutex > heapLock(HeapMutex());
+#endif
   volatile bool enabled = OSDisableInterrupts();
   if (ptr != nullptr) {
     mpAllocator->Free(ptr);
   }
   OSRestoreInterrupts(enabled);
 }
+
+#ifdef TARGET_PC
+// Port: MP_HEAP_CHECK hooks for CFrameDelayedKiller (see CGameAllocator::CheckHeap).
+bool PortHeapCheckEnabled() { return CGameAllocator::HeapCheckEnabled(); }
+
+void PortHeapCheckAll() {
+  std::lock_guard< std::recursive_mutex > heapLock(HeapMutex());
+  gGameAllocator.CheckHeap();
+}
+
+bool PortHeapPeekBlock(const void* ptr, const char** fileAndLine, size_t* len) {
+  std::lock_guard< std::recursive_mutex > heapLock(HeapMutex());
+  return gGameAllocator.PeekLiveBlock(ptr, fileAndLine, len);
+}
+#endif
 
 void CMemory::SetOutOfMemoryCallback(IAllocator::FOutOfMemoryCb cb, const void* context) {
   mpAllocator->SetOutOfMemoryCallback(cb, context);

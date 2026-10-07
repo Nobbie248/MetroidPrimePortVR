@@ -9,6 +9,7 @@
 #include "webgpu/gpu.hpp"
 
 #include <algorithm>
+#include <array>
 #include <memory>
 
 namespace aurora::gfx {
@@ -194,6 +195,21 @@ TEST_F(GfxRecordingTest, UniformSnapshotIncludesLogicalTextureSizeAndLineWidth) 
   gx::g_gxState.textures[0].texObj.image0 ^= 1;
   EXPECT_FALSE(gx::uniform_matches(info, snapshot));
   EXPECT_FALSE(gx::uniform_matches(info, ByteBuffer{}));
+}
+
+TEST_F(GfxRecordingTest, PushPastMappedBufferReturnsOverflowRange) {
+  // The frame's buffers wrap fixed-size mapped staging memory, which used to abort when full.
+  std::array<uint8_t, 64> mapped{};
+  frame.storage = ByteBuffer{mapped.data(), mapped.size()};
+  const std::array<uint8_t, 48> data{};
+
+  const auto first = push_storage(data.data(), data.size());
+  EXPECT_FALSE(overflowed(first));
+  EXPECT_EQ(first.size, data.size());
+  EXPECT_TRUE(overflowed(push_storage(data.data(), data.size())));
+  EXPECT_EQ(frame.storage.size(), data.size());
+
+  frame.storage = ByteBuffer{};
 }
 
 TEST_F(GfxRecordingTest, EfbPassUsesDiscoveredSceneLayout) {

@@ -5,6 +5,8 @@
 #include <array>
 #include <cmath>
 #include <cstdint>
+#include <cstdlib>
+#include <deque>
 #include <span>
 #include <string>
 #include <string_view>
@@ -88,6 +90,7 @@ static const void* g_surfaceWindow = nullptr;
 static wgpu::SurfaceCapabilities g_surfaceCapabilities;
 bool g_hasCoreFeatures = false;
 bool g_bcTexturesSupported = false;
+bool g_lightmapBinding = false;
 bool g_astcTexturesSupported = false;
 bool g_textureComponentSwizzleSupported = false;
 bool g_multiviewSupported = false;
@@ -837,9 +840,12 @@ bool initialize(AuroraBackend auroraBackend, bool allowCpu) {
     return false;
   }
   {
+    // MP_GPU_POWER=low asks for the integrated GPU on a machine that also has a discrete one.
+    const char* power = std::getenv("MP_GPU_POWER");
+    const bool lowPower = power != nullptr && std::string_view{power} == "low";
     wgpu::RequestAdapterOptions options{
         .featureLevel = wgpu::FeatureLevel::Compatibility,
-        .powerPreference = wgpu::PowerPreference::HighPerformance,
+        .powerPreference = lowPower ? wgpu::PowerPreference::LowPower : wgpu::PowerPreference::HighPerformance,
         .backendType = backend,
         .compatibleSurface = g_surface,
     };
@@ -910,8 +916,30 @@ bool initialize(AuroraBackend auroraBackend, bool allowCpu) {
   }
   g_backendType = g_adapterInfo.backendType;
   const auto backendName = magic_enum::enum_name(g_backendType);
-  Log.info("Graphics adapter information\n  API: {}\n  Device: {} ({})\n  Driver: {}", backendName, adapterName,
-           magic_enum::enum_name(g_adapterInfo.adapterType), description);
+  auto vendorName = g_adapterInfo.vendor;
+  if (vendorName.IsUndefined()) {
+    vendorName = wgpu::StringView("Unknown");
+  }
+  auto architectureName = g_adapterInfo.architecture;
+  if (architectureName.IsUndefined()) {
+    architectureName = wgpu::StringView("Unknown");
+  }
+  wgpu::SupportedFeatures supportedFeatures;
+  g_adapter.GetFeatures(&supportedFeatures);
+  std::string allFeatures;
+  for (size_t i = 0; i < supportedFeatures.featureCount; ++i) {
+    const std::string_view name = magic_enum::enum_name(supportedFeatures.features[i]);
+    if (name.empty()) {
+      continue;
+    }
+    allFeatures += allFeatures.empty() ? "\n  " : ", ";
+    allFeatures += name;
+  }
+  Log.info("Graphics adapter information\n  API: {}\n  Device: {} ({})\n  Driver: {}"
+           "\n  Vendor: {} ({:#06x}), device {:#06x}\n  Architecture: {}\n  Adapter features:{}",
+           backendName, adapterName, magic_enum::enum_name(g_adapterInfo.adapterType), description, vendorName,
+           g_adapterInfo.vendorID, g_adapterInfo.deviceID, architectureName,
+           allFeatures.empty() ? "\n  (none)" : allFeatures);
 
   {
     wgpu::Limits supportedLimits{};
@@ -931,6 +959,9 @@ bool initialize(AuroraBackend auroraBackend, bool allowCpu) {
                                                                             : supportedLimits.maxTextureDimension3D,
         .maxTextureArrayLayers = supportedLimits.maxTextureArrayLayers == 0 ? WGPU_LIMIT_U32_UNDEFINED
                                                                             : supportedLimits.maxTextureArrayLayers,
+        .maxSampledTexturesPerShaderStage = supportedLimits.maxSampledTexturesPerShaderStage >= 17
+                                                ? 17
+                                                : WGPU_LIMIT_U32_UNDEFINED,
         .maxStorageBuffersPerShaderStage = 2,
         .maxStorageBufferBindingSize = supportedLimits.maxStorageBufferBindingSize == 0
                                            ? WGPU_LIMIT_U64_UNDEFINED
@@ -952,19 +983,68 @@ bool initialize(AuroraBackend auroraBackend, bool allowCpu) {
         "\n  maxStorageBuffersPerShaderStage: {}"
         "\n  minUniformBufferOffsetAlignment: {}"
         "\n  minStorageBufferOffsetAlignment: {}"
-        "\n  maxImmediateSize: {}",
+        "\n  maxImmediateSize: {}"
+        "\n  maxBindGroups: {}"
+        "\n  maxStorageBufferBindingSize: {}"
+        "\n  maxUniformBufferBindingSize: {}"
+        "\n  maxBufferSize: {}"
+        "\n  maxVertexBuffers: {}"
+        "\n  maxVertexAttributes: {}"
+        "\n  maxColorAttachments: {}"
+        "\n  maxComputeWorkgroupStorageSize: {}"
+        "\n  maxStorageBuffersInVertexStage: {}"
+        "\n  maxStorageBuffersInFragmentStage: {}",
         requiredLimits.maxTextureDimension1D, requiredLimits.maxTextureDimension2D,
         requiredLimits.maxTextureDimension3D, requiredLimits.maxTextureArrayLayers,
         requiredLimits.maxStorageBuffersPerShaderStage, requiredLimits.minUniformBufferOffsetAlignment,
-        requiredLimits.minStorageBufferOffsetAlignment, requiredLimits.maxImmediateSize);
+        requiredLimits.minStorageBufferOffsetAlignment, requiredLimits.maxImmediateSize,
+        supportedLimits.maxBindGroups, supportedLimits.maxStorageBufferBindingSize,
+        supportedLimits.maxUniformBufferBindingSize, supportedLimits.maxBufferSize,
+        supportedLimits.maxVertexBuffers, supportedLimits.maxVertexAttributes, supportedLimits.maxColorAttachments,
+        supportedLimits.maxComputeWorkgroupStorageSize, compatibilityModeLimits.maxStorageBuffersInVertexStage,
+        compatibilityModeLimits.maxStorageBuffersInFragmentStage);
+    // The requests above override the adapter defaults; say what was changed so
+    // a driver bug (issue #7) can be told apart from a bad request.
+    std::string limitNotes;
+    const auto noteLimit = [&](const char* name, uint64_t requested, uint64_t supported) {
+      if (requested != supported) {
+        limitNotes += limitNotes.empty() ? "\n  " : ", ";
+        limitNotes += name;
+        limitNotes += " requested " + std::to_string(requested) + ", adapter " + std::to_string(supported);
+      }
+    };
+    noteLimit("maxTextureDimension1D", requiredLimits.maxTextureDimension1D,
+              supportedLimits.maxTextureDimension1D);
+    noteLimit("maxTextureDimension2D", requiredLimits.maxTextureDimension2D,
+              supportedLimits.maxTextureDimension2D);
+    noteLimit("maxTextureDimension3D", requiredLimits.maxTextureDimension3D,
+              supportedLimits.maxTextureDimension3D);
+    noteLimit("maxTextureArrayLayers", requiredLimits.maxTextureArrayLayers,
+              supportedLimits.maxTextureArrayLayers);
+    g_lightmapBinding = requiredLimits.maxSampledTexturesPerShaderStage == 17;
+    if (g_lightmapBinding) {
+      limitNotes += limitNotes.empty() ? "\n  " : ", ";
+      limitNotes += "maxSampledTexturesPerShaderStage requested 17, adapter " +
+                    std::to_string(supportedLimits.maxSampledTexturesPerShaderStage);
+    }
+    noteLimit("maxStorageBuffersPerShaderStage", requiredLimits.maxStorageBuffersPerShaderStage,
+              supportedLimits.maxStorageBuffersPerShaderStage);
+    noteLimit("maxStorageBufferBindingSize", requiredLimits.maxStorageBufferBindingSize,
+              supportedLimits.maxStorageBufferBindingSize);
+    noteLimit("maxBufferSize", requiredLimits.maxBufferSize, supportedLimits.maxBufferSize);
+    noteLimit("minUniformBufferOffsetAlignment", requiredLimits.minUniformBufferOffsetAlignment,
+              supportedLimits.minUniformBufferOffsetAlignment);
+    noteLimit("minStorageBufferOffsetAlignment", requiredLimits.minStorageBufferOffsetAlignment,
+              supportedLimits.minStorageBufferOffsetAlignment);
+    if (!limitNotes.empty()) {
+      Log.info("Limits overridden from the adapter defaults:{}", limitNotes);
+    }
     std::vector<wgpu::FeatureName> requiredFeatures;
     g_hasCoreFeatures = false;
     g_bcTexturesSupported = false;
     g_astcTexturesSupported = false;
     g_textureComponentSwizzleSupported = false;
     g_multiviewSupported = false;
-    wgpu::SupportedFeatures supportedFeatures;
-    g_adapter.GetFeatures(&supportedFeatures);
     for (size_t i = 0; i < supportedFeatures.featureCount; ++i) {
       const auto feature = supportedFeatures.features[i];
       if (feature == wgpu::FeatureName::CoreFeaturesAndLimits || feature == wgpu::FeatureName::TextureCompressionBC ||
@@ -981,11 +1061,10 @@ bool initialize(AuroraBackend auroraBackend, bool allowCpu) {
         }
         requiredFeatures.push_back(feature);
       }
-#ifdef TRACY_ENABLE
+      // Per-pass GPU times (gpu_prof); Dawn's quantization of them is off in disableToggles.
       if (feature == wgpu::FeatureName::TimestampQuery) {
         requiredFeatures.push_back(feature);
       }
-#endif
 #if defined(WEBGPU_DAWN) && defined(_WIN32)
       // The OpenXR stereo bridge (lib/webgpu/d3d12_interop.cpp) imports its eye
       // intermediates as shared D3D12 resources and orders them with a shared
@@ -1038,7 +1117,7 @@ bool initialize(AuroraBackend auroraBackend, bool allowCpu) {
           store_to_cache(key.data(), key.size(), value.data(), value.size(), nullptr);
         });
 
-    constexpr std::array enableToggles{
+    std::vector<const char*> enableToggles{
 #if _WIN32
         "use_dxc",
 #ifndef NDEBUG
@@ -1056,19 +1135,49 @@ bool initialize(AuroraBackend auroraBackend, bool allowCpu) {
         "enable_immediate_error_handling",
         "gl_allow_context_on_multi_threads",
     };
-    constexpr std::array disableToggles{
+    std::vector<const char*> disableToggles{
         "timestamp_quantization",
-        // Adreno strikes again!
-        // https://github.com/TwilitRealm/dusklight/issues/2563
+        // Adreno 740 (Galaxy S23, Odin 2) crashes in vkCreateGraphicsPipelines with it on.
+        // Upstream aurora bded88e9: https://github.com/TwilitRealm/dusklight/issues/2563
         "use_spirv_reconvergence_mode",
     };
+    // Extra toggles for driver debugging: MP_DAWN_ENABLE / MP_DAWN_DISABLE, comma-separated.
+    static std::deque<std::string> envToggles;
+    envToggles.clear();
+    for (const auto& [name, list] : {std::pair{"MP_DAWN_ENABLE", &enableToggles},
+                                     std::pair{"MP_DAWN_DISABLE", &disableToggles}}) {
+      const char* value = std::getenv(name);
+      for (std::string_view rest = value != nullptr ? value : ""; !rest.empty();) {
+        const size_t comma = rest.find(',');
+        if (comma != 0) {
+          list->push_back(envToggles.emplace_back(rest.substr(0, comma)).c_str());
+          Log.info("{}: {}", name, envToggles.back());
+        }
+        rest = comma == std::string_view::npos ? std::string_view{} : rest.substr(comma + 1);
+      }
+    }
+    // GL is only the fallback for drivers that draw wrong on Vulkan, so it runs without
+    // Dawn's blob cache: cached program binaries crashed Mesa in glProgramBinary.
     wgpu::DawnTogglesDescriptor togglesDescriptor(wgpu::DawnTogglesDescriptor::Init{
-        .nextInChain = &cacheDescriptor,
+        .nextInChain = g_backendType == wgpu::BackendType::OpenGLES ||
+                               g_backendType == wgpu::BackendType::OpenGL
+                           ? nullptr
+                           : &cacheDescriptor,
         .enabledToggleCount = enableToggles.size(),
         .enabledToggles = enableToggles.data(),
         .disabledToggleCount = disableToggles.size(),
         .disabledToggles = disableToggles.data(),
     });
+    std::string enabledToggles, disabledToggles;
+    for (const char* toggle : enableToggles) {
+      enabledToggles += enabledToggles.empty() ? "\n  " : ", ";
+      enabledToggles += toggle;
+    }
+    for (const char* toggle : disableToggles) {
+      disabledToggles += disabledToggles.empty() ? "\n  " : ", ";
+      disabledToggles += toggle;
+    }
+    Log.info("Dawn toggles\n  Enabled:{}\n  Disabled:{}", enabledToggles, disabledToggles);
 #endif
     wgpu::DeviceDescriptor deviceDescriptor({
 #ifdef WEBGPU_DAWN
@@ -1137,6 +1246,16 @@ bool initialize(AuroraBackend auroraBackend, bool allowCpu) {
   auto surfaceFormat = best_surface_format();
   g_vsyncEnabled.store(g_config.vsync, std::memory_order_release);
   auto presentMode = select_present_mode(g_surfaceCapabilities);
+  std::string surfaceFormats, surfacePresentModes;
+  for (size_t i = 0; i < g_surfaceCapabilities.formatCount; ++i) {
+    surfaceFormats += "\n  ";
+    surfaceFormats += magic_enum::enum_name(g_surfaceCapabilities.formats[i]);
+  }
+  for (size_t i = 0; i < g_surfaceCapabilities.presentModeCount; ++i) {
+    surfacePresentModes += "\n  ";
+    surfacePresentModes += magic_enum::enum_name(g_surfaceCapabilities.presentModes[i]);
+  }
+  Log.info("Surface capabilities\n  Formats:{}\n  Present modes:{}", surfaceFormats, surfacePresentModes);
   Log.info("Using surface format {}, present mode {}", magic_enum::enum_name(surfaceFormat),
            magic_enum::enum_name(presentMode));
   const auto size = window::get_window_size();
@@ -1198,9 +1317,10 @@ static void resize_swapchain_internal(uint32_t width, uint32_t height, uint32_t 
   if (!g_surface || !g_device || width == 0 || height == 0 || nativeHeight == 0 || nativeWidth == 0) {
     return;
   }
-  const bool sizeChanged = g_graphicsConfig.surfaceConfiguration.width != nativeWidth ||
-                           g_graphicsConfig.surfaceConfiguration.height != nativeHeight ||
-                           g_frameBuffer.size.width != width || g_frameBuffer.size.height != height;
+  const bool surfaceChanged = g_graphicsConfig.surfaceConfiguration.width != nativeWidth ||
+                              g_graphicsConfig.surfaceConfiguration.height != nativeHeight;
+  const bool sizeChanged =
+      surfaceChanged || g_frameBuffer.size.width != width || g_frameBuffer.size.height != height;
   if (!force && !sizeChanged) {
     return;
   }
@@ -1208,11 +1328,12 @@ static void resize_swapchain_internal(uint32_t width, uint32_t height, uint32_t 
     gx::trim_copy_texture_cache();
     gfx::clear_caches();
   }
-  g_graphicsConfig.surfaceConfiguration.width = nativeWidth;
-  g_graphicsConfig.surfaceConfiguration.height = nativeHeight;
-  auto surfaceConfiguration = g_graphicsConfig.surfaceConfiguration;
-  surfaceConfiguration.device = g_device;
-  {
+  // A new EFB scale alone (dynamic resolution) keeps the swapchain as it is.
+  if (force || surfaceChanged) {
+    g_graphicsConfig.surfaceConfiguration.width = nativeWidth;
+    g_graphicsConfig.surfaceConfiguration.height = nativeHeight;
+    auto surfaceConfiguration = g_graphicsConfig.surfaceConfiguration;
+    surfaceConfiguration.device = g_device;
     window::SurfaceLock surfaceLock;
     g_surface.Configure(&surfaceConfiguration);
   }

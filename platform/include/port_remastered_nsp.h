@@ -16,6 +16,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <fstream>
+#include <mutex>
 #include <string>
 #include <vector>
 
@@ -42,12 +43,15 @@ public:
 
   bool Open(const std::string& path);
   void Close();
-  // The bytes read, fewer than `size` at the end of the file.
+  // The bytes read, fewer than `size` at the end of the file. Safe from any
+  // number of threads at once: a descriptor is read with pread, and the stream
+  // (Windows) takes a lock around its seek and read.
   size_t ReadSome(uint64_t offset, void* out, size_t size);
   // False unless all of `size` bytes were read.
   bool ReadAt(uint64_t offset, void* out, size_t size);
 
 private:
+  std::mutex m_streamMutex;
   std::ifstream m_stream;
   int m_fd = -1;
 };
@@ -67,13 +71,27 @@ public:
   const std::vector<RomfsFile>& Files() const { return m_files; }
   const RomfsFile* Find(const std::string& path) const;
 
-  // Decrypts [offset, offset + size) of `file` into `out`. Thread-compatible:
-  // safe from one thread at a time (it shares the file handle and a scratch buffer).
+  // A file of the program NCA's ExeFS (a PFS0 section), "main" for the executable.
+  // False, with `error` set, when the NCA has no such section or file. The
+  // whole file is read, so ask only for what is needed.
+  bool ReadExefsFile(const std::string& name, std::vector<uint8_t>& out, std::string& error) const;
+
+  // Decrypts [offset, offset + size) of `file` into `out`. Safe from several
+  // threads at once once Open() has returned: each call has its own buffer and
+  // cipher context, and SourceFile's reads are positional.
   bool Read(const RomfsFile& file, uint64_t offset, void* out, size_t size, std::string& error) const;
 
 private:
+  // Where an AES-CTR section sits in the .nsp.
+  struct Section {
+    uint64_t base = 0;    // absolute, in the .nsp
+    uint64_t size = 0;
+    uint64_t inNca = 0;   // from the NCA start, for the counter
+    uint8_t ctrHigh[8] = {};
+  };
   // Reads and decrypts `size` bytes at `offset` in the RomFS section.
   bool ReadSection(uint64_t offset, void* out, size_t size, std::string& error) const;
+  bool ReadFrom(const Section& section, uint64_t offset, void* out, size_t size, std::string& error) const;
 
   bool m_open = false;
   mutable SourceFile m_file;
@@ -87,7 +105,20 @@ private:
   uint8_t m_ctrHigh[8] = {};
   uint8_t m_contentKey[16] = {};
   std::vector<RomfsFile> m_files;
-  mutable std::vector<uint8_t> m_scratch;
+  // The ExeFS section, when the NCA has one, and where its PFS0 starts in it.
+  bool m_hasExefs = false;
+  Section m_exefs;
+  uint64_t m_exefsPfs = 0;
+  uint64_t m_exefsPfsSize = 0;
 };
+
+// Metroid Prime Remastered's environment BRDF table, 0x100 bytes of the executable
+// ("main"'s NSO image at kBrdfLutMemOffset). Only its SHA-256 is known here: the
+// table is read from the user's own image, never shipped.
+constexpr uint32_t kBrdfLutMemOffset = 0x1d0dbfc;
+constexpr size_t kBrdfLutSize = 0x100;
+bool ExtractBrdfLut(const Nsp& nsp, std::vector<uint8_t>& out, std::string& error);
+// False unless `data` is the table of the supported version (SHA-256 check).
+bool IsKnownBrdfLut(const uint8_t* data, size_t size);
 
 } // namespace PortRemastered

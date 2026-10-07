@@ -149,7 +149,15 @@ const bool CAuxWeapon::UpdateComboFx(float dt, const CVector3f& scale, const CVe
       StopComboFx(mgr, false);
     }
 
-    x24_muzzleFxGen->SetGlobalTranslation(firePos);
+#ifdef TARGET_PC
+    // Remastered's CAuxWeaponMP1::UpdateComboFx orients the muzzle effect with the beam
+    // transform (elementgen_set_global_orientation_and_translation); the converted effects
+    // place their children along that frame.
+    if (x24_muzzleFxGen->PortIsRemastered()) {
+      x24_muzzleFxGen->SetGlobalOrientAndTrans(targetXf);
+    } else
+#endif
+      x24_muzzleFxGen->SetGlobalTranslation(firePos);
     x24_muzzleFxGen->SetGlobalScale(scale);
     x24_muzzleFxGen->SetParticleEmission(firingFx);
     x24_muzzleFxGen->Update(dt);

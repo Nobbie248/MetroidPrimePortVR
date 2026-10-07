@@ -34,6 +34,7 @@ void AuroraFrameEnd() {
 #include "Kyoto/Basics/COsContext.hpp"
 #include "Kyoto/Basics/CStopwatch.hpp"
 #include "Kyoto/CFrameDelayedKiller.hpp"
+#include "Kyoto/Graphics/CCubeMaterial.hpp"
 #include "Kyoto/Graphics/CGX.hpp"
 #include "Kyoto/Graphics/CGraphicsSys.hpp"
 #include "Kyoto/Graphics/CTexture.hpp"
@@ -525,6 +526,18 @@ void CGraphics::LoadLight(ERglLight light, const CLight& info) {
   GXInitLightColor(&mLightObj[light], info.GetColor().GetGXColor());
   GXLoadLightObjImm(&mLightObj[light], lightId);
   mLightTypes[light] = info.GetType();
+#ifdef TARGET_PC
+  CCubeMaterial::sPortAreaLights &= ~(1u << light);
+  if (info.HasPortHdr()) {
+    CVector3f hdrPos = info.GetPosition() + info.GetPortHdrOffset();
+    MTXMultVec(mCameraMtx, reinterpret_cast< VecPtr >(&hdrPos), reinterpret_cast< VecPtr >(&hdrPos));
+    const f32 viewPos[3] = {hdrPos.GetX(), hdrPos.GetY(), hdrPos.GetZ()};
+    GXSetPBRLightHdr(lightId, info.GetPortHdrColor(), viewPos, info.GetPortHdrR0(),
+                     info.GetPortHdrR1(), info.GetPortHdrFalloff());
+  } else {
+    GXSetPBRLightHdr(lightId, nullptr, nullptr, 0.f, 0.f, 0);
+  }
+#endif
 }
 
 void CGraphics::DisableAllLights() {
@@ -781,6 +794,7 @@ bool CGraphics::BeginScene() {
     return false;
   }
   ClearBackAndDepthBuffers();
+  PortDebug::RunGpuSelfTestIfRequested();
   return true;
 }
 

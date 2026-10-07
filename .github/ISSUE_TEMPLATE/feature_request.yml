@@ -1,0 +1,22 @@
+name: Feature request
+description: Suggest something new or a change to how the port works.
+labels: ["enhancement"]
+body:
+  - type: textarea
+    id: idea
+    attributes:
+      label: What would you like?
+      description: Describe the feature and the problem it solves.
+    validations:
+      required: true
+
+  - type: dropdown
+    id: platform
+    attributes:
+      label: Platform it's for
+      multiple: true
+      options:
+        - All
+        - Android
+        - Windows
+        - Linux

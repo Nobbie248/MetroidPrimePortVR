@@ -1,4 +1,5 @@
 #include "port_remastered_map.h"
+#include "port_bytes.h"
 
 #include "port_map_icons.h"
 
@@ -72,25 +73,21 @@ bool Normalize(Vec& a) {
   return true;
 }
 
-uint32_t Be32(const uint8_t* p) { return uint32_t(p[0]) << 24 | uint32_t(p[1]) << 16 | uint32_t(p[2]) << 8 | p[3]; }
-uint32_t Le32(const uint8_t* p) { return uint32_t(p[3]) << 24 | uint32_t(p[2]) << 16 | uint32_t(p[1]) << 8 | p[0]; }
-uint64_t Le64(const uint8_t* p) { return uint64_t(Le32(p + 4)) << 32 | Le32(p); }
+using port::AppendBE32;
+using port::ReadBE32;
+using port::ReadLE32;
+using port::ReadLE64;
 float AsFloat(uint32_t bits) {
   float value;
   std::memcpy(&value, &bits, sizeof(value));
   return value;
 }
-void PutBe32(std::vector<uint8_t>& out, uint32_t v) {
-  out.push_back(uint8_t(v >> 24));
-  out.push_back(uint8_t(v >> 16));
-  out.push_back(uint8_t(v >> 8));
-  out.push_back(uint8_t(v));
-}
+
 void PutBeFloat(std::vector<uint8_t>& out, double v) {
   const float f = float(v);
   uint32_t bits;
   std::memcpy(&bits, &f, sizeof(bits));
-  PutBe32(out, bits);
+  AppendBE32(out, bits);
 }
 
 struct Box {
@@ -118,7 +115,7 @@ bool ReadMlvl(const std::vector<uint8_t>& d, std::vector<Mat>& areas, uint32_t& 
     if (!need(4)) {
       return false;
     }
-    const uint64_t bytes = uint64_t(Be32(&d[o])) * unit;
+    const uint64_t bytes = uint64_t(ReadBE32(&d[o])) * unit;
     o += 4;
     if (bytes > d.size() || !need(size_t(bytes))) {
       return false;
@@ -130,7 +127,7 @@ bool ReadMlvl(const std::vector<uint8_t>& d, std::vector<Mat>& areas, uint32_t& 
   if (!skip(11) || !need(8)) {
     return false;
   }
-  const uint32_t count = Be32(&d[o]);
+  const uint32_t count = ReadBE32(&d[o]);
   o += 8;
   if (count > 4096) {
     return false;
@@ -141,7 +138,7 @@ bool ReadMlvl(const std::vector<uint8_t>& d, std::vector<Mat>& areas, uint32_t& 
     }
     Mat xf{};
     for (size_t k = 0; k < 12; ++k) {
-      xf[k] = AsFloat(Be32(&d[o + 4 + 4 * k]));
+      xf[k] = AsFloat(ReadBE32(&d[o + 4 + 4 * k]));
     }
     for (const double f : xf) {
       if (!std::isfinite(f)) {
@@ -157,7 +154,7 @@ bool ReadMlvl(const std::vector<uint8_t>& d, std::vector<Mat>& areas, uint32_t& 
     if (!skip(8) || !skip(4) || !need(4)) {  // dependencies, their layer offsets
       return false;
     }
-    const uint32_t docks = Be32(&d[o]);
+    const uint32_t docks = ReadBE32(&d[o]);
     o += 4;
     for (uint32_t k = 0; k < docks; ++k) {
       if (!skip(8) || !skip(12)) {  // connections, corners
@@ -168,7 +165,7 @@ bool ReadMlvl(const std::vector<uint8_t>& d, std::vector<Mat>& areas, uint32_t& 
   if (!need(4)) {
     return false;
   }
-  mapw = Be32(&d[o]);
+  mapw = ReadBE32(&d[o]);
   return true;
 }
 
@@ -185,19 +182,19 @@ struct RetailArea {
 
 bool ReadMapa(RetailArea& area) {
   const std::vector<uint8_t>& d = area.data;
-  if (d.size() < kMapaHeader || Be32(&d[0]) != 0xDEADD00D) {
+  if (d.size() < kMapaHeader || ReadBE32(&d[0]) != 0xDEADD00D) {
     return false;
   }
-  area.objects = Be32(&d[40]);
-  const size_t vertices = Be32(&d[44]);
-  area.surfaces = Be32(&d[48]);
+  area.objects = ReadBE32(&d[40]);
+  const size_t vertices = ReadBE32(&d[44]);
+  area.surfaces = ReadBE32(&d[48]);
   if (area.objects > d.size() / kMapaObject || vertices > d.size() / 12 ||
       kMapaHeader + area.objects * kMapaObject + vertices * 12 > d.size()) {
     return false;
   }
   const uint8_t* p = &d[0] + kMapaHeader + area.objects * kMapaObject;
   for (size_t i = 0; i < vertices; ++i, p += 12) {
-    area.vertices.push_back({AsFloat(Be32(p)), AsFloat(Be32(p + 4)), AsFloat(Be32(p + 8))});
+    area.vertices.push_back({AsFloat(ReadBE32(p)), AsFloat(ReadBE32(p + 4)), AsFloat(ReadBE32(p + 8))});
   }
   return true;
 }
@@ -232,7 +229,7 @@ bool ReadCmap(const uint8_t* d, size_t size, std::vector<RemasteredArea>& out) {
     if (!need(4)) {
       return false;
     }
-    const uint32_t length = Le32(d + o);
+    const uint32_t length = ReadLE32(d + o);
     o += 4;
     if (!need(length)) {
       return false;
@@ -246,7 +243,7 @@ bool ReadCmap(const uint8_t* d, size_t size, std::vector<RemasteredArea>& out) {
   if (size < 32 || !readString(nullptr) || !need(4)) {
     return false;
   }
-  const uint32_t count = Le32(d + o);
+  const uint32_t count = ReadLE32(d + o);
   o += 4;
   for (uint32_t i = 0; i < count; ++i) {
     RemasteredArea area;
@@ -258,7 +255,7 @@ bool ReadCmap(const uint8_t* d, size_t size, std::vector<RemasteredArea>& out) {
       return false;
     }
     o += 8 + 48 + 12;
-    const uint64_t chunks = Le64(d + o);
+    const uint64_t chunks = ReadLE64(d + o);
     o += 8;
     if (!need(chunks)) {
       return false;
@@ -266,7 +263,7 @@ bool ReadCmap(const uint8_t* d, size_t size, std::vector<RemasteredArea>& out) {
     const size_t end = o + size_t(chunks);
     while (end - o >= 24) {
       const uint8_t* tag = d + o;
-      const uint64_t length = Le64(d + o + 4);
+      const uint64_t length = ReadLE64(d + o + 4);
       o += 24;  // tag, size, version, a zero
       if (length > end - o) {
         return false;
@@ -276,20 +273,20 @@ bool ReadCmap(const uint8_t* d, size_t size, std::vector<RemasteredArea>& out) {
       if (length < 4) {
         continue;
       }
-      const uint32_t n = Le32(body);
+      const uint32_t n = ReadLE32(body);
       // Only the first of each: a second would number its corners from zero again.
       if (std::memcmp(tag, "VERT", 4) == 0 && area.vertices.empty() && uint64_t(n) * 12 <= length - 4) {
         for (uint32_t v = 0; v < n; ++v) {
           const uint8_t* p = body + 4 + size_t(v) * 12;
           // Remastered: x to the other side, y up.
-          area.vertices.push_back({-double(AsFloat(Le32(p))), AsFloat(Le32(p + 8)), AsFloat(Le32(p + 4))});
+          area.vertices.push_back({-double(AsFloat(ReadLE32(p))), AsFloat(ReadLE32(p + 8)), AsFloat(ReadLE32(p + 4))});
         }
       } else if (std::memcmp(tag, "TRIS", 4) == 0 && area.triangles.empty() && n <= kMaxTriangles &&
                  uint64_t(n) * 16 <= length - 4) {
         for (uint32_t t = 0; t < n; ++t) {
           const uint8_t* p = body + 4 + size_t(t) * 16;  // three corners and a zero
           // The other way round, for the turned x.
-          area.triangles.push_back({Le32(p), Le32(p + 8), Le32(p + 4)});
+          area.triangles.push_back({ReadLE32(p), ReadLE32(p + 8), ReadLE32(p + 4)});
         }
       }
     }
@@ -551,9 +548,9 @@ std::vector<uint8_t> WriteMapa(const RetailArea& retail, const std::vector<Vec>&
       PutBeFloat(out, c);
     }
   }
-  PutBe32(out, uint32_t(retail.objects));
-  PutBe32(out, uint32_t(vertices.size()));
-  PutBe32(out, uint32_t(faces.size()));
+  AppendBE32(out, uint32_t(retail.objects));
+  AppendBE32(out, uint32_t(vertices.size()));
+  AppendBE32(out, uint32_t(faces.size()));
   out.insert(out.end(), retail.data.begin() + kMapaHeader,
              retail.data.begin() + kMapaHeader + retail.objects * kMapaObject);
   for (const Vec& v : vertices) {
@@ -572,16 +569,16 @@ std::vector<uint8_t> WriteMapa(const RetailArea& retail, const std::vector<Vec>&
     for (double c : face.centre) {
       PutBeFloat(out, c);
     }
-    PutBe32(out, uint32_t(base + data.size()));
-    PutBe32(data, 1);
-    PutBe32(data, kGxTriangles);
-    PutBe32(data, uint32_t(face.triangles.size()));
+    AppendBE32(out, uint32_t(base + data.size()));
+    AppendBE32(data, 1);
+    AppendBE32(data, kGxTriangles);
+    AppendBE32(data, uint32_t(face.triangles.size()));
     data.insert(data.end(), face.triangles.begin(), face.triangles.end());
     pad(data);
-    PutBe32(out, uint32_t(base + data.size()));
-    PutBe32(data, uint32_t(face.outlines.size()));
+    AppendBE32(out, uint32_t(base + data.size()));
+    AppendBE32(data, uint32_t(face.outlines.size()));
     for (const std::vector<uint8_t>& line : face.outlines) {
-      PutBe32(data, uint32_t(line.size()));
+      AppendBE32(data, uint32_t(line.size()));
       data.insert(data.end(), line.begin(), line.end());
       pad(data);
     }
@@ -669,7 +666,7 @@ bool WriteWorldMapAreas(uint32_t mlvl, const uint8_t* cmap, size_t size, const M
     return false;
   }
   // A MAPW lists the world's MAPA in the MLVL's area order.
-  if (!io.retail(kMAPW, mapw, raw) || raw.size() < 12 || Be32(&raw[8]) != transforms.size() ||
+  if (!io.retail(kMAPW, mapw, raw) || raw.size() < 12 || ReadBE32(&raw[8]) != transforms.size() ||
       raw.size() < 12 + transforms.size() * 4) {
     error = "the retail MAPW is unreadable";
     return false;
@@ -677,7 +674,7 @@ bool WriteWorldMapAreas(uint32_t mlvl, const uint8_t* cmap, size_t size, const M
   std::vector<RetailArea> retail;
   for (size_t i = 0; i < transforms.size(); ++i) {
     RetailArea area;
-    area.mapa = Be32(&raw[12 + i * 4]);
+    area.mapa = ReadBE32(&raw[12 + i * 4]);
     area.xf = transforms[i];
     if (!io.retail(kMAPA, area.mapa, area.data) || !ReadMapa(area) || area.vertices.empty()) {
       continue;

@@ -4,6 +4,10 @@
 
 #include "rstl/math.hpp"
 
+#ifdef TARGET_PC
+#include "Kyoto/Particles/CParticleGlobals.hpp"
+#endif
+
 CUVEConstant::CUVEConstant(TToken< CTexture > tex) : x4_tex(tex) {}
 
 CUVEConstant::~CUVEConstant() {}
@@ -87,3 +91,61 @@ void CUVEAnimTexture::GetValueUV(int frame, SUVElementSet& valOut) const {
 }
 
 TLockedToken< CTexture > CUVEAnimTexture::GetValueTexture(int frame) const { return x4_tex; }
+
+#ifdef TARGET_PC
+static int PortEvalInt(CIntElement* elem, int def) {
+  int result = def;
+  if (elem != nullptr) {
+    elem->GetValue(0, result);
+    delete elem;
+  }
+  return result;
+}
+
+CUVEAtlasTexture::CUVEAtlasTexture(TToken< CTexture > tex, CIntElement* cols, CIntElement* rows,
+                                   CIntElement* count, CIntElement* mode, CIntElement* flipX)
+: x4_tex(tex) {
+  x10_cols = rstl::max_val(1, PortEvalInt(cols, 1));
+  x14_rows = rstl::max_val(1, PortEvalInt(rows, 1));
+  x18_count = rstl::max_val(1, PortEvalInt(count, 1));
+  x1c_mode = PortEvalInt(mode, 0);
+  x20_flipX = PortEvalInt(flipX, 0) != 0;
+}
+
+CUVEAtlasTexture::~CUVEAtlasTexture() {}
+
+int CUVEAtlasTexture::SelectTile(uint seed, int frame, int lifeFrames) const {
+  if (x1c_mode == 1) {
+    float life = static_cast< float >(frame) / static_cast< float >(rstl::max_val(1, lifeFrames));
+    life = rstl::min_val(1.f, rstl::max_val(0.f, life));
+    const int last = rstl::min_val(x18_count, x10_cols * x14_rows) - 1;
+    return rstl::min_val(last, static_cast< int >(life * static_cast< float >(x18_count)));
+  }
+  return static_cast< int >((seed % static_cast< uint >(x18_count)) %
+                            static_cast< uint >(x10_cols * x14_rows));
+}
+
+void CUVEAtlasTexture::TileUV(int tile, bool flip, SUVElementSet& valOut) const {
+  // v counts from texel row 0, like ATEX's yMin; the quads put yMax on their top edge.
+  const int col = tile % x10_cols;
+  const int row = tile / x10_cols;
+  const float x0 = static_cast< float >(col) / static_cast< float >(x10_cols);
+  const float x1 = static_cast< float >(col + 1) / static_cast< float >(x10_cols);
+  valOut.xMin = flip ? x1 : x0;
+  valOut.xMax = flip ? x0 : x1;
+  valOut.yMin = static_cast< float >(row) / static_cast< float >(x14_rows);
+  valOut.yMax = static_cast< float >(row + 1) / static_cast< float >(x14_rows);
+}
+
+void CUVEAtlasTexture::GetValueUV(int frame, SUVElementSet& valOut) const {
+  const CElementGen::CParticle* particle = CParticleGlobals::xPortUVParticle;
+  if (particle == nullptr) {
+    TileUV(0, false, valOut);
+    return;
+  }
+  TileUV(SelectTile(particle->xPortSeed, frame, particle->x0_endFrame - particle->x28_startFrame),
+         FlipFor(particle->xPortSeed), valOut);
+}
+
+TLockedToken< CTexture > CUVEAtlasTexture::GetValueTexture(int frame) const { return x4_tex; }
+#endif

@@ -630,6 +630,36 @@ void salCtrlDsp(s16* dest) {
     if (stp->auxB[salAuxFrame])
       memset(stp->auxB[salAuxFrame], 0, SAL_SAMPLES_PER_FRAME * 3 * sizeof(s32));
 
+    /* Per-frame break cleanup, mirroring the original's pre-pass in
+     * salBuildCommandList (hw_dspctrl.c) before the per-subframe mix loop.
+     *
+     * Without it a break relied entirely on the ADSR release reaching its end:
+     * changed[] is only cleared by hwInitSamplePlayback, so the break bit stayed
+     * set on a running voice and every frame re-ran adsrStartRelease, resetting
+     * adsr.cnt before adsrHandle could count it down. A looping voice (the charge
+     * beam hum) then never reached salDeactivateVoice and looped forever with no
+     * synth voice left to stop it. Deactivating here also stops a repeated break
+     * bit from reviving the voice.
+     *
+     * Only RUNNING voices (state != 0 && state != 1) are handled here. A new
+     * voice (state == 1) is left to the startupBreak rule in the init block
+     * below, so the stale break bit salActivateVoice leaves on a reused slot
+     * cannot kill the voice that just took it. Voices are unlinked by
+     * salDeactivateVoice, so the next pointer is read first and a dead voice
+     * skipped. */
+    for (DSPvoice* bp = stp->voiceRoot; bp != NULL;) {
+      DSPvoice* nextBp = bp->next; /* save in case voice is deactivated */
+      if (bp->state != 0 && bp->state != 1 &&
+          (bp->postBreak != 0 || (bp->changed[0] & 0x20) != 0)) {
+        if (bp->virtualSampleID != (u32)-1) {
+          salSynthSendMessage(bp, 3);
+        }
+        salDeactivateVoice(bp);
+        bp->startupBreak = 0;
+      }
+      bp = nextBp;
+    }
+
     /* Render all voices in this studio */
     DSPvoice* vp = stp->voiceRoot;
     while (vp != NULL) {
@@ -640,6 +670,20 @@ void salCtrlDsp(s16* dest) {
 
         /* New voice initialization (mirrors salBuildCommandList state==1 path) */
         if (vp->state == 1) {
+          /* As Dolphin's salBuildCommandList: a voice broken in the frame it started
+           * (startupBreak) never plays. Without this, a break written to changed[0]
+           * for a voice that starts at a later subframe was skipped by the loop below,
+           * and a looping sound (the charge beam hum) played on with no synth voice
+           * left to stop it. Otherwise a break bit in changed[0] was carried over by
+           * hwInitSamplePlayback from the slot's previous voice, not meant for this one. */
+          if (vp->startupBreak) {
+            vp->startupBreak = 0;
+            salDeactivateVoice(vp);
+            vp = nextVp;
+            continue;
+          }
+          vp->changed[0] &= ~0x20;
+
           if (adsrSetup(&vp->adsr) != 0) {
             salSynthSendMessage(vp, 0);
             salDeactivateVoice(vp);
@@ -923,7 +967,10 @@ static int salAudioThreadFunc(void* data) {
   while (SDL_GetAtomicInt(&salAudioThreadRunning)) {
     const int queuedBytes = salAudioStream != NULL ? SDL_GetAudioStreamQueued(salAudioStream) : 0;
     if (salAudioStream != NULL && queuedBytes >= SAL_BUFFER_BYTES * SAL_MAX_QUEUED_FRAMES) {
-      SDL_Delay(1);
+      /* Full: the device takes a frame (160 samples at 32 kHz, 5 ms) at a time, so wait
+       * most of one rather than waking every millisecond to look. The queue still holds
+       * the other frames' worth, far more than this wait. */
+      SDL_Delay(4);
       continue;
     }
 

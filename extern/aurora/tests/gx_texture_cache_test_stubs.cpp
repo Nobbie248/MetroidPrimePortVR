@@ -115,6 +115,7 @@ void queue_palette_conv(tex_palette_conv::ConvRequest req) { ++s_paletteConversi
 
 namespace aurora::gfx::texture_replacement {
 StreamingStats process_streaming() noexcept { return {}; }
+void sweep_idle_cache() noexcept {}
 
 std::optional<ReplacementResult> find_pointer_replacement(const GXTexObj_& obj) noexcept {
   return s_replacementId != 0 ? std::optional{ReplacementResult{.handle = s_replacement, .id = s_replacementId}}

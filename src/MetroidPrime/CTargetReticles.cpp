@@ -1193,7 +1193,7 @@ void CCompoundTargetReticle::DrawOrbitZoneGroup(const CMatrix3f& rot,
 
     float scale = x1e8_crosshairsScale;
 #ifdef TARGET_PC
-    if (PortDebug::MouseAim() || PortDebug::TwinStick()) {
+    if (PortDebug::DirectAim()) {
       scale *= static_cast< float >(PortDebug::CrosshairSize()) / 100.f;
     }
 #endif
@@ -1272,7 +1272,7 @@ CVector3f CCompoundTargetReticle::CalculateOrbitZoneReticlePosition(const CState
   const CGameCamera& cam = mgr.GetCameraManager()->GetCurrentCamera(mgr);
   float halfExtY = CCast::LtoF(gpTweakPlayer->GetOrbitZoneHeight(0));
   float dist = 224.f / halfExtY;
-  dist /= CMath::SlowTangentR(cam.GetFov() * 0.5f * (1.f / 360.f) * (2.f * M_PIF));
+  dist /= CMath::SlowTangentR(cam.GetRenderFov() * 0.5f * (1.f / 360.f) * (2.f * M_PIF));
 
   CTransform4f camXf = mgr.GetCameraManager()->GetCurrentCameraTransform(mgr);
   CVector3f fwd = camXf.GetForward();
@@ -1348,10 +1348,10 @@ void CTargetingManager::Draw(const CStateManager& mgr, bool hideLockon) const {
   const CGameCamera& curCam = mgr.GetCameraManager()->GetCurrentCamera(mgr);
   CTransform4f camXf = mgr.GetCameraManager()->GetCurrentCameraTransform(mgr);
   CGraphics::SetViewPointMatrix(camXf);
-  CFrustumPlanes frustum(camXf, curCam.GetFov() * 0.01745329238474369f, curCam.GetAspectRatio(),
+  CFrustumPlanes frustum(camXf, curCam.GetRenderFov() * 0.01745329238474369f, curCam.GetAspectRatio(),
                          1.f, false, 100.f);
   gpRender->SetClippingPlanes(frustum);
-  gpRender->SetPerspective(curCam.GetFov(), static_cast< float >(CGraphics::GetViewport().mWidth),
+  gpRender->SetPerspective(curCam.GetRenderFov(), static_cast< float >(CGraphics::GetViewport().mWidth),
                            static_cast< float >(CGraphics::GetViewport().mHeight),
                            curCam.GetNearClipDistance(), curCam.GetFarClipDistance());
   x0_targetReticle.Draw(mgr, hideLockon);
@@ -1490,10 +1490,10 @@ void COrbitPointMarker::Draw(const CStateManager& mgr) const {
       CTransform4f camXf = mgr.GetCameraManager()->GetCurrentCameraTransform(mgr);
       CGraphics::SetViewPointMatrix(camXf);
       {
-        CFrustumPlanes frustum(camXf, curCam.GetFov() * 0.01745329238474369f,
+        CFrustumPlanes frustum(camXf, curCam.GetRenderFov() * 0.01745329238474369f,
                                curCam.GetAspectRatio(), 1.f, false, 100.f);
         gpRender->SetClippingPlanes(frustum);
-        gpRender->SetPerspective(curCam.GetFov(),
+        gpRender->SetPerspective(curCam.GetRenderFov(),
                                  static_cast< float >(CGraphics::GetViewport().mWidth),
                                  static_cast< float >(CGraphics::GetViewport().mHeight),
                                  curCam.GetNearClipDistance(), curCam.GetFarClipDistance());

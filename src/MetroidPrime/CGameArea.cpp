@@ -22,6 +22,7 @@
 #include "WorldFormat/CPVSAreaSet.hpp"
 
 #ifdef TARGET_PC
+#include "port_randomizer.h"
 #include "port_skip_cutscenes.h"
 
 #include <string.h>
@@ -590,6 +591,60 @@ void CGameArea::Validate(CStateManager& mgr) {
   }
 }
 
+#ifdef TARGET_PC
+// Randomizer dump: list the pickups of a layer that is inactive now. Only the
+// active layers' objects are built, so a pickup on any other layer never
+// reaches ScriptLoader::LoadPickup (the Artifact of Wild, on a layer of the
+// Sunchamber that turns on later, was missing from every dump). Reads the same
+// stream layout as CStateManager::LoadScriptObject and LoadPickup without
+// constructing anything.
+static void PortDumpInactivePickups(const CGameArea& area, CStateManager& mgr, TLayerId layer) {
+  const rstl::pair< const uchar*, int > buffer = area.GetLayerScriptBuffer(layer);
+  if (buffer.first == nullptr || buffer.second <= 5)
+    return;
+  CMemoryInStream in(buffer.first, buffer.second);
+  in.ReadChar();
+  const int count = in.ReadLong();
+  for (int i = 0; i < count; ++i) {
+    const uchar type = static_cast< uchar >(in.ReadChar());
+    const uint length = in.ReadLong();
+    const uint start = in.GetReadPosition();
+    if (start + length > static_cast< uint >(buffer.second))
+      return;
+    if (type == kST_Pickup) {
+      CMemoryInStream obj(buffer.first + start, length);
+      const uint eid = obj.ReadLong();
+      const int conns = obj.ReadLong();
+      for (int c = 0; c < conns * 3; ++c)
+        obj.ReadLong();
+      const uint propCount = obj.ReadLong();
+      if (propCount == 18) {
+        while (obj.ReadChar() != '\0') {
+        }
+        for (int f = 0; f < 15; ++f) // position, rotation, scale, extent, offset
+          obj.ReadFloat();
+        int itemType = obj.ReadLong();
+        int capacity = obj.ReadLong();
+        int amount = obj.ReadLong();
+        for (int f = 0; f < 3; ++f) // possibility, lifetime, fade-in time
+          obj.ReadFloat();
+        PortRandomizer::PickupModel model;
+        model.model = obj.ReadLong();
+        model.acs = obj.ReadLong();
+        model.character = obj.ReadLong();
+        model.animation = obj.ReadLong();
+        // Dump mode only logs the location and never rewrites it.
+        PortRandomizer::ApplyPickup(static_cast< uint32_t >(mgr.GetWorld()->IGetWorldAssetId()),
+                                    static_cast< uint32_t >(area.IGetAreaAssetId()), eid,
+                                    itemType, capacity, amount, model);
+      }
+    }
+    for (uint b = 0; b < length; ++b)
+      in.ReadChar();
+  }
+}
+#endif
+
 void CGameArea::LoadScriptObjects(CStateManager& mgr) {
   rstl::vector< TEditorId > ids;
   const CScriptLayerManager& layers = *mgr.WorldLayerState();
@@ -601,6 +656,11 @@ void CGameArea::LoadScriptObjects(CStateManager& mgr) {
       CMemoryInStream stream(buffer.first, buffer.second);
       mgr.LoadScriptObjects(GetId(), stream, ids);
     }
+#ifdef TARGET_PC
+    else if (PortRandomizer::DumpEnabled() && mgr.GetWorld() != nullptr) {
+      PortDumpInactivePickups(*this, mgr, layer);
+    }
+#endif
   }
   mgr.InitScriptObjects(ids);
 }

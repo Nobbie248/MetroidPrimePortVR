@@ -133,9 +133,9 @@ bool PortReadDisc(uint id, std::vector< uint8_t >& out, uint* type = nullptr) {
 }
 } // namespace
 
-const PortCustomRes::Resource* CResLoader::PortCustomResource(const CAssetId asset) {
+const PortCustomRes::Resource* CResLoader::PortCustomResource(const CAssetId asset, const bool load) {
   const bool custom = PortCustomRes::IsCustomId(asset);
-  if ((!custom && !PortSkipCutscenes::IsPickupDependency(asset) &&
+  if ((!custom && !load && !PortSkipCutscenes::IsPickupDependency(asset) &&
        !PortApWorld::IsDoorDependency(asset)) ||
       PortPakResourceExists(asset))
     return nullptr;
@@ -156,8 +156,10 @@ const PortCustomRes::Resource* CResLoader::PortCustomResource(const CAssetId ass
   }
 
   // A pickup model's texture, skin or animation, or a door type's shield, from another world's PAK
-  // (randomprime copies these into the room's PAK instead). Kept for the run;
-  // a later load of that PAK is found first.
+  // (randomprime copies these into the room's PAK instead). Also any load of an id no loaded PAK
+  // has, which retail never asks for but a mod's resource can (an imported Remastered effect's
+  // child from another world): it crashed on a null PAK. Kept for the run; a later load of that
+  // PAK is found first.
   static std::mutex sMutex;
   static std::map< uint, std::unique_ptr< PortCustomRes::Resource > > sCopies;
   std::lock_guard< std::mutex > lock(sMutex);
@@ -401,7 +403,7 @@ const SObjectTag* CResLoader::GetResourceIdByName(const char* name) const {
 FourCC CResLoader::GetResourceTypeById(const CAssetId asset) const {
 #ifdef TARGET_PC
   if (const PortCustomRes::Resource* custom =
-          const_cast< CResLoader& >(*this).PortCustomResource(asset)) {
+          const_cast< CResLoader& >(*this).PortCustomResource(asset, false)) {
     return custom->type;
   }
 #endif

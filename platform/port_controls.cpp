@@ -1125,12 +1125,25 @@ bool Capturing() {
   return sCapture.target != ECapture::kNone && !(sCapture.conflict && sCapture.conflictReleased);
 }
 
-void DrawTab() {
+// What both sub-tabs share: the capture prompt and conflict popup, and the
+// column widths of the binding tables.
+struct SBindLayout {
+  float bindWidth = 0.f;
+  float clearWidth = 0.f;
+  float labelWidth = 0.f;
+  float slotX[PAD_KEY_SLOT_COUNT] = {};
+  std::string buttonLabels[std::size(kControlPadButtons)];
+  std::string axisLabels[PAD_AXIS_COUNT];
+};
+
+// Polls the capture and draws its prompt. Ends with BeginDisabled for as long as an
+// input is being captured: pair it with EndTab.
+static void BeginTab(SBindLayout& layout) {
   sLastDrawFrame = ImGui::GetFrameCount();
   PollCapture();
   // Wide enough for the usual key names, so the columns line up at any font
   // scale; a longer name is clipped.
-  const float bindWidth =
+  layout.bindWidth =
       std::max(ImGui::CalcTextSize("Mouse Middle").x, ImGui::CalcTextSize("Press...").x) +
       ImGui::GetStyle().FramePadding.x * 2.f;
 
@@ -1176,6 +1189,35 @@ void DrawTab() {
   // Nothing else is clickable while an input is being captured: the capture
   // owns every key, button and click until it binds or is cancelled.
   ImGui::BeginDisabled(sCapture.target != ECapture::kNone);
+  float labelWidth = 0.f;
+  for (size_t i = 0; i < std::size(kControlPadButtons); ++i) {
+    layout.buttonLabels[i] = ActionLabel(kControlPadButtons[i].function, kControlPadButtons[i].label);
+    labelWidth = std::max(labelWidth, ImGui::CalcTextSize(layout.buttonLabels[i].c_str()).x);
+  }
+  for (int i = 0; i < PAD_AXIS_COUNT; ++i) {
+    layout.axisLabels[i] = ActionLabel(kControlPadAxes[i].function, kControlPadAxes[i].label);
+    labelWidth = std::max(labelWidth, ImGui::CalcTextSize(layout.axisLabels[i].c_str()).x);
+  }
+
+  // Columns: the action, then each key slot (a binding button and its clear
+  // button). A controller row's binding spans the key column; a button row's
+  // alt button takes the alt key column.
+  const ImGuiStyle& style = ImGui::GetStyle();
+  layout.labelWidth = labelWidth;
+  layout.clearWidth = ImGui::CalcTextSize("x").x + style.FramePadding.x * 2.f;
+  layout.slotX[0] = labelWidth + style.ItemSpacing.x * 2.f;
+  layout.slotX[1] = labelWidth + style.ItemSpacing.x * 4.f + layout.bindWidth + style.ItemInnerSpacing.x +
+                    layout.clearWidth;
+}
+
+void DrawKeyboardMouse() {
+  SBindLayout layout;
+  BeginTab(layout);
+  const float bindWidth = layout.bindWidth;
+  const float labelWidth = layout.labelWidth;
+  const float* slotX = layout.slotX;
+  const std::string* buttonLabels = layout.buttonLabels;
+  const std::string* axisLabels = layout.axisLabels;
   const auto keyPresetButton = [](const char* label, EKeyPreset preset, const char* tooltip) {
     if (ImGui::Button(label)) {
       ApplyKeyPreset(preset);
@@ -1200,189 +1242,180 @@ void DrawTab() {
                   "Turns on mouse aim and off Twin Stick Aim, which would take the\n"
                   "beam keys for aim.");
 
-  std::string buttonLabels[std::size(kControlPadButtons)];
-  std::string axisLabels[PAD_AXIS_COUNT];
-  float labelWidth = 0.f;
-  for (size_t i = 0; i < std::size(kControlPadButtons); ++i) {
-    buttonLabels[i] = ActionLabel(kControlPadButtons[i].function, kControlPadButtons[i].label);
-    labelWidth = std::max(labelWidth, ImGui::CalcTextSize(buttonLabels[i].c_str()).x);
+
+  const float rowX = ImGui::GetCursorPosX();
+  ImGui::TextDisabled("Action");
+  ImGui::SameLine(rowX + slotX[0]);
+  ImGui::TextDisabled("Key");
+  ImGui::SameLine(rowX + slotX[1]);
+  ImGui::TextDisabled("Alt key");
+  for (int i = 0; i < static_cast< int >(std::size(kControlPadButtons)); ++i) {
+    ImGui::PushID(i);
+    KeyRow(ECapture::kKeyButton, i, buttonLabels[i], slotX, bindWidth);
+    ImGui::PopID();
   }
   for (int i = 0; i < PAD_AXIS_COUNT; ++i) {
-    axisLabels[i] = ActionLabel(kControlPadAxes[i].function, kControlPadAxes[i].label);
-    labelWidth = std::max(labelWidth, ImGui::CalcTextSize(axisLabels[i].c_str()).x);
+    ImGui::PushID(100 + i);
+    KeyRow(ECapture::kKeyAxis, i, axisLabels[i], slotX, bindWidth);
+    ImGui::PopID();
+  }
+  ImGui::PushID(150);
+  KeyRow(ECapture::kShiftKey, 0, kShiftLabel, slotX, bindWidth);
+  ImGui::PopID();
+  ShiftTooltip();
+  for (int slot = 0; slot < PAD_KEY_SLOT_COUNT; ++slot) {
+    ShiftOverlapNote(ECapture::kShiftKey, slot);
   }
 
-  // Columns: the action, then each key slot (a binding button and its clear
-  // button). A controller row's binding spans the key column; a button row's
-  // alt button takes the alt key column.
-  const ImGuiStyle& style = ImGui::GetStyle();
-  const float clearWidth = ImGui::CalcTextSize("x").x + style.FramePadding.x * 2.f;
-  const float slotX[PAD_KEY_SLOT_COUNT] = {
-      labelWidth + style.ItemSpacing.x * 2.f,
-      labelWidth + style.ItemSpacing.x * 4.f + bindWidth + style.ItemInnerSpacing.x + clearWidth,
-  };
-
-  if (ImGui::CollapsingHeader("Keyboard & mouse", ImGuiTreeNodeFlags_DefaultOpen)) {
+  ImGui::SeparatorText("Mouse buttons");
+  ImGui::TextDisabled("Under mouse aim; out of it only A and B are pressed (bombs, menus).");
+  // The combo's entries follow PortInputMap::EMouseAction: none, the pad
+  // buttons in kControlPadButtons order, then the beam shift.
+  std::string actionLabels[PortInputMap::kMA_Count];
+  actionLabels[PortInputMap::kMA_None] = "None";
+  for (size_t i = 0; i < std::size(kControlPadButtons); ++i) {
+    actionLabels[i + 1] = buttonLabels[i];
+  }
+  actionLabels[PortInputMap::kMA_Shift] = kShiftLabel;
+  static const char* const kMouseNames[PortInputMap::kMouseButtonCount] = {"Left", "Middle", "Right", "X1 (back)",
+                                                                           "X2 (forward)"};
+  for (int button = 0; button < PortInputMap::kMouseButtonCount; ++button) {
+    ImGui::PushID(160 + button);
     const float rowX = ImGui::GetCursorPosX();
-    ImGui::TextDisabled("Action");
+    ImGui::AlignTextToFramePadding();
+    ImGui::TextUnformatted(kMouseNames[button]);
     ImGui::SameLine(rowX + slotX[0]);
-    ImGui::TextDisabled("Key");
-    ImGui::SameLine(rowX + slotX[1]);
-    ImGui::TextDisabled("Alt key");
+    ImGui::SetNextItemWidth(std::max(bindWidth * 2.f, labelWidth));
+    const int current = PortDebug::MouseAction(button);
+    if (ImGui::BeginCombo("##action", actionLabels[current].c_str())) {
+      for (int action = 0; action < PortInputMap::kMA_Count; ++action) {
+        if (ImGui::Selectable(actionLabels[action].c_str(), action == current)) {
+          PortDebug::SetMouseAction(button, action);
+        }
+      }
+      ImGui::EndCombo();
+    }
+    ImGui::PopID();
+  }
+  ImGui::EndDisabled();
+}
+
+void DrawController() {
+  SBindLayout layout;
+  BeginTab(layout);
+  const float bindWidth = layout.bindWidth;
+  const float clearWidth = layout.clearWidth;
+  const float* slotX = layout.slotX;
+  const std::string* buttonLabels = layout.buttonLabels;
+  const std::string* axisLabels = layout.axisLabels;
+  const ImGuiStyle& style = ImGui::GetStyle();
+  u32 padButtonCount = 0;
+  if (PADGetButtonMappings(kControlPort, &padButtonCount) == nullptr) {
+    ImGui::TextDisabled("No controller on pad 1.");
+  } else if (SDL_Gamepad* pad = PADGetSDLGamepadForIndex(kControlPort);
+             pad != nullptr && SDL_IsJoystickVirtual(SDL_GetGamepadID(pad))) {
+    // Aurora ignores mappings on the virtual touch pad, so there is nothing to edit.
+    ImGui::TextWrapped("The touch controls always use the GameCube layout; presets and remaps apply to "
+                       "real controllers only.");
+  } else {
+    const auto presetButton = [](const char* label, EPadPreset preset, const char* tooltip) {
+      if (ImGui::Button(label)) {
+        ApplyPadPreset(preset);
+      }
+      if (ImGui::IsItemHovered(ImGuiHoveredFlags_ForTooltip | ImGuiHoveredFlags_AllowWhenDisabled)) {
+        ImGui::SetTooltip("%s", tooltip);
+      }
+    };
+    ImGui::AlignTextToFramePadding();
+    ImGui::TextUnformatted("Preset:");
+    ImGui::SameLine();
+    presetButton("GameCube", EPadPreset::kGameCube,
+                 "The default layout: the face buttons and shoulder as on a GameCube pad.\nTurns off Twin Stick Aim.");
+    ImGui::SameLine();
+    // A GameCube pad has no right stick click for free look.
+    ImGui::BeginDisabled(PADIsGCAdapter(kControlPort));
+    presetButton("Remastered", EPadPreset::kRemastered,
+                 "Metroid Prime Remastered's Dual Sticks scheme (Xbox labels): RT or B\n"
+                 "fire, LT lock on, A or LB jump, X morph ball, RB missile, Menu map,\n"
+                 "View pause, right stick click free look. D-pad: up Combat, right Scan,\n"
+                 "left X-Ray, down Thermal visor; hold Y for up Power, right Wave, left\n"
+                 "Plasma, down Ice beam; in morph ball Y springs (with Spring Ball on).\n"
+                 "Turns on Twin Stick Aim and the Scan/X-Ray swap.");
+    ImGui::SameLine();
+    presetButton("Modern", EPadPreset::kModern,
+                 "RT fire, LT lock on, A jump, B morph ball, RB missile, Y map,\n"
+                 "right stick click free look. Turns on Twin Stick Aim; hold LB\n"
+                 "and press the D-pad to change beams.");
+    ImGui::EndDisabled();
+    ImGui::SameLine();
+    presetButton("Southpaw", EPadPreset::kSouthpaw,
+                 "The GameCube layout with the two sticks swapped.\nTurns off Twin Stick Aim.");
+
+    const float padWidth = bindWidth + style.ItemInnerSpacing.x + clearWidth;
+    const PADDeadZones* deadZones = PADGetDeadZones(kControlPort);
+    const bool emulateTriggers = deadZones != nullptr && deadZones->emulateTriggers;
+    const auto padRow = [&](ECapture kind, int index, const std::string& label) {
+      const float rowX = ImGui::GetCursorPosX();
+      ImGui::AlignTextToFramePadding();
+      ImGui::TextUnformatted(label.c_str());
+      ImGui::SameLine(rowX + slotX[0]);
+      const SInput input = RowInput(kind, index, 0);
+      std::string name = InputName(input);
+      // An unbound L or R click follows its analog trigger.
+      ECapture pairKind = ECapture::kNone;
+      int pairIndex = -1;
+      if (kind == ECapture::kPadButton && input.code == -1 && emulateTriggers &&
+          PairedRow(kind, index, pairKind, pairIndex)) {
+        name = std::string("(") + kControlPadAxes[pairIndex].label + ")";
+      }
+      BindingButton(kind, index, 0, name, padWidth);
+      // A button row's second input (Aurora maps one; the port ORs this in).
+      if (kind == ECapture::kPadButton) {
+        const SInput alt = RowInput(kind, index, 1);
+        ImGui::SameLine(rowX + slotX[1]);
+        BindingButton(kind, index, 1, alt.code == -1 ? std::string("-") : InputName(alt), bindWidth);
+        ImGui::SameLine(0.f, style.ItemInnerSpacing.x);
+        ImGui::BeginDisabled(alt.code == -1);
+        if (ImGui::Button("x")) {
+          BindRow(kind, index, 1, SInput{});
+        }
+        if (ImGui::IsItemHovered(ImGuiHoveredFlags_ForTooltip)) {
+          ImGui::SetTooltip("Clear");
+        }
+        ImGui::EndDisabled();
+      }
+    };
+    {
+      const float rowX = ImGui::GetCursorPosX();
+      ImGui::TextDisabled("Action");
+      ImGui::SameLine(rowX + slotX[0]);
+      ImGui::TextDisabled("Button");
+      ImGui::SameLine(rowX + slotX[1]);
+      ImGui::TextDisabled("Alt button");
+    }
     for (int i = 0; i < static_cast< int >(std::size(kControlPadButtons)); ++i) {
-      ImGui::PushID(i);
-      KeyRow(ECapture::kKeyButton, i, buttonLabels[i], slotX, bindWidth);
+      ImGui::PushID(200 + i);
+      padRow(ECapture::kPadButton, i, buttonLabels[i]);
       ImGui::PopID();
     }
     for (int i = 0; i < PAD_AXIS_COUNT; ++i) {
-      ImGui::PushID(100 + i);
-      KeyRow(ECapture::kKeyAxis, i, axisLabels[i], slotX, bindWidth);
+      ImGui::PushID(300 + i);
+      padRow(ECapture::kPadAxis, i, axisLabels[i]);
       ImGui::PopID();
     }
-    ImGui::PushID(150);
-    KeyRow(ECapture::kShiftKey, 0, kShiftLabel, slotX, bindWidth);
-    ImGui::PopID();
+    ImGui::PushID(400);
+    padRow(ECapture::kShiftPad, 0, kShiftLabel);
     ShiftTooltip();
-    for (int slot = 0; slot < PAD_KEY_SLOT_COUNT; ++slot) {
-      ShiftOverlapNote(ECapture::kShiftKey, slot);
+    ImGui::SameLine(0.f, style.ItemInnerSpacing.x);
+    ImGui::BeginDisabled(ShiftPadInput().code == -1);
+    if (ImGui::Button("x")) {
+      BindRow(ECapture::kShiftPad, 0, 0, SInput{});
     }
-
-    ImGui::SeparatorText("Mouse buttons");
-    ImGui::TextDisabled("Under mouse aim; out of it only A and B are pressed (bombs, menus).");
-    // The combo's entries follow PortInputMap::EMouseAction: none, the pad
-    // buttons in kControlPadButtons order, then the beam shift.
-    std::string actionLabels[PortInputMap::kMA_Count];
-    actionLabels[PortInputMap::kMA_None] = "None";
-    for (size_t i = 0; i < std::size(kControlPadButtons); ++i) {
-      actionLabels[i + 1] = buttonLabels[i];
-    }
-    actionLabels[PortInputMap::kMA_Shift] = kShiftLabel;
-    static const char* const kMouseNames[PortInputMap::kMouseButtonCount] = {"Left", "Middle", "Right", "X1 (back)",
-                                                                             "X2 (forward)"};
-    for (int button = 0; button < PortInputMap::kMouseButtonCount; ++button) {
-      ImGui::PushID(160 + button);
-      const float rowX = ImGui::GetCursorPosX();
-      ImGui::AlignTextToFramePadding();
-      ImGui::TextUnformatted(kMouseNames[button]);
-      ImGui::SameLine(rowX + slotX[0]);
-      ImGui::SetNextItemWidth(std::max(bindWidth * 2.f, labelWidth));
-      const int current = PortDebug::MouseAction(button);
-      if (ImGui::BeginCombo("##action", actionLabels[current].c_str())) {
-        for (int action = 0; action < PortInputMap::kMA_Count; ++action) {
-          if (ImGui::Selectable(actionLabels[action].c_str(), action == current)) {
-            PortDebug::SetMouseAction(button, action);
-          }
-        }
-        ImGui::EndCombo();
-      }
-      ImGui::PopID();
-    }
-  }
-
-  if (ImGui::CollapsingHeader("Controller", ImGuiTreeNodeFlags_DefaultOpen)) {
-    u32 padButtonCount = 0;
-    if (PADGetButtonMappings(kControlPort, &padButtonCount) == nullptr) {
-      ImGui::TextDisabled("No controller on pad 1.");
-    } else {
-      const auto presetButton = [](const char* label, EPadPreset preset, const char* tooltip) {
-        if (ImGui::Button(label)) {
-          ApplyPadPreset(preset);
-        }
-        if (ImGui::IsItemHovered(ImGuiHoveredFlags_ForTooltip | ImGuiHoveredFlags_AllowWhenDisabled)) {
-          ImGui::SetTooltip("%s", tooltip);
-        }
-      };
-      ImGui::AlignTextToFramePadding();
-      ImGui::TextUnformatted("Preset:");
-      ImGui::SameLine();
-      presetButton("GameCube", EPadPreset::kGameCube,
-                   "The default layout: the face buttons and shoulder as on a GameCube pad.\nTurns off Twin Stick Aim.");
-      ImGui::SameLine();
-      // A GameCube pad has no right stick click for free look.
-      ImGui::BeginDisabled(PADIsGCAdapter(kControlPort));
-      presetButton("Remastered", EPadPreset::kRemastered,
-                   "Metroid Prime Remastered's Dual Sticks scheme (Xbox labels): RT or B\n"
-                   "fire, LT lock on, A or LB jump, X morph ball, RB missile, Menu map,\n"
-                   "View pause, right stick click free look. D-pad: up Combat, right Scan,\n"
-                   "left X-Ray, down Thermal visor; hold Y for up Power, right Wave, left\n"
-                   "Plasma, down Ice beam; in morph ball Y springs (with Spring Ball on).\n"
-                   "Turns on Twin Stick Aim and the Scan/X-Ray swap.");
-      ImGui::SameLine();
-      presetButton("Modern", EPadPreset::kModern,
-                   "RT fire, LT lock on, A jump, B morph ball, RB missile, Y map,\n"
-                   "right stick click free look. Turns on Twin Stick Aim; hold LB\n"
-                   "and press the D-pad to change beams.");
-      ImGui::EndDisabled();
-      ImGui::SameLine();
-      presetButton("Southpaw", EPadPreset::kSouthpaw,
-                   "The GameCube layout with the two sticks swapped.\nTurns off Twin Stick Aim.");
-
-      const float padWidth = bindWidth + style.ItemInnerSpacing.x + clearWidth;
-      const PADDeadZones* deadZones = PADGetDeadZones(kControlPort);
-      const bool emulateTriggers = deadZones != nullptr && deadZones->emulateTriggers;
-      const auto padRow = [&](ECapture kind, int index, const std::string& label) {
-        const float rowX = ImGui::GetCursorPosX();
-        ImGui::AlignTextToFramePadding();
-        ImGui::TextUnformatted(label.c_str());
-        ImGui::SameLine(rowX + slotX[0]);
-        const SInput input = RowInput(kind, index, 0);
-        std::string name = InputName(input);
-        // An unbound L or R click follows its analog trigger.
-        ECapture pairKind = ECapture::kNone;
-        int pairIndex = -1;
-        if (kind == ECapture::kPadButton && input.code == -1 && emulateTriggers &&
-            PairedRow(kind, index, pairKind, pairIndex)) {
-          name = std::string("(") + kControlPadAxes[pairIndex].label + ")";
-        }
-        BindingButton(kind, index, 0, name, padWidth);
-        // A button row's second input (Aurora maps one; the port ORs this in).
-        if (kind == ECapture::kPadButton) {
-          const SInput alt = RowInput(kind, index, 1);
-          ImGui::SameLine(rowX + slotX[1]);
-          BindingButton(kind, index, 1, alt.code == -1 ? std::string("-") : InputName(alt), bindWidth);
-          ImGui::SameLine(0.f, style.ItemInnerSpacing.x);
-          ImGui::BeginDisabled(alt.code == -1);
-          if (ImGui::Button("x")) {
-            BindRow(kind, index, 1, SInput{});
-          }
-          if (ImGui::IsItemHovered(ImGuiHoveredFlags_ForTooltip)) {
-            ImGui::SetTooltip("Clear");
-          }
-          ImGui::EndDisabled();
-        }
-      };
-      {
-        const float rowX = ImGui::GetCursorPosX();
-        ImGui::TextDisabled("Action");
-        ImGui::SameLine(rowX + slotX[0]);
-        ImGui::TextDisabled("Button");
-        ImGui::SameLine(rowX + slotX[1]);
-        ImGui::TextDisabled("Alt button");
-      }
-      for (int i = 0; i < static_cast< int >(std::size(kControlPadButtons)); ++i) {
-        ImGui::PushID(200 + i);
-        padRow(ECapture::kPadButton, i, buttonLabels[i]);
-        ImGui::PopID();
-      }
-      for (int i = 0; i < PAD_AXIS_COUNT; ++i) {
-        ImGui::PushID(300 + i);
-        padRow(ECapture::kPadAxis, i, axisLabels[i]);
-        ImGui::PopID();
-      }
-      ImGui::PushID(400);
-      padRow(ECapture::kShiftPad, 0, kShiftLabel);
-      ShiftTooltip();
-      ImGui::SameLine(0.f, style.ItemInnerSpacing.x);
-      ImGui::BeginDisabled(ShiftPadInput().code == -1);
-      if (ImGui::Button("x")) {
-        BindRow(ECapture::kShiftPad, 0, 0, SInput{});
-      }
-      ImGui::EndDisabled();
-      ImGui::PopID();
-      ShiftOverlapNote(ECapture::kShiftPad, 0);
-      if (PADDeadZones* zones = PADGetDeadZones(kControlPort)) {
-        DrawDeadZones(*zones);
-      }
+    ImGui::EndDisabled();
+    ImGui::PopID();
+    ShiftOverlapNote(ECapture::kShiftPad, 0);
+    if (PADDeadZones* zones = PADGetDeadZones(kControlPort)) {
+      DrawDeadZones(*zones);
     }
   }
   ImGui::EndDisabled();

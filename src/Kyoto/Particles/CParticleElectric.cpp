@@ -22,6 +22,7 @@
 #include "MetroidPrime/CActor.hpp"
 #include "MetroidPrime/Cameras/CCameraManager.hpp"
 #include "port_debug.h"
+#include "port_fx_debug.h"
 #endif
 
 ushort CParticleElectric::sSeed = 99;
@@ -257,6 +258,13 @@ void CParticleElectric::CalculateFractal(int start, int end, float ampl, float a
 }
 
 const bool CParticleElectric::Update(double dt) {
+#ifdef TARGET_PC
+  PortFx::UpdateScope fxScope(dt);
+  if (fxScope.skip) {
+    return false;
+  }
+  dt = fxScope.dt;
+#endif
   CGlobalRandom random(x14c_randState);
   bool updated = false;
   if (x450_25_haveGPSM) {
@@ -343,6 +351,12 @@ const bool CParticleElectric::Update(double dt) {
 }
 
 void CParticleElectric::Render() {
+#ifdef TARGET_PC
+  PortFx::RenderScope fxScope;
+  if (PortFx::gMuteActive && PortFx::IsMuted(*this)) {
+    return;
+  }
+#endif
   const float startTime = CStopwatch::GetGlobalTime();
   if (!x3e8_electricManagers.empty()) {
     if (x450_29_transformDirty) {
@@ -832,3 +846,35 @@ const CTransform4f& CParticleElectric::GetGlobalOrientation() const {
 const CVector3f& CParticleElectric::GetGlobalTranslation() const { return xa4_globalTranslation; }
 const CTransform4f& CParticleElectric::GetOrientation() const { return x44_orientation; }
 const CVector3f& CParticleElectric::GetTranslation() const { return x38_translation; }
+
+#ifdef TARGET_PC
+uint CParticleElectric::PortFxAsset() const { return CToken(x1c_elecDesc).GetTag().GetId(); }
+
+void CParticleElectric::PortFxDescribe(PortFxInfo& out) const {
+  out.kind = 'ELSC';
+  out.asset = PortFxAsset();
+  out.particles = GetParticleCount();
+  out.frame = x28_currentFrame;
+  out.lifetime = x2c_LIFE;
+  out.emitting = x450_24_emitting;
+  out.deletable = IsSystemDeletable();
+  out.pos[0] = xa4_globalTranslation.GetX();
+  out.pos[1] = xa4_globalTranslation.GetY();
+  out.pos[2] = xa4_globalTranslation.GetZ();
+  for (int i = 0; i < x1e0_swooshGenerators.size(); ++i) {
+    if (x1e0_swooshGenerators[i].get() != nullptr) {
+      out.children.push_back(x1e0_swooshGenerators[i].get());
+    }
+  }
+  for (int i = 0; i < x400_gpsmGenerators.size(); ++i) {
+    if (x400_gpsmGenerators[i].get() != nullptr) {
+      out.children.push_back(x400_gpsmGenerators[i].get());
+    }
+  }
+  for (int i = 0; i < x410_epsmGenerators.size(); ++i) {
+    if (x410_epsmGenerators[i].get() != nullptr) {
+      out.children.push_back(x410_epsmGenerators[i].get());
+    }
+  }
+}
+#endif

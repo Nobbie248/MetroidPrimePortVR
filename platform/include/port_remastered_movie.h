@@ -49,13 +49,22 @@ class JpegSplitter {
 public:
   using Sink = std::function<bool(const std::vector<uint8_t>&)>;
 
-  // False when the bytes are not JPEGs, or the sink returned false.
+  // No picture of a movie comes near this; a stream that runs past it without
+  // ending one is not a JPEG stream, and holding it all would only use memory.
+  static constexpr size_t kMaxPicture = size_t(16) << 20;
+
+  // False when the bytes are not JPEGs, a picture runs past kMaxPicture, or
+  // the sink returned false.
   bool Feed(const uint8_t* data, size_t size, const Sink& sink);
   // True when the stream ended between two pictures.
-  bool Idle() const { return m_data.empty(); }
+  bool Idle() const { return m_start == m_data.size(); }
 
 private:
+  // Splits off every whole picture in m_data from m_start on.
+  bool Split(const Sink& sink);
+
   std::vector<uint8_t> m_data;
+  size_t m_start = 0;     // the picture being parsed starts here; before it is done with
   size_t m_pos = 0;       // parsed up to here
   size_t m_scanStart = 0; // 0 while in the header segments
 };

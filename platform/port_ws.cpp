@@ -519,30 +519,6 @@ bool ValidUrlCharacter(const std::string& text, bool allowPathSpace) {
   return true;
 }
 
-bool SetSocketErrorText(std::string& error, const char* operation) {
-  error = operation;
-  error += ": ";
-  error += SystemError(SocketError());
-  return false;
-}
-
-void AppendUnmaskedFrame(std::string& destination, uint8_t opcode, const std::string& payload) {
-  destination.push_back(static_cast<char>(0x80 | (opcode & 0x0f)));
-  const uint64_t length = payload.size();
-  if (length < 126) {
-    destination.push_back(static_cast<char>(length));
-  } else if (length <= 0xffff) {
-    destination.push_back(static_cast<char>(126));
-    destination.push_back(static_cast<char>((length >> 8) & 0xff));
-    destination.push_back(static_cast<char>(length & 0xff));
-  } else {
-    destination.push_back(static_cast<char>(127));
-    for (int i = 7; i >= 0; --i)
-      destination.push_back(static_cast<char>((length >> (i * 8)) & 0xff));
-  }
-  destination.append(payload);
-}
-
 #ifdef MP_HAVE_OPENSSL
 #if !defined(_WIN32) && !defined(SO_NOSIGPIPE)
 // OpenSSL writes to the socket with write(), which raises SIGPIPE when the

@@ -1,5 +1,6 @@
 #include "MetroidPrime/CMessageScreen.hpp"
 
+#include "GuiSys/CGuiCamera.hpp"
 #include "GuiSys/CGuiFrame.hpp"
 #include "GuiSys/CGuiModel.hpp"
 #include "GuiSys/CGuiTextPane.hpp"
@@ -39,6 +40,11 @@ bool CMessageScreen::Update(float dt, float blurAmt) {
     const bool ready = xc_msgScreen.TryCache() && x0_msg.TryCache();
     if (ready) {
       x18_loadedMsgScreen = xc_msgScreen.GetObject();
+      // Port: keep the message box's proportions in widescreen, pillarboxed (as
+      // the save prompt is) instead of stretching it across the wide viewport.
+      if (CGuiCamera* cam = x18_loadedMsgScreen->GetFrameCamera()) {
+        cam->SetAspectMatch(true, false);
+      }
       x1c_textpane_message =
           static_cast< CGuiTextPane* >(x18_loadedMsgScreen->FindWidget("textpane_message"));
       x20_basewidget_top = x18_loadedMsgScreen->FindWidget("basewidget_top");

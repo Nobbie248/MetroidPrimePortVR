@@ -273,17 +273,20 @@ void CScriptWater::Render(const CStateManager& mgr) const {
     xf.AddTranslationZ(zOffset);
     const CVector3f& areaCenter =
         mgr.GetWorld()->GetAreaAlways(mgr.GetNextAreaId()).GetAABB().GetCenterPoint();
+    bool remastered = false;
 #ifdef TARGET_PC
     // A mod's surface stands in for the fluid plane (port_room_liquid.h).
-    if (!PortRoomLiquid::Draw(mgr, mgr.GetWorld()->GetAreaAlways(GetCurrentAreaId()), GetUniqueId().value,
-                              GetTranslation(), x1b4_fluidPlane->GetFluidType(),
-                              GetTranslation().GetZ() + x130_bounds.GetMaxPoint().GetZ()))
+    remastered = PortRoomLiquid::Draw(mgr, mgr.GetWorld()->GetAreaAlways(GetCurrentAreaId()), GetUniqueId().value,
+                                      GetTranslation(), x1b4_fluidPlane->GetFluidType(),
+                                      GetTranslation().GetZ() + x130_bounds.GetMaxPoint().GetZ());
 #endif
+    if (!remastered)
     x1b4_fluidPlane->Render(
         mgr, x2bc_alpha, aabb, xf, mgr.GetWorld()->GetAreaAlways(GetCurrentAreaId()).GetTM(), false,
         x150_frustum, mgr.GetFluidPlaneManager()->GetRippleManager(), GetUniqueId(),
         x2d8_tileIntersects.get(), x2c4_gridDimX, x2c8_gridDimY, areaCenter);
-    if (x214_fogBias) {
+    // Remastered's CScriptWaterMP1::Render (0xd19404) draws no fog volume over its surface.
+    if (x214_fogBias && !remastered) {
       if (mgr.GetPlayerState()->CanVisorSeeFog(mgr)) {
         if (gkWaterFog) {
           float sinVal = CMath::FastSinR(x224_fogSpeed * CGraphics::GetSecondsMod900());

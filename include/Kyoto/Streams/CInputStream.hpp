@@ -46,6 +46,20 @@ public:
 
   uint GetBlockOffset() const { return x4_blockOffset; }
   const uint GetReadPosition() const { return x18_readPosition; }
+#ifdef TARGET_PC
+  // A big-endian word `offset` bytes past the read position, without reading
+  // it. False when it is not in the buffered block (a memory stream holds all
+  // of its data in one).
+  bool PortPeekLong(uint offset, uint& out) const {
+    if (x10_ptr == nullptr || x8_blockLen < x4_blockOffset ||
+        x8_blockLen - x4_blockOffset < offset + 4) {
+      return false;
+    }
+    const uchar* p = x10_ptr + x4_blockOffset + offset;
+    out = uint(p[0]) << 24 | uint(p[1]) << 16 | uint(p[2]) << 8 | uint(p[3]);
+    return true;
+  }
+#endif
 
 private:
   bool GrabAnotherBlock();

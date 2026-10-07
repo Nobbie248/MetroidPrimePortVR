@@ -10,8 +10,13 @@ bool bind_pipeline(PipelineRef ref, const wgpu::RenderPassEncoder& pass);
 // and on a tiled GPU each one costs in every bin.
 void bind_gx_uniform(const wgpu::RenderPassEncoder& pass, const wgpu::BindGroup& bindGroup, uint32_t offset);
 // The same for a GX draw's texture bind group (group 2, by its cache reference) and
-// its index buffer range: consecutive draws of one model share both.
-void bind_gx_textures(const wgpu::RenderPassEncoder& pass, BindGroupRef bindGroup);
+// its index buffer range: consecutive draws of one model share both. A draw without a
+// group of its own keeps the last one, unless that was a shadow receiver's (`shadowGroup`,
+// its own layout): the empty group (the multiview one with `multiview`) goes back then.
+void bind_gx_textures(const wgpu::RenderPassEncoder& pass, BindGroupRef bindGroup, bool shadowGroup = false,
+                      bool multiview = false);
+// Call after setting bind group 2 directly, so the next GX draw sets its own again.
+void forget_texture_group();
 void bind_gx_indices(const wgpu::RenderPassEncoder& pass, const wgpu::Buffer& buffer, uint64_t offset, uint64_t size,
                      wgpu::IndexFormat format = wgpu::IndexFormat::Uint16);
 // Group 0: the frame's vertex buffer, or the geometry cache's (geometry_buffer.hpp)

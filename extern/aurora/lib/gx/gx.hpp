@@ -51,6 +51,20 @@ constexpr bool UsePerPixelLighting = false;
 constexpr bool UseReversedZ = true;
 
 constexpr u32 MaxTextures = GX_MAX_TEXMAP;
+// Group 2 binding of the PBR environment BRDF table, after the probe, its sampler and the volumes.
+constexpr u32 kBrdfLutBinding = MaxTextures * 2 + 7;
+// Group 2 bindings of the volumetric fog's froxels and their sampler (ShaderConfig::volFog).
+constexpr u32 kVolFogFroxelBinding = MaxTextures * 2 + 8;
+constexpr u32 kVolFogSamplerBinding = MaxTextures * 2 + 9;
+// A shadow receiver (shadow_receives) never fogs per pixel, so its group 2 layout puts the sun's shadow map and
+// comparison sampler in the froxel's slots: group 2 already holds WebGPU's default 16 sampled textures.
+constexpr u32 kShadowMapBinding = kVolFogFroxelBinding;
+constexpr u32 kShadowSamplerBinding = kVolFogSamplerBinding;
+// A baked lightmap's 2D array (GX_AURORA_SET_PBR_LIGHTMAP), read with the probe's sampler. It is the 17th
+// sampled texture of group 2, one past WebGPU's default limit, so the layout has it only when the device was
+// given more (webgpu::g_lightmapBinding); kTextureBindings counts it.
+constexpr u32 kLightmapBinding = MaxTextures * 2 + 10;
+constexpr u32 kTextureBindings = MaxTextures * 2 + 11;
 constexpr u32 MaxTluts = 20;
 constexpr u32 MaxTevStages = GX_MAX_TEVSTAGE;
 constexpr u32 MaxColorChannels = 4;
@@ -66,7 +80,7 @@ constexpr u32 MaxIndTexMtxs = 3;
 constexpr u32 MaxVtxFmt = GX_MAX_VTXFMT;
 constexpr u32 MaxPnMtx = (GX_PNMTX9 / 3) + 1;
 constexpr u32 MaxIndexAttr = 12; // VA_POS -> VA_TEX7
-constexpr u32 MaxUniformSize = 3840;
+constexpr u32 MaxUniformSize = 8192; // WebGPU guarantees maxUniformBufferBindingSize >= 16384
 constexpr u32 XfRegCount = 0x58; // 0x1000-0x1057
 
 enum DirtyFlag : u8 {
@@ -87,7 +101,7 @@ enum MultiviewMode : u8 {
   // onto the screen differs per eye (AuroraSetStereoScreenTexMtx).
   MultiviewFull = 2,
   // MultiviewClip's uniform in the per-eye passes of a frame without multiview: the
-  // eye is the draw's immediate (DrawImmediateData::eyeMask, 0 or 1), set per pass.
+  // eye is the draw's immediate (set_eye_mask, 0 or 1), set per pass.
   EyeClipImmediate = 3,
 };
 
@@ -95,13 +109,17 @@ struct DrawImmediateData {
   u32 vtxStart = 0;
   u32 currentPnMtx = 0;
   u32 fogRangeBase = 0;
-  // Multiview stereo replay: 1 when the draw's uniform is a pair of eye copies
-  // (element `view_index & eyeMask` of it), 0 when both eyes share the mono one.
-  u32 eyeMask = 0;
+  // The draw's serial (bits 0-23), read by shaders built with ShaderConfig::drawId, and, for
+  // multiview stereo replay, the eye mask in bit 31 (set_eye_mask): 1 when the draw's uniform is a
+  // pair of eye copies (element `view_index & eye mask` of it), 0 when both eyes share the mono one.
+  u32 serial = 0;
   std::array<u32, MaxIndexAttr> arrayStart{};
 };
 static_assert(std::has_unique_object_representations_v<DrawImmediateData>);
 static_assert(sizeof(DrawImmediateData) == 64);
+inline void set_eye_mask(DrawImmediateData& data, u32 eyeMask) {
+  data.serial = (data.serial & 0x7FFFFFFFu) | (eyeMask != 0 ? 0x80000000u : 0u);
+}
 
 extern wgpu::BindGroup g_emptyTextureBindGroup;
 // The multiview stereo replay's (gfx/stereo_multiview.hpp): 2D array views.
@@ -411,9 +429,13 @@ struct GXState {
   u8 numIndStages = 0;
   u8 numTevStages = 0;
   u8 numTexGens = 0;
-  bool pbr = false; // GX_AURORA_SET_PBR
+  u8 pbr = 0; // GX_AURORA_SET_PBR: above 1, a cost test (GXSetPBRCostTest)
   u8 sdf = 0; // GX_AURORA_SET_SDF
   bool mapBatch = false; // GX_AURORA_MAP_BATCH
+  u8 depthPrepass = 0; // GX_AURORA_PORT_DEPTH_PREPASS
+  std::array<u32, 3> drawTag{0, UINT32_MAX, 0}; // GX_AURORA_SET_DRAW_TAG: asset, model index, material
+  u32 drawSerial = 0; // GX_AURORA_PORT_DRAW_SERIAL
+  bool drawIdMode = false; // GX_AURORA_PORT_DRAW_ID_MODE
   Mat3x4<float> pbrProbe; // GX_AURORA_SET_PBR_PROBE
   Vec4<float> pbrEmissive{1.f, 1.f, 1.f, 0.f}; // GX_AURORA_SET_PBR_MATERIAL
   Vec4<float> pbrBacklight{0.f, 0.f, 0.f, 0.f};
@@ -424,9 +446,35 @@ struct GXState {
   u32 pbrCube = 0; // GX_AURORA_SET_PBR_CUBE
   Vec4<float> pbrCubeParams{0.f, 0.f, 0.f, 0.f}; // see GXSetPBRCube
   std::array<Vec4<float>, 6> pbrAmbient{}; // GX_AURORA_SET_PBR_AMBIENT
+  bool pbrBrdfLut = false; // GX_AURORA_SET_PBR_BRDF_LUT: a table is bound
   u32 pbrVolume = 0; // GX_AURORA_SET_PBR_VOLUME
   std::array<Vec4<float>, 6> pbrVolumeRows{}; // see GXSetPBRVolume
+  u32 pbrLightmap = 0; // GX_AURORA_SET_PBR_LIGHTMAP
+  Vec4<float> pbrLightmapRect{};                  // offU, offV, scale (0: off), level
+  std::array<Vec4<float>, 3> pbrLightmapAxes{};   // xyz: a row taking a view-space normal to the lightmap's axes
+  u8 pbrLightmapAttr = GX_VA_NULL; // GX_AURORA_SET_PBR_LIGHTMAP_ATTR
   std::array<Vec4<float>, 3> pbrTone{}; // GX_AURORA_SET_PBR_TONE
+  Vec4<float> pbrLightSkip{}; // GX_AURORA_SET_PBR_LIGHT_SKIP: x the mask
+  Vec4<float> pbrBakedLightModulation{1.f, 1.f, 1.f, 0.f}; // GX_AURORA_SET_PBR_BAKED_LIGHT_MODULATION
+  // GX_AURORA_SET_PBR_BACKLIGHT: the height plane; the back colour direction and strength;
+  // the top strength.
+  std::array<Vec4<float>, 3> pbrBacklightLights{};
+  Vec4<float> pbrLightScale{1.f, 1.f, 0.f, 0.f}; // GX_AURORA_SET_PBR_LIGHT_SCALE: diffuse, f0, -, fade
+  std::array<Vec4<float>, 8> pbrShield{}; // GX_AURORA_SET_PBR_SHIELD: CCH0..6, then AUVI xyz + DIFC.w
+  // GX_AURORA_SET_PBR_LIGHT_HDR, per light: colour (rgb, falloff + 1; w 0 = off), then
+  // (view position, r0), then (r1, -, -, -).
+  std::array<Vec4<float>, GX::MaxLights * 3> pbrLightHdr{};
+  // GX_AURORA_PORT_VOLUMETRIC_FOG up to its _END: the draws fog themselves (ShaderConfig::volFog)
+  // with the recorded fog's near, range, exposure and the start of the world's depth range (nearer is the viewmodel) and its tone curve.
+  bool volFog = false;
+  Vec4<float> volFogParams{};
+  std::array<Vec4<float>, 3> volFogTone{};
+  // GX_AURORA_PORT_SHADOW_*: the following draws are the world's (they cast and receive the sun's
+  // shadow), and this frame's sun (shadowActive) with its uniform (gfx/shadow.hpp's Uniform).
+  bool shadowCaster = false;
+  bool shadowCasterOnly = false; // they cast but aren't drawn (GXPortSetShadowCasterOnly)
+  bool shadowActive = false;
+  std::array<Vec4<float>, 10> shadowUniform{};
 
   // GX2 polygon offset state
   f32 frontOffset = 0.0f;
@@ -505,6 +553,8 @@ void set_draw_sync_token(u16 token) noexcept;
 u16 draw_sync_token() noexcept;
 void copy_tex(const void* dest, GXBool clear) noexcept;
 void copy_probe_face(u32 face) noexcept;
+// Whether load_word is generated with the clamped storage read (Adreno 730 on Vulkan; see shader.cpp).
+bool storage_load_clamp_active() noexcept;
 const gfx::TextureBind& get_texture(GXTexMapID id) noexcept;
 void resolve_sampled_textures(const ShaderInfo& info) noexcept;
 
@@ -542,6 +592,14 @@ struct AttrConfig {
   bool le = true;
   bool nbt3 = false; // GX_NRM_NBT3
 };
+// ShaderConfig::volFog, as Remastered's shaders fog each kind of draw after the full-screen fog.
+enum : u8 {
+  VolFogNone = 0,       // no fog: multiplying or subtracting blends, depth-only passes
+  VolFogBlended = 1,    // alpha blended, per vertex: colour T + in-scatter
+  VolFogAdditive = 2,   // added to the frame, per vertex: colour T
+  VolFogOpaque = 3,     // not blended, per pixel: as the full-screen pass
+  VolFogPremultiplied = 4, // ONE, INVSRCALPHA, per vertex: colour T + in-scatter alpha
+};
 struct ShaderConfig {
   u8 fogType = GX_FOG_NONE;
   u8 vtxStride = 0;
@@ -554,15 +612,27 @@ struct ShaderConfig {
   u8 multiview : 2 = 0;
   u8 mapBatch : 1 = false;
   u8 mapCull : 2 = 0; // Fill culling in a batch whose line quads must be uncullable.
+  u8 drawId : 1 = false; // debug view "drawid": the fragment is the draw serial (DrawImmediateData::serial)
+  // GX_AURORA_PORT_SHADOW_CASTER while a shadow frame is set: the draw casts into the sun's shadow
+  // map (an extra vs_shadow entry) and, when PBR, receives the sun through it.
+  u8 shadow : 1 = false;
+  u8 pad1 : 6 = 0;
   u8 pbr = 0; // GX_AURORA_SET_PBR
   u8 sdf = 0; // GX_AURORA_SET_SDF
+  u8 depthOnly = 0; // pass 1 of GX_AURORA_PORT_DEPTH_PREPASS: the colour is not written
+  u8 pbrKind = 0; // with pbr, the special surface kind (pbrLayer.y), a constant in the shader
+  // GXState::volFog: how the draw fogs itself (VolFog*), chosen from its blend.
+  u8 volFog = 0;
+  // With pbr, the vertex attribute holding the baked lightmap's UV (GX_VA_TEX0..7), or GX_VA_NULL: a varying in the shader.
+  u8 pbrLightmapAttr = GX_VA_NULL;
   // Without GX_VA_PNMTXIDX, the position (and normal) matrix every vertex takes: a
   // constant index lets the GPU keep that one matrix in its constant memory instead
   // of loading it for each vertex (on the Quest's Adreno, the vertex fetch stall
   // dominated the eye passes).
   u8 currentPnMtx = 0;
   u8 nativeVertices = false;
-  std::array<u8, 1> pad2{};
+  // 12 bytes so far, a multiple of the u32 fields' alignment: the struct has no padding
+  // (memcmp and hash; the static_assert below).
   std::array<AttrConfig, MaxVtxAttr> attrs;
   std::array<TevSwap, MaxTevSwap> tevSwapTable;
   std::array<TevStage, MaxTevStages> tevStages;
@@ -576,6 +646,10 @@ struct ShaderConfig {
   bool operator==(const ShaderConfig& rhs) const { return memcmp(this, &rhs, sizeof(*this)) == 0; }
 };
 static_assert(std::has_unique_object_representations_v<ShaderConfig>);
+// Whether a draw samples the sun's shadow map: a lit PBR surface drawn in colour without per-pixel fog.
+inline bool shadow_receives(const ShaderConfig& sc) noexcept {
+  return sc.shadow && sc.pbr != 0 && sc.volFog == VolFogNone && sc.depthOnly == 0 && sc.lineMode == 0 && !sc.drawId;
+}
 
 struct PipelineConfig;
 
@@ -600,6 +674,10 @@ struct ShaderInfo {
   bool lightingEnabled : 1 = false;
   u8 lineMode : 2 = 0;
   bool usesPbr : 1 = false;
+  bool usesLightmap : 1 = false; // ShaderConfig::pbrLightmapAttr is set
+  bool usesVolFog : 1 = false;
+  bool usesShadow : 1 = false;    // ShaderConfig::shadow: the shadow uniforms and vs_shadow
+  bool shadowReceive : 1 = false; // shadow_receives: group 2 uses the shadow layout
 };
 struct BindGroupRanges {
   std::array<gfx::Range, MaxIndexAttr> vaRanges{};
@@ -609,6 +687,17 @@ wgpu::RenderPipeline build_pipeline(const PipelineConfig& config, ArrayRef<wgpu:
                                     wgpu::ShaderModule shader, const char* label) noexcept;
 std::string build_shader_source(const ShaderConfig& config) noexcept;
 wgpu::ShaderModule build_shader(const ShaderConfig& config) noexcept;
+// Shader debugging (MP_WGSL_DUMP / MP_WGSL_OVERRIDE, console `shader`). dump_shaders writes every module built so
+// far to dir (and keeps writing new ones) and returns how many files it made; set_shader_override_dir turns the
+// override on (empty = off).
+u32 dump_shaders(const char* dir) noexcept;
+void set_shader_override_dir(const char* dir) noexcept;
+// While on, each draw with a nonzero serial records the hash of its ShaderConfig; draw_shader_hash reads it back (0 =
+// none) and shader_overridden says whether an edited source is in place for a hash.
+void set_draw_shader_log(bool on) noexcept;
+void note_draw_shader(u32 serial, const ShaderConfig& config) noexcept;
+u64 draw_shader_hash(u32 serial) noexcept;
+bool shader_overridden(u64 hash) noexcept;
 GXBindGroups build_bind_groups(const ShaderInfo& info) noexcept;
 // Stereo replay: the texture bind groups the left and right eye passes use when
 // a sampled texture has per-eye stand-ins (gfx/stereo_shadow.hpp); zero when the

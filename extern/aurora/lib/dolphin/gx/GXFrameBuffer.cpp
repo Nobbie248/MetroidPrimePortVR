@@ -92,8 +92,11 @@ void copy_tex(const void* dest, GXBool clear) noexcept {
   const auto clearColor = clear && g_gxState.colorUpdate;
   const auto clearAlpha = clear && g_gxState.alphaUpdate;
   const auto clearDepth = clear && g_gxState.depthUpdate;
-  gfx::resolve_pass_into(handle.handle, rect, clearColor, clearAlpha, clearDepth, g_gxState.clearColor,
-                         clear_depth_value(), texCopyFmt);
+  // Cost test 11 measures what the copies' pass breaks cost; a copy that clears still has to.
+  if (clear || GXGetPBRCostTest() != 11) {
+    gfx::resolve_pass_into(handle.handle, rect, clearColor, clearAlpha, clearDepth, g_gxState.clearColor,
+                           clear_depth_value(), texCopyFmt);
+  }
   ++handle.revision;
   handle.lastCopy = ++s_copySerial;
   handle.width = g_gxState.texCopyDstWidth;
@@ -174,7 +177,7 @@ GXRenderModeObj GXMpal480IntDf = {
 void GXAdjustForOverscan(GXRenderModeObj* rmin, GXRenderModeObj* rmout, u16 hor, u16 ver) {
   // Overscan only insets the visible VI area; the EFB and XFB keep the game's
   // logical size, because they drive GXSetViewport and GXSetScissor. The GX
-  // scissor is an 11-bit field biased by 342, so copying the OS window's pixel
+  // scissor is a 12-bit field biased by 342 (width <= 3754), so copying the OS window's pixel
   // size into fbWidth (2351, or 1878 once the port widens it to 16:9) wraps the
   // scissor to zero width and clips every draw away. Aurora scales the logical
   // framebuffer up to the window when it presents instead.
@@ -239,7 +242,13 @@ void GXSetDispCopyGamma(GXGamma gamma) {}
 
 void GXCopyDisp(void* dest, GXBool clear) {}
 
+// Port extension: counts EFB copies made from the game thread (GXPortCopySerial).
+static u32 sCopySerial = 0;
+
+u32 GXPortCopySerial(void) { return sCopySerial; }
+
 void GXCopyTex(void* dest, GXBool clear) {
+  ++sCopySerial;
   GX_WRITE_AURORA(GX_AURORA_LOAD_COPY_DEST);
   GX_WRITE_U64(reinterpret_cast<u64>(dest));
 

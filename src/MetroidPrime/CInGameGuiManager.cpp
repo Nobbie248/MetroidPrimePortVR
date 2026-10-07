@@ -47,6 +47,8 @@
 
 #include "port_debug.h"
 
+#include <algorithm>
+
 // Profiling labels retained in the retail string pool.
 static const char* const skGuiElementNames[] = {
     "FaceplateDecoration", "     FaceReflection", "        PlayerVisor", "                Hud",
@@ -105,6 +107,8 @@ CInGameGuiManager::TPauseScreenDGRPs CInGameGuiManager::LockPauseScreenDependenc
   return ret;
 }
 
+const CInGameGuiManager* CInGameGuiManager::sPortCurrent = nullptr;
+
 CInGameGuiManager::CInGameGuiManager(const CStateManager& mgr, CArchitectureQueue& queue)
 : x0_iggmPreLoad(gpSimplePool->GetObj("PreLoadIGGM_DGRP"))
 , x18_loadPhase(kLP_LoadDepsGroup)
@@ -153,9 +157,14 @@ CInGameGuiManager::CInGameGuiManager(const CStateManager& mgr, CArchitectureQueu
     token.Lock();
     xc8_inGameGuiDGRPs.push_back(token);
   }
+  sPortCurrent = this;
 }
 
-CInGameGuiManager::~CInGameGuiManager() {}
+CInGameGuiManager::~CInGameGuiManager() {
+  if (sPortCurrent == this) {
+    sPortCurrent = nullptr;
+  }
+}
 
 void CInGameGuiManager::InitializeDumpableARAMTextures() {
   int count = 0;
@@ -270,6 +279,45 @@ void CInGameGuiManager::StartFadeIn() {
   xf8_camFilter.DisableFilter(0.5f);
 }
 
+// Port: the screen rect of the minimap's depth-mask model, for the Android
+// touch overlay's tap-to-open-map. Called right after the mask is drawn, so the
+// HUD camera's view and projection are still current; `world` is the mask's
+// drawn transform (with the widescreen HUD spread). `drawn` is false where the
+// map can open but the minimap isn't drawn (the other visors), and the overlay
+// puts a map button there.
+void CInGameGuiManager::PublishMinimapRect(bool shown, bool drawn, const CTransform4f& world) const {
+  const auto& token = x148_model_automapper->GetModel();
+  CModel* model = token ? token->GetObject() : nullptr;
+  const CViewport& vp = CGraphics::GetViewport();
+  if (!shown || model == nullptr || vp.mWidth <= 0 || vp.mHeight <= 0) {
+    return;
+  }
+  const CTransform4f toView =
+      CGraphics::GetViewMatrix().GetInverse() * world;
+  const CMatrix4f proj = CGraphics::GetPerspectiveProjectionMatrix();
+  const CAABox& box = model->GetBoundingBox();
+  float x0 = FLT_MAX, y0 = FLT_MAX, x1 = -FLT_MAX, y1 = -FLT_MAX;
+  for (int i = 0; i < 8; ++i) {
+    const CVector3f eye = toView * box.GetPoint(i);
+    if (eye.GetY() <= 0.f) {
+      return; // behind the camera
+    }
+    const CVector3f ndc = proj.MultiplyOneOverW(eye);
+    const float x = (static_cast< float >(vp.mLeft) + (ndc.GetX() * 0.5f + 0.5f) * vp.mWidth) /
+                    static_cast< float >(CGraphics::GetRenderMode().fbWidth);
+    const float y = (static_cast< float >(vp.mTop) + (0.5f - ndc.GetY() * 0.5f) * vp.mHeight) /
+                    static_cast< float >(CGraphics::GetRenderMode().efbHeight);
+    x0 = std::min(x0, x);
+    x1 = std::max(x1, x);
+    y0 = std::min(y0, y);
+    y1 = std::max(y1, y);
+  }
+  // A little padding for fat fingers.
+  const float padX = 0.15f * (x1 - x0);
+  const float padY = 0.15f * (y1 - y0);
+  PortDebug::SetMinimapRect(true, drawn, x0 - padX, y0 - padY, x1 + padX, y1 + padY);
+}
+
 void CInGameGuiManager::Draw(const CStateManager& mgr) const {
 #ifdef TARGET_PC
   const PortDebug::ScopedPhaseTimer phaseTimer(PortDebug::kPhaseDrawGui);
@@ -277,6 +325,8 @@ void CInGameGuiManager::Draw(const CStateManager& mgr) const {
   if (!GetIsGameDraw()) {
     gpRender->SetRequestRGBA6(true);
   }
+  // Re-published below if the minimap is drawn this frame.
+  PortDebug::SetMinimapRect(false, false, 0.f, 0.f, 0.f, 0.f);
   if (x1d8_onScreenTexAlpha > 0.f && x1dc_onScreenTexTok->GetObject() != nullptr) {
     const CTexture& tex = *x1dc_onScreenTexTok->GetObject();
     gpRender->SetDepthReadWrite(false, false);
@@ -448,6 +498,11 @@ void CInGameGuiManager::Draw(const CStateManager& mgr) const {
     x148_model_automapper->DrawWithWorldTransform(
         CGuiWidgetDrawParms(1.f, CVector3f::Zero()),
         mapSpread * x148_model_automapper->GetWorldTransform());
+    PublishMinimapRect(drawVisor && x38_autoMapper->IsFullyInMiniMapState() &&
+                           x3c_pauseScreenBlur->IsGameDraw() &&
+                           x1ec_hudVisMode != CTweakGui::kHud_Zero,
+                       mapAlpha > 0.f && t > 0.f,
+                       mapSpread * x148_model_automapper->GetWorldTransform());
     CGraphics::SetDepthWriteMode(true, kE_GEqual, false);
     x38_autoMapper->Draw(mgr, mapSpread * CTransform4f::Translate(0.f, 0.02f, 0.f) * x18c_mapCamXf,
                          mapAlpha * (x1f4_visorStaticAlpha * t));
@@ -564,6 +619,9 @@ void CInGameGuiManager::PreDraw(CStateManager& mgr, bool isCameraActive) {
 void CInGameGuiManager::Update(const CStateManager& mgr, float dt, CArchitectureQueue& queue,
                                bool cameraActive) {
   EnsureStates(mgr);
+  // Port: the touch overlay shows R in the pause menu, where it changes screens.
+  PortDebug::SetPauseScreenOpen(x1c0_nextState == kIGGS_PauseGame ||
+                                x1c0_nextState == kIGGS_PauseLogBook);
 #ifdef TARGET_PC
   // PortVr: the map, pause, logbook, save and message screens take the VR
   // controllers' plain GameCube layout, where A confirms (in the gameplay one

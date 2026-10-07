@@ -3,6 +3,10 @@
 
 #include "GuiSys/CGuiWidgetIdDB.hpp"
 #include "rstl/string.hpp"
+#ifdef TARGET_PC
+#include <utility>
+#include <vector>
+#endif
 
 class CFinalInput;
 class CGuiSys;
@@ -51,6 +55,23 @@ public:
   void EnableLights(uint mask) const;
   void DisableLights() const;
 
+#ifdef TARGET_PC
+  // Port: the HUD aspect spread moves each widget by its own anchor. Widgets of one compact
+  // cluster (a visor/beam selector) name a shared anchor so they move as one unit.
+  void SetSpreadAnchor(const CGuiWidget* member, const CGuiWidget* anchor);
+  // Port: the same for every widget parented (at any depth) under `root`, with `root` as anchor.
+  void SetSpreadAnchorTree(const CGuiWidget* root);
+  // Port: under the vertical spread, stretch `widget` with the frame decoration instead of moving
+  // it rigidly (the missile and threat bars, which run along the side struts).
+  void SetSpreadStretch(const CGuiWidget* widget);
+  // Port: the same for `root` and every widget parented (at any depth) under it.
+  void SetSpreadStretchTree(const CGuiWidget* root);
+  // Port: under the vertical spread, slide the models under `root` (at any depth) straight up or
+  // down without pitching them, all those above the view centre by one offset and all those below
+  // by another, so pieces of one assembly (the helmet shell, its glass and lights) stay together.
+  void SetSpreadSlideTree(const CGuiWidget* root);
+#endif
+
 private:
   uint x0_id;
   uint x4_;
@@ -65,6 +86,11 @@ private:
   int x50_b;
   int x54_c;
   mutable bool x58_24_loaded : 1;
+#ifdef TARGET_PC
+  std::vector< std::pair< const CGuiWidget*, const CGuiWidget* > > mSpreadAnchors;
+  std::vector< const CGuiWidget* > mSpreadStretch;
+  std::vector< const CGuiWidget* > mSpreadSlide;
+#endif
 };
 CHECK_SIZEOF(CGuiFrame, 0x5c);
 

@@ -259,7 +259,7 @@ TEST_F(GxTextureCacheTest, CopyRevisionRequeuesDynamicPaletteConversion) {
   g_gxState.loadedTextures[0] = make_texture(palette.data(), 1, GX_TF_C8, 4, 4);
   g_gxState.loadedTextures[0].tlut = GX_TLUT0;
   g_gxState.loadedTluts[0] = make_tlut(palette.data(), 1, 256);
-  g_gxState.copyTextures[palette.data()] = {.handle = copy, .revision = 1};
+  g_gxState.copyTextures[palette.data()] = {.handle = copy, .revision = 1, .width = 4, .height = 4};
   ShaderInfo info{};
   info.sampledTextures.set(0);
   resolve_sampled_textures(info);
@@ -277,13 +277,13 @@ TEST_F(GxTextureCacheTest, CopyRecreationAtSameDestinationRebindsHandle) {
   const auto first = testing::make_texture_handle(2, 2);
   const auto second = testing::make_texture_handle(2, 2);
   g_gxState.loadedTextures[0] = make_texture(destination.data(), 1);
-  g_gxState.copyTextures[destination.data()] = {.handle = first, .revision = 1};
+  g_gxState.copyTextures[destination.data()] = {.handle = first, .revision = 1, .width = 2, .height = 2};
   ShaderInfo info{};
   info.sampledTextures.set(0);
   resolve_sampled_textures(info);
   EXPECT_EQ(g_gxState.textures[0].ref, first);
 
-  g_gxState.copyTextures[destination.data()] = {.handle = second, .revision = 1};
+  g_gxState.copyTextures[destination.data()] = {.handle = second, .revision = 1, .width = 2, .height = 2};
   texture::invalidate_bindings();
   resolve_sampled_textures(info);
 

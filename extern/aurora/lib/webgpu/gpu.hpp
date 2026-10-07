@@ -54,6 +54,8 @@ extern wgpu::Instance g_instance;
 extern wgpu::AdapterInfo g_adapterInfo;
 extern bool g_hasCoreFeatures;
 extern bool g_bcTexturesSupported;
+// The device was given 17 sampled textures a stage (the default is 16), so group 2 has the baked lightmap's slot.
+extern bool g_lightmapBinding;
 extern bool g_astcTexturesSupported;
 extern bool g_textureComponentSwizzleSupported;
 // The device has PrimedGun's Vulkan multiview (quest/dawn patches, gfx/stereo_multiview.hpp).

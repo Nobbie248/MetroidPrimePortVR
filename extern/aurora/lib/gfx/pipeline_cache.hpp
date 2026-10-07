@@ -29,6 +29,8 @@ using NewPipelineCallback = std::function<wgpu::RenderPipeline()>;
 void initialize_pipeline_cache();
 void shutdown_pipeline_cache();
 void begin_pipeline_frame();
+// Forgets every built and queued pipeline; the next lookup rebuilds them (shader reload).
+void drop_pipelines();
 void end_pipeline_frame();
 
 template <typename Config>

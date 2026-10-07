@@ -69,6 +69,46 @@ void TestSplitter() {
   PortRemastered::JpegSplitter stopping;
   Check(!stopping.Feed(stream.data(), stream.size(), [](const std::vector<uint8_t>&) { return false; }),
         "a failing sink stops the stream");
+
+  // A scan that never ends is refused once it outgrows any picture, not held.
+  PortRemastered::JpegSplitter endless;
+  const std::vector<uint8_t> head(first.begin(), first.begin() + 13);
+  bool fed = endless.Feed(head.data(), head.size(), ignore);
+  const std::vector<uint8_t> filler(1 << 20, 0x55);
+  size_t total = head.size();
+  while (fed && total <= PortRemastered::JpegSplitter::kMaxPicture) {
+    fed = endless.Feed(filler.data(), filler.size(), ignore);
+    total += filler.size();
+  }
+  const size_t limit = PortRemastered::JpegSplitter::kMaxPicture;
+  Check(!fed && total > limit && total <= limit + filler.size(), "a picture without an end is refused past the limit");
+  // Many pictures in one call are not one picture, however many bytes they add up to.
+  std::vector<uint8_t> many;
+  const std::vector<uint8_t> big = Jpeg(std::vector<uint8_t>(1 << 20, 0x55));
+  while (many.size() <= PortRemastered::JpegSplitter::kMaxPicture) {
+    many.insert(many.end(), big.begin(), big.end());
+  }
+  PortRemastered::JpegSplitter bulk;
+  size_t pictures = 0;
+  Check(bulk.Feed(many.data(), many.size(), [&](const std::vector<uint8_t>& frame) {
+          pictures += frame == big ? 1 : 0;
+          return true;
+        }) && bulk.Idle(),
+        "pictures past the limit in one call parse");
+  Check(pictures == many.size() / big.size(), "every picture of a large call comes out");
+  // A picture split across calls, after one that ended in the same call.
+  PortRemastered::JpegSplitter carried;
+  std::vector<uint8_t> partial = second;
+  partial.insert(partial.end(), first.begin(), first.begin() + 15);
+  std::vector<std::vector<uint8_t>> carriedFrames;
+  const auto keep = [&](const std::vector<uint8_t>& frame) {
+    carriedFrames.push_back(frame);
+    return true;
+  };
+  bool carriedOk = carried.Feed(partial.data(), partial.size(), keep) && !carried.Idle();
+  carriedOk = carriedOk && carried.Feed(first.data() + 15, first.size() - 15, keep) && carried.Idle();
+  Check(carriedOk && carriedFrames.size() == 2 && carriedFrames[0] == second,
+        "a picture carried over a call comes out whole");
 }
 
 void TestWriter() {

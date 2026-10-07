@@ -92,11 +92,13 @@ if (AURORA_ENABLE_GX)
     ../lib/gx/geometry_cache.cpp
     gx_geometry_cache_test.cpp
     ../lib/gx/regs.cpp
+    ../lib/gx/resident.cpp
     ../lib/thread.cpp
     # Display list reader/optimizer
     ../lib/gx/attr_fmt.cpp
     ../lib/gx/dl.cpp
     gx_dl_test.cpp
+    gx_resident_test.cpp
   )
 
   target_include_directories(gx_fifo_tests PRIVATE
@@ -184,6 +186,7 @@ if (AURORA_ENABLE_GX)
   add_executable(gfx_recording_tests
     gfx_recording_test.cpp
     native_vertex_test.cpp
+    gx_uniform_limit_test.cpp
     render_target_layout_test.cpp
   )
   target_include_directories(gfx_recording_tests PRIVATE
@@ -197,10 +200,28 @@ if (AURORA_ENABLE_GX)
     absl::flat_hash_map
     gtest
     gtest_main
+    absl::btree # gx.hpp includes absl headers; aurora_gx only gets them privately
+    absl::flat_hash_map
   )
   aurora_copy_runtime_dlls(gfx_recording_tests)
   gtest_discover_tests(gfx_recording_tests)
 endif () # AURORA_ENABLE_GX
+
+# The bloom readback slots' locking, on the CPU: a header of its own, so no renderer is needed.
+add_executable(bloom_readback_slots_tests
+  bloom_readback_slots_test.cpp
+)
+target_include_directories(bloom_readback_slots_tests PRIVATE
+  ../include
+  ../lib
+)
+target_compile_definitions(bloom_readback_slots_tests PRIVATE AURORA TARGET_PC)
+target_link_libraries(bloom_readback_slots_tests PRIVATE
+  gtest
+  gtest_main
+)
+aurora_copy_runtime_dlls(bloom_readback_slots_tests)
+gtest_discover_tests(bloom_readback_slots_tests)
 
 # DVD API tests
 if (TARGET aurora::dvd)

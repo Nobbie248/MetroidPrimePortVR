@@ -1,5 +1,7 @@
 // The .hudbars file: parsing, writing, and walking a bar's strip. See port_hud_bars.h.
 #include "port_hud_bars.h"
+#include "port_strings.h"
+#include "port_bytes.h"
 
 #include <algorithm>
 #include <cmath>
@@ -15,36 +17,12 @@ constexpr uint32_t kMaxBars = 64;
 constexpr uint32_t kMaxName = 256;
 constexpr uint32_t kMaxStations = 65536;
 
-uint32_t Get32(const uint8_t* p) {
-  return uint32_t(p[0]) | (uint32_t(p[1]) << 8) | (uint32_t(p[2]) << 16) | (uint32_t(p[3]) << 24);
-}
+using port::AppendLE32;
+using port::AppendLEFloat;
+using port::ReadLE32;
+using port::ReadLEFloat;
 
-float GetFloat(const uint8_t* p) {
-  const uint32_t bits = Get32(p);
-  float value;
-  std::memcpy(&value, &bits, sizeof(value));
-  return value;
-}
-
-void Put32(std::vector<uint8_t>& out, uint32_t value) {
-  for (int i = 0; i < 4; ++i) {
-    out.push_back(uint8_t(value >> (i * 8)));
-  }
-}
-
-void PutFloat(std::vector<uint8_t>& out, float value) {
-  uint32_t bits;
-  std::memcpy(&bits, &value, sizeof(bits));
-  Put32(out, bits);
-}
-
-int HexDigit(char c) {
-  if (c >= '0' && c <= '9') {
-    return c - '0';
-  }
-  c = char(c | 0x20);
-  return c >= 'a' && c <= 'f' ? c - 'a' + 10 : -1;
-}
+using port::HexDigit;
 
 // The first station past `t`; stations at `t` itself are not past it.
 size_t After(const Bar& bar, float t) {
@@ -54,33 +32,15 @@ size_t After(const Bar& bar, float t) {
 } // namespace
 
 bool ParseFileName(const std::string& fileName, uint32_t& id) {
-  static const char kSuffix[] = ".hudbars";
-  if (fileName.size() != 8 + sizeof(kSuffix) - 1) {
-    return false;
-  }
-  for (size_t i = 0; i < sizeof(kSuffix) - 1; ++i) {
-    if (char(fileName[8 + i] | 0x20) != kSuffix[i] && fileName[8 + i] != kSuffix[i]) {
-      return false;
-    }
-  }
-  uint32_t value = 0;
-  for (size_t i = 0; i < 8; ++i) {
-    const int digit = HexDigit(fileName[i]);
-    if (digit < 0) {
-      return false;
-    }
-    value = (value << 4) | uint32_t(digit);
-  }
-  id = value;
-  return true;
+  return port::ParseHexFileName(fileName, ".hudbars", id);
 }
 
 bool ParseFile(const uint8_t* data, size_t size, Bars& out) {
   out.clear();
-  if (size < 12 || Get32(data) != kMagic || Get32(data + 4) != kVersion) {
+  if (size < 12 || ReadLE32(data) != kMagic || ReadLE32(data + 4) != kVersion) {
     return false;
   }
-  const uint32_t count = Get32(data + 8);
+  const uint32_t count = ReadLE32(data + 8);
   if (count > kMaxBars) {
     return false;
   }
@@ -90,7 +50,7 @@ bool ParseFile(const uint8_t* data, size_t size, Bars& out) {
     if (size - at < 4) {
       return false;
     }
-    const uint32_t nameLength = Get32(data + at);
+    const uint32_t nameLength = ReadLE32(data + at);
     at += 4;
     if (nameLength > kMaxName || size - at < size_t(nameLength) + 4) {
       return false;
@@ -98,7 +58,7 @@ bool ParseFile(const uint8_t* data, size_t size, Bars& out) {
     Bar bar;
     bar.name.assign(reinterpret_cast<const char*>(data + at), nameLength);
     at += nameLength;
-    const uint32_t stations = Get32(data + at);
+    const uint32_t stations = ReadLE32(data + at);
     at += 4;
     if (stations < 2 || stations > kMaxStations || (size - at) / kStationSize < stations) {
       return false;
@@ -107,7 +67,7 @@ bool ParseFile(const uint8_t* data, size_t size, Bars& out) {
     for (Station& station : bar.stations) {
       float values[10];
       for (int k = 0; k < 10; ++k) {
-        values[k] = GetFloat(data + at + size_t(k) * 4);
+        values[k] = ReadLEFloat(data + at + size_t(k) * 4);
         if (!std::isfinite(values[k])) {
           return false;
         }
@@ -129,25 +89,25 @@ bool ParseFile(const uint8_t* data, size_t size, Bars& out) {
 
 void WriteFile(const Bars& bars, std::vector<uint8_t>& out) {
   out.clear();
-  Put32(out, kMagic);
-  Put32(out, kVersion);
-  Put32(out, uint32_t(bars.size()));
+  AppendLE32(out, kMagic);
+  AppendLE32(out, kVersion);
+  AppendLE32(out, uint32_t(bars.size()));
   for (const Bar& bar : bars) {
-    Put32(out, uint32_t(bar.name.size()));
+    AppendLE32(out, uint32_t(bar.name.size()));
     out.insert(out.end(), bar.name.begin(), bar.name.end());
-    Put32(out, uint32_t(bar.stations.size()));
+    AppendLE32(out, uint32_t(bar.stations.size()));
     for (const Station& station : bar.stations) {
       for (float value : station.a) {
-        PutFloat(out, value);
+        AppendLEFloat(out, value);
       }
       for (float value : station.b) {
-        PutFloat(out, value);
+        AppendLEFloat(out, value);
       }
       for (float value : station.uvA) {
-        PutFloat(out, value);
+        AppendLEFloat(out, value);
       }
       for (float value : station.uvB) {
-        PutFloat(out, value);
+        AppendLEFloat(out, value);
       }
     }
   }

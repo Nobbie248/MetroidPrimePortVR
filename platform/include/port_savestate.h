@@ -59,8 +59,11 @@ bool RequestSave(int slot); // false (and LastMessage says why) if refused now
 bool RequestLoad(int slot);
 // Reads the mods folder again (and installs a finished Remastered import):
 // the game is rebuilt where Samus stands, as by a save and a load, with every
-// PAK reopened. With no game running, the next one to start does it.
+// PAK reopened. In the front end CFrontEndUI does it at its next tick; with
+// no game running otherwise, the next one to start does it.
 bool RequestModReload();
+// How many times the mod files were read again, to tell when a request ran.
+int ModReloads();
 // What the last request did, for the overlay and the console.
 std::string LastMessage();
 
@@ -70,5 +73,12 @@ std::string LastMessage();
 bool Tick(CStateManager& mgr);
 // CMainFlow, before the next game loads: swaps in the loaded game state.
 void InstallPending();
+// CMainFlow: whether the front end (title screen, file select) is the flow.
+void SetInFrontEnd(bool inFrontEnd);
+// CFrontEndUI, each tick: true (once) when a reload was asked for in the
+// front end. It closes its movies, calls ReloadModsNow and opens them again,
+// since rebuilding the disc-file overlays breaks the reads of open files.
+bool TakeFrontEndReload();
+void ReloadModsNow();
 
 } // namespace PortSaveState

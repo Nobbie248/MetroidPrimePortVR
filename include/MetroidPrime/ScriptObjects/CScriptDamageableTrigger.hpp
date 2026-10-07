@@ -38,6 +38,8 @@ public:
   CHealthInfo* HealthInfo(CStateManager&) override;
   void Think(float, CStateManager&) override;
   rstl::optional_object< CAABox > GetTouchBounds() const override;
+  // The alpha its MaxReached -> Activate actors are drawn at (for the port's room geometry).
+  float PortLinkedAlpha() const { return GetPuddleAlphaScale(); }
 
 private:
   CFrustumPlanes xe8_frustum;

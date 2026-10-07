@@ -290,10 +290,55 @@ void TestFrame() {
         "its bounds, in the disc's axes");
   Check(model.U32() == 8, "seven data sections and one surface");
 }
+
+void Little16(Blob& out, uint32_t v) {
+  out.push_back(uint8_t(v));
+  out.push_back(uint8_t(v >> 8));
+}
+
+// A colour property of a tweak file: only the components given, as Remastered writes them.
+void TweakColor(Blob& out, uint32_t hash, const std::vector<std::pair<uint32_t, float>>& components) {
+  Little32(out, hash);
+  Little16(out, uint32_t(2 + components.size() * 10));
+  Little16(out, uint32_t(components.size()));
+  for (const auto& [component, value] : components) {
+    Little32(out, component);
+    Little16(out, 4);
+    Little32(out, Bits(value));
+  }
+}
+
+void TestBeamTints() {
+  constexpr uint32_t kR = 0x110889D1, kG = 0x8A7AFF22, kB = 0x2A5349E9;
+  Blob ldta(0x38, 0);
+  std::memcpy(ldta.data(), "RFRM", 4);
+  std::memcpy(ldta.data() + 0x14, "LDTA", 4);
+  std::memcpy(ldta.data() + 0x20, "LDCH", 4);
+  Little16(ldta, 5);
+  TweakColor(ldta, 0x12345678, {{kR, 0.f}});            // not a beam's
+  TweakColor(ldta, 0x2584A7DF, {{kB, 0.f}});            // Power
+  TweakColor(ldta, 0xE8DF071A, {});                     // Ice
+  TweakColor(ldta, 0x735A17B9, {{kR, .5f}, {kG, .2f}});  // Wave
+  TweakColor(ldta, 0xB7B9CFBC, {{kR, .8f}, {kG, .1f}, {kB, 2.f}});  // Plasma, clamped
+  std::map<std::string, std::array<float, 4>> tints;
+  std::string error;
+  Check(HudBeamIconTints(ldta.data(), ldta.size(), tints, error) && tints.size() == 4, "four beam colours");
+  Check(tints["model_beamicon3"] == std::array<float, 4>{1.f, 1.f, 0.f, 1.f}, "Power is yellow");
+  Check(tints["model_beamicon2"] == std::array<float, 4>{1.f, 1.f, 1.f, 1.f}, "Ice keeps the defaults");
+  Check(Close(tints["model_beamicon1"][0], .5f) && Close(tints["model_beamicon1"][1], .2f) &&
+            Close(tints["model_beamicon1"][2], 1.f),
+        "Wave is purple");
+  Check(Close(tints["model_beamicon0"][1], .1f) && Close(tints["model_beamicon0"][2], 1.f), "Plasma, clamped");
+  tints.clear();
+  Check(!HudBeamIconTints(ldta.data(), 0x30, tints, error), "a cut file");
+  ldta[0] = 'X';
+  Check(!HudBeamIconTints(ldta.data(), ldta.size(), tints, error), "not a tweak file");
+}
 }  // namespace
 
 int main() {
   TestFrame();
+  TestBeamTints();
   if (sFailures == 0) {
     std::printf("port_remastered_hud: ok\n");
   }

@@ -206,29 +206,90 @@ void TestConvert() {
         "a blank line after a heading is kept");
 }
 
+void TestTranslate() {
+  std::u16string out;
+  Check(TranslateText(u"Caf\u00e9 cr\u00e8me", u"&just=center;Coffee", u"Coffee", out) &&
+            out == u"&just=center;Caf\u00e9 cr\u00e8me",
+        "a translation keeps its accents and the disc's layout");
+  Check(TranslateText(u"Une\nligne", u"One\nline", u"One\nline", out) && out == u"Une\nligne",
+        "breaks are kept where the English has the disc's");
+  Check(TranslateText(u"Une\nlongue\n\n\nligne pro-\nduite", u"One line", u"One\nlong\n\nline", out) &&
+            out == u"Une longue\n\nligne pro-duite",
+        "else only paragraph breaks are kept, as one blank line");
+  Check(TranslateText(u"Dr\u00fccke " + Tag(1, 0, {char16_t(0xCD30)}) + u" jetzt",
+                      u"Press &image=SI,0.7,A;now", u"Press x now", out) &&
+            out == u"Dr\u00fccke &image=SI,0.7,A; jetzt",
+        "a button becomes the disc's image");
+  Check(!TranslateText(u"Dr\u00fccke " + Tag(1, 0, {char16_t(0xCD30)}), u"Press now", u"Press now", out),
+        "a button the disc lacks stays English");
+  Check(!TranslateText(u"Dr\u00fccke", u"Press &image=SI,0.7,A;", u"Press", out),
+        "an image the translation lacks stays English");
+  Check(TranslateText(u"Rouge " + kRed + u"vif", u"x", u"x", out) && out == u"Rouge &push;&main-color=#FF0A0AFF;vif&pop;",
+        "a colour run is kept");
+  Check(!TranslateText(u"A & B", u"x", u"x", out), "an ampersand stays English");
+  Check(!TranslateText(Tag(0, 2, {char16_t(60)}), u"x", u"x", out), "an empty translation stays English");
+
+  uint32_t strg = 0;
+  std::string name;
+  Check(SplitNamedLabel("[0000ABCD]_MapLegend", strg, name) && strg == 0xABCD && name == "MapLegend",
+        "a named label splits");
+  Check(!SplitNamedLabel("[0000ABCD]_002", strg, name), "an index label is not a named one");
+  Check(!SplitNamedLabel("MapLegend", strg, name), "a label without a table is not");
+}
+
 void TestMerge() {
+  const uint32_t french = 0x45554652;  // 'EUFR'
+  const uint32_t english = 0x454E474C;
   const std::vector<uint8_t> retail =
-      Strg({{0x4652454E, {u"un", u"deux", u"trois"}}, {0x454E474C, {u"one", u"&just=center;two", u"three"}}});
-  std::map<uint32_t, std::u16string> strings;
-  strings[0] = u"one";      // unchanged
-  strings[1] = u"second";   // changed
-  strings[7] = u"nothing";  // past the table
+      Strg({{0x4652454E, {u"un", u"deux", u"trois"}}, {english, {u"one", u"&just=center;two", u"three"}}});
+  TableText text;
+  text.byIndex[0]["USEN"] = u"one";      // unchanged
+  text.byIndex[1]["USEN"] = u"second";   // changed
+  text.byIndex[7]["USEN"] = u"nothing";  // past the table
   std::vector<uint8_t> merged;
-  int changed = 0;
-  Check(MergeStringTable(retail.data(), retail.size(), strings, merged, changed) && changed == 1,
+  int reworded = 0;
+  int translated = 0;
+  Check(MergeStringTable(retail.data(), retail.size(), text, merged, reworded, translated) && reworded == 1 &&
+            translated == 0,
         "one string changes");
   Check(merged.size() % 32 == 0, "the table is padded to a block");
-  const std::vector<uint8_t> expect =
-      Strg({{0x4652454E, {u"un", u"deux", u"trois"}}, {0x454E474C, {u"one", u"&just=center;second", u"three"}}});
+  std::vector<uint8_t> expect =
+      Strg({{0x4652454E, {u"un", u"deux", u"trois"}}, {english, {u"one", u"&just=center;second", u"three"}}});
   Check(merged.size() >= expect.size() && std::memcmp(merged.data(), expect.data(), expect.size()) == 0,
         "the other strings and languages are as they were");
 
-  strings.erase(1);
-  Check(!MergeStringTable(retail.data(), retail.size(), strings, merged, changed) && changed == 0,
+  // A translation by index, and one by a name whose English is the disc's.
+  text.byIndex[1]["EUFR"] = u"seconde";
+  text.byName["Third"]["USEN"] = u"three";
+  text.byName["Third"]["EUFR"] = u"troisi\u00e8me";
+  Check(MergeStringTable(retail.data(), retail.size(), text, merged, reworded, translated) && reworded == 1 &&
+            translated == 2,
+        "two strings are translated");
+  expect = Strg({{0x4652454E, {u"un", u"deux", u"trois"}},
+                 {english, {u"one", u"&just=center;second", u"three"}},
+                 {french, {u"one", u"&just=center;seconde", u"troisi\u00e8me"}}});
+  Check(merged.size() >= expect.size() && std::memcmp(merged.data(), expect.data(), expect.size()) == 0,
+        "a language is added, English where it has no translation");
+
+  // A screen title keeps the disc's brackets.
+  const std::vector<uint8_t> titled = Strg({{english, {u"&just=center;[ Inventory ]"}}});
+  TableText title;
+  title.byName["InventoryScreenTitle"]["USEN"] = u"Inventory";
+  title.byName["InventoryScreenTitle"]["EUGE"] = u"Inventar";
+  Check(MergeStringTable(titled.data(), titled.size(), title, merged, reworded, translated) && reworded == 0 &&
+            translated == 1,
+        "a bracketed title is matched by its words");
+  expect = Strg({{english, {u"&just=center;[ Inventory ]"}}, {0x45554745, {u"&just=center;[ Inventar ]"}}});
+  Check(merged.size() >= expect.size() && std::memcmp(merged.data(), expect.data(), expect.size()) == 0,
+        "and its translation is bracketed too");
+
+  text.byIndex.erase(1);
+  text.byName.clear();
+  Check(!MergeStringTable(retail.data(), retail.size(), text, merged, reworded, translated) && reworded == 0,
         "a table with nothing new is not written");
-  strings[1] = u"second";
+  text.byIndex[1]["USEN"] = u"second";
   for (size_t cut = 0; cut < retail.size(); ++cut) {
-    Check(!MergeStringTable(retail.data(), cut, strings, merged, changed), "a table cut short is refused");
+    Check(!MergeStringTable(retail.data(), cut, text, merged, reworded, translated), "a table cut short is refused");
   }
 }
 }  // namespace
@@ -236,6 +297,7 @@ void TestMerge() {
 int main() {
   TestMsbt();
   TestConvert();
+  TestTranslate();
   TestMerge();
   if (sFailures == 0) {
     std::printf("port_remastered_text_tests: all passed\n");

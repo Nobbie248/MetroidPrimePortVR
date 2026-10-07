@@ -30,9 +30,13 @@ struct TableEntry {
   // PortModelVariant::Id(id, key) - of `retail` itself for a static model, of
   // `ancs` (a copy of it binding the new model) for a character's. `key` -1 and
   // `ancs` set: `ancs` is replaced in place by such a copy. 0 and -1: neither.
+  // kEveryCharacter and -1: `retail` keeps its id but its skins get new ones
+  // (another model shares the retail ones), bound in every character.
   uint32_t ancs;
   int8_t key;
 };
+
+constexpr uint32_t kEveryCharacter = 0xFFFFFFFFu;
 
 const TableEntry* Table(size_t& count);
 const uint32_t* TableSkins(const TableEntry& entry);

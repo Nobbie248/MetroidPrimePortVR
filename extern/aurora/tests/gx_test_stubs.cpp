@@ -3,6 +3,9 @@
 // These allow the test binary to link without pulling in WebGPU runtime.
 
 #include "gx/gx.hpp"
+#include "gfx/bloom.hpp"
+#include "gfx/volfog.hpp"
+#include "gfx/shadow.hpp"
 #include "gfx/clear.hpp"
 #include "gfx/resources.hpp"
 #include "gfx/depth_peek.hpp"
@@ -53,6 +56,13 @@ void increment_merged_draw_count(uint32_t) noexcept {}
 namespace aurora::webgpu {
 GraphicsConfig g_graphicsConfig{};
 } // namespace aurora::webgpu
+
+#include "webgpu/gpu_prof.hpp"
+namespace aurora::webgpu::gpu_prof {
+void set_enabled(bool) {}
+bool supported() { return false; }
+Result results() { return {}; }
+} // namespace aurora::webgpu::gpu_prof
 
 // --- GXState ---
 namespace aurora::gx {
@@ -163,7 +173,16 @@ bool uniform_matches(const ShaderInfo&, const ByteBuffer& snapshot) noexcept {
 }
 void resolve_sampled_textures(const ShaderInfo& info) noexcept {}
 std::array<gfx::BindGroupRef, 2> build_stereo_bind_groups(const ShaderInfo& info) noexcept { return {}; }
+u32 dump_shaders(const char* dir) noexcept { return 0; }
+void set_shader_override_dir(const char* dir) noexcept {}
+void set_draw_shader_log(bool on) noexcept {}
+void note_draw_shader(u32 serial, const ShaderConfig& config) noexcept {}
+u64 draw_shader_hash(u32 serial) noexcept { return 0; }
+bool shader_overridden(u64 hash) noexcept { return false; }
 } // namespace aurora::gx
+namespace aurora::gfx {
+void drop_pipelines() {}
+} // namespace aurora::gfx
 
 // --- Stereo replay stubs (the FIFO never runs immersive here) ---
 namespace aurora::gfx {
@@ -234,7 +253,18 @@ uint64_t geometry_buffer_capacity() noexcept { return testing::geometryCapacity;
 void queue_geometry_upload(uint32_t offset, const uint8_t* data, uint32_t size) {
   testing::geometryUploads.push_back({offset, std::vector<uint8_t>(data, data + size)});
 }
-Range push_storage(const uint8_t* data, size_t length) { return {}; }
+// Tests set it to see draws dropped for want of storage room.
+bool g_testStorageFull = false;
+Range push_storage(const uint8_t* data, size_t length) { return g_testStorageFull ? OverflowRange : Range{}; }
+
+// The resident regions: tests set them, and see the uploads.
+Range g_testResidentRegions[3]{};
+uint32_t g_testResidentUploads = 0;
+Range resident_region(ResidentBuffer kind) noexcept { return g_testResidentRegions[static_cast<int>(kind)]; }
+bool queue_resident_upload(ResidentBuffer kind, uint32_t offset, const uint8_t* data, size_t size) {
+  ++g_testResidentUploads;
+  return true;
+}
 
 Vec2<uint32_t> get_render_target_size() noexcept { return {640, 480}; }
 void set_viewport(const Viewport& viewport) noexcept {}
@@ -337,9 +367,17 @@ TextureHandle face(uint32_t face) { return {}; }
 void create_cube(uint32_t id, uint32_t size, uint32_t mipCount, const uint8_t* texels, size_t length) {}
 void destroy_cube(uint32_t id) {}
 bool has_cube(uint32_t id) { return false; }
+bool blend_cubes(uint32_t dst, const uint32_t* src, const float* weights, uint32_t count) { return false; }
 void create_volume(uint32_t id, uint32_t sizeX, uint32_t sizeY, uint32_t sizeZ, const uint8_t* texels, size_t length) {}
 void destroy_volume(uint32_t id) {}
+bool set_brdf_lut(const uint8_t* texels, size_t length) { return length == 256; }
 bool has_volume(uint32_t id) { return false; }
+bool lightmap_available() { return false; }
+bool lightmap_bc_supported() { return false; }
+void create_lightmap(uint32_t id, uint32_t width, uint32_t height, uint32_t layers, uint32_t format,
+                     const uint8_t* texels, size_t length) {}
+void destroy_lightmap(uint32_t id) {}
+bool has_lightmap(uint32_t id) { return false; }
 } // namespace probe
 void begin_offscreen(uint32_t width, uint32_t height) {
   testing::offscreenWidth.store(width, std::memory_order_relaxed);
@@ -349,6 +387,47 @@ void begin_offscreen(uint32_t width, uint32_t height) {
 void end_offscreen() { testing::endOffscreenCount.fetch_add(1, std::memory_order_release); }
 bool is_offscreen() noexcept { return false; }
 } // namespace aurora::gfx
+
+namespace aurora::gfx::bloom {
+bool push(const Params& params) { return false; }
+bool ensure_task() { return false; }
+void record(const Params& params) {}
+void set_grade_lut(uint32_t id, const uint8_t* rgba) {}
+void after_submit() noexcept {}
+bool frame_radiance(float out[3], uint32_t& serial) { return false; }
+void shutdown() {}
+} // namespace aurora::gfx::bloom
+
+namespace aurora::gfx::volfog {
+bool ensure_task() { return false; }
+bool record(const Params& params) { return false; }
+void shutdown() {}
+} // namespace aurora::gfx::volfog
+
+namespace aurora::gfx::shadow {
+bool ensure_task() { return false; }
+bool set_frame(const float worldToView[3][4], const float sunDir[3], float radius, const float color[3],
+               Uniform& out) {
+  return false;
+}
+bool box_casts(const float worldToView[3][4], const float sunDir[3], float radius, const float min[3],
+               const float max[3]) {
+  return false;
+}
+void box_center(const float worldToView[3][4], float radius, float center[3]) {}
+uint32_t last_caster_count() { return 0; }
+void add_caster(const gx::DrawData& draw) {}
+bool record() { return false; }
+const wgpu::TextureView& map_view() {
+  static const wgpu::TextureView view;
+  return view;
+}
+const wgpu::Sampler& sampler() {
+  static const wgpu::Sampler sampler;
+  return sampler;
+}
+void shutdown() {}
+} // namespace aurora::gfx::shadow
 
 namespace aurora::gfx::depth_peek {
 namespace {

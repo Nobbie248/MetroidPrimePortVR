@@ -12,6 +12,8 @@
 #include "../gfx/resource_cache.hpp"
 #include "../gfx/stereo_multiview.hpp"
 #include "../gfx/stereo_shadow.hpp"
+#include "../gfx/shadow.hpp"
+#include "../gfx/volfog.hpp"
 #include "../gfx/texture.hpp"
 #include "gx_fmt.hpp"
 
@@ -51,6 +53,14 @@ wgpu::PipelineLayout sPipelineLayout;
 // Multiview stereo replay (gfx/stereo_multiview.hpp): the GX textures as 2D arrays.
 wgpu::BindGroupLayout sMultiviewTextureBindGroupLayout;
 wgpu::PipelineLayout sMultiviewPipelineLayout;
+// ... and a shadow receiver's (sShadowTextureBindGroupLayout with the GX textures as 2D arrays).
+wgpu::BindGroupLayout sMultiviewShadowTextureBindGroupLayout;
+wgpu::PipelineLayout sMultiviewShadowRecvPipelineLayout;
+// A shadow receiver's group 2 (the shadow map in the froxel's slots) and its pipeline layout, and the
+// shadow map pass's layout, which has no group 2.
+wgpu::BindGroupLayout sShadowTextureBindGroupLayout;
+wgpu::PipelineLayout sShadowRecvPipelineLayout;
+wgpu::PipelineLayout sShadowPipelineLayout;
 
 std::atomic<int> sPendingViewportPolicy{-1};
 // Last GXSetDrawSync token whose FIFO command has been processed.
@@ -332,6 +342,30 @@ const gfx::TextureBind& get_texture(GXTexMapID id) noexcept { return g_gxState.t
 wgpu::RenderPipeline build_pipeline(const PipelineConfig& config, ArrayRef<wgpu::VertexBufferLayout> vtxBuffers,
                                     wgpu::ShaderModule shader, const char* label) noexcept {
   ZoneScoped;
+  if (config.shadowPass != 0) {
+    // The sun's shadow map: depth only, both faces, with a slope bias against acne.
+    const wgpu::DepthStencilState depthStencil{
+        .format = gfx::shadow::MapFormat,
+        .depthWriteEnabled = true,
+        .depthCompare = wgpu::CompareFunction::Less,
+        .depthBias = 2,
+        .depthBiasSlopeScale = 2.0f,
+    };
+    const wgpu::RenderPipelineDescriptor descriptor{
+        .label = label,
+        .layout = sShadowPipelineLayout,
+        .vertex =
+            {
+                .module = shader,
+                .entryPoint = "vs_shadow",
+                .bufferCount = static_cast<uint32_t>(vtxBuffers.size()),
+                .buffers = vtxBuffers.data(),
+            },
+        .primitive = to_primitive_state(GX_CULL_NONE),
+        .depthStencil = &depthStencil,
+    };
+    return g_device.CreateRenderPipeline(&descriptor);
+  }
   const float depthBias = (UseReversedZ ? -1.0f : 1.0f) * std::bit_cast<float>(config.polygonOffsetBits);
   const float depthBiasSlopeScale = (UseReversedZ ? -1.0f : 1.0f) * std::bit_cast<float>(config.polygonOffsetScaleBits);
   const float depthBiasClamp = webgpu::g_hasCoreFeatures ? std::bit_cast<float>(config.polygonOffsetClampBits) : 0.0f;
@@ -361,7 +395,9 @@ wgpu::RenderPipeline build_pipeline(const PipelineConfig& config, ArrayRef<wgpu:
       config.shaderConfig.multiview == MultiviewClip || config.shaderConfig.multiview == MultiviewFull;
   wgpu::RenderPipelineDescriptor descriptor{
       .label = label,
-      .layout = multiview ? sMultiviewPipelineLayout : sPipelineLayout,
+      .layout = shadow_receives(config.shaderConfig)
+                    ? (multiview ? sMultiviewShadowRecvPipelineLayout : sShadowRecvPipelineLayout)
+                    : (multiview ? sMultiviewPipelineLayout : sPipelineLayout),
       .vertex =
           {
               .module = shader,
@@ -392,6 +428,36 @@ wgpu::RenderPipeline build_pipeline(const PipelineConfig& config, ArrayRef<wgpu:
   return g_device.CreateRenderPipeline(&descriptor);
 }
 
+// How a draw after the volumetric fog fogs itself. Remastered fogs its transparents per vertex,
+// over a frame the full-screen pass has already fogged: an alpha-blended surface as colour T +
+// in-scatter, an additive one as colour T, so it adds no in-scatter of its own. Blends that
+// multiply or subtract the frame are left alone: fogging them would fog what is behind twice.
+static u8 vol_fog_mode(bool depthOnly) noexcept {
+  if (!g_gxState.volFog || depthOnly || !g_gxState.colorUpdate) {
+    return VolFogNone;
+  }
+  const auto src = g_gxState.blendFacSrc;
+  const auto dst = g_gxState.blendFacDst;
+  if (g_gxState.blendMode == GX_BM_NONE ||
+      (g_gxState.blendMode == GX_BM_BLEND && src == GX_BL_ONE && dst == GX_BL_ZERO)) {
+    return VolFogOpaque;
+  }
+  if (g_gxState.blendMode != GX_BM_BLEND) {
+    return VolFogNone;
+  }
+  const bool srcScales = src == GX_BL_ONE || src == GX_BL_SRCALPHA || src == GX_BL_INVSRCALPHA;
+  if (srcScales && dst == GX_BL_ONE) {
+    return VolFogAdditive;
+  }
+  if (src == GX_BL_SRCALPHA && dst == GX_BL_INVSRCALPHA) {
+    return VolFogBlended;
+  }
+  if (src == GX_BL_ONE && dst == GX_BL_INVSRCALPHA) {
+    return VolFogPremultiplied;
+  }
+  return VolFogNone;
+}
+
 void populate_pipeline_config(PipelineConfig& config, GXPrimitive primitive, GXVtxFmt fmt) noexcept {
   ZoneScoped;
 
@@ -400,6 +466,15 @@ void populate_pipeline_config(PipelineConfig& config, GXPrimitive primitive, GXV
   config.shaderConfig.fogType = g_gxState.fog.type;
   config.shaderConfig.fogRangeEnabled = g_gxState.fog.rangeEnabled;
   config.shaderConfig.pbr = g_gxState.pbr;
+  if (g_gxState.pbr != 0) {
+    config.shaderConfig.pbrKind = static_cast<u8>(std::clamp(std::lround(g_gxState.pbrLayer.y()), 0L, 255L));
+    // The lightmap's UV attribute, when the bound vertex format has it (and the device a slot for the lightmap).
+    const u8 lightmapAttr = g_gxState.pbrLightmapAttr;
+    if (webgpu::g_lightmapBinding && lightmapAttr >= GX_VA_TEX0 && lightmapAttr <= GX_VA_TEX7 &&
+        g_gxState.vtxDesc[lightmapAttr] != GX_NONE) {
+      config.shaderConfig.pbrLightmapAttr = lightmapAttr;
+    }
+  }
   config.shaderConfig.sdf = g_gxState.sdf;
   config.shaderConfig.nativeVertices = g_gxState.nativeVertices;
   config.shaderConfig.mapBatch = g_gxState.mapBatch && primitive == GX_TRIANGLES;
@@ -500,12 +575,29 @@ void populate_pipeline_config(PipelineConfig& config, GXPrimitive primitive, GXV
   const auto cullMode = config.shaderConfig.lineMode == 0 && !config.shaderConfig.mapBatch
                             ? g_gxState.cullMode : GX_CULL_NONE;
   const auto [polygonOffset, polygonOffsetScale] = polygon_offset_for_cull_mode(cullMode);
+  // GX_AURORA_PORT_DEPTH_PREPASS: pass 1 writes only the depth, pass 2 shades where it is equal.
+  // Both keep the vertex stage and the polygon offset, so their depths match exactly (the
+  // position is @invariant).
+  const bool writesDepth = g_gxState.depthCompare && g_gxState.depthUpdate;
+  const bool depthOnly = g_gxState.depthPrepass == 1;
+  const bool depthEqual = g_gxState.depthPrepass == 2 && writesDepth;
+  config.shaderConfig.depthOnly = depthOnly;
+  // The "drawid" view: flat colours that must reach the frame as they are, so no fog and no blend (a
+  // depth-only pass stays one).
+  const bool drawId = g_gxState.drawIdMode && !depthOnly;
+  config.shaderConfig.drawId = drawId;
+  if (drawId) {
+    config.shaderConfig.fogType = GX_FOG_NONE;
+    config.shaderConfig.fogRangeEnabled = false;
+  }
+  config.shaderConfig.volFog = drawId ? VolFogNone : vol_fog_mode(depthOnly);
+  config.shaderConfig.shadow = g_gxState.shadowCaster && g_gxState.shadowActive && config.shaderConfig.lineMode == 0;
   config = {
       .msaaSamples = gfx::get_sample_count(),
       .shaderConfig = config.shaderConfig,
-      .depthFunc = g_gxState.depthFunc,
+      .depthFunc = depthEqual ? GX_EQUAL : g_gxState.depthFunc,
       .cullMode = cullMode,
-      .blendMode = g_gxState.blendMode,
+      .blendMode = drawId ? GX_BM_NONE : g_gxState.blendMode,
       .blendFacSrc = g_gxState.blendFacSrc,
       .blendFacDst = g_gxState.blendFacDst,
       .blendOp = g_gxState.blendOp,
@@ -514,13 +606,23 @@ void populate_pipeline_config(PipelineConfig& config, GXPrimitive primitive, GXV
       .polygonOffsetScaleBits = std::bit_cast<uint32_t>(polygonOffsetScale),
       .polygonOffsetClampBits = std::bit_cast<uint32_t>(g_gxState.clamp),
       .depthCompare = g_gxState.depthCompare,
-      .depthUpdate = g_gxState.depthUpdate,
-      .alphaUpdate = g_gxState.alphaUpdate,
-      .colorUpdate = g_gxState.colorUpdate,
+      .depthUpdate = g_gxState.depthUpdate && !depthEqual,
+      .alphaUpdate = g_gxState.alphaUpdate && !depthOnly,
+      .colorUpdate = g_gxState.colorUpdate && !depthOnly,
   };
 }
 
+// The lightmap's slot is the last binding, left out of group 2 when the device has no room for it.
+static size_t texture_binding_count() noexcept { return kTextureBindings - (webgpu::g_lightmapBinding ? 0 : 1); }
+
 namespace {
+// Whether a draw binds a group 2 of its own: textures, or the volumetric fog, the sun's shadow map or
+// a baked lightmap.
+bool needs_texture_group(const ShaderInfo& info) noexcept {
+  return info.sampledTextures.any() || info.sampledIndTextures.any() || info.usesVolFog || info.shadowReceive ||
+         info.usesLightmap;
+}
+
 // The GX texture bind group of the textures `info` samples, each texture's view
 // chosen by `view_for` (the mono view, or a stereo eye's stand-in). A multiview
 // bind group (gfx/stereo_multiview.hpp) binds 2D array views in its own layout.
@@ -528,7 +630,7 @@ template <typename ViewFor>
 gfx::BindGroupRef build_texture_bind_group(const ShaderInfo& info, const ViewFor& view_for,
                                            bool multiview = false) noexcept {
   // Using C WGPU types instead of C++ wrappers to avoid destructor overhead
-  std::array<WGPUBindGroupEntry, MaxTextures * 2 + 2 + gfx::probe::VolumeTextures> textureEntries{};
+  std::array<WGPUBindGroupEntry, kTextureBindings> textureEntries{};
   textureEntries[MaxTextures * 2].binding = MaxTextures * 2;
   textureEntries[MaxTextures * 2].textureView = gfx::probe::cube_view(g_gxState.pbrCube).Get();
   textureEntries[MaxTextures * 2 + 1].binding = MaxTextures * 2 + 1;
@@ -536,6 +638,18 @@ gfx::BindGroupRef build_texture_bind_group(const ShaderInfo& info, const ViewFor
   for (u32 i = 0; i < gfx::probe::VolumeTextures; ++i) {
     textureEntries[MaxTextures * 2 + 2 + i].binding = MaxTextures * 2 + 2 + i;
     textureEntries[MaxTextures * 2 + 2 + i].textureView = gfx::probe::volume_view(g_gxState.pbrVolume, i).Get();
+  }
+  textureEntries[kLightmapBinding].binding = kLightmapBinding;
+  textureEntries[kLightmapBinding].textureView = gfx::probe::lightmap_view(g_gxState.pbrLightmap).Get();
+  textureEntries[kBrdfLutBinding].binding = kBrdfLutBinding;
+  textureEntries[kBrdfLutBinding].textureView = gfx::probe::brdf_lut_view().Get();
+  textureEntries[kVolFogFroxelBinding].binding = kVolFogFroxelBinding;
+  textureEntries[kVolFogFroxelBinding].textureView = gfx::volfog::froxel_view().Get();
+  textureEntries[kVolFogSamplerBinding].binding = kVolFogSamplerBinding;
+  textureEntries[kVolFogSamplerBinding].sampler = gfx::volfog::sampler().Get();
+  if (info.shadowReceive) {
+    textureEntries[kShadowMapBinding].textureView = gfx::shadow::map_view().Get();
+    textureEntries[kShadowSamplerBinding].sampler = gfx::shadow::sampler().Get();
   }
   for (u32 i = 0; i < MaxTextures; ++i) {
     const auto& tex = g_gxState.textures[i];
@@ -554,6 +668,15 @@ gfx::BindGroupRef build_texture_bind_group(const ShaderInfo& info, const ViewFor
       if (g_gxState.pbr && tex.ref->isReplacement && samplerDescriptor.maxAnisotropy > pbrAniso) {
         samplerDescriptor.maxAnisotropy = pbrAniso;
       }
+      // Cost tests 8 and 9 (GXSetPBRCostTest) shade in full with cheaper filtering of the
+      // mod's maps: 8 without anisotropy, 9 also without blending between mips.
+      const u32 costTest = g_gxState.pbr ? g_gxState.pbr - 1u : 0u;
+      if (tex.ref->isReplacement && (costTest == 8 || costTest == 9)) {
+        samplerDescriptor.maxAnisotropy = 1;
+        if (costTest == 9) {
+          samplerDescriptor.mipmapFilter = wgpu::MipmapFilterMode::Nearest;
+        }
+      }
       samplerEntry.sampler = gfx::sampler_ref(samplerDescriptor).Get();
     } else {
       textureEntry.textureView = multiview ? sEmptyArrayTextureView.Get() : sEmptyTextureView.Get();
@@ -562,8 +685,10 @@ gfx::BindGroupRef build_texture_bind_group(const ShaderInfo& info, const ViewFor
   }
   const WGPUBindGroupDescriptor textureBindGroupDescriptor{
       .label = {multiview ? "GX Multiview Texture Bind Group" : "GX Texture Bind Group", WGPU_STRLEN},
-      .layout = multiview ? sMultiviewTextureBindGroupLayout.Get() : sTextureBindGroupLayout.Get(),
-      .entryCount = textureEntries.size(),
+      .layout = multiview ? (info.shadowReceive ? sMultiviewShadowTextureBindGroupLayout
+                                                : sMultiviewTextureBindGroupLayout).Get()
+                          : (info.shadowReceive ? sShadowTextureBindGroupLayout : sTextureBindGroupLayout).Get(),
+      .entryCount = texture_binding_count(),
       .entries = textureEntries.data(),
   };
   return gfx::bind_group_ref(textureBindGroupDescriptor);
@@ -571,7 +696,7 @@ gfx::BindGroupRef build_texture_bind_group(const ShaderInfo& info, const ViewFor
 } // namespace
 
 gfx::BindGroupRef build_multiview_bind_group(const ShaderInfo& info) noexcept {
-  if (!sMultiviewTextureBindGroupLayout || (!info.sampledTextures.any() && !info.sampledIndTextures.any())) {
+  if (!sMultiviewTextureBindGroupLayout || !needs_texture_group(info)) {
     return {};
   }
   ZoneScoped;
@@ -591,7 +716,7 @@ gfx::BindGroupRef build_multiview_bind_group(const ShaderInfo& info) noexcept {
 GXBindGroups build_bind_groups(const ShaderInfo& info) noexcept {
   ZoneScoped;
 
-  if (!info.sampledTextures.any() && !info.sampledIndTextures.any()) {
+  if (!needs_texture_group(info)) {
     // Don't bother re-binding anything
     return {};
   }
@@ -627,13 +752,62 @@ std::array<gfx::BindGroupRef, 2> build_stereo_bind_groups(const ShaderInfo& info
   return groups;
 }
 
+namespace {
+// group 2's entries with nothing bound: the PBR, fog and lightmap defaults, and `gxView` for every GX
+// texture (a 2D view, or a 2D array view for the multiview group).
+std::array<wgpu::BindGroupEntry, kTextureBindings> empty_texture_entries(const wgpu::TextureView& gxView) {
+  std::array<wgpu::BindGroupEntry, kTextureBindings> entries;
+  entries[MaxTextures * 2] = {
+      .binding = MaxTextures * 2,
+      .textureView = gfx::probe::cube_view(),
+  };
+  entries[MaxTextures * 2 + 1] = {
+      .binding = MaxTextures * 2 + 1,
+      .sampler = gfx::probe::sampler(),
+  };
+  for (u32 i = 0; i < gfx::probe::VolumeTextures; ++i) {
+    entries[MaxTextures * 2 + 2 + i] = {
+        .binding = MaxTextures * 2 + 2 + i,
+        .textureView = gfx::probe::volume_view(0, i),
+    };
+  }
+  entries[kLightmapBinding] = {
+      .binding = kLightmapBinding,
+      .textureView = gfx::probe::lightmap_view(0),
+  };
+  entries[kBrdfLutBinding] = {
+      .binding = kBrdfLutBinding,
+      .textureView = gfx::probe::brdf_lut_view(),
+  };
+  entries[kVolFogFroxelBinding] = {
+      .binding = kVolFogFroxelBinding,
+      .textureView = gfx::volfog::froxel_view(),
+  };
+  entries[kVolFogSamplerBinding] = {
+      .binding = kVolFogSamplerBinding,
+      .sampler = gfx::volfog::sampler(),
+  };
+  for (u32 i = 0; i < MaxTextures; ++i) {
+    entries[i * 2] = {
+        .binding = i * 2,
+        .textureView = gxView,
+    };
+    entries[i * 2 + 1] = {
+        .binding = i * 2 + 1,
+        .sampler = sEmptySampler,
+    };
+  }
+  return entries;
+}
+} // namespace
+
 void initialize() noexcept {
   // Native vertex input for resident world geometry, on unless MP_NATIVE_VERTICES=0.
   const char* nativeInput = std::getenv("MP_NATIVE_VERTICES");
   g_gxState.nativeVertexInputRequested = nativeInput == nullptr || nativeInput[0] != '0';
   Log.info("Native cached vertex input: {}", g_gxState.nativeVertexInputRequested);
   {
-    std::array<wgpu::BindGroupLayoutEntry, MaxTextures * 2 + 2 + gfx::probe::VolumeTextures> textureEntries;
+    std::array<wgpu::BindGroupLayoutEntry, kTextureBindings> textureEntries;
     // The PBR environment probe (GX_AURORA_COPY_PROBE_FACE)
     textureEntries[MaxTextures * 2] = {
         .binding = MaxTextures * 2,
@@ -661,6 +835,41 @@ void initialize() noexcept {
               },
       };
     }
+    // The baked lightmap (GX_AURORA_SET_PBR_LIGHTMAP), the 17th sampled texture: only on a device that has it
+    textureEntries[kLightmapBinding] = {
+        .binding = kLightmapBinding,
+        .visibility = wgpu::ShaderStage::Fragment,
+        .texture =
+            {
+                .sampleType = wgpu::TextureSampleType::Float,
+                .viewDimension = wgpu::TextureViewDimension::e2DArray,
+            },
+    };
+    // The PBR environment BRDF table (GX_AURORA_SET_PBR_BRDF_LUT), also read with the probe's sampler
+    textureEntries[kBrdfLutBinding] = {
+        .binding = kBrdfLutBinding,
+        .visibility = wgpu::ShaderStage::Fragment,
+        .texture =
+            {
+                .sampleType = wgpu::TextureSampleType::Float,
+                .viewDimension = wgpu::TextureViewDimension::e2D,
+            },
+    };
+    // The volumetric fog's froxels (GX_AURORA_PORT_VOLUMETRIC_FOG), read per vertex or per pixel
+    textureEntries[kVolFogFroxelBinding] = {
+        .binding = kVolFogFroxelBinding,
+        .visibility = wgpu::ShaderStage::Vertex | wgpu::ShaderStage::Fragment,
+        .texture =
+            {
+                .sampleType = wgpu::TextureSampleType::Float,
+                .viewDimension = wgpu::TextureViewDimension::e3D,
+            },
+    };
+    textureEntries[kVolFogSamplerBinding] = {
+        .binding = kVolFogSamplerBinding,
+        .visibility = wgpu::ShaderStage::Vertex | wgpu::ShaderStage::Fragment,
+        .sampler = {.type = wgpu::SamplerBindingType::Filtering},
+    };
     for (u32 i = 0; i < MaxTextures; ++i) {
       textureEntries[i * 2] = {
           .binding = i * 2,
@@ -679,10 +888,51 @@ void initialize() noexcept {
     }
     const wgpu::BindGroupLayoutDescriptor descriptor{
         .label = "GX Texture Bind Group Layout",
-        .entryCount = textureEntries.size(),
+        .entryCount = texture_binding_count(),
         .entries = textureEntries.data(),
     };
     sTextureBindGroupLayout = g_device.CreateBindGroupLayout(&descriptor);
+    const auto plainEntries = textureEntries;
+    // A shadow receiver's: the sun's shadow map and its comparison sampler in the froxel's slots
+    textureEntries[kShadowMapBinding] = {
+        .binding = kShadowMapBinding,
+        .visibility = wgpu::ShaderStage::Fragment,
+        .texture =
+            {
+                .sampleType = wgpu::TextureSampleType::Depth,
+                .viewDimension = wgpu::TextureViewDimension::e2D,
+            },
+    };
+    textureEntries[kShadowSamplerBinding] = {
+        .binding = kShadowSamplerBinding,
+        .visibility = wgpu::ShaderStage::Fragment,
+        .sampler = {.type = wgpu::SamplerBindingType::Comparison},
+    };
+    const wgpu::BindGroupLayoutDescriptor shadowDescriptor{
+        .label = "GX Shadow Receiver Texture Bind Group Layout",
+        .entryCount = texture_binding_count(),
+        .entries = textureEntries.data(),
+    };
+    sShadowTextureBindGroupLayout = g_device.CreateBindGroupLayout(&shadowDescriptor);
+    if (webgpu::g_multiviewSupported) {
+      // Multiview stereo replay (gfx/stereo_multiview.hpp): the same bindings, the GX textures as
+      // 2D arrays.
+      const auto multiviewLayout = [](std::array<wgpu::BindGroupLayoutEntry, kTextureBindings> entries,
+                                      const char* label) {
+        for (u32 i = 0; i < MaxTextures; ++i) {
+          entries[i * 2].texture.viewDimension = wgpu::TextureViewDimension::e2DArray;
+        }
+        const wgpu::BindGroupLayoutDescriptor layoutDescriptor{
+            .label = label,
+            .entryCount = texture_binding_count(),
+            .entries = entries.data(),
+        };
+        return g_device.CreateBindGroupLayout(&layoutDescriptor);
+      };
+      sMultiviewTextureBindGroupLayout = multiviewLayout(plainEntries, "GX Multiview Texture Bind Group Layout");
+      sMultiviewShadowTextureBindGroupLayout =
+          multiviewLayout(textureEntries, "GX Multiview Shadow Receiver Texture Bind Group Layout");
+    }
   }
   {
     constexpr wgpu::SamplerDescriptor descriptor{.label = "Empty sampler"};
@@ -699,35 +949,11 @@ void initialize() noexcept {
     sEmptyTextureView = sEmptyTexture.CreateView();
   }
   {
-    std::array<wgpu::BindGroupEntry, MaxTextures * 2 + 2 + gfx::probe::VolumeTextures> entries;
-    entries[MaxTextures * 2] = {
-        .binding = MaxTextures * 2,
-        .textureView = gfx::probe::cube_view(),
-    };
-    entries[MaxTextures * 2 + 1] = {
-        .binding = MaxTextures * 2 + 1,
-        .sampler = gfx::probe::sampler(),
-    };
-    for (u32 i = 0; i < gfx::probe::VolumeTextures; ++i) {
-      entries[MaxTextures * 2 + 2 + i] = {
-          .binding = MaxTextures * 2 + 2 + i,
-          .textureView = gfx::probe::volume_view(0, i),
-      };
-    }
-    for (u32 i = 0; i < MaxTextures; ++i) {
-      entries[i * 2] = {
-          .binding = i * 2,
-          .textureView = sEmptyTextureView,
-      };
-      entries[i * 2 + 1] = {
-          .binding = i * 2 + 1,
-          .sampler = sEmptySampler,
-      };
-    }
+    const auto entries = empty_texture_entries(sEmptyTextureView);
     const wgpu::BindGroupDescriptor desc{
         .label = "GX Empty Texture Bind Group",
         .layout = sTextureBindGroupLayout,
-        .entryCount = entries.size(),
+        .entryCount = texture_binding_count(),
         .entries = entries.data(),
     };
     g_emptyTextureBindGroup = g_device.CreateBindGroup(&desc);
@@ -746,80 +972,64 @@ void initialize() noexcept {
     };
     sPipelineLayout = g_device.CreatePipelineLayout(&desc);
   }
-  if (webgpu::g_multiviewSupported) {
-    // The multiview layout: the same bindings, the GX textures as 2D arrays.
-    std::array<wgpu::BindGroupLayoutEntry, MaxTextures * 2 + 2 + gfx::probe::VolumeTextures> textureEntries;
-    textureEntries[MaxTextures * 2] = {
-        .binding = MaxTextures * 2,
-        .visibility = wgpu::ShaderStage::Fragment,
-        .texture = {.sampleType = wgpu::TextureSampleType::Float, .viewDimension = wgpu::TextureViewDimension::Cube},
-    };
-    textureEntries[MaxTextures * 2 + 1] = {
-        .binding = MaxTextures * 2 + 1,
-        .visibility = wgpu::ShaderStage::Fragment,
-        .sampler = {.type = wgpu::SamplerBindingType::Filtering},
-    };
-    for (u32 i = 0; i < gfx::probe::VolumeTextures; ++i) {
-      textureEntries[MaxTextures * 2 + 2 + i] = {
-          .binding = MaxTextures * 2 + 2 + i,
-          .visibility = wgpu::ShaderStage::Fragment,
-          .texture = {.sampleType = wgpu::TextureSampleType::Float, .viewDimension = wgpu::TextureViewDimension::e3D},
-      };
-    }
-    for (u32 i = 0; i < MaxTextures; ++i) {
-      textureEntries[i * 2] = {
-          .binding = i * 2,
-          .visibility = wgpu::ShaderStage::Fragment,
-          .texture = {.sampleType = wgpu::TextureSampleType::Float,
-                      .viewDimension = wgpu::TextureViewDimension::e2DArray},
-      };
-      textureEntries[i * 2 + 1] = {
-          .binding = i * 2 + 1,
-          .visibility = wgpu::ShaderStage::Fragment,
-          .sampler = {.type = wgpu::SamplerBindingType::Filtering},
-      };
-    }
-    const wgpu::BindGroupLayoutDescriptor layoutDescriptor{
-        .label = "GX Multiview Texture Bind Group Layout",
-        .entryCount = textureEntries.size(),
-        .entries = textureEntries.data(),
-    };
-    sMultiviewTextureBindGroupLayout = g_device.CreateBindGroupLayout(&layoutDescriptor);
+  if (sMultiviewTextureBindGroupLayout) {
     const wgpu::TextureViewDescriptor arrayViewDescriptor{
         .label = "Empty texture array view",
         .dimension = wgpu::TextureViewDimension::e2DArray,
     };
     sEmptyArrayTextureView = sEmptyTexture.CreateView(&arrayViewDescriptor);
-    std::array<wgpu::BindGroupEntry, MaxTextures * 2 + 2 + gfx::probe::VolumeTextures> entries;
-    entries[MaxTextures * 2] = {.binding = MaxTextures * 2, .textureView = gfx::probe::cube_view()};
-    entries[MaxTextures * 2 + 1] = {.binding = MaxTextures * 2 + 1, .sampler = gfx::probe::sampler()};
-    for (u32 i = 0; i < gfx::probe::VolumeTextures; ++i) {
-      entries[MaxTextures * 2 + 2 + i] = {.binding = MaxTextures * 2 + 2 + i,
-                                          .textureView = gfx::probe::volume_view(0, i)};
-    }
-    for (u32 i = 0; i < MaxTextures; ++i) {
-      entries[i * 2] = {.binding = i * 2, .textureView = sEmptyArrayTextureView};
-      entries[i * 2 + 1] = {.binding = i * 2 + 1, .sampler = sEmptySampler};
-    }
+    const auto entries = empty_texture_entries(sEmptyArrayTextureView);
     const wgpu::BindGroupDescriptor emptyDescriptor{
         .label = "GX Empty Multiview Texture Bind Group",
         .layout = sMultiviewTextureBindGroupLayout,
-        .entryCount = entries.size(),
+        .entryCount = texture_binding_count(),
         .entries = entries.data(),
     };
     g_emptyMultiviewTextureBindGroup = g_device.CreateBindGroup(&emptyDescriptor);
+    const auto pipelineLayout = [](const wgpu::BindGroupLayout& textures, const char* label) {
+      const std::array layouts{
+          gfx::detail::resources().staticBindGroupLayout,
+          gfx::detail::resources().uniformBindGroupLayout,
+          textures,
+      };
+      const wgpu::PipelineLayoutDescriptor desc{
+          .label = label,
+          .bindGroupLayoutCount = layouts.size(),
+          .bindGroupLayouts = layouts.data(),
+          .immediateSize = sizeof(DrawImmediateData),
+      };
+      return g_device.CreatePipelineLayout(&desc);
+    };
+    sMultiviewPipelineLayout = pipelineLayout(sMultiviewTextureBindGroupLayout, "GX Multiview Pipeline Layout");
+    sMultiviewShadowRecvPipelineLayout =
+        pipelineLayout(sMultiviewShadowTextureBindGroupLayout, "GX Multiview Shadow Receiver Pipeline Layout");
+  }
+  {
     const std::array layouts{
         gfx::detail::resources().staticBindGroupLayout,
         gfx::detail::resources().uniformBindGroupLayout,
-        sMultiviewTextureBindGroupLayout,
+        sShadowTextureBindGroupLayout,
     };
     const wgpu::PipelineLayoutDescriptor desc{
-        .label = "GX Multiview Pipeline Layout",
+        .label = "GX Shadow Receiver Pipeline Layout",
         .bindGroupLayoutCount = layouts.size(),
         .bindGroupLayouts = layouts.data(),
         .immediateSize = sizeof(DrawImmediateData),
     };
-    sMultiviewPipelineLayout = g_device.CreatePipelineLayout(&desc);
+    sShadowRecvPipelineLayout = g_device.CreatePipelineLayout(&desc);
+  }
+  {
+    const std::array layouts{
+        gfx::detail::resources().staticBindGroupLayout,
+        gfx::detail::resources().uniformBindGroupLayout,
+    };
+    const wgpu::PipelineLayoutDescriptor desc{
+        .label = "GX Shadow Map Pipeline Layout",
+        .bindGroupLayoutCount = layouts.size(),
+        .bindGroupLayouts = layouts.data(),
+        .immediateSize = sizeof(DrawImmediateData),
+    };
+    sShadowPipelineLayout = g_device.CreatePipelineLayout(&desc);
   }
 }
 
@@ -829,8 +1039,13 @@ void shutdown() noexcept {
   sTextureBindGroupLayout = {};
   sMultiviewTextureBindGroupLayout = {};
   sMultiviewPipelineLayout = {};
+  sMultiviewShadowTextureBindGroupLayout = {};
+  sMultiviewShadowRecvPipelineLayout = {};
   sEmptyArrayTextureView = {};
   g_emptyMultiviewTextureBindGroup = {};
+  sShadowTextureBindGroupLayout = {};
+  sShadowRecvPipelineLayout = {};
+  sShadowPipelineLayout = {};
   {
     std::lock_guard lock{sBindGroupLayoutMutex};
     sUniformBindGroupLayouts.clear();

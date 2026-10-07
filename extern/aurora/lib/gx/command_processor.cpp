@@ -10,10 +10,13 @@
 
 #include <cstring>
 
+#include "../gfx/bloom.hpp"
+#include "../gfx/volfog.hpp"
 #include "../gfx/depth_peek.hpp"
 #include "geometry_cache.hpp"
 #include "native_vertex.hpp"
 #include "../gfx/probe.hpp"
+#include "../gfx/shadow.hpp"
 #include "../gfx/recording.hpp"
 #include "../gfx/stereo_shadow.hpp"
 #include "../internal.hpp"
@@ -22,14 +25,17 @@
 #include "gx.hpp"
 #include "pipeline.hpp"
 #include "regs.hpp"
+#include "resident.hpp"
 #include "shader_info.hpp"
 #include "texture.hpp"
 
 #include <tracy/Tracy.hpp>
 
 #include <algorithm>
+#include <bit>
 #include <cmath>
 #include <cstdint>
+#include <cstring>
 #include <span>
 #include <memory>
 #include <optional>
@@ -165,6 +171,9 @@ struct DrawCache {
   PipelineConfig config{};
   ShaderInfo shaderInfo{};
   gfx::PipelineRef pipelineRef{};
+  // The sun's shadow-map pipeline, for a draw that casts (GXPortSetShadowCaster)
+  gfx::PipelineRef shadowPipelineRef{};
+  bool shadowCaster = false;
   GXBindGroups bindGroups{};
   uint64_t bindGeneration = 0;
   GXVtxFmt fmt = GX_MAX_VTXFMT;
@@ -870,22 +879,84 @@ static void select_native_vertices(bool native) noexcept {
   }
 }
 
+// A texgen reading a UV set the vertices don't carry draws with zero UVs (shader.cpp
+// vtx_attr). Names the draw from GX_AURORA_SET_DRAW_TAG, once per model, material and
+// texcoord, so a bad mod model can be found.
+static void warn_missing_uv_sets(const ShaderConfig& config, const ShaderInfo& info) noexcept {
+  static std::vector<std::array<u32, 4>> sReported;
+  for (u32 i = 0; i < info.sampledTexCoords.size(); ++i) {
+    if (!info.sampledTexCoords.test(i)) {
+      continue;
+    }
+    const auto& tcg = config.tcgs[i];
+    if ((tcg.type >= GX_TG_BUMP0 && tcg.type <= GX_TG_BUMP7) || tcg.src < GX_TG_TEX0 || tcg.src > GX_TG_TEX7) {
+      continue;
+    }
+    const u32 set = tcg.src - GX_TG_TEX0;
+    if (config.attrs[GX_VA_TEX0 + set].attrType != GX_NONE) {
+      continue;
+    }
+    const auto& tag = g_gxState.drawTag;
+    const std::array<u32, 4> key{tag[0], tag[1], tag[2], i};
+    if (sReported.size() >= 64 || std::find(sReported.begin(), sReported.end(), key) != sReported.end()) {
+      continue;
+    }
+    sReported.push_back(key);
+    if (tag[0] == 0 && tag[1] == UINT32_MAX) {
+      Log.warn("untagged draw: texcoord {} reads UV set {}, which its vertices lack{}", i, set,
+               config.pbr ? " (PBR)" : "");
+    } else {
+      Log.warn("model {:08X} (index {}) material {}: texcoord {} reads UV set {}, which its vertices lack{}", tag[0],
+               static_cast<s32>(tag[1]), tag[2], i, set, config.pbr ? " (PBR)" : "");
+    }
+  }
+}
+
+// A draw whose data the frame's buffers have no room left for (e.g. an oversized replacement
+// model) is dropped instead of aborting the game: true when range overflowed. Warns once per
+// model. Whatever was pushed before the drop is orphaned, so the next draw must not merge.
+static bool drop_overflowed_draw(gfx::Range range, const char* buffer) noexcept {
+  if (!gfx::overflowed(range))
+    LIKELY { return false; }
+  sDrawCache.lastDrawFmt = GX_MAX_VTXFMT;
+  static std::vector<u32> sReported;
+  const auto& tag = g_gxState.drawTag;
+  if (sReported.size() < 64 && std::find(sReported.begin(), sReported.end(), tag[0]) == sReported.end()) {
+    sReported.push_back(tag[0]);
+    if (tag[0] == 0 && tag[1] == UINT32_MAX) {
+      Log.warn("untagged draw dropped: the frame's {} buffer is full", buffer);
+    } else {
+      Log.warn("model {:08X} (index {}) material {}: draw dropped, the frame's {} buffer is full", tag[0],
+               static_cast<s32>(tag[1]), tag[2], buffer);
+    }
+  }
+  return true;
+}
+
 static void push_gx_draw(GXPrimitive prim, GXVtxFmt fmt, u32 vtxCount, gfx::Range vertRange, gfx::Range idxRange,
                          u32 numIndices, bool cachedGeometry = false) noexcept {
   auto& state = g_gxState;
   auto& cache = sDrawCache;
+  if (drop_overflowed_draw(vertRange, "vertex") || drop_overflowed_draw(idxRange, "index")) {
+    return;
+  }
   const bool perfOn = gfx::perf::enabled();
   const auto t0 = gfx::perf::stamp(perfOn);
 
-  DrawImmediateData immediates{.vtxStart = vertRange.offset, .currentPnMtx = state.currentPnMtx};
+  DrawImmediateData immediates{
+      .vtxStart = vertRange.offset, .currentPnMtx = state.currentPnMtx, .serial = state.drawSerial};
   // The arrays, unless the vertices carry their elements already (deindexVertices)
   for (int i = GX_VA_POS; i <= GX_VA_TEX7 && !state.deindexVertices; ++i) {
     if (state.vtxDesc[i] != GX_INDEX8 && state.vtxDesc[i] != GX_INDEX16) {
       continue;
     }
     auto& array = state.arrays[i];
-    if (array.cachedRange.size == 0) {
+    if (array.cachedRange.size == 0 && !resident::array_range(array.data, array.size, array.cachedRange)) {
       array.cachedRange = gfx::push_storage(static_cast<const uint8_t*>(array.data), array.size);
+      if (drop_overflowed_draw(array.cachedRange, "storage")) {
+        array.cachedRange = {};
+        return;
+      }
     }
     immediates.arrayStart[i - GX_VA_POS] = array.cachedRange.offset + array.baseIndex * array.stride;
   }
@@ -897,22 +968,44 @@ static void push_gx_draw(GXPrimitive prim, GXVtxFmt fmt, u32 vtxCount, gfx::Rang
     const bool hadPipeline = cache.hasPipeline;
     const auto prevSampledTextures = cache.shaderInfo.sampledTextures;
     const auto prevSampledIndTextures = cache.shaderInfo.sampledIndTextures;
+    const bool prevUsesVolFog = cache.shaderInfo.usesVolFog;
+    const bool prevShadowReceive = cache.shaderInfo.shadowReceive;
+    const bool prevUsesLightmap = cache.shaderInfo.usesLightmap;
     populate_pipeline_config(cache.config, prim, fmt);
     cache.shaderInfo = build_shader_info(cache.config.shaderConfig);
+    warn_missing_uv_sets(cache.config.shaderConfig, cache.shaderInfo);
     cache.pipelineRef = gfx::pipeline_ref(cache.config);
     cache.multiviewPipelineMask = 0;
+    // Only an opaque surface that writes depth casts: the shadow map's vertex-only pass can't
+    // alpha-test or blend. The game draws most opaque surfaces as a ONE/ZERO blend.
+    const auto& sc = cache.config.shaderConfig;
+    const bool opaque = cache.config.blendMode == GX_BM_NONE ||
+                        (cache.config.blendMode == GX_BM_BLEND && cache.config.blendFacSrc == GX_BL_ONE &&
+                         cache.config.blendFacDst == GX_BL_ZERO);
+    cache.shadowCaster = cache.shaderInfo.usesShadow && cache.config.depthCompare && cache.config.depthUpdate &&
+                         opaque && !sc.alphaCompare && sc.depthOnly == 0;
+    if (cache.shadowCaster) {
+      PipelineConfig shadowConfig = cache.config;
+      shadowConfig.shadowPass = 1;
+      shadowConfig.msaaSamples = 1;
+      cache.shadowPipelineRef = gfx::pipeline_ref(shadowConfig);
+    }
     cache.fmt = fmt;
     cache.lineMode = lineMode;
     cache.hasPipeline = true;
     state.dirty = (state.dirty & ~DirtyPipeline) | DirtyUniform;
     gfx::perf::count(gfx::perf::g_fifoPipelineBuilds, perfOn);
     if (!hadPipeline || prevSampledTextures != cache.shaderInfo.sampledTextures ||
-        prevSampledIndTextures != cache.shaderInfo.sampledIndTextures) {
+        prevSampledIndTextures != cache.shaderInfo.sampledIndTextures ||
+        prevUsesVolFog != cache.shaderInfo.usesVolFog || prevUsesLightmap != cache.shaderInfo.usesLightmap ||
+        prevShadowReceive != cache.shaderInfo.shadowReceive) {
       cache.bindGeneration = 0;
     }
   }
 
   const auto tA = gfx::perf::stamp(perfOn);
+  note_draw_shader(state.drawSerial, cache.config.shaderConfig);
+
   const bool bindGroupsValid =
       (state.dirty & DirtyTextures) == 0 && cache.bindGeneration == texture::current_bind_generation();
   if (!bindGroupsValid) {
@@ -951,6 +1044,10 @@ static void push_gx_draw(GXPrimitive prim, GXVtxFmt fmt, u32 vtxCount, gfx::Rang
   if (!uniformValid) {
     gfx::perf::count(gfx::perf::g_fifoUniformBuilds, perfOn);
     cache.uniformRange = build_uniform(cache.shaderInfo, cache.stereoUniformOffsets, &cache.uniformBytes);
+    if (drop_overflowed_draw(cache.uniformRange, "uniform")) {
+      cache.uniformRange = {};
+      return;
+    }
     cache.uniformRoute = gfx::stereo_draw_route();
     cache.uniformPlane = gfx::stereo_head_locked_plane();
     cache.uniformScreenTexMtx = gfx::stereo_screen_tex_mtx();
@@ -979,13 +1076,17 @@ static void push_gx_draw(GXPrimitive prim, GXVtxFmt fmt, u32 vtxCount, gfx::Rang
     const auto key = fog_range_lut_key();
     if (!cache.hasFogRange || cache.fogRangeKey != key) {
       cache.fogRange = push_fog_range_lut(key);
+      if (drop_overflowed_draw(cache.fogRange, "storage")) {
+        cache.hasFogRange = false;
+        return;
+      }
       cache.fogRangeKey = key;
       cache.hasFogRange = true;
     }
   }
   immediates.fogRangeBase = cache.fogRange.offset / sizeof(u32);
   // MultiviewFull: an eye pair (element view_index of it) or one uniform for both eyes.
-  immediates.eyeMask = cache.stereoUniformOffsets[0] != cache.stereoUniformOffsets[1] ? 1 : 0;
+  set_eye_mask(immediates, cache.stereoUniformOffsets[0] != cache.stereoUniformOffsets[1] ? 1 : 0);
 
   state.dirty &= ~DirtyImmediates;
 
@@ -998,7 +1099,7 @@ static void push_gx_draw(GXPrimitive prim, GXVtxFmt fmt, u32 vtxCount, gfx::Rang
     instanceCount = vtxCount;
   }
   cache.lastDrawFmt = fmt;
-  gfx::push_draw_command(DrawData{
+  const DrawData draw{
       .pipeline = cache.pipelineRef,
       .vertRange = vertRange,
       .idxRange = idxRange,
@@ -1012,9 +1113,19 @@ static void push_gx_draw(GXPrimitive prim, GXVtxFmt fmt, u32 vtxCount, gfx::Rang
       .stereoUniformOffset = cache.stereoUniformOffsets,
       .cachedGeometry = cachedGeometry,
       .nativeVertices = cache.config.shaderConfig.nativeVertices != 0,
+      .shadowGroup = cache.shaderInfo.shadowReceive,
       .stereoTextureBindGroup = cache.stereoBindGroups,
       .multiviewPipeline = multiviewPipeline,
-  });
+  };
+  if (!state.shadowCasterOnly) {
+    gfx::push_draw_command(draw);
+  }
+  if (cache.shadowCaster) {
+    DrawData caster = draw;
+    caster.pipeline = cache.shadowPipelineRef;
+    caster.bindGroups = {};
+    gfx::shadow::add_caster(caster);
+  }
   if (perfOn) {
     const auto t3 = gfx::perf::tick();
     gfx::perf::count(gfx::perf::g_fifoNativeDraws, state.nativeVertices);
@@ -1583,6 +1694,133 @@ static void handle_cached_display_list(ByteReader& reader) noexcept {
   draw_cached_geometry(fmt, *entry);
 }
 
+// How many indices prepare_idx_buffer makes of a draw, or 0 for one it cannot make into
+// whole triangles.
+static u32 triangle_index_count(GXPrimitive prim, u16 vtxCount) noexcept {
+  switch (prim) {
+  case GX_TRIANGLES:
+    return vtxCount >= 3 && vtxCount % 3 == 0 ? vtxCount : 0;
+  case GX_QUADS:
+    return vtxCount >= 4 && vtxCount % 4 == 0 ? vtxCount / 4 * 6 : 0;
+  case GX_TRIANGLESTRIP:
+  case GX_TRIANGLEFAN:
+    return vtxCount >= 3 ? (u32(vtxCount) - 2) * 3 : 0;
+  default:
+    return 0;
+  }
+}
+
+static u32 current_vtx_size(GXVtxFmt fmt) noexcept {
+  return g_gxState.lastVtxFmt == fmt ? g_gxState.lastVtxSize : calc_vtx_size(fmt);
+}
+
+// Makes a retained display list into triangle lists in the resident buffers, as the
+// processor would draw it now (merged draws, with their index buffers). False when it holds
+// anything but triangle draws, or there is no room for it.
+static bool build_resident_dl(resident::Entry& entry) noexcept {
+  ZoneScoped;
+  const std::vector<u8>& bytes = *entry.bytes;
+  std::array<u32, GX_MAX_VTXFMT> sizes{};
+  std::vector<resident::Chunk> chunks;
+  std::vector<u8> verts;
+  std::vector<u8> indices;
+  ByteBuffer idxBuf;
+  size_t pos = 0;
+  while (pos < bytes.size()) {
+    const u8 cmd = bytes[pos++];
+    if (cmd == CP_CMD_NOP) {
+      continue;
+    }
+    if (cmd < 0x80 || bytes.size() - pos < 2) {
+      return false;
+    }
+    const auto fmt = static_cast<GXVtxFmt>(cmd & CP_VAT_MASK);
+    const auto prim = static_cast<GXPrimitive>(cmd & CP_OPCODE_MASK);
+    const u16 vtxCount = static_cast<u16>((bytes[pos] << 8) | bytes[pos + 1]);
+    pos += 2;
+    const u32 numIndices = triangle_index_count(prim, vtxCount);
+    if (numIndices == 0 || numIndices > 0xFFFF) {
+      return false;
+    }
+    if (sizes[fmt] == 0) {
+      sizes[fmt] = current_vtx_size(fmt);
+    }
+    const size_t vtxBytes = size_t(vtxCount) * sizes[fmt];
+    if (sizes[fmt] == 0 || vtxBytes > bytes.size() - pos) {
+      return false;
+    }
+    if (chunks.empty() || chunks.back().fmt != fmt || u32(chunks.back().vtxCount) + vtxCount > 0xFFFF) {
+      // A new draw starts where push_verts and push_indices would start one: 4-aligned.
+      verts.resize(AURORA_ALIGN(verts.size(), 4));
+      indices.resize(AURORA_ALIGN(indices.size(), 4));
+      chunks.push_back(resident::Chunk{
+          .fmt = fmt,
+          .vtxCount = 0,
+          .vertOffset = static_cast<u32>(verts.size()),
+          .vertSize = 0,
+          .idxOffset = static_cast<u32>(indices.size()),
+          .idxCount = 0,
+      });
+    }
+    resident::Chunk& chunk = chunks.back();
+    verts.insert(verts.end(), bytes.begin() + pos, bytes.begin() + pos + vtxBytes);
+    pos += vtxBytes;
+    idxBuf.clear();
+    const u32 made = prepare_idx_buffer(idxBuf, prim, chunk.vtxCount, vtxCount);
+    indices.insert(indices.end(), idxBuf.data(), idxBuf.data() + idxBuf.size());
+    chunk.vtxCount = static_cast<u16>(chunk.vtxCount + vtxCount);
+    chunk.vertSize += static_cast<u32>(vtxBytes);
+    chunk.idxCount += made;
+  }
+  if (chunks.empty() || !resident::store_dl(entry, verts, indices)) {
+    return false;
+  }
+  entry.vtxSizes = sizes;
+  entry.chunks = std::move(chunks);
+  return true;
+}
+
+static void call_resident_dl(const void* key, u32 size) noexcept {
+  ZoneScoped;
+  resident::Entry* const entry = resident::find(key);
+  if (entry == nullptr || size > entry->bytes->size()) {
+    Log.error("GX_AURORA_RESIDENT_CALL_DL: {} is not retained with {} bytes", key, size);
+    return;
+  }
+  // Port: with indexed vertices resolved on the CPU (GXState::deindexVertices) the pipeline reads
+  // resolved records, which the retained raw vertices are not: processed as if sent.
+  if (g_gxState.deindexVertices) {
+    process(entry->bytes->data(), size);
+    return;
+  }
+  if (!entry->chunks.empty()) {
+    // Parsed with other vertex sizes: what the vertices are has changed since.
+    for (int fmt = 0; fmt < GX_MAX_VTXFMT; ++fmt) {
+      const u32 parsed = entry->vtxSizes[fmt];
+      if (parsed != 0 && parsed != current_vtx_size(static_cast<GXVtxFmt>(fmt))) {
+        resident::free_dl(*entry);
+        break;
+      }
+    }
+  }
+  if (entry->chunks.empty() && !entry->dlTried) {
+    entry->dlTried = true;
+    build_resident_dl(*entry);
+  }
+  if (entry->chunks.empty()) {
+    // As GXCallDisplayList would have sent it.
+    process(entry->bytes->data(), size);
+    return;
+  }
+  for (const resident::Chunk& chunk : entry->chunks) {
+    const gfx::Range vertRange{entry->vert.offset + chunk.vertOffset, chunk.vertSize};
+    const gfx::Range idxRange{entry->idx.offset + chunk.idxOffset, chunk.idxCount * u32(sizeof(u16))};
+    push_gx_draw(GX_TRIANGLES, chunk.fmt, chunk.vtxCount, vertRange, idxRange, chunk.idxCount);
+  }
+  // The next draw must not merge into these: its vertices are not after them.
+  sDrawCache.lastDrawFmt = GX_MAX_VTXFMT;
+}
+
 static void handle_draw(u8 cmd, ByteReader& reader) noexcept {
   const auto fmt = static_cast<GXVtxFmt>(cmd & CP_VAT_MASK);
   const auto prim = static_cast<GXPrimitive>(cmd & CP_OPCODE_MASK);
@@ -1795,6 +2033,23 @@ void handle_aurora(ByteReader& reader) noexcept {
       AURORA_ASSERT(vtxCount <= 0xFFFF, "GX_AURORA_DRAW_SIZED: too many vertices ({})", vtxCount);
       draw_prim(0, prim, fmt, static_cast<u16>(vtxCount), reader);
     }
+  } else if (subCmd == GX_AURORA_RESIDENT_RETAIN) {
+    const auto* key = reinterpret_cast<const void*>(reader.read<u64>());
+    std::unique_ptr<std::vector<u8>> bytes{reinterpret_cast<std::vector<u8>*>(reader.read<u64>())};
+    resident::retain(key, std::move(bytes));
+  } else if (subCmd == GX_AURORA_RESIDENT_RELEASE) {
+    const auto* key = reinterpret_cast<const void*>(reader.read<u64>());
+    resident::release(key);
+    // An array still set to it reads its resident copy no more.
+    for (auto& array : g_gxState.arrays) {
+      if (array.data == key) {
+        array.cachedRange = {};
+      }
+    }
+  } else if (subCmd == GX_AURORA_RESIDENT_CALL_DL) {
+    const auto* key = reinterpret_cast<const void*>(reader.read<u64>());
+    const u32 size = reader.read<u32>();
+    call_resident_dl(key, size);
   } else if (subCmd == GX_AURORA_DRAW_INDEXED) {
     ZoneScopedN("DRAW_INDEXED");
     const u8 cmd = reader.read<u8>();
@@ -1839,7 +2094,7 @@ void handle_aurora(ByteReader& reader) noexcept {
       g_gxState.dirty |= DirtyImmediates;
     }
   } else if (subCmd == GX_AURORA_SET_PBR) {
-    const bool pbr = reader.read<u8>() != 0;
+    const u8 pbr = reader.read<u8>();
     if (g_gxState.pbr != pbr) {
       g_gxState.pbr = pbr;
       g_gxState.dirty |= DirtyPipeline;
@@ -1849,6 +2104,29 @@ void handle_aurora(ByteReader& reader) noexcept {
     if (g_gxState.sdf != sdf) {
       g_gxState.sdf = sdf;
       g_gxState.dirty |= DirtyPipeline;
+    }
+  } else if (subCmd == GX_AURORA_PORT_DEPTH_PREPASS) {
+    const u8 pass = reader.read<u8>();
+    if (g_gxState.depthPrepass != pass) {
+      g_gxState.depthPrepass = pass;
+      g_gxState.dirty |= DirtyPipeline;
+    }
+  } else if (subCmd == GX_AURORA_PORT_DRAW_SERIAL) {
+    const u32 serial = reader.read<u32>();
+    if (g_gxState.drawSerial != serial) {
+      g_gxState.drawSerial = serial;
+      // Draws with different serials must not merge.
+      g_gxState.dirty |= DirtyImmediates;
+    }
+  } else if (subCmd == GX_AURORA_PORT_DRAW_ID_MODE) {
+    const bool on = reader.read<u8>() != 0;
+    if (g_gxState.drawIdMode != on) {
+      g_gxState.drawIdMode = on;
+      g_gxState.dirty |= DirtyPipeline;
+    }
+  } else if (subCmd == GX_AURORA_SET_DRAW_TAG) {
+    for (u32& value : g_gxState.drawTag) {
+      value = reader.read<u32>();
     }
   } else if (subCmd == GX_AURORA_COPY_PROBE_FACE) {
     copy_probe_face(reader.read<u8>());
@@ -1943,6 +2221,63 @@ void handle_aurora(ByteReader& reader) noexcept {
       g_gxState.pbrVolumeRows = rows;
       g_gxState.dirty |= DirtyUniform;
     }
+  } else if (subCmd == GX_AURORA_CREATE_PBR_LIGHTMAP) {
+    const u32 id = reader.read<u32>();
+    const u32 width = reader.read<u32>();
+    const u32 height = reader.read<u32>();
+    const u32 layers = reader.read<u32>();
+    const u32 format = reader.read<u32>();
+    const std::unique_ptr<std::vector<u8>> texels{reinterpret_cast<std::vector<u8>*>(reader.read<u64>())};
+    gfx::probe::create_lightmap(id, width, height, layers, format, texels->data(), texels->size());
+    g_gxState.dirty |= DirtyTextures;
+  } else if (subCmd == GX_AURORA_DESTROY_PBR_LIGHTMAP) {
+    gfx::probe::destroy_lightmap(reader.read<u32>());
+    g_gxState.dirty |= DirtyTextures;
+  } else if (subCmd == GX_AURORA_SET_PBR_LIGHTMAP) {
+    u32 id = reader.read<u32>();
+    Vec4<float> rect;
+    {
+      const f32 x = reader.read<f32>();
+      const f32 y = reader.read<f32>();
+      const f32 z = reader.read<f32>();
+      const f32 w = reader.read<f32>();
+      rect = {x, y, z, w};
+    }
+    std::array<Vec4<float>, 3> axes;
+    for (Vec4<float>& v : axes) {
+      const f32 x = reader.read<f32>();
+      const f32 y = reader.read<f32>();
+      const f32 z = reader.read<f32>();
+      v = {x, y, z, 0.f};
+    }
+    if (id == 0 || !gfx::probe::has_lightmap(id)) {
+      id = 0;
+      rect = {};
+      axes = {};
+    }
+    if (g_gxState.pbrLightmap != id) {
+      g_gxState.pbrLightmap = id;
+      g_gxState.dirty |= DirtyTextures;
+    }
+    if (g_gxState.pbrLightmapRect != rect || g_gxState.pbrLightmapAxes != axes) {
+      g_gxState.pbrLightmapRect = rect;
+      g_gxState.pbrLightmapAxes = axes;
+      g_gxState.dirty |= DirtyUniform;
+    }
+  } else if (subCmd == GX_AURORA_SET_PBR_LIGHTMAP_ATTR) {
+    const u8 attr = reader.read<u8>();
+    if (g_gxState.pbrLightmapAttr != attr) {
+      g_gxState.pbrLightmapAttr = attr;
+      g_gxState.dirty |= DirtyPipeline;
+    }
+  } else if (subCmd == GX_AURORA_SET_PBR_BRDF_LUT) {
+    const std::unique_ptr<std::vector<u8>> texels{reinterpret_cast<std::vector<u8>*>(reader.read<u64>())};
+    const bool on = gfx::probe::set_brdf_lut(texels->data(), texels->size());
+    if (g_gxState.pbrBrdfLut != on) {
+      g_gxState.pbrBrdfLut = on;
+      g_gxState.dirty |= DirtyUniform;
+    }
+    g_gxState.dirty |= DirtyTextures;
   } else if (subCmd == GX_AURORA_SET_PBR_TONE) {
     std::array<Vec4<float>, 3> rows;
     for (Vec4<float>& v : rows) {
@@ -1954,6 +2289,165 @@ void handle_aurora(ByteReader& reader) noexcept {
     }
     if (g_gxState.pbrTone != rows) {
       g_gxState.pbrTone = rows;
+      g_gxState.dirty |= DirtyUniform;
+    }
+  } else if (subCmd == GX_AURORA_PORT_POST_PROCESS) {
+    u32 words[32];
+    for (u32& word : words) {
+      word = reader.read<u32>();
+    }
+    gfx::bloom::Params params;
+    static_assert(sizeof(params) == sizeof(words));
+    std::memcpy(&params, words, sizeof(params));
+    gfx::bloom::record(params);
+  } else if (subCmd == GX_AURORA_PORT_VOLUMETRIC_FOG) {
+    gfx::volfog::Params params;
+    u32 words[sizeof(params) / sizeof(u32)];
+    for (u32& word : words) {
+      word = reader.read<u32>();
+    }
+    std::memcpy(&params, words, sizeof(params));
+    if (gfx::volfog::record(params)) {
+      // The draws after it fog themselves through the froxels it fills.
+      // w: where the world's depth range starts; nearer is the viewmodel, which isn't fogged.
+      const Vec4<float> fogParams{params.depth[0], params.fog[0], params.colorA[3], params.depth[2]};
+      std::array<Vec4<float>, 3> tone;
+      for (size_t i = 0; i < tone.size(); ++i) {
+        tone[i] = {params.tone[i][0], params.tone[i][1], params.tone[i][2], params.tone[i][3]};
+      }
+      if (!g_gxState.volFog) {
+        g_gxState.volFog = true;
+        g_gxState.dirty |= DirtyPipeline;
+      }
+      if (g_gxState.volFogParams != fogParams || g_gxState.volFogTone != tone) {
+        g_gxState.volFogParams = fogParams;
+        g_gxState.volFogTone = tone;
+        g_gxState.dirty |= DirtyUniform;
+      }
+      // A new froxel texture when the frame's size changed.
+      g_gxState.dirty |= DirtyTextures;
+    }
+  } else if (subCmd == GX_AURORA_PORT_VOLUMETRIC_FOG_END) {
+    if (g_gxState.volFog) {
+      g_gxState.volFog = false;
+      g_gxState.dirty |= DirtyPipeline;
+    }
+  } else if (subCmd == GX_AURORA_PORT_SHADOW_CASTER) {
+    const u8 mode = reader.read<u8>();
+    const bool on = mode != 0;
+    g_gxState.shadowCasterOnly = mode == 2;
+    if (g_gxState.shadowCaster != on) {
+      g_gxState.shadowCaster = on;
+      g_gxState.dirty |= DirtyPipeline;
+    }
+  } else if (subCmd == GX_AURORA_PORT_SHADOW_FRAME) {
+    f32 worldToView[3][4];
+    for (auto& row : worldToView) {
+      for (f32& v : row) {
+        v = reader.read<f32>();
+      }
+    }
+    f32 sunDir[3];
+    for (f32& v : sunDir) {
+      v = reader.read<f32>();
+    }
+    const f32 radius = reader.read<f32>();
+    f32 color[3];
+    for (f32& v : color) {
+      v = reader.read<f32>();
+    }
+    gfx::shadow::Uniform uniform{};
+    const bool active = gfx::shadow::set_frame(worldToView, sunDir, radius, color, uniform);
+    if (g_gxState.shadowActive != active) {
+      g_gxState.shadowActive = active;
+      g_gxState.dirty |= DirtyPipeline;
+    }
+    if (active) {
+      static_assert(sizeof(uniform) == sizeof(g_gxState.shadowUniform));
+      std::array<Vec4<float>, 10> values;
+      std::memcpy(values.data(), &uniform, sizeof(uniform));
+      if (g_gxState.shadowUniform != values) {
+        g_gxState.shadowUniform = values;
+        g_gxState.dirty |= DirtyUniform;
+      }
+    }
+  } else if (subCmd == GX_AURORA_PORT_SHADOW_RENDER) {
+    gfx::shadow::record();
+  } else if (subCmd == GX_AURORA_SET_PBR_LIGHT_SKIP) {
+    const Vec4<float> value{static_cast<f32>(reader.read<u32>() & 0xFF), 0.f, 0.f, 0.f};
+    if (g_gxState.pbrLightSkip != value) {
+      g_gxState.pbrLightSkip = value;
+      g_gxState.dirty |= DirtyUniform;
+    }
+  } else if (subCmd == GX_AURORA_SET_PBR_BAKED_LIGHT_MODULATION) {
+    Vec4<float> value{1.f, 1.f, 1.f, 0.f};
+    value.x() = reader.read<f32>();
+    value.y() = reader.read<f32>();
+    value.z() = reader.read<f32>();
+    if (g_gxState.pbrBakedLightModulation != value) {
+      g_gxState.pbrBakedLightModulation = value;
+      g_gxState.dirty |= DirtyUniform;
+    }
+  } else if (subCmd == GX_AURORA_SET_PBR_BACKLIGHT) {
+    f32 v[9];
+    for (f32& f : v) {
+      f = reader.read<f32>();
+    }
+    const std::array<Vec4<float>, 3> value{
+        Vec4<float>{v[0], v[1], v[2], v[3]},
+        Vec4<float>{v[4], v[5], v[6], v[7]},
+        Vec4<float>{v[8], 0.f, 0.f, 0.f},
+    };
+    if (g_gxState.pbrBacklightLights != value) {
+      g_gxState.pbrBacklightLights = value;
+      g_gxState.dirty |= DirtyUniform;
+    }
+  } else if (subCmd == GX_AURORA_SET_PBR_SHIELD) {
+    std::array<Vec4<float>, 8> value;
+    for (auto& row : value) {
+      const f32 x = reader.read<f32>();
+      const f32 y = reader.read<f32>();
+      const f32 z = reader.read<f32>();
+      const f32 w = reader.read<f32>();
+      row = Vec4<float>{x, y, z, w};
+    }
+    if (g_gxState.pbrShield != value) {
+      g_gxState.pbrShield = value;
+      g_gxState.dirty |= DirtyUniform;
+    }
+  } else if (subCmd == GX_AURORA_SET_PBR_LIGHT_HDR) {
+    const u32 bit = reader.read<u32>() & 0xFF;
+    f32 v[8];
+    for (f32& f : v) {
+      f = reader.read<f32>();
+    }
+    const u32 falloff = std::min(reader.read<u32>(), 3u);
+    if (bit != 0) {
+      const u32 idx = static_cast<u32>(std::countr_zero(bit));
+      const bool on = v[7] > 0.f;
+      const std::array<Vec4<float>, 3> rows{
+          on ? Vec4<float>{v[0], v[1], v[2], static_cast<f32>(falloff + 1)} : Vec4<float>{},
+          on ? Vec4<float>{v[3], v[4], v[5], v[6]} : Vec4<float>{},
+          on ? Vec4<float>{v[7], 0.f, 0.f, 0.f} : Vec4<float>{},
+      };
+      for (u32 row = 0; row < 3; ++row) {
+        if (g_gxState.pbrLightHdr[idx * 3 + row] != rows[row]) {
+          g_gxState.pbrLightHdr[idx * 3 + row] = rows[row];
+          g_gxState.dirty |= DirtyUniform;
+        }
+      }
+    }
+  } else if (subCmd == GX_AURORA_SET_PBR_LIGHT_SCALE) {
+    const f32 diffuse = reader.read<f32>();
+    const f32 f0 = reader.read<f32>();
+    const f32 alpha = std::clamp(reader.read<f32>(), 0.f, 1.f);
+    const bool alphaReplaces = reader.read<u32>() != 0;
+    // w is the fade as the shader reads it: 0 none, 1 + alpha in place of the material's
+    // alpha, -(1 + alpha) times it.
+    const f32 fade = alphaReplaces ? 1.f + alpha : alpha < 1.f ? -(1.f + alpha) : 0.f;
+    const Vec4<float> value{diffuse, f0, 0.f, fade};
+    if (g_gxState.pbrLightScale != value) {
+      g_gxState.pbrLightScale = value;
       g_gxState.dirty |= DirtyUniform;
     }
   } else if (subCmd == GX_AURORA_SET_PBR_MATERIAL) {

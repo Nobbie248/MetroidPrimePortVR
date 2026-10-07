@@ -14,5 +14,5 @@ void CZipSupport::Free(void* ptr1, void* ptr2) {
   if (ptr2 == nullptr) {
     return;
   }
-  delete[] ptr2;
+  delete[] static_cast< uchar* >(ptr2);
 }

@@ -131,8 +131,13 @@ void CDolphinController::ReadDevices() {
     if ((alt & PAD_TRIGGER_L) && status[0].triggerL < 150) status[0].triggerL = 150;
     if ((alt & PAD_TRIGGER_R) && status[0].triggerR < 150) status[0].triggerR = 150;
   }
+  // A touch-overlay minimap tap: one poll of Z held, released on the next.
+  if (PortDebug::ConsumeMapTapZ()) {
+    status[0].err = PAD_ERR_NONE;
+    status[0].button |= PAD_TRIGGER_Z;
+  }
   // The beam shift, bound in the Controls tab (left shift by default).
-  const bool shiftHeld = mouseShift || PortControls::ShiftHeld();
+  const bool shiftHeld = mouseShift || PortControls::ShiftHeld() || PortDebug::TouchBeamShift();
   for (int i = 0; i < 4; ++i) {
     // One disconnected port must not prevent the other ports updating. Clear
     // stale held buttons on disconnect and keep UI interaction out of gameplay.
@@ -156,12 +161,13 @@ void CDolphinController::ReadDevices() {
     x4_status[0].substickY = 0;
 
     // Beams are selected from the C-stick, which twin-stick just consumed, so
-    // under twin-stick left shift (the Android overlay's RB sends it) is a beam
-    // shift too, and so are the L trigger and LB unless a pad button is bound
-    // as the shift (Remastered's layout locks on with L and jumps with LB).
+    // under twin-stick left shift (and the touch overlay's held Beam button) is a
+    // beam shift too, and so are the L trigger and LB unless a pad button is
+    // bound as the shift (Remastered's layout locks on with L and jumps with LB).
+    // Touch has its own shift button, so there L and LB stay lock-on and jump.
     const bool* keys = SDL_GetKeyboardState(nullptr);
     SDL_Gamepad* pad = PADGetSDLGamepadForIndex(0);
-    const bool padShiftBound = PortDebug::ShiftBinding(2) >= 0;
+    const bool padShiftBound = PortDebug::ShiftBinding(2) >= 0 || PortDebug::TouchActive();
     const bool beamModifier =
         shiftHeld || (keys != nullptr && keys[SDL_SCANCODE_LSHIFT] != 0) ||
         (!padShiftBound && ((x4_status[0].button & PAD_TRIGGER_L) != 0 ||

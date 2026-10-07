@@ -41,4 +41,31 @@ public:
   bool HasConstantUV() const override { return false; }
 };
 
+#ifdef TARGET_PC
+// Port-only 'PATL': an atlas of cols x rows equal tiles, tile k in column k % cols and row
+// k / cols counted from texel row 0. Mode 0 picks a tile per particle from its seed, mode 1
+// flips through `count` tiles over the particle's life. flipX mirrors half the particles.
+class CUVEAtlasTexture : public CUVElement {
+  TLockedToken< CTexture > x4_tex;
+  int x10_cols;
+  int x14_rows;
+  int x18_count;
+  int x1c_mode;
+  bool x20_flipX;
+
+public:
+  CUVEAtlasTexture(TToken< CTexture > tex, CIntElement* cols, CIntElement* rows, CIntElement* count,
+                   CIntElement* mode, CIntElement* flipX);
+  ~CUVEAtlasTexture() override;
+  TLockedToken< CTexture > GetValueTexture(int frame) const override;
+  void GetValueUV(int frame, SUVElementSet& valOut) const override;
+  bool HasConstantTexture() const override { return true; }
+  bool HasConstantUV() const override { return false; }
+  // Pure tile selection, exposed for tests. `lifeFrames` is endFrame - startFrame.
+  int SelectTile(uint seed, int frame, int lifeFrames) const;
+  void TileUV(int tile, bool flip, SUVElementSet& valOut) const;
+  bool FlipFor(uint seed) const { return x20_flipX && ((seed >> 16) & 1) != 0; }
+};
+#endif
+
 #endif // _CUVELEMENT

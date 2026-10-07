@@ -303,6 +303,17 @@ void TestSplit() {
 }
 } // namespace
 
+void TestImportStamp() {
+  Check(PortMods::ImportStampStale("", 2), "missing stamp is stale");
+  Check(PortMods::ImportStampStale("1\nabc123\n", 2), "older is stale");
+  Check(!PortMods::ImportStampStale("2\nabc123\n", 2), "equal is current");
+  Check(!PortMods::ImportStampStale("3", 2), "newer is current");
+  Check(!PortMods::ImportStampStale("  2 \n", 2), "leading blanks");
+  Check(PortMods::ImportStampStale("garbage", 2), "garbage is stale");
+  Check(PortMods::ImportStampStale("-5", 2), "negative is stale");
+  Check(PortMods::ImportStampStale("\n2", 2), "number on a later line is not the stamp");
+}
+
 int main() {
   const fs::path dir = fs::temp_directory_path() / "port_mods_tests";
   std::error_code ec;
@@ -314,6 +325,7 @@ int main() {
   TestAdd(dir);
   TestNewPak(dir);
   TestSplit();
+  TestImportStamp();
   fs::remove_all(dir, ec);
   if (sFailures != 0) {
     std::fprintf(stderr, "%d failure(s)\n", sFailures);

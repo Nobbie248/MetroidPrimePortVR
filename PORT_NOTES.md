@@ -1,3 +1,37 @@
+## VR: the snap turn (2026-10-08)
+
+The SNAP TURN setting used to switch off smooth turning on the look stick and
+nothing more; SNAP TURN ANGLE was saved but not read. Now, with SNAP TURN on,
+a flick of the look stick turns Samus by the angle at once, as PrimedGun's
+`UpdateSnapTurn` did:
+
+- The flick counts past 0.72 on the stick's x, and the stick has to come back
+  under 0.32 before the next one. Two snaps are at least eight game frames
+  (0.133 s) apart.
+- A flick made while the stick's controller is at the head (the visor
+  gesture's zone) never counts, even once the hand leaves with the stick still
+  pushed. A flick made while Samus cannot turn (menu, map, cinematic, morph
+  ball, visor change) is used up rather than kept.
+- The angle is clamped to PrimedGun's 30-90 degrees.
+
+`platform/include/vr/vr_snap_turn.h` holds the tracker (test
+`port_vr_snap_turn_tests`). `vr_pad.cpp` feeds it before the visor gesture
+zeroes that stick. `CPlayer::PortVrSnapTurn`, from `CPlayer::Think`, applies
+the turn with the touch look's guards plus no orbit lock or grapple, since
+there the game sets the facing. PrimedGun rotated the player's transform in
+memory; here `SetTransform` does it during the tick.
+
+Two things would otherwise sweep where PrimedGun jumped:
+- the frame blend: `CCameraManager::PortCutNextUpdate` makes the next camera
+  update a cut; a turn under 45 degrees used to blend across one tick;
+- the cannon's 0.24 smoothing, in world space: `VrResetCannonSmoothing` drops
+  it, as PrimedGun's snap did.
+
+One difference from PrimedGun: it read the right controller's stick whatever
+the stick layout, so with the sticks swapped its snap turn sat on the movement
+stick. Here it is the look stick, the one smooth turning reads; the default
+layout behaves the same.
+
 ## Renderer: a lean texture bind group for plain GX draws (2026-10-07)
 
 After the upstream merge, the Chozo plaza encoded in 2.33-2.50 ms on the

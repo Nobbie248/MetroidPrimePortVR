@@ -81,6 +81,10 @@ bool VrCannonTransform(const CStateManager& mgr, const CPlayer& player, const CT
                        CTransform4f& gunXf) noexcept;
 // Whether the last VrCannonTransform placed the cannon.
 bool VrCannonTracked() noexcept;
+// The body turned at once (the snap turn): the next VrCannonTransform places
+// the cannon without easing from the old facing, as PrimedGun's snap turn
+// dropped its cannon smoothing.
+void VrResetCannonSmoothing() noexcept;
 
 // Look to scan (PrimedGun's gun ray / scan target hook, vr_patch_gun_ray_target):
 // in the scan visor the head picks the scan target and the scan icons, rather

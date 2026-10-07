@@ -79,7 +79,7 @@ constexpr KeyInfo kKeys[] = {
     {"vr_directional_movement_air_accel", K::Float, "8", 0.0f, 60.0f, 0.5f, false},
     {"vr_look_yaw_sensitivity", K::Float, "1", 0.20f, 3.00f, 0.05f},
     {"vr_snap_turn_enabled", K::Bool, "0"},
-    {"vr_snap_turn_degrees", K::Int, "45", 30.0f, 90.0f, 15.0f, false},
+    {"vr_snap_turn_degrees", K::Int, "45", 30.0f, 90.0f, 15.0f},
     // Calibration
     {"vr_vr_overlays_enabled", K::Bool, "1"},
     {"vr_height_prompt_enabled", K::Bool, "1", 0, 0, 0, false},

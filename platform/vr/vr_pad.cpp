@@ -7,6 +7,7 @@
 #include "vr/openxr_screen_math.h"
 #include "vr/vr_beam_wheel.h"
 #include "vr/vr_settings.h"
+#include "vr/vr_snap_turn.h"
 #include "vr/vr_visor_dpad.h"
 
 #include "MetroidPrime/CStateManager.hpp"
@@ -56,6 +57,8 @@ std::mutex g_mutex;
 VrPadState g_state;
 WheelState g_wheel;
 VisorDpad::Tracker g_visor;
+SnapTurn::Tracker g_snap;
+float g_snap_pending = 0.0f; // degrees, positive right: VrTakeSnapTurn's, game thread only
 bool g_was_active = false;
 bool g_recenter_was_pressed = false; // the right stick click's last state
 bool g_was_gameplay = false;
@@ -296,6 +299,8 @@ void VrPadUpdate(const CStateManager* mgr) noexcept {
         g_state = {};
         g_wheel = {};
         g_visor.Reset();
+        g_snap.Reset();
+        g_snap_pending = 0.0f;
         g_gameplay_samples = 0;
         return;
     }
@@ -313,6 +318,7 @@ void VrPadUpdate(const CStateManager* mgr) noexcept {
     bool gameplay = false;
     bool orbit = false;
     bool visor_press_accepted = false;
+    bool visor_changing = false;
     if (mgr != nullptr && mgr->GetPlayer() != nullptr) {
         const CPlayer* player = mgr->GetPlayer();
         const bool first_person = player->GetCameraState() == CPlayer::kCS_FirstPerson;
@@ -324,6 +330,7 @@ void VrPadUpdate(const CStateManager* mgr) noexcept {
             orbit = state == CPlayer::kOS_OrbitObject || state == CPlayer::kOS_ForcedOrbitObject ||
                     state == CPlayer::kOS_OrbitPoint || state == CPlayer::kOS_OrbitCarcass;
             visor_press_accepted = VisorPressAccepted(*mgr, *player);
+            visor_changing = mgr->GetPlayerState()->GetIsVisorTransitioning();
         }
     }
     if (gameplay && !g_was_gameplay) {
@@ -357,6 +364,29 @@ void VrPadUpdate(const CStateManager* mgr) noexcept {
         in.accepting = visor_press_accepted;
         in.now = NowSeconds();
         visor = g_visor.Update(in);
+    }
+    // The snap turn, on the look stick before the visor gesture takes it:
+    // PrimedGun keeps a flick made at the head from counting afterwards.
+    {
+        const uint32_t look_hand = settings.directional_movement_use_right_stick ? 0u : 1u;
+        const OpenXRControllerState& hand = snapshot.controllers[look_hand];
+        SnapTurn::Input in;
+        in.enabled = settings.snap_turn_enabled;
+        in.connected = hand.connected;
+        in.stick_x = hand.thumbstick_x;
+        in.near_head = (look_hand == visor_hand && visor.zone) ||
+                       (hand.aim_pose.valid && snapshot.head_pose.valid &&
+                        VisorDpad::HandNearHead(hand.aim_pose.position, snapshot.head_pose.position,
+                                                settings.xr_dpad_head_radius, settings.xr_dpad_head_y_below));
+        in.accepting = gameplay && !visor_changing;
+        in.degrees = settings.snap_turn_degrees;
+        in.now = NowSeconds();
+        const float turn = g_snap.Update(in);
+        if (turn != 0.0f) {
+            g_snap_pending = turn;
+        } else if (!gameplay) {
+            g_snap_pending = 0.0f;
+        }
     }
     // While the hand is at the head its stick is the D-pad's alone: no walking,
     // strafing, turning or jumping from it.
@@ -402,6 +432,12 @@ void VrPadUpdate(const CStateManager* mgr) noexcept {
 }
 
 void VrNoteInGameMenu(bool open) noexcept { g_in_game_menu = open; }
+
+float VrTakeSnapTurn() noexcept {
+    const float turn = g_snap_pending;
+    g_snap_pending = 0.0f;
+    return turn;
+}
 
 VrPadState GetVrPadState() noexcept {
     std::lock_guard lock(g_mutex);

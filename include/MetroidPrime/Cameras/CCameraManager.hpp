@@ -74,6 +74,9 @@ public:
   CVector3f GetGlobalCameraTranslation(const CStateManager& mgr) const;
   static void SetPresentationInterpolation(float t);
   static float GetPresentationInterpolation();
+  // Port: the next Update takes the camera's change as a cut, so frames drawn
+  // between ticks show it at once instead of sweeping (the VR snap turn).
+  static void PortCutNextUpdate();
   // Port: the world-frame rotation per-frame look adds to the presented view
   // (docs/FRAME_INTERPOLATION.md), for things drawn at a tick-time aim point.
   bool GetPresentedLookRotation(const CStateManager& mgr, CTransform4f& rotation) const;

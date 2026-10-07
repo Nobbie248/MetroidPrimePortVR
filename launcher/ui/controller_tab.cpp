@@ -66,9 +66,7 @@ void BuildControllerTab(TabContext& ctx, QTabWidget* tabs) {
   ctx.Float(layout, QObject::tr("Air acceleration"), "vr_directional_movement_air_accel");
   FloatRow* lookYaw = ctx.Float(layout, QObject::tr("Look yaw sensitivity"), "vr_look_yaw_sensitivity");
   lookYaw->setToolTip(QObject::tr("The native build applies values up to 1.0 so far."));
-  ctx.Check(layout, QObject::tr("Snap turn"), "vr_snap_turn_enabled",
-            QObject::tr("The native build so far only turns off smooth turning on the look "
-                        "stick; the snap rotation itself is not in yet."));
+  ctx.Check(layout, QObject::tr("Snap turn"), "vr_snap_turn_enabled");
   ctx.Combo(layout, QObject::tr("Snap turn angle"), "vr_snap_turn_degrees",
             {{QObject::tr("30 degrees"), QStringLiteral("30")},
              {QObject::tr("45 degrees"), QStringLiteral("45")},

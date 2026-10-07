@@ -294,6 +294,8 @@ bool VrCannonTransform(const CStateManager& mgr, const CPlayer& player, const CT
 
 bool VrCannonTracked() noexcept { return s_cannon.tracked; }
 
+void VrResetCannonSmoothing() noexcept { s_cannon.smoothValid = false; }
+
 CVector3f VrCannonModelOffsetWorld() noexcept {
     return s_cannon.tracked ? s_cannon.modelOffsetWorld : CVector3f::Zero();
 }

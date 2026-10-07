@@ -3,6 +3,7 @@
 #include "port_debug.h"
 #include "port_freecam.h"
 #ifdef TARGET_PC
+#include "vr/vr_pad.h"
 #include "vr/vr_view.h"
 #endif
 
@@ -962,6 +963,39 @@ void CPlayer::UpdateTouchLook(float dt, CStateManager& mgr) {
   }
 }
 
+// PortVr: PrimedGun's snap turn. A flick of the look stick (vr/vr_pad.cpp)
+// turns Samus by the snap turn angle at once, where PrimedGun rotated the
+// player's transform in memory. The camera's frame blend and the cannon's
+// smoothing are cut so the view jumps rather than sweeps. Only when she could
+// turn by hand: in an orbit lock or a grapple the game sets her facing.
+void CPlayer::PortVrSnapTurn(CStateManager& mgr) {
+#ifdef TARGET_PC
+  const float degrees = PortVr::VrTakeSnapTurn();
+  if (degrees == 0.f) {
+    return;
+  }
+  const CCameraManager* cameras = mgr.GetCameraManager();
+  // Mouse aim owns the facing when it is on (UpdateMouseAim).
+  const bool allowed =
+      !MouseControlsAllowed(mgr) && mgr.GetGameState() == CStateManager::kGS_Running &&
+      !GetDisableInput() && !x760_controlsFrozen && !GetFrozenState() &&
+      mgr.GetPlayerState()->IsAlive() && x2f8_morphBallState == kMS_Unmorphed &&
+      x2f4_cameraState == kCS_FirstPerson && x304_orbitState == kOS_NoOrbit &&
+      (x3b8_grappleState == kGS_None || x3b8_grappleState == kGS_Firing) && cameras != nullptr &&
+      cameras->IsInFPCamera() && !cameras->IsInCinematicCamera() &&
+      !cameras->GetCurrentCamera(mgr).DisablesInput();
+  if (!allowed) {
+    return;
+  }
+  // A positive yaw turns left; the snap's positive degrees turn right.
+  const CVector3f forward = GetTransform().GetForward();
+  const float yaw = atan2f(-forward.GetX(), forward.GetY()) - degrees * (M_PIF / 180.f);
+  SetTransform(CQuaternion::ZRotation(CRelAngle(yaw)).BuildTransform4f(GetTransform().GetTranslation()));
+  CCameraManager::PortCutNextUpdate();
+  PortVr::VrResetCannonSmoothing();
+#endif
+}
+
 void CPlayer::Update(float dt, CStateManager& mgr) {
   UpdateMouseAim(mgr);
   SetCoefficientOfRestitutionModifier(0.f);
@@ -1798,6 +1832,7 @@ void CPlayer::Think(float dt, CStateManager& mgr) {
   UpdateEnvironmentDamageCameraShake(dt, mgr);
   UpdatePhazonDamage(dt, mgr);
   PublishWheelState(*this, mgr);
+  PortVrSnapTurn(mgr);
   if (!MouseControlsAllowed(mgr)) {
     UpdateTouchLook(dt, mgr);
     UpdateFreeLook(dt);

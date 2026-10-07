@@ -147,7 +147,7 @@ object PrimedGunTabs {
                 R.string.primedgun_look_yaw_sensitivity_note
             )
         )
-        add(switch(context, R.string.primedgun_snap_turn, "vr_snap_turn_enabled", R.string.primedgun_snap_turn_note))
+        add(switch(context, R.string.primedgun_snap_turn, "vr_snap_turn_enabled"))
         add(
             choice(
                 context, R.string.primedgun_snap_turn_angle, "vr_snap_turn_degrees",

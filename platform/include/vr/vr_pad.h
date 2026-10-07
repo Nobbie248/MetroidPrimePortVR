@@ -14,6 +14,9 @@
 //
 // The visor gesture (vr_visor_dpad.h): with the off-hand controller held next
 // to the headset, its stick is the D-pad, which picks the visors.
+//
+// The snap turn (vr_snap_turn.h): with the setting on, a flick of the look
+// stick turns Samus by the snap turn angle instead of turning her smoothly.
 
 #pragma once
 
@@ -33,6 +36,12 @@ void VrPadUpdate(const CStateManager* mgr) noexcept;
 // closing. The classic mapping applies meanwhile, as PrimedGun's game flow
 // hooks made it, so the controllers' A confirms and B backs out.
 void VrNoteInGameMenu(bool open) noexcept;
+
+// Game thread, from CPlayer::PortVrSnapTurn: the snap turn a look stick flick
+// asked for since the last call (vr_snap_turn.h), in degrees, positive to the
+// right, or 0. Taking it clears it; a request left over when gameplay ends
+// (menu, map, cinematic, morph ball) is dropped.
+float VrTakeSnapTurn() noexcept;
 
 // What the pad synthesis last decided, for the game hooks and the overlays.
 struct VrPadState {

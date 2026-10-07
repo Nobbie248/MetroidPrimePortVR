@@ -152,7 +152,6 @@
     <string name="primedgun_look_yaw_sensitivity">Look yaw sensitivity</string>
     <string name="primedgun_look_yaw_sensitivity_note">The native build applies values up to 1.0 so far.</string>
     <string name="primedgun_snap_turn">Snap turn</string>
-    <string name="primedgun_snap_turn_note">The native build so far only turns off smooth turning on the look stick; the snap rotation itself is not in yet.</string>
     <string name="primedgun_snap_turn_angle">Snap turn angle</string>
     <string name="primedgun_snap_turn_30">30 degrees</string>
     <string name="primedgun_snap_turn_45">45 degrees</string>

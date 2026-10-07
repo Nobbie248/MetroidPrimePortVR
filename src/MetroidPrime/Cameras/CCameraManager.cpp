@@ -53,6 +53,7 @@ TUniqueId sCameraSnapshotId = kInvalidUniqueId;
 CTransform4f sPreviousCameraTransform = CTransform4f::Identity();
 CTransform4f sCurrentCameraTransform = CTransform4f::Identity();
 float sPresentationInterpolation = -1.f;
+bool sPortCutNextUpdate = false;
 
 CTransform4f InterpolateCameraTransform(const CTransform4f& previous,
                                         const CTransform4f& current, float t) {
@@ -369,6 +370,7 @@ void CCameraManager::Update(float dt, CStateManager& mgr) {
   const CQuaternion previousRotation = CQuaternion::FromMatrix(previousTransform);
   const CQuaternion currentRotation = CQuaternion::FromMatrix(currentTransform);
   const bool discontinuity =
+      sPortCutNextUpdate ||
       (currentTransform.GetTranslation() - previousTransform.GetTranslation()).MagSquared() > 16.f ||
       (!mgr.GetPlayer()->MouseLookIsFree(mgr) &&
        fabsf(CQuaternion::Dot(previousRotation, currentRotation)) < 0.9238795f);
@@ -377,6 +379,7 @@ void CCameraManager::Update(float dt, CStateManager& mgr) {
   } else {
     sPreviousCameraTransform = previousTransform;
   }
+  sPortCutNextUpdate = false;
   sCurrentCameraTransform = currentTransform;
   sCameraSnapshotOwner = this;
   sCameraSnapshotId = currentId;
@@ -563,6 +566,7 @@ CTransform4f CCameraManager::GetSimulationCameraTransform(const CStateManager& m
 
 void CCameraManager::SetPresentationInterpolation(float t) { sPresentationInterpolation = t; }
 float CCameraManager::GetPresentationInterpolation() { return sPresentationInterpolation; }
+void CCameraManager::PortCutNextUpdate() { sPortCutNextUpdate = true; }
 
 CVector3f CCameraManager::GetGlobalCameraTranslation(const CStateManager& mgr) const {
   return GetCurrentCamera(mgr).GetTransform().Rotate(x30_shakeOffset);

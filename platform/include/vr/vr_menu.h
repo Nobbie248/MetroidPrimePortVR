@@ -288,6 +288,7 @@ struct View {
     bool streamed_audio = true;
     bool musyx_audio = true;
     bool log_file = false;
+    bool draw_tags = true; // PortDebug::DrawTags
     uint32_t eye_width = 0; // per eye at the chosen render scale; 0 without a session
     uint32_t eye_height = 0;
     float headset_hz = 0.0f;
@@ -322,6 +323,7 @@ public:
     virtual void SetStreamedAudio(bool on) = 0;
     virtual void SetMusyxAudio(bool on) = 0;
     virtual void SetLogFile(bool on) = 0;
+    virtual void SetDrawTags(bool on) = 0;
 };
 
 // --- The port's tabs ---
@@ -397,7 +399,7 @@ inline PortList PortItems(const View& view) {
 }
 
 // DEBUG: what of the F1 overlay's Debug tab works in the headset (the cheats,
-// the audio and the log), the [xr-diag] switch, and live readouts. The free
+// the audio, the log and the draw tags), the [xr-diag] switch, and live readouts. The free
 // camera and the modding tools need a pad and the desktop and stay in F1.
 enum class DebugItem : uint8_t {
     FullHealth,
@@ -407,12 +409,13 @@ enum class DebugItem : uint8_t {
     MusyxAudio,
     LogFile,
     XrDiagnostics,
+    DrawTags,
     HeadsetRate,   // readout
     HeadsetFrames, // readout
     GameFrames,    // readout
     Draws,         // readout
 };
-inline constexpr uint32_t kDebugItems = 11;
+inline constexpr uint32_t kDebugItems = 12;
 
 inline constexpr std::array<float, 5> kRefreshRates = {0.0f, 72.0f, 80.0f, 90.0f, 120.0f};
 inline constexpr std::array<const char*, 5> kPerformanceLevels = {"boost", "sustained_high", "sustained_low",
@@ -705,6 +708,8 @@ inline Row DebugRow(const State& s, const PortVrSettings& v, const View& view, D
         return {"WRITE THE LOG TO A FILE", OnOff(view.log_file)};
     case DebugItem::XrDiagnostics:
         return {"XR DIAGNOSTICS LOG", OnOff(v.diagnostics_logging)};
+    case DebugItem::DrawTags:
+        return {"DRAW TAGS - NAMES IN WARNINGS", OnOff(view.draw_tags)};
     case DebugItem::HeadsetRate:
         return {"HEADSET REFRESH", rate(view.headset_hz, "%.0f HZ")};
     case DebugItem::HeadsetFrames:
@@ -1617,6 +1622,9 @@ inline void Activate(State& s, PortVrSettings& v, const View& view, double now, 
             break;
         case DebugItem::XrDiagnostics:
             v.diagnostics_logging = !v.diagnostics_logging;
+            break;
+        case DebugItem::DrawTags:
+            actions.SetDrawTags(!view.draw_tags);
             break;
         default:
             break; // readouts

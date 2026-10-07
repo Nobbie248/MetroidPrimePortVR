@@ -939,6 +939,12 @@ unpacks to a temporary directory instead of mounting.
   second drops the faceplate decoration, Samus's face reflection and the
   on-visor billboard effects (rain, splashes, steam). Console:
   `hudscale <50..100>`, `helmet <0|1>`, `visorfx <0|1>` (0 hides).
+- Draw tags (F1 > Debug > Rendering, and DRAW TAGS on the VR menu's DEBUG tab;
+  persisted as `draw_tags`, on by default): each model surface sends its model
+  and material to the renderer (GXSetDrawTag), so the renderer's warnings name a
+  mod model with a missing UV set or a draw that did not fit the frame. That is
+  two FIFO commands per surface, about 4,000 a frame in a busy room; off, the
+  warnings say "untagged draw".
 - Speedrun timer and LiveSplit (F1 > Game > Speedrun; the timer also in pause Options >
   Display as In-Game Timer). `speedrun_timer` draws the in-game time (the play
   time the save shows, which stops in cutscenes, menus and loads) in the bottom

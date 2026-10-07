@@ -172,6 +172,7 @@ int sHudScale = PortDebug::kHudScaleMax;
 bool sHideHelmet = true;
 bool sHideVisorEffects = false;
 bool sHideMinimap = false;
+bool sDrawTags = true; // GXSetDrawTag per model surface (PortDebug::DrawTags)
 // Game-thread phases (NoteFramePhase), accumulated over RecordFrame's window.
 uint64_t sPhaseNs[PortDebug::kPhaseCount] = {};
 double sPhaseMs[PortDebug::kPhaseCount] = {};
@@ -560,6 +561,8 @@ void ApplySetting(const std::string& key, const std::string& value) {
     sHideVisorEffects = ParseBool(value);
   } else if (key == "hide_minimap") {
     sHideMinimap = ParseBool(value);
+  } else if (key == "draw_tags") {
+    sDrawTags = ParseBool(value);
   } else if (key == "reveal_map") {
     sRevealMap = ParseBool(value);
   } else if (key == "map_pickups") {
@@ -846,6 +849,7 @@ void SaveSettings() {
   file << "hide_helmet=" << (sHideHelmet ? 1 : 0) << '\n';
   file << "hide_visor_effects=" << (sHideVisorEffects ? 1 : 0) << '\n';
   file << "hide_minimap=" << (sHideMinimap ? 1 : 0) << '\n';
+  file << "draw_tags=" << (sDrawTags ? 1 : 0) << '\n';
   file << "reveal_map=" << (sRevealMap ? 1 : 0) << '\n';
   file << "map_pickups=" << (sMapPickups ? 1 : 0) << '\n';
   file << "tracker_progress=" << (sTrackerProgress ? 1 : 0) << '\n';
@@ -1536,6 +1540,17 @@ bool HideMinimap() {
 void SetHideMinimap(bool enabled) {
   EnsureInitialized();
   sHideMinimap = enabled;
+  MarkDirty();
+}
+
+bool DrawTags() {
+  EnsureInitialized();
+  return sDrawTags;
+}
+
+void SetDrawTags(bool enabled) {
+  EnsureInitialized();
+  sDrawTags = enabled;
   MarkDirty();
 }
 
@@ -6374,6 +6389,15 @@ void DrawRendering() {
   ImGui::SetItemTooltip("Recommended: off.\n"
                         "Draws what Samus collides with: walls grey, floors blue, ceilings red,\n"
                         "lava orange, grates yellow, solid objects as orange boxes.");
+  bool drawTags = sDrawTags;
+  if (ImGui::Checkbox("Draw tags", &drawTags)) {
+    SetDrawTags(drawTags);
+  }
+  ImGui::SetItemTooltip("Saved with the settings, unlike the rest of this section. Recommended: on when\n"
+                        "looking into a mod model, else off.\n"
+                        "Each model surface tells the renderer its model and material, so a warning\n"
+                        "about a bad mod model names it. Two commands per surface, thousands a frame in\n"
+                        "a busy room; off, the warnings say \"untagged draw\".");
 
   if (ImGui::CollapsingHeader("Frame statistics")) {
     if (const AuroraStats* stats = aurora_get_stats()) {

@@ -58,6 +58,7 @@ public:
   void SetStreamedAudio(bool on) override { streamed = on ? 1 : 0; }
   void SetMusyxAudio(bool on) override { musyx = on ? 1 : 0; }
   void SetLogFile(bool on) override { log = on ? 1 : 0; }
+  void SetDrawTags(bool on) override { tags = on ? 1 : 0; }
 
   int saves = 0;
   int exits = 0;
@@ -73,6 +74,7 @@ public:
   int streamed = -1;
   int musyx = -1;
   int log = -1;
+  int tags = -1;
 };
 
 // The middle of row `index`'s hit band, and of its value box's halves.
@@ -425,12 +427,15 @@ void TestDebug() {
   Check(actions.streamed == 0 && actions.musyx == 0 && actions.log == 1, "audio and log switches");
   Click(s, v, view, kLabelX, RowY(kDebugTab, 6), now, actions);
   Check(v.diagnostics_logging, "xr diagnostics switch");
+  Check(BuildRows(s, v, view)[7].value == "ON", "draw tags on by default");
+  Click(s, v, view, kLabelX, RowY(kDebugTab, 7), now, actions);
+  Check(actions.tags == 0, "draw tags switch");
   // Readouts.
   view.headset_hz = 90.0f;
   view.headset_fps = 89.94f;
   view.draws = 1234;
   const auto rows = BuildRows(s, v, view);
-  Check(rows[7].value == "90 HZ" && rows[8].value == "89.9" && rows[9].value == "UNKNOWN" && rows[10].value == "1234",
+  Check(rows[8].value == "90 HZ" && rows[9].value == "89.9" && rows[10].value == "UNKNOWN" && rows[11].value == "1234",
         "readouts");
   Check(PageCount(kDebugTab, view) == 1, "one page");
 

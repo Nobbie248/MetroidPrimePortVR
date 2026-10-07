@@ -11,6 +11,7 @@
 #include "dolphin/gx/GXVert.h"
 #ifdef TARGET_PC
 #include <dolphin/gx/GXExtra.h>
+#include "port_debug.h"
 #include "port_pbr_record.h"
 #include "port_room_env.h"
 #include <algorithm>
@@ -798,14 +799,20 @@ void CCubeModel::DrawSurface(const CCubeSurface& surface, const CModelFlags& mod
     CGX::SetZMode(true, GX_LEQUAL, false);
   }
   // Names the draw in Aurora's warnings (a mod model whose texgen reads a missing UV set).
-  GXSetDrawTag(PortAssetId(), static_cast< u32 >(x44_idx), surface.GetMaterialIndex());
+  // Port: unless turned off (PortDebug::DrawTags): two FIFO commands a surface.
+  const bool portDrawTag = PortDebug::DrawTags();
+  if (portDrawTag) {
+    GXSetDrawTag(PortAssetId(), static_cast< u32 >(x44_idx), surface.GetMaterialIndex());
+  }
   if (sPortDrawNumbering) {
     PortBeginDraw(surface, pbr);
   }
 #endif
   surface.CallDisplayList();
 #ifdef TARGET_PC
-  GXSetDrawTag(0, 0xFFFFFFFF, 0);
+  if (portDrawTag) {
+    GXSetDrawTag(0, 0xFFFFFFFF, 0);
+  }
   if (sPortDrawNumbering) {
     GXPortSetDrawSerial(0);
   }

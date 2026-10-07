@@ -195,6 +195,13 @@ void SetHideVisorEffects(bool enabled);
 // Hide the HUD's minimap, hundreds of draws a frame in a busy area.
 bool HideMinimap();
 void SetHideMinimap(bool enabled);
+// Draw tags (persisted as `draw_tags`, on by default): each model surface names its
+// model and material to Aurora (GXSetDrawTag), so the renderer's warnings can say
+// which mod model has a problem. Two FIFO commands per surface, thousands a frame in a
+// busy room; off spares the game and FIFO threads that work, and the warnings then
+// read "untagged draw".
+bool DrawTags();
+void SetDrawTags(bool enabled);
 // Where the game thread's frame goes (Performance tab): the game's update, the
 // world's draw and the HUD's, timed in the game code and averaged per frame.
 enum FramePhase { kPhaseUpdate = 0, kPhaseDrawWorld = 1, kPhaseDrawGui = 2, kPhaseCount = 3 };

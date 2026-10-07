@@ -142,6 +142,7 @@ public:
             PortLogFile::Start();
         }
     }
+    void SetDrawTags(bool on) override { PortDebug::SetDrawTags(on); }
 
     // After the click's settings are stored: the requested save, then the exit
     // the way closing the window exits (the F1 overlay's Exit game).
@@ -228,6 +229,7 @@ VrMenu::View BuildView(Menu& menu, const PortVrSettings& settings, double now) {
     view.musyx_audio = PortDebug::MusyxAudioEnabled();
     // The setting: a log started for this run by MP_LOG_FILE goes on until it ends.
     view.log_file = PortDebug::LogFile();
+    view.draw_tags = PortDebug::DrawTags();
     // The eye size the chosen render scale gives, at once when it changes.
     const OpenXREyeResolution eye = OpenXRGetEyeResolution(settings.render_scale);
     view.eye_width = eye.scaled_width;

@@ -93,7 +93,10 @@ LauncherWindow::LauncherWindow()
   BuildSetupTab(m_tabs);
   const auto addSettingsTab = [this](void (*build)(TabContext&, QTabWidget*)) {
     build(m_ctx, m_tabs);
-    m_settingsPages.push_back(m_tabs->widget(m_tabs->count() - 1));
+    // The lock disables what the scroll area shows, not the scroll area, so a
+    // locked tab still scrolls.
+    QWidget* page = m_tabs->widget(m_tabs->count() - 1);
+    m_settingsPages.push_back(page->findChild<QScrollArea*>()->widget());
   };
   addSettingsTab(BuildControllerTab);
   addSettingsTab(BuildCalibrationTab);

@@ -41,7 +41,15 @@ bool OpenXRIsRunning() noexcept;
 // gamepad (Gamepad controller mode). Call it from the game thread wherever the
 // game is about to read controllers: the pacing thread deliberately leaves SDL
 // alone. Cheap and safe to call when VR is off.
+// It also follows the headset's input focus (below): while the headset has it,
+// SDL keeps joystick events for an unfocused window, the virtual gamepad's too.
 void OpenXRApplyControllerState() noexcept;
+
+// Game thread: a headset session is running and the runtime gives it input
+// focus, as of the last OpenXRApplyControllerState. The player is in the
+// headset then, so the desktop window's focus says nothing about where their
+// input goes, and the game keeps reading the controllers when it is lost.
+bool OpenXRHeadsetHasInputFocus() noexcept;
 std::string OpenXRLastError();
 
 // True where the headset is the only display there is (the Quest build): there VR

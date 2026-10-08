@@ -16,6 +16,7 @@
 #ifdef TARGET_PC
 #include "port_controls.h"
 #include "port_input_map.h"
+#include "vr/openxr_integration.h"
 #endif
 
 #include <string.h>
@@ -91,6 +92,11 @@ void CDolphinController::ReadDevices() {
 #endif
   // The console's pad commands work in a window without focus.
   inputFocused = inputFocused || PortConsoleEnabled();
+#ifdef TARGET_PC
+  // PortVr: so do the headset controllers while the headset has the focus;
+  // the player cannot see the desktop window to click back into it.
+  inputFocused = inputFocused || PortVr::OpenXRHeadsetHasInputFocus();
+#endif
   int mouseActions[PortInputMap::kMouseButtonCount];
   for (int i = 0; i < PortInputMap::kMouseButtonCount; ++i) {
     mouseActions[i] = PortDebug::MouseAction(i);

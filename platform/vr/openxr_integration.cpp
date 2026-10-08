@@ -2198,11 +2198,25 @@ bool OpenXRIsRunning() noexcept {
 #endif
 }
 
+namespace {
+bool g_headset_input_focus = false; // game thread
+} // namespace
+
 void OpenXRApplyControllerState() noexcept {
 #if MP_OPENXR_GRAPHICS_BACKEND
     OpenXRApplyVirtualGamepad();
+    // SDL drops joystick presses while no window of ours has keyboard focus,
+    // virtual joysticks included; the port turns background events off. While
+    // the headset has the input focus they are let through, from the next pump.
+    const bool focus = OpenXRIsRunning() && OpenXRGetInputSnapshot().runtime_active;
+    if (focus != g_headset_input_focus) {
+        g_headset_input_focus = focus;
+        aurora_set_background_input(focus);
+    }
 #endif
 }
+
+bool OpenXRHeadsetHasInputFocus() noexcept { return g_headset_input_focus; }
 
 void OpenXRRequestRecenter() noexcept {
 #if MP_OPENXR_GRAPHICS_BACKEND

@@ -1,3 +1,29 @@
+## VR: the controllers keep working when the desktop window loses focus (2026-10-08)
+
+On PC, the headset controllers' buttons and sticks did nothing once the game's
+desktop window lost focus (another window clicked, alt-tab, a SteamVR or
+Virtual Desktop window brought up). Two gates dropped them:
+
+- `CDolphinController::ReadDevices` zeroes every pad port while
+  `SDL_GetKeyboardFocus()` is null (`docs/NATIVE_PORT.md`). That cleared the
+  PrimedGun pad, which reaches port 0 through `PADSetVirtualStatus`.
+- SDL ignores joystick presses while no window of ours has keyboard focus,
+  virtual joysticks included, because the port sets
+  `allowJoystickBackgroundEvents = false`. That froze Gamepad mode's
+  "OpenXR Controllers" joystick.
+
+The player in the headset cannot see the desktop window to click back into
+it, so a running session with input focus from the runtime now counts as
+focus. `OpenXRApplyControllerState` (game thread, every frame) records it for
+`OpenXRHeadsetHasInputFocus` and turns SDL's background joystick events on
+while it holds (`aurora_set_background_input`), off again when the session
+ends or loses focus. `ReadDevices` ORs it into `inputFocused`, as it already
+does for the console. While the headset has focus a desktop pad also reaches
+the game with the window unfocused. The keyboard does not, because SDL resets
+it on focus loss. With VR off nothing changes.
+
+build/vr and build/nooxr: 63/63 port tests.
+
 ## VR: the lock turns the camera again unless NO CAMERA TURN ON LOCK (2026-10-08)
 
 Look to lock-on and look to grapple kept the body's facing during a lock the

@@ -90,6 +90,12 @@ bool VrCannonTransform(const CStateManager& mgr, const CPlayer& player, const CT
                        CTransform4f& gunXf) noexcept;
 // Whether the last VrCannonTransform placed the cannon.
 bool VrCannonTracked() noexcept;
+// The selected cannon controller's calibrated world-space aim, without
+// advancing model smoothing. False when the controller is not tracked.
+bool VrCannonAim(const CPlayer& player, const CTransform4f& cameraXf,
+                 CVector3f& origin, CVector3f& direction) noexcept;
+// Idle reticle on the cannon ray's first world hit, or its maximum reach.
+bool VrCannonTargetPoint(const CStateManager& mgr, CVector3f& point) noexcept;
 // The body turned at once (the snap turn): the next VrCannonTransform places
 // the cannon without easing from the old facing, as PrimedGun's snap turn
 // dropped its cannon smoothing.

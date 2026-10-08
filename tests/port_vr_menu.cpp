@@ -373,25 +373,37 @@ void TestConfig() {
 
   // Page 2 ends with RESET CONFIG, two clicks; it leaves PrimedGun's settings alone.
   Click(s, v, pc, kNextX, kPageY, now, actions);
-  Check(s.port_page == 1 && ItemCount(s, pc) == 9, "config page 2");
+  Check(s.port_page == 1 && ItemCount(s, pc) == 10, "config page 2");
   // LOOK TO LOCK-ON, LOOK TO GRAPPLE and NO CAMERA TURN ON LOCK follow LOOK TO SCAN.
-  Check(BuildRows(s, v, pc)[4].label == std::string("LOOK TO LOCK-ON") &&
-            BuildRows(s, v, pc)[5].label == std::string("LOOK TO GRAPPLE") &&
-            BuildRows(s, v, pc)[6].label == std::string("NO CAMERA TURN ON LOCK"),
+  Check(BuildRows(s, v, pc)[4].label == std::string("CANNON TARGETING") &&
+            BuildRows(s, v, pc)[5].label == std::string("LOOK TO LOCK-ON") &&
+            BuildRows(s, v, pc)[6].label == std::string("LOOK TO GRAPPLE") &&
+            BuildRows(s, v, pc)[7].label == std::string("NO CAMERA TURN ON LOCK"),
         "look to lock-on and grapple rows");
   Check(!v.look_lock_no_camera_turn, "the camera turns on a lock by default");
+  Check(v.cannon_targeting, "cannon targeting defaults on");
+  Check(v.CannonTargetingForVisor(false) && !v.CannonTargetingForVisor(true),
+        "enabled cannon targeting applies to combat but never the scan visor");
+  v.cannon_targeting = false;
+  Check(!v.CannonTargetingForVisor(false) && !v.CannonTargetingForVisor(true),
+        "disabled cannon targeting changes neither visor");
+  Click(s, v, pc, kLabelX, RowY(kPortConfigTab, 4), now, actions);
+  Check(v.cannon_targeting && BuildRows(s, v, pc)[4].value == "ON", "cannon targeting toggles on");
+  Click(s, v, pc, kLabelX, RowY(kPortConfigTab, 4), now, actions);
+  Check(!v.cannon_targeting, "cannon targeting toggles off");
   Click(s, v, pc, kLabelX, RowY(kPortConfigTab, 4), now, actions);
   Click(s, v, pc, kLabelX, RowY(kPortConfigTab, 5), now, actions);
   Click(s, v, pc, kLabelX, RowY(kPortConfigTab, 6), now, actions);
+  Click(s, v, pc, kLabelX, RowY(kPortConfigTab, 7), now, actions);
   Check(!v.look_to_lock_on && !v.look_to_grapple && v.look_lock_no_camera_turn,
         "look to lock-on, grapple and camera turn switches");
   v.metroid_hud_size = 2.0f;
-  Click(s, v, pc, kLabelX, RowY(kPortConfigTab, 8), now, actions);
+  Click(s, v, pc, kLabelX, RowY(kPortConfigTab, 9), now, actions);
   Check(s.reset_confirm == kResetPortConfig && Near(v.render_scale, kVrRenderScaleMax), "reset config armed");
-  Click(s, v, pc, kLabelX, RowY(kPortConfigTab, 8), now, actions);
+  Click(s, v, pc, kLabelX, RowY(kPortConfigTab, 9), now, actions);
   Check(Near(v.render_scale, PortVrSettings{}.render_scale) && v.display_refresh_rate == 0.0f &&
             v.remove_cinematic_bars && v.look_to_lock_on && v.look_to_grapple && !v.look_lock_no_camera_turn &&
-            Near(v.metroid_hud_size, 2.0f),
+            v.cannon_targeting && Near(v.metroid_hud_size, 2.0f),
         "reset config");
 
   // The Quest: foveation waits for the next start without density maps.

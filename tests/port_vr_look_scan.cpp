@@ -32,6 +32,10 @@ int main() {
           "scan icon size is independent of bearing around the head");
   }
   Check(Near(iconScale, 0.5f), "near scan icons retain their maximum size clamp");
+  Check(Near(ScanIndicatorScale({10.f, 0.f, 0.f}, 640.f, 16.f, 32.f, 2.f), 0.5f),
+        "cannon reticle clamp remains correct with a non-unit model scale");
+  Check(Near(ScanIndicatorScale({10.f, 0.f, 0.f}, 640.f, 16.f, 128.f, 2.f), 2.f),
+        "cannon reticle preserves its model scale inside the size bounds");
   Check(Near(ScanIndicatorScale({0.f, 100.f, 0.f}, 640.f, 16.f, 32.f), 2.5f),
         "distant scan icons retain their minimum size clamp");
   Check(Near(ScanIndicatorScale({}, 640.f, 16.f, 32.f), 1.f),

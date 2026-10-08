@@ -220,6 +220,10 @@ void DrawVrDebugTab() {
   ImGui::TextWrapped("Off, the scan window shows the view behind it unmagnified, keeping its frame.");
 
   ImGui::SeparatorText("Look targeting");
+  changed |= ImGui::Checkbox("Cannon targeting", &s.cannon_targeting);
+  ImGui::TextWrapped("Aim the cannon to select combat lock-on and grapple targets and place the combat reticle. "
+                     "The scan visor keeps head targeting. Off uses the existing camera/head targeting. "
+                     "Requires a tracked cannon controller.");
   changed |= ImGui::Checkbox("Look to scan", &s.patch_gun_ray_target);
   ImGui::TextWrapped("The scan target and the scan icons follow where the head looks, and a scan lock keeps the "
                      "body's facing (PrimedGun's gun ray / scan target hook).");

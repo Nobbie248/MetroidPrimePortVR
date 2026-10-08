@@ -354,6 +354,7 @@ enum class PortItem : uint8_t {
     Pipelined,
     DeindexVertices,
     LookToScan,
+    CannonTargeting,
     LookToLockOn,
     LookToGrapple,
     LookLockNoCameraTurn,
@@ -396,6 +397,7 @@ inline PortList PortItems(const View& view) {
     add(PortItem::Pipelined);
     add(PortItem::DeindexVertices);
     add(PortItem::LookToScan);
+    add(PortItem::CannonTargeting);
     add(PortItem::LookToLockOn);
     add(PortItem::LookToGrapple);
     add(PortItem::LookLockNoCameraTurn);
@@ -687,6 +689,8 @@ inline Row PortRow(const State& s, const PortVrSettings& v, const View& view, Po
         return {"INDEXED VERTICES ON CPU", OnOff(v.deindex_vertices)};
     case PortItem::LookToScan:
         return {"LOOK TO SCAN", OnOff(v.patch_gun_ray_target)};
+    case PortItem::CannonTargeting:
+        return {"CANNON TARGETING", OnOff(v.cannon_targeting)};
     case PortItem::LookToLockOn:
         return {"LOOK TO LOCK-ON", OnOff(v.look_to_lock_on)};
     case PortItem::LookToGrapple:
@@ -1169,6 +1173,7 @@ inline void ResetAll(PortVrSettings& v) {
     v.index_grip_press_threshold = d.index_grip_press_threshold;
     v.combat_jump_use_primary_button = d.combat_jump_use_primary_button;
     v.gun_targeting_enabled = d.gun_targeting_enabled;
+    v.cannon_targeting = d.cannon_targeting;
     v.gun_targeting_distance = d.gun_targeting_distance;
     v.gun_targeting_radius = d.gun_targeting_radius;
     v.visor_helmet_enabled = d.visor_helmet_enabled;
@@ -1221,6 +1226,7 @@ inline void ResetPortConfig(PortVrSettings& v) {
     v.pipelined_rendering = d.pipelined_rendering;
     v.deindex_vertices = d.deindex_vertices;
     v.patch_gun_ray_target = d.patch_gun_ray_target;
+    v.cannon_targeting = d.cannon_targeting;
     v.look_to_lock_on = d.look_to_lock_on;
     v.look_to_grapple = d.look_to_grapple;
     v.look_lock_no_camera_turn = d.look_lock_no_camera_turn;
@@ -1598,6 +1604,9 @@ inline void Activate(State& s, PortVrSettings& v, const View& view, double now, 
             break;
         case PortItem::LookToLockOn:
             v.look_to_lock_on = !v.look_to_lock_on;
+            break;
+        case PortItem::CannonTargeting:
+            v.cannon_targeting = !v.cannon_targeting;
             break;
         case PortItem::LookToGrapple:
             v.look_to_grapple = !v.look_to_grapple;

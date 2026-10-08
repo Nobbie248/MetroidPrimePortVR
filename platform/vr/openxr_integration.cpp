@@ -1710,7 +1710,8 @@ private:
             head.orientation = {q.x, q.y, q.z, q.w};
         }
         virtual_screen_anchor_.Update(policy.presentation, policy.game_mode, tracked ? &head : nullptr,
-                                      frame.presentation.quad_distance_meters);
+                                      frame.presentation.quad_distance_meters,
+                                      frame.xr_frame.predicted_display_time);
         const auto& pose = virtual_screen_anchor_.Pose();
         frame.presentation.quad_anchored = virtual_screen_anchor_.Valid();
         frame.presentation.quad_pose.orientation =

@@ -6,6 +6,7 @@
 
 #include "vr/openxr_settings_panel.h"
 #include "vr/vr_menu.h"
+#include "vr/virtual_screen_anchor.h"
 
 #include <cmath>
 #include <cstdio>
@@ -517,6 +518,48 @@ void TestPlacement() {
   Check(Near(dot.position, {0.0f, 0.0f, -2.0f + kDotLift}), "dot in front of the panel");
 }
 
+void TestScreenAnchor() {
+  VirtualScreenAnchor anchor;
+  screen_math::Pose head{{1.f, 1.7f, 2.f}, {0.f, 0.f, 0.f, 1.f}};
+  anchor.Update(VRPresentationMode::VirtualScreen, VRGameMode::FrontEnd, nullptr, 2.f);
+  Check(!anchor.Valid(), "screen waits for the first tracked head pose");
+  anchor.Update(VRPresentationMode::VirtualScreen, VRGameMode::FrontEnd, &head, 2.f);
+  Check(anchor.Valid() && Near(anchor.Pose().position, {1.f, 1.7f, 0.f}),
+        "first screen is ahead of the head at head height");
+
+  const float halfSqrt = std::sqrt(0.5f);
+  head.orientation = {0.f, halfSqrt, 0.f, halfSqrt};
+  head.position = {3.f, 1.8f, 4.f};
+  anchor.Update(VRPresentationMode::VirtualScreen, VRGameMode::FrontEnd, &head, 2.f);
+  Check(Near(anchor.Pose().position, {1.f, 1.7f, 0.f}),
+        "turning or moving the head does not drag an open screen");
+
+  anchor.Update(VRPresentationMode::Immersive, VRGameMode::InGame, &head, 2.f);
+  Check(!anchor.Valid(), "gameplay releases the previous screen anchor");
+  anchor.Update(VRPresentationMode::VirtualScreen, VRGameMode::Paused, nullptr, 2.f);
+  Check(anchor.Valid() && Near(anchor.Pose().position, {1.f, 1.8f, 4.f}),
+        "menu opening during a tracking blip uses the last headset facing");
+  Check(Near(screen_math::Rotate(anchor.Pose().orientation, {0.f, 0.f, -1.f}), {-1.f, 0.f, 0.f}),
+        "reopened menu faces the new headset yaw");
+
+  head.orientation = {0.f, -halfSqrt, 0.f, halfSqrt};
+  anchor.Update(VRPresentationMode::VirtualScreen, VRGameMode::Cinematic, &head, 2.f);
+  Check(Near(anchor.Pose().position, {5.f, 1.8f, 4.f}),
+        "cinema opening after a menu captures a new facing without gameplay between");
+  head.orientation = {halfSqrt, 0.f, 0.f, halfSqrt};
+  anchor.Update(VRPresentationMode::VirtualScreen, VRGameMode::Cinematic, &head, 2.f);
+  Check(Near(anchor.Pose().position, {5.f, 1.8f, 4.f}), "cinema stays anchored while looking around");
+
+  anchor.Reset();
+  anchor.Update(VRPresentationMode::VirtualScreen, VRGameMode::Cinematic, nullptr, 2.f);
+  Check(!anchor.Valid(), "recenter discards poses from the old reference space");
+  head.orientation = {0.5f, 0.f, 0.f, std::sqrt(0.75f)};
+  anchor.Update(VRPresentationMode::VirtualScreen, VRGameMode::Cinematic, &head, 2.f);
+  Check(Near(anchor.Pose().position, {3.f, 1.8f, 2.f}) &&
+            Near(screen_math::Rotate(anchor.Pose().orientation, {0.f, 1.f, 0.f}), {0.f, 1.f, 0.f}),
+        "screen remains upright when captured with head pitch");
+}
+
 void TestControls() {
   using settings_panel::Controls;
   using settings_panel::ToggleOptions;
@@ -629,6 +672,7 @@ int main() {
   TestConfig();
   TestDebug();
   TestPlacement();
+  TestScreenAnchor();
   TestControls();
   std::puts("vr menu tests passed");
   return 0;

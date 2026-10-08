@@ -14,6 +14,7 @@
 #include "vr/openxr_diagnostics.h"
 #include "vr/openxr_screen_math.h"
 #include "vr/prime_vr_policy.h"
+#include "vr/virtual_screen_anchor.h"
 #include "vr/vr_log.h"
 #include "vr/vr_settings.h"
 #include <aurora/gfx.h>
@@ -172,21 +173,6 @@ std::array<float, 3> CenterPosition(const OpenXRFrame& frame) noexcept {
         (left.position.y + right.position.y) * 0.5f,
         (left.position.z + right.position.z) * 0.5f,
     };
-}
-
-// Places an upright screen `distance` metres ahead of the head. Only the
-// head's yaw is used, so the screen is never pitched or rolled by whatever the
-// player's head happened to be doing when it was anchored.
-XrPosef ScreenPoseAhead(const OpenXRFrame& frame, float distance) noexcept {
-    const auto& q = frame.views[0].pose.orientation;
-    const float yaw =
-        std::atan2(2.0f * (q.x * q.z + q.w * q.y), 1.0f - 2.0f * (q.x * q.x + q.y * q.y));
-    const std::array<float, 3> center = CenterPosition(frame);
-    XrPosef pose{};
-    pose.orientation = {0.0f, std::sin(yaw * 0.5f), 0.0f, std::cos(yaw * 0.5f)};
-    pose.position = {center[0] - std::sin(yaw) * distance, center[1],
-                     center[2] - std::cos(yaw) * distance};
-    return pose;
 }
 
 void IdentityEye(AuroraStereoEye& eye) noexcept {
@@ -1112,7 +1098,7 @@ private:
             // Both of these read this frame's located head pose and must run
             // before FinishFrame submits a layer built from it.
             ServiceRecenterRequest();
-            UpdateVirtualScreenPose(frame);
+            UpdateVirtualScreenPose(frame, policy);
             if (input_ != nullptr) {
                 const diagnostics::ScopedStage input_timer(diagnostics::Stage::InputSync);
                 // After the screen is placed, so the pointer aims at this
@@ -1306,7 +1292,7 @@ private:
         NoteEyeSize(packet);
         // The head pose this packet was located with places the screens and aims the pointer.
         ServiceRecenterRequest();
-        UpdateVirtualScreenPose(packet);
+        UpdateVirtualScreenPose(packet, policy);
         if (input_ != nullptr) {
             const diagnostics::ScopedStage input_timer(diagnostics::Stage::InputSync);
             input_->Sync(packet.xr_frame.predicted_display_time, PointerScreen(packet, policy, immersive),
@@ -1442,7 +1428,7 @@ private:
         NoteEyeSize(packet);
         // The head pose this packet was located with places the screens and aims the pointer.
         ServiceRecenterRequest();
-        UpdateVirtualScreenPose(packet);
+        UpdateVirtualScreenPose(packet, policy);
         if (input_ != nullptr) {
             const diagnostics::ScopedStage input_timer(diagnostics::Stage::InputSync);
             input_->Sync(packet.xr_frame.predicted_display_time, PointerScreen(packet, policy, immersive),
@@ -1709,23 +1695,27 @@ private:
         }
     }
 
-    // Anchors the menu screen in the application space and holds it there. The
-    // pose is captured once, from the first frame whose head pose is good enough
-    // to place it, and released again by a recenter or an origin change.
-    void UpdateVirtualScreenPose(OpenXRBackendFrame& frame) noexcept {
-        if (frame.presentation.mode != OpenXRFrameMode::VirtualScreen) {
-            return;
-        }
+    // Each newly opened menu/cinema screen captures the latest HMD facing.
+    // Keep tracking the head during gameplay too, for a transition on a frame
+    // whose tracking is unavailable; the visible screen then stays anchored.
+    void UpdateVirtualScreenPose(OpenXRBackendFrame& frame, const PrimeVRPolicySnapshot& policy) noexcept {
         constexpr XrViewStateFlags kPoseUsable =
             XR_VIEW_STATE_ORIENTATION_VALID_BIT | XR_VIEW_STATE_POSITION_VALID_BIT;
-        if (!virtual_screen_pose_valid_ && frame.xr_frame.views_valid &&
-            (frame.xr_frame.view_state_flags & kPoseUsable) == kPoseUsable) {
-            virtual_screen_pose_ = ScreenPoseAhead(
-                frame.xr_frame, std::max(0.25f, frame.presentation.quad_distance_meters));
-            virtual_screen_pose_valid_ = true;
+        screen_math::Pose head{};
+        const bool tracked = frame.xr_frame.views_valid &&
+                             (frame.xr_frame.view_state_flags & kPoseUsable) == kPoseUsable;
+        if (tracked) {
+            head.position = CenterPosition(frame.xr_frame);
+            const auto& q = frame.xr_frame.views[0].pose.orientation;
+            head.orientation = {q.x, q.y, q.z, q.w};
         }
-        frame.presentation.quad_anchored = virtual_screen_pose_valid_;
-        frame.presentation.quad_pose = virtual_screen_pose_;
+        virtual_screen_anchor_.Update(policy.presentation, policy.game_mode, tracked ? &head : nullptr,
+                                      frame.presentation.quad_distance_meters);
+        const auto& pose = virtual_screen_anchor_.Pose();
+        frame.presentation.quad_anchored = virtual_screen_anchor_.Valid();
+        frame.presentation.quad_pose.orientation =
+            {pose.orientation[0], pose.orientation[1], pose.orientation[2], pose.orientation[3]};
+        frame.presentation.quad_pose.position = {pose.position[0], pose.position[1], pose.position[2]};
     }
 
     // The rectangle the game picture covers on the screen this frame shows, in
@@ -1908,7 +1898,7 @@ private:
         last_immersive_ = false;
         // The anchored menu screen is placed in the same space, so it is stale
         // for exactly the same reasons and is re-placed on the next frame.
-        virtual_screen_pose_valid_ = false;
+        virtual_screen_anchor_.Reset();
     }
 
     void SetInterpolationActive(bool active) noexcept {
@@ -2124,8 +2114,7 @@ private:
     std::string last_error_;
     std::array<float, 3> base_position_{};
     bool base_position_valid_ = false;
-    XrPosef virtual_screen_pose_{{0.0f, 0.0f, 0.0f, 1.0f}, {0.0f, 0.0f, 0.0f}};
-    bool virtual_screen_pose_valid_ = false;
+    VirtualScreenAnchor virtual_screen_anchor_{};
     bool last_immersive_ = false;
     uint64_t applied_session_run_serial_ = 0;
     bool session_was_active_ = false;

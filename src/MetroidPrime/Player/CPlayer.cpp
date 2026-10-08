@@ -963,6 +963,26 @@ void CPlayer::UpdateTouchLook(float dt, CStateManager& mgr) {
   }
 }
 
+// PortVr: the player steers Samus on foot in first person, with no orbit lock
+// and nothing holding the controls. The headset's own movement (the snap turn,
+// directional movement) reads the controllers directly rather than the pad,
+// which CStateManager::ProcessInput blanks for a disabled input, so it checks
+// the same things itself. Mouse aim owns the facing and the strafe when it is
+// on (UpdateMouseAim, ComputeMovement); the debug free camera takes the pad.
+bool CPlayer::PortVrPlayerSteers(const CStateManager& mgr) const {
+#ifdef TARGET_PC
+  const CCameraManager* cameras = mgr.GetCameraManager();
+  return !MouseControlsAllowed(mgr) && mgr.GetGameState() == CStateManager::kGS_Running &&
+         !GetDisableInput() && !x760_controlsFrozen && !GetFrozenState() &&
+         mgr.GetPlayerState()->IsAlive() && x2f8_morphBallState == kMS_Unmorphed &&
+         x2f4_cameraState == kCS_FirstPerson && x304_orbitState == kOS_NoOrbit && cameras != nullptr &&
+         cameras->IsInFPCamera() && !cameras->IsInCinematicCamera() &&
+         !cameras->GetCurrentCamera(mgr).DisablesInput() && !PortFreeCam::Active();
+#else
+  return false;
+#endif
+}
+
 // PortVr: PrimedGun's snap turn. A flick of the look stick (vr/vr_pad.cpp)
 // turns Samus by the snap turn angle at once, where PrimedGun rotated the
 // player's transform in memory. The camera's frame blend and the cannon's
@@ -974,17 +994,7 @@ void CPlayer::PortVrSnapTurn(CStateManager& mgr) {
   if (degrees == 0.f) {
     return;
   }
-  const CCameraManager* cameras = mgr.GetCameraManager();
-  // Mouse aim owns the facing when it is on (UpdateMouseAim).
-  const bool allowed =
-      !MouseControlsAllowed(mgr) && mgr.GetGameState() == CStateManager::kGS_Running &&
-      !GetDisableInput() && !x760_controlsFrozen && !GetFrozenState() &&
-      mgr.GetPlayerState()->IsAlive() && x2f8_morphBallState == kMS_Unmorphed &&
-      x2f4_cameraState == kCS_FirstPerson && x304_orbitState == kOS_NoOrbit &&
-      (x3b8_grappleState == kGS_None || x3b8_grappleState == kGS_Firing) && cameras != nullptr &&
-      cameras->IsInFPCamera() && !cameras->IsInCinematicCamera() &&
-      !cameras->GetCurrentCamera(mgr).DisablesInput();
-  if (!allowed) {
+  if (!PortVrPlayerSteers(mgr) || (x3b8_grappleState != kGS_None && x3b8_grappleState != kGS_Firing)) {
     return;
   }
   // A positive yaw turns left; the snap's positive degrees turn right.

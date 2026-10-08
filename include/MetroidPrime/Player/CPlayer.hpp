@@ -304,6 +304,7 @@ public:
   void UpdateMouseAim(CStateManager& mgr);
   void UpdateTouchLook(float dt, CStateManager& mgr); // port
   void PortVrSnapTurn(CStateManager& mgr);
+  bool PortVrPlayerSteers(const CStateManager& mgr) const;
   void UpdateMorphBallTransition(float dt, CStateManager& mgr);
   void UpdateAimTarget(CStateManager& mgr);
   void UpdateAimTargetTimer(float dt);

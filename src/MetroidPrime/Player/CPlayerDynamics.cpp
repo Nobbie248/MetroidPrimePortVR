@@ -1,6 +1,9 @@
 #include "MetroidPrime/Player/CPlayer.hpp"
 #include "port_debug.h"
 #include "port_mouse.h"
+#ifdef TARGET_PC
+#include "vr/vr_pad.h"
+#endif
 
 #include "MetroidPrime/Player/CGameState.hpp"
 #include "MetroidPrime/Cameras/CCameraManager.hpp"
@@ -331,6 +334,19 @@ void CPlayer::ComputeMovement(const CFinalInput& input, CStateManager& mgr, floa
     SetAngularVelocityOR(CAxisAngle::Identity());
   }
 #ifdef TARGET_PC
+  // PortVr: PrimedGun's directional movement (vr/vr_directional_move.h). The
+  // headset's move stick walks and strafes Samus toward where its controller
+  // points, at PrimedGun's speed and accelerations, in place of the stick's
+  // walk; the look stick still turns her and the jump is the game's. The ramp
+  // starts from the speed she carries out of the last tick, where PrimedGun
+  // read it at the end of the frame, before this tick's friction.
+  PortVr::VrMove vrMove;
+  if (PortVrPlayerSteers(mgr)) {
+    const CVector3f velocity = GetVelocityWR();
+    const float flatSpeed = CVector2f(velocity.GetX(), velocity.GetY()).Magnitude();
+    vrMove = PortVr::VrDirectionalMove(flatSpeed, x258_movementState == NPlayer::kMS_OnGround, dt,
+                                       mgr.GetUpdateFrameIndex());
+  }
   // A fast morph carries its velocity through without friction (gravity still
   // applies through JumpInput). A fast unmorph is instant.
   if (!IsMorphBallTransitioning() || !IsFastMorphTransition())
@@ -415,6 +431,13 @@ void CPlayer::ComputeMovement(const CFinalInput& input, CStateManager& mgr, floa
     forwardForce = 0.f;
   }
   if (x304_orbitState == kOS_NoOrbit || x3dd_lookButtonHeld) {
+#ifdef TARGET_PC
+    // PortVr: directional movement sets the velocity below instead.
+    if (vrMove.owns) {
+      strafeForce = 0.f;
+      forwardForce = 0.f;
+    }
+#endif
     const CVector3f force(strafeForce, forwardForce, jumpInput);
     ApplyForceOR(force, CAxisAngle::Identity());
     if (turnInput != 0.f) {
@@ -463,6 +486,14 @@ void CPlayer::ComputeMovement(const CFinalInput& input, CStateManager& mgr, floa
       }
     }
   }
+#ifdef TARGET_PC
+  // PortVr: directional movement's horizontal velocity, in her frame; the
+  // vertical (gravity, the jump's force applied above) stays the game's.
+  if (vrMove.moving) {
+    const CVector3f planar = GetTransform().Rotate(CVector3f(vrMove.right, vrMove.forward, 0.f));
+    SetVelocityWR(CVector3f(planar.GetX(), planar.GetY(), GetVelocityWR().GetZ()));
+  }
+#endif
   x9c5_29_hitWall = false;
   if (x2d4_accelerationChangeTimer > 0.f) {
     x2d0_curAcceleration = 0;

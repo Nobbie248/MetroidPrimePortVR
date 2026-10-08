@@ -267,6 +267,36 @@ void DrawVrDebugTab() {
   ImGui::Text("Beam wheel: %s   hover: %s", pad.weapon_panel ? "open" : "closed",
               pad.weapon_panel ? BeamName(pad.weapon_selected) : "-");
 
+  ImGui::SeparatorText("Movement");
+  changed |= ImGui::Checkbox("Directional movement (the move stick strafes)", &s.directional_movement_enabled);
+  ImGui::TextWrapped("Outside a lock, the move stick walks and strafes toward where its controller points and only "
+                     "the look stick turns (PrimedGun's left stick strafe). Off, pushing it sideways turns Samus "
+                     "as on the TV.");
+  {
+    int stick = s.directional_movement_use_right_stick ? 1 : 0;
+    if (ImGui::Combo("Movement stick", &stick, "Left\0Right\0")) {
+      s.directional_movement_use_right_stick = stick == 1;
+      changed = true;
+    }
+    int direction = s.directional_movement_use_hmd_direction ? 1 : 0;
+    if (ImGui::Combo("Movement direction", &direction, "Controller\0Headset\0")) {
+      s.directional_movement_use_hmd_direction = direction == 1;
+      changed = true;
+    }
+  }
+  changed |= ImGui::SliderFloat("Movement deadzone", &s.directional_movement_deadzone, 0.f, 0.95f, "%.2f");
+  changed |= ImGui::SliderFloat("Movement speed", &s.directional_movement_speed, 1.f, 60.f, "%.1f units/s");
+  changed |= ImGui::SliderFloat("Movement acceleration", &s.directional_movement_accel, 1.f, 120.f,
+                                "%.0f units/s/s");
+  changed |= ImGui::SliderFloat("Air acceleration", &s.directional_movement_air_accel, 0.f, 60.f, "%.1f units/s/s");
+  ImGui::TextWrapped("PrimedGun: deadzone 0.25, speed 14, acceleration 45, air acceleration 8.");
+  if (pad.move_owned) {
+    ImGui::Text("Move stick: %s   heading: %+.0f deg", pad.move_moving ? "walking" : "centred",
+                pad.move_heading_degrees);
+  } else {
+    ImGui::Text("Move stick: the game's walk");
+  }
+
   ImGui::SeparatorText("Visor gesture");
   changed |= ImGui::Checkbox("Pick visors with the off hand next to the head", &s.xr_dpad_enabled);
   ImGui::TextWrapped("Hold the off-hand controller beside the headset and push its stick: up combat, left scan, "

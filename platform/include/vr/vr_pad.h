@@ -17,6 +17,10 @@
 //
 // The snap turn (vr_snap_turn.h): with the setting on, a flick of the look
 // stick turns Samus by the snap turn angle instead of turning her smoothly.
+//
+// Directional movement (vr_directional_move.h): with the setting on, the move
+// stick walks and strafes toward where its controller points, and only the
+// look stick turns.
 
 #pragma once
 
@@ -43,6 +47,28 @@ void VrNoteInGameMenu(bool open) noexcept;
 // (menu, map, cinematic, morph ball) is dropped.
 float VrTakeSnapTurn() noexcept;
 
+// Directional movement for one tick: PrimedGun's left stick strafe
+// (vr_directional_move.h).
+struct VrMove {
+    // The move stick walks Samus here rather than through the pad: the game's
+    // walk force from the stick is left out. Set in gameplay outside an orbit
+    // lock or a grapple, with the setting on and the heading's pose tracked.
+    bool owns = false;
+    // Past the deadzone: her horizontal velocity, in her frame (x right,
+    // y forward), game units per second. Otherwise nothing is set and the
+    // game's friction stops her.
+    bool moving = false;
+    float right = 0.0f;
+    float forward = 0.0f;
+};
+// Game thread, from CPlayer::ComputeMovement while the player steers Samus on
+// foot (CPlayer::PortVrPlayerSteers). `flatSpeed` is the horizontal speed she
+// carries into the tick, `onGround` picks the ground or the air acceleration,
+// `tick` is CStateManager::GetUpdateFrameIndex(): the speed ramps up over
+// consecutive ticks and starts again from her speed after any tick without a
+// call (a lock, the morph ball, a menu).
+VrMove VrDirectionalMove(float flatSpeed, bool onGround, float dt, uint32_t tick) noexcept;
+
 // What the pad synthesis last decided, for the game hooks and the overlays.
 struct VrPadState {
     bool active = false;        // the VR controllers own port 0
@@ -53,6 +79,9 @@ struct VrPadState {
     uint32_t weapon_hand = 1;   // 0 left, 1 right
     bool visor_zone = false;    // the off hand is at the head: its stick is the D-pad
     int visor_direction = -1;   // VisorDpad::Dir: 0 up (combat), 1 right (X-ray), 2 down (thermal), 3 left (scan)
+    bool move_owned = false;    // directional movement has the move stick (VrMove::owns)
+    bool move_moving = false;   // and the stick is past its deadzone
+    float move_heading_degrees = 0.0f; // the heading's yaw from Samus's forward, positive right
 };
 VrPadState GetVrPadState() noexcept;
 

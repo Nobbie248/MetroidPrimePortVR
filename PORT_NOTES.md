@@ -1,3 +1,58 @@
+## VR: directional movement, PrimedGun's left stick strafe (2026-10-08)
+
+The directional movement settings (LEFT STICK STRAFE, MOVEMENT DIRECTION, the
+deadzone, the speed and the two accelerations) were saved but not read: the
+move stick walked forward and back and its sideways push turned Samus, as on
+the TV. Now, with LEFT STICK STRAFE on (the default), the move stick works as
+PrimedGun's `UpdateDirectionalMovement` made it:
+
+- Outside an orbit lock, pushing it up walks toward where its controller
+  points, and sideways strafes across that. MOVEMENT DIRECTION HEADSET uses
+  the head's heading instead. Only the look stick turns her.
+- Past the deadzone (0.25), her horizontal velocity is set along the stick at
+  a speed ramping toward 14 units/s times the stick's push. The ramp starts
+  from the speed she carries, no faster than that target, and climbs at 45
+  units/s/s on the ground or 8 in the air. Easing the stick back drops the
+  speed to the new target at once. The direction follows the stick at once,
+  in the air too. Inside the deadzone the game's friction stops her.
+- In an orbit lock the stick is the game's orbit strafe again. In a grapple
+  its X turns the swing again, as with the setting off. With the snap turn on
+  nothing else could turn it: the look stick only snaps, and a snap waits for
+  the grapple to end. PrimedGun's lock layout, which L held on the grapple
+  point gave it, did the same. With the off hand at the head (the visor
+  gesture) nothing walks, whichever stick moves.
+  The jump stays the game's, and the stick's up still reaches the pad, since
+  the jump's arc reads it.
+
+PrimedGun wrote the player's velocity in memory at the end of each frame, over
+the game's own walk along the body. Here `CPlayer::ComputeMovement` leaves out
+the stick's walk force and sets the velocity itself during the tick, so Samus
+moves at exactly the ramp's speed, with no walk along the body under it.
+`vr_pad.cpp` reads the stick along the heading once per frame and takes the
+move stick's X off the pad's turn. `VrDirectionalMove` runs the ramp in the
+tick, from the speed she carries out of the last one, and starts it again
+after any tick it did not run (`CStateManager::GetUpdateFrameIndex`).
+
+The heading is where the controller's aim pose points, levelled, in the
+tracking space. That space's forward is the body's forward (the eyes and the
+cannon are placed from it with no yaw of their own). It is exact however the
+controller is pitched or rolled. Past about 72 degrees up or down the aim has
+no heading left, so the controller's top takes over, all of it when vertical.
+PrimedGun took a yaw angle out of the quaternion instead, which drifts once
+the controller is pitched: aimed 45 degrees down with a 30-degree heading, it
+walked 22 degrees off forward.
+
+The gate is the snap turn's, now `CPlayer::PortVrPlayerSteers`: first person,
+unmorphed, no lock, nothing disabling the input or freezing the controls, no
+cinematic, no mouse aim. It also leaves out the debug free camera now, for
+the snap turn too. Header-only maths in `platform/include/vr/vr_directional_move.h`
+(test `port_vr_directional_move_tests`); F1 VR tab "Movement" section with a
+live readout. Both launchers' movement keys lost their "not active yet" tag.
+
+build/vr and build/nooxr: 64/64 port tests. Desktop Landing Site boot with
+VR off is clean. Tried in the headset: walking, strafing and turning a grapple
+swing with the snap turn on.
+
 ## VR: the controllers keep working when the desktop window loses focus (2026-10-08)
 
 On PC, the headset controllers' buttons and sticks did nothing once the game's

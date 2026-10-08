@@ -691,6 +691,10 @@ if(MP_BUILD_TESTS)
     # (platform/include/vr/vr_snap_turn.h): header-only, no game types.
     add_executable(port_vr_snap_turn_tests tests/port_vr_snap_turn.cpp)
     target_include_directories(port_vr_snap_turn_tests PRIVATE platform/include)
+    # Directional movement's heading, stick reading and speed ramp
+    # (platform/include/vr/vr_directional_move.h): header-only, no game types.
+    add_executable(port_vr_directional_move_tests tests/port_vr_directional_move.cpp)
+    target_include_directories(port_vr_directional_move_tests PRIVATE platform/include)
     # Drives a real SDL virtual gamepad through the touch overlay's own code.
     # That code was Android-only and untested, so a wrong button mapping could
     # not fail anywhere except on a phone.
@@ -834,7 +838,7 @@ if(MP_BUILD_TESTS)
     target_link_libraries(port_launcher_tests PRIVATE primedgun_launcher_core)
     add_test(NAME port_launcher_tests COMMAND port_launcher_tests "${CMAKE_CURRENT_BINARY_DIR}/launcher-test-data")
     set_tests_properties(port_launcher_tests PROPERTIES TIMEOUT 15 LABELS port)
-    foreach(test IN ITEMS port_remastered_report_tests port_buffer_tests port_ai_tests port_randomizer_tests port_apclient_tests port_ap_solo_tests port_ap_logic_tests port_rando_gen_tests port_musyx_tests port_musyx_charge_loop_tests port_disc_tests port_mouse_tests port_touch_pad_tests port_json_tests port_ws_tests port_mods_tests port_actor_collision_bounds_tests port_room_env_tests port_room_geo_tests port_hd_font_tests port_hud_bars_tests port_remastered_astc_tests port_remastered_hud_tests port_remastered_movie_tests port_gallery_tests port_remastered_nso_tests port_remastered_text_tests port_remastered_uv_tests port_remastered_anuv_tests port_remastered_lits_tests port_remastered_blend_tests port_remastered_image_tests port_remastered_effect_tests port_remastered_effect_convert_tests port_remastered_effect_import_tests port_importers_tests port_custom_res_tests port_hold_toggle_tests port_env_tests port_tick_pair_tests port_livesplit_tests port_discord_tests port_update_check_tests port_savestate_tests port_timing_tests port_audio_math_tests port_vr_stereo_tests port_vr_look_scan_tests port_vr_visor_dpad_tests port_vr_beam_wheel_tests port_vr_menu_tests port_vr_snap_turn_tests)
+    foreach(test IN ITEMS port_remastered_report_tests port_buffer_tests port_ai_tests port_randomizer_tests port_apclient_tests port_ap_solo_tests port_ap_logic_tests port_rando_gen_tests port_musyx_tests port_musyx_charge_loop_tests port_disc_tests port_mouse_tests port_touch_pad_tests port_json_tests port_ws_tests port_mods_tests port_actor_collision_bounds_tests port_room_env_tests port_room_geo_tests port_hd_font_tests port_hud_bars_tests port_remastered_astc_tests port_remastered_hud_tests port_remastered_movie_tests port_gallery_tests port_remastered_nso_tests port_remastered_text_tests port_remastered_uv_tests port_remastered_anuv_tests port_remastered_lits_tests port_remastered_blend_tests port_remastered_image_tests port_remastered_effect_tests port_remastered_effect_convert_tests port_remastered_effect_import_tests port_importers_tests port_custom_res_tests port_hold_toggle_tests port_env_tests port_tick_pair_tests port_livesplit_tests port_discord_tests port_update_check_tests port_savestate_tests port_timing_tests port_audio_math_tests port_vr_stereo_tests port_vr_look_scan_tests port_vr_visor_dpad_tests port_vr_beam_wheel_tests port_vr_menu_tests port_vr_snap_turn_tests port_vr_directional_move_tests)
         add_test(NAME ${test} COMMAND ${test})
         set_tests_properties(${test} PROPERTIES TIMEOUT 15 LABELS port)
         aurora_copy_runtime_dlls(${test})

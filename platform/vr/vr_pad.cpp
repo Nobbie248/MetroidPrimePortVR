@@ -6,6 +6,7 @@
 #include "vr/openxr_integration.h"
 #include "vr/openxr_screen_math.h"
 #include "vr/vr_beam_wheel.h"
+#include "vr/vr_directional_move.h"
 #include "vr/vr_settings.h"
 #include "vr/vr_snap_turn.h"
 #include "vr/vr_visor_dpad.h"
@@ -53,12 +54,27 @@ struct WheelState {
     uint32_t pulse_samples = 0;
 };
 
+// Directional movement: VrPadUpdate's reading of the move stick, for the ticks
+// that follow it (VrDirectionalMove).
+struct MoveState {
+    bool owns = false;
+    std::array<float, 2> heading{0.0f, 1.0f};
+    DirectionalMove::Wish wish;
+    float speed = 0.0f;
+    float accel = 0.0f;
+    float air_accel = 0.0f;
+};
+
 std::mutex g_mutex;
 VrPadState g_state;
 WheelState g_wheel;
 VisorDpad::Tracker g_visor;
 SnapTurn::Tracker g_snap;
 float g_snap_pending = 0.0f; // degrees, positive right: VrTakeSnapTurn's, game thread only
+MoveState g_move;             // game thread only, as the ramp and its tick
+DirectionalMove::Ramp g_move_ramp;
+bool g_move_ramp_ticked = false;
+uint32_t g_move_ramp_tick = 0;
 bool g_was_active = false;
 bool g_recenter_was_pressed = false; // the right stick click's last state
 bool g_was_gameplay = false;
@@ -220,7 +236,7 @@ void ApplyClassic(const OpenXRControllerState& left, const OpenXRControllerState
 
 // Gameplay and orbit lock: PrimedGun's first-person layout.
 void ApplyGameplay(const OpenXRControllerState& left, const OpenXRControllerState& right, uint32_t weapon_hand,
-                   bool orbit, bool grips_ready, const PortVrSettings& settings,
+                   bool orbit, bool grapple, bool grips_ready, const PortVrSettings& settings,
                    const std::array<std::string, 2>& profiles, PADStatus& pad) {
     const OpenXRControllerState& weapon = weapon_hand == 1 ? right : left;
     const OpenXRControllerState& off = weapon_hand == 1 ? left : right;
@@ -230,13 +246,21 @@ void ApplyGameplay(const OpenXRControllerState& left, const OpenXRControllerStat
     const bool a_jump = settings.combat_jump_use_primary_button;
 
     // Forward / back on the move stick. Sideways: the orbit strafe in a lock,
-    // otherwise the look stick's turn (directional movement, which takes the
-    // move stick's X off the pad, is a later phase; until then both turn).
+    // otherwise the look stick's turn. Directional movement takes the move
+    // stick's X for its strafe (VrDirectionalMove), as PrimedGun did; without
+    // it that X turns too, as on the TV. The Y stays on the pad either way:
+    // the game's jump reads it for the jump's arc.
+    //
+    // A grapple has no strafe, and its swing turns on the pad's X
+    // (CPlayer::ApplyGrappleForces), so there the move stick's X turns again.
+    // With the snap turn on it is the only thing that does: the look stick
+    // then only snaps, and a snap waits until the grapple is over. PrimedGun's
+    // lock layout, which L held on the grapple point gave it, did the same.
     pad.stickY = ToStick(move.thumbstick_y);
     if (orbit) {
         pad.stickX = ToStick(move.thumbstick_x);
     } else {
-        float turn = move.thumbstick_x;
+        float turn = settings.directional_movement_enabled && !grapple ? 0.0f : move.thumbstick_x;
         if (!settings.snap_turn_enabled && !modifier) {
             const float sensitivity = std::min(settings.look_yaw_sensitivity, 1.0f);
             turn += look.thumbstick_x * sensitivity;
@@ -301,6 +325,7 @@ void VrPadUpdate(const CStateManager* mgr) noexcept {
         g_visor.Reset();
         g_snap.Reset();
         g_snap_pending = 0.0f;
+        g_move = {};
         g_gameplay_samples = 0;
         return;
     }
@@ -317,6 +342,7 @@ void VrPadUpdate(const CStateManager* mgr) noexcept {
     // The mapping, from the game's own state.
     bool gameplay = false;
     bool orbit = false;
+    bool grapple = false;
     bool visor_press_accepted = false;
     bool visor_changing = false;
     if (mgr != nullptr && mgr->GetPlayer() != nullptr) {
@@ -329,6 +355,7 @@ void VrPadUpdate(const CStateManager* mgr) noexcept {
             const CPlayer::EPlayerOrbitState state = player->GetOrbitState();
             orbit = state == CPlayer::kOS_OrbitObject || state == CPlayer::kOS_ForcedOrbitObject ||
                     state == CPlayer::kOS_OrbitPoint || state == CPlayer::kOS_OrbitCarcass;
+            grapple = state == CPlayer::kOS_Grapple; // from the pull to the jump off
             visor_press_accepted = VisorPressAccepted(*mgr, *player);
             visor_changing = mgr->GetPlayerState()->GetIsVisorTransitioning();
         }
@@ -388,6 +415,30 @@ void VrPadUpdate(const CStateManager* mgr) noexcept {
             g_snap_pending = 0.0f;
         }
     }
+    // Directional movement: the move stick read along its controller's heading
+    // (or the head's), for the ticks' CPlayer::ComputeMovement. In an orbit
+    // lock the stick is the game's orbit strafe, as PrimedGun stood down while
+    // the lock was held on a target, and in a grapple the swing's. With the
+    // off hand at the head nothing walks, whichever stick moves: PrimedGun's
+    // rule too.
+    {
+        const OpenXRControllerState& hand = settings.directional_movement_use_right_stick ? right : left;
+        const OpenXRPoseState& pose =
+            settings.directional_movement_use_hmd_direction ? snapshot.head_pose : hand.aim_pose;
+        g_move = {};
+        g_move.owns = settings.directional_movement_enabled && gameplay && !orbit && !grapple && hand.connected &&
+                      pose.valid;
+        if (g_move.owns) {
+            g_move.heading = DirectionalMove::Heading(pose.orientation);
+            if (!visor.zone) {
+                g_move.wish = DirectionalMove::FromStick(g_move.heading, hand.thumbstick_x, hand.thumbstick_y,
+                                                         settings.directional_movement_deadzone);
+            }
+            g_move.speed = settings.directional_movement_speed;
+            g_move.accel = settings.directional_movement_accel;
+            g_move.air_accel = settings.directional_movement_air_accel;
+        }
+    }
     // While the hand is at the head its stick is the D-pad's alone: no walking,
     // strafing, turning or jumping from it.
     if (visor.zone) {
@@ -410,7 +461,8 @@ void VrPadUpdate(const CStateManager* mgr) noexcept {
     PADStatus pad{};
     pad.err = PAD_ERR_NONE;
     if (gameplay) {
-        ApplyGameplay(left, right, weapon_hand, orbit, grips_ready, settings, snapshot.interaction_profiles, pad);
+        ApplyGameplay(left, right, weapon_hand, orbit, grapple, grips_ready, settings, snapshot.interaction_profiles,
+                      pad);
     } else {
         ApplyClassic(left, right, weapon_hand, settings, snapshot.interaction_profiles, pad);
     }
@@ -429,6 +481,10 @@ void VrPadUpdate(const CStateManager* mgr) noexcept {
     g_state.weapon_hand = weapon_hand;
     g_state.visor_zone = visor.zone;
     g_state.visor_direction = static_cast<int>(visor.direction);
+    g_state.move_owned = g_move.owns;
+    g_state.move_moving = g_move.wish.moving;
+    g_state.move_heading_degrees =
+        g_move.owns ? std::atan2(g_move.heading[0], g_move.heading[1]) * (180.0f / 3.14159265358979f) : 0.0f;
 }
 
 void VrNoteInGameMenu(bool open) noexcept { g_in_game_menu = open; }
@@ -437,6 +493,30 @@ float VrTakeSnapTurn() noexcept {
     const float turn = g_snap_pending;
     g_snap_pending = 0.0f;
     return turn;
+}
+
+VrMove VrDirectionalMove(float flatSpeed, bool onGround, float dt, uint32_t tick) noexcept {
+    // The ramp carries on from the tick before, or within a tick (a grapple's
+    // jump-off computes the movement twice); after any gap it starts again
+    // from the speed she has, as PrimedGun's did whenever it stood down.
+    if (!g_move_ramp_ticked || (tick != g_move_ramp_tick && tick != g_move_ramp_tick + 1)) {
+        g_move_ramp.Reset();
+    }
+    g_move_ramp_ticked = true;
+    g_move_ramp_tick = tick;
+
+    VrMove move;
+    move.owns = g_move.owns;
+    if (!g_move.owns || !g_move.wish.moving) {
+        g_move_ramp.Reset();
+        return move;
+    }
+    const float speed = g_move_ramp.Step(flatSpeed, g_move.speed * g_move.wish.push,
+                                         onGround ? g_move.accel : g_move.air_accel, dt);
+    move.moving = true;
+    move.right = g_move.wish.right * speed;
+    move.forward = g_move.wish.forward * speed;
+    return move;
 }
 
 VrPadState GetVrPadState() noexcept {

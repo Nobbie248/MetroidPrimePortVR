@@ -94,7 +94,7 @@ void TestSettingsFile(const fs::path& root) {
   std::string error;
   Check(file.Save(path, error), "the file saves");
   Check(ReadFile(path) == expected, "the saved bytes are the edited text");
-  Check(!fs::exists(path.string() + ".tmp"), "the temporary file is renamed away");
+  Check(!fs::exists(path.string() + ".launcher.tmp"), "the temporary file is renamed away");
   PortSettingsFile reread;
   Check(reread.Load(path) && reread.Get("vr_rumble_hand") == "left", "the saved file reads back");
   PortSettingsFile missing;
@@ -136,6 +136,17 @@ void TestModel() {
         "Reset All restores the PrimedGun settings");
   Check(model.Int("vr_cannon_texture_slot") == 3 && model.Bool("fullscreen"),
         "Reset All leaves the cannon slot and the display settings");
+
+  // What the game saved while it runs, under an edit not written yet.
+  SettingsModel live;
+  live.Load(file);
+  live.SetBool("vr_snap_turn_enabled", true);
+  PortSettingsFile saved;
+  saved.Parse("vr_world_scale=3\nvr_snap_turn_enabled=0\n");
+  live.Refresh(saved);
+  Check(live.Value("vr_world_scale") == "3", "a refresh takes what the game saved");
+  Check(live.Bool("vr_snap_turn_enabled") && live.Changes().size() == 1,
+        "a refresh keeps the edit not written yet");
 }
 
 // The launcher's defaults are the game's: PortVrSettings{} for every vr_* key.

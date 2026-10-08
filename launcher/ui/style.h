@@ -2,8 +2,8 @@
 //
 // PrimedGun's launcher look, from DolphinQt/MainWindow.cpp ConnectStack, and
 // the dark palette its Dolphin build ran under (DolphinQt/Settings.cpp). Added
-// here: the "not active yet" tag and a disabled button colour, since the tabs
-// are locked while the game runs.
+// here: the "not active yet" tag and a disabled button colour, for the Setup
+// buttons that wait while the game runs.
 
 #pragma once
 

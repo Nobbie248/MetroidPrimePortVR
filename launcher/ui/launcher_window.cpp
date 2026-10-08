@@ -14,6 +14,7 @@
 #include "port_gci.h"
 
 #include <QCloseEvent>
+#include <QDateTime>
 #include <QDialog>
 #include <QDialogButtonBox>
 #include <QDir>
@@ -40,6 +41,9 @@ namespace PrimedGunLauncher {
 namespace {
 
 constexpr int kForceStopDelayMs = 10000;
+// While the game runs, edits are written at most this often, so a dragged
+// slider reaches the game as it moves.
+constexpr int kLiveSaveMs = 150;
 
 QString LauncherVersion() { return QStringLiteral(PRIMEDGUN_LAUNCHER_VERSION); }
 
@@ -85,24 +89,17 @@ LauncherWindow::LauncherWindow()
   layout->setContentsMargins(14, 12, 14, 10);
   layout->setSpacing(8);
 
-  m_ctx.onEdited = [this] { UpdateFooter(); };
+  m_ctx.onEdited = [this] { OnEdited(); };
   m_ctx.saveKeyNow = [this](std::string_view key) { SaveKeyNow(key); };
 
   m_tabs = new QTabWidget(page);
   m_tabs->setDocumentMode(true);
   BuildSetupTab(m_tabs);
-  const auto addSettingsTab = [this](void (*build)(TabContext&, QTabWidget*)) {
-    build(m_ctx, m_tabs);
-    // The lock disables what the scroll area shows, not the scroll area, so a
-    // locked tab still scrolls.
-    QWidget* page = m_tabs->widget(m_tabs->count() - 1);
-    m_settingsPages.push_back(page->findChild<QScrollArea*>()->widget());
-  };
-  addSettingsTab(BuildControllerTab);
-  addSettingsTab(BuildCalibrationTab);
-  addSettingsTab(BuildCannonTab);
+  BuildControllerTab(m_ctx, m_tabs);
+  BuildCalibrationTab(m_ctx, m_tabs);
+  BuildCannonTab(m_ctx, m_tabs);
   BuildLayoutTab(m_ctx, m_tabs);
-  addSettingsTab(BuildPortConfigTab);
+  BuildPortConfigTab(m_ctx, m_tabs);
   BuildAboutTab(m_ctx, m_tabs);
   layout->addWidget(m_tabs, 1);
   BuildFooter(layout);
@@ -117,6 +114,15 @@ LauncherWindow::LauncherWindow()
       m_forceStopOffered = true;
       m_stopButton->setText(tr("Force Stop"));
       m_runStatus->setText(tr("The game has not closed yet. Force Stop ends it at once."));
+    }
+  });
+
+  m_liveSaveTimer = new QTimer(this);
+  m_liveSaveTimer->setSingleShot(true);
+  m_liveSaveTimer->setInterval(kLiveSaveMs);
+  connect(m_liveSaveTimer, &QTimer::timeout, this, [this] {
+    if (m_game != nullptr) {
+      SaveSettings();
     }
   });
 
@@ -232,7 +238,7 @@ void LauncherWindow::BuildFooter(QVBoxLayout* layout) {
     }
     m_model.ResetAll();
     m_ctx.RefreshAll();
-    UpdateFooter();
+    OnEdited();
   });
   connect(m_saveButton, &QPushButton::clicked, this, [this] { SaveSettings(); });
 }
@@ -287,6 +293,11 @@ void LauncherWindow::SaveKeyNow(std::string_view key) {
     error = "cannot read the settings file";
   } else {
     file.Set(std::string(key), m_model.Value(key));
+    if (key == "vr_cannon_texture_slot" && m_game != nullptr) {
+      // The running game reloads the user pack when this line changes
+      // (platform/debug_ui.cpp ApplyChangedSetting), also for the same slot.
+      file.Set("cannon_textures_applied", std::to_string(QDateTime::currentMSecsSinceEpoch()));
+    }
     if (file.Save(ToPath(m_paths.settingsFile), error)) {
       m_lastWritten = file.Text();
       m_model.MarkSaved(key);
@@ -320,11 +331,13 @@ void LauncherWindow::WatchSettingsFile() {
 
 void LauncherWindow::OnSettingsFileChanged() {
   WatchSettingsFile();
-  if (m_game != nullptr) {
-    return; // read again when the game exits
-  }
   PortSettingsFile file;
   if (!file.Load(ToPath(m_paths.settingsFile)) || file.Text() == m_lastWritten) {
+    return;
+  }
+  if (m_game != nullptr) {
+    // The game saved what was changed in play (F1, the headset's menu).
+    RefreshFromFile();
     return;
   }
   if (m_model.Dirty()) {
@@ -335,8 +348,27 @@ void LauncherWindow::OnSettingsFileChanged() {
   LoadSettings();
 }
 
+void LauncherWindow::RefreshFromFile() {
+  PortSettingsFile file;
+  if (!file.Load(ToPath(m_paths.settingsFile))) {
+    return;
+  }
+  m_model.Refresh(file);
+  m_changedOnDisk = false;
+  m_ctx.RefreshAll();
+  UpdateFooter();
+}
+
+void LauncherWindow::OnEdited() {
+  UpdateFooter();
+  if (m_game != nullptr && !m_liveSaveTimer->isActive()) {
+    m_liveSaveTimer->start();
+  }
+}
+
 void LauncherWindow::UpdateFooter() {
-  // While the game runs, the Setup tab says the settings are locked.
+  // While the game runs, edits are written within kLiveSaveMs, so there is
+  // nothing to report.
   QString status;
   QString tooltip;
   if (m_game == nullptr && m_model.Dirty()) {
@@ -431,7 +463,7 @@ void LauncherWindow::ShowSetupNotes() {
 <li>Save states do not carry over from PrimedGun on Dolphin. Make sure to save normally before you transfer.</li>
 <li>Once in game, click the right stick to set your height.</li>
 <li>Try to stay in the centre of your play space and face forward, this mod is not roomscaled.</li>
-<li>Settings are locked while the game runs. Change them here before pressing Play, or use F1 in game for live changes.</li>
+<li>Settings changed here while the game runs apply in game at once (Enable VR waits for the next start). Changes made in game with F1 or the headset's menu show here too.</li>
 <li>Use Save Settings after changing PrimedGun options; Play saves them too.</li>
 </ul>)"),
       content);
@@ -641,10 +673,12 @@ void LauncherWindow::OnGameFinished(int exitCode, QProcess::ExitStatus status) {
   m_stopRequested = false;
   m_forceStopOffered = false;
   m_stopButton->setText(tr("Stop"));
+  // An edit not written yet stays an unsaved change.
+  m_liveSaveTimer->stop();
   SetRunning(false);
   // The game rewrote port_settings.ini as it closed, with anything the F1
   // overlay changed.
-  LoadSettings();
+  RefreshFromFile();
 
   if (m_closeAfterStop) {
     close();
@@ -667,22 +701,18 @@ void LauncherWindow::OnGameFinished(int exitCode, QProcess::ExitStatus status) {
 }
 
 void LauncherWindow::SetRunning(bool running) {
-  for (QWidget* page : m_settingsPages) {
-    page->setEnabled(!running);
-  }
   const bool haveDisc = !SelectedDisc().isEmpty();
   const bool haveGame = QFileInfo::exists(m_paths.gameExe);
   m_selectButton->setEnabled(!running);
   m_playButton->setEnabled(!running && haveDisc && haveGame);
   m_stopButton->setEnabled(running);
   m_optionsButton->setEnabled(haveDisc);
+  // The game has the memory card open.
   m_transferButton->setEnabled(!running);
-  m_resetAllButton->setEnabled(!running);
-  m_saveButton->setEnabled(!running);
   if (running) {
     if (!m_stopRequested) {
       m_runStatus->setObjectName(QStringLiteral("PrimedGunGood"));
-      m_runStatus->setText(tr("Running. Settings are locked until the game closes."));
+      m_runStatus->setText(tr("Running. Settings you change apply in game at once."));
     }
   } else if (!haveGame) {
     m_runStatus->setObjectName(QStringLiteral("PrimedGunBad"));

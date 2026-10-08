@@ -2,9 +2,11 @@
 
 #include "port_settings_file.h"
 
+#include <chrono>
 #include <fstream>
 #include <iterator>
 #include <system_error>
+#include <thread>
 
 namespace PrimedGunLauncher {
 namespace {
@@ -151,8 +153,9 @@ bool PortSettingsFile::Save(const std::filesystem::path& path, std::string& erro
   if (path.has_parent_path()) {
     std::filesystem::create_directories(path.parent_path(), ec);
   }
+  // Not the game's own "<path>.tmp": both may save at once while the game runs.
   std::filesystem::path temp = path;
-  temp += ".tmp";
+  temp += ".launcher.tmp";
   {
     std::ofstream out(temp, std::ios::binary | std::ios::trunc);
     if (!out) {
@@ -167,7 +170,15 @@ bool PortSettingsFile::Save(const std::filesystem::path& path, std::string& erro
       return false;
     }
   }
-  std::filesystem::rename(temp, path, ec);
+  // The game reads the file a few times a second while it runs, and on Windows
+  // a file open for reading cannot be replaced; the read is over in moments.
+  for (int attempt = 0; attempt < 10; ++attempt) {
+    std::filesystem::rename(temp, path, ec);
+    if (!ec) {
+      break;
+    }
+    std::this_thread::sleep_for(std::chrono::milliseconds(20));
+  }
   if (ec) {
     std::filesystem::remove(temp, ec);
     error = "cannot replace the settings file";

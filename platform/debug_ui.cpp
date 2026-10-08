@@ -114,6 +114,7 @@
 #include <filesystem>
 #include <fstream>
 #include <iterator>
+#include <map>
 #include <mutex>
 #include <optional>
 #include <sstream>
@@ -464,6 +465,14 @@ float sGyroOverridePitch = 0.f;
 float sGyroOverrideYaw = 0.f;
 bool sVisible = false;
 bool sSettingsDirty = false;
+// The settings file as the game last read or wrote it, so a change another
+// program (PrimedGun's launcher) makes while the game runs can be told apart
+// and applied (PollSettingsFile). A time of min() means "read it again".
+std::mutex sSettingsFileMutex;
+std::map< std::string, std::string > sSettingsFileValues;
+std::filesystem::file_time_type sSettingsFileTime = std::filesystem::file_time_type::min();
+std::uintmax_t sSettingsFileSize = 0;
+uint64_t sSettingsPollMs = 0;
 bool sAudioSettingsApplied = false;
 bool sPresentationSettingsApplied = false;
 CStateManager* sStateManager = nullptr;
@@ -883,15 +892,12 @@ void ApplySetting(const std::string& key, const std::string& value) {
   }
 }
 
-void LoadSettings() {
-  const std::string path = SettingsFilePath();
-  std::ifstream file(path);
-  if (!file.is_open()) {
-    return;
-  }
-  std::fprintf(stderr, "metroid_prime_port: loaded settings from %s\n", path.c_str());
+// Calls `use(key, value)` for each setting line, in file order: '#' starts a
+// comment anywhere, keys and values are trimmed.
+template < typename Use >
+void ForEachSettingLine(std::istream& in, Use&& use) {
   std::string line;
-  while (std::getline(file, line)) {
+  while (std::getline(in, line)) {
     const size_t comment = line.find('#');
     if (comment != std::string::npos) {
       line.erase(comment);
@@ -901,14 +907,38 @@ void LoadSettings() {
       continue;
     }
     const std::string key = Trim(line.substr(0, separator));
-    const std::string value = Trim(line.substr(separator + 1));
     if (!key.empty()) {
-      ApplySetting(key, value);
+      use(key, Trim(line.substr(separator + 1)));
     }
   }
+}
+
+// The values the game would read from `in`, a later line winning.
+std::map< std::string, std::string > SettingValues(std::istream& in) {
+  std::map< std::string, std::string > values;
+  ForEachSettingLine(in, [&values](const std::string& key, const std::string& value) { values[key] = value; });
+  return values;
+}
+
+void LoadSettings() {
+  const std::string path = SettingsFilePath();
+  std::ifstream file(path);
+  if (!file.is_open()) {
+    return;
+  }
+  std::fprintf(stderr, "metroid_prime_port: loaded settings from %s\n", path.c_str());
+  std::map< std::string, std::string > values;
+  ForEachSettingLine(file, [&values](const std::string& key, const std::string& value) {
+    ApplySetting(key, value);
+    values[key] = value;
+  });
   if (sTouchClassic) {
     sTouchTwinStick = false;
   }
+  std::lock_guard< std::mutex > lock(sSettingsFileMutex);
+  sSettingsFileValues = std::move(values);
+  // Read again at the first poll: a change made since is applied then.
+  sSettingsFileTime = std::filesystem::file_time_type::min();
 }
 
 void SaveSettings() {
@@ -1091,6 +1121,12 @@ void SaveSettings() {
   }
   std::fprintf(stderr, "metroid_prime_port: saved settings to %s\n", path.c_str());
   sSettingsDirty = false;
+  std::istringstream saved(text);
+  std::lock_guard< std::mutex > lock(sSettingsFileMutex);
+  sSettingsFileValues = SettingValues(saved);
+  // Not the time of this write: another program may write right after it, so
+  // the next poll reads the file and compares.
+  sSettingsFileTime = std::filesystem::file_time_type::min();
 }
 
 // Whether the player just used a real pad, keyboard or mouse. The touch overlay
@@ -8558,8 +8594,95 @@ bool DrawDesktopWindow() {
   return open;
 }
 
+// A key another program changed in the settings file while the game runs,
+// stored as LoadSettings stores it and applied the way the overlay's own
+// control applies it. Only the keys PrimedGun's launcher edits; any other
+// keeps the game's value, which its next save writes back. False when the key
+// was not applied.
+static bool ApplyChangedSetting(const std::string& key, const std::string& value) {
+  if (key == "cannon_textures_applied") {
+    // A request rather than a setting (no save writes it back): the launcher
+    // copied cannon textures into the user pack, also when the slot number
+    // stayed the same (Remove Shine).
+    PortTextures::RequestUserPackReload();
+    return true;
+  }
+  if (key.compare(0, 3, "vr_") == 0) {
+    // Stored and handed to Aurora at once (vr_enabled waits for the next start).
+    return PortVr::ApplyVrSetting(key, value);
+  }
+  if (key == "vsync") {
+    ApplySetting(key, value);
+    aurora_enable_vsync(sVsyncEnabled && !sTurbo);
+  } else if (key == "fullscreen") {
+    ApplySetting(key, value);
+    VISetWindowFullscreen(sFullscreen);
+  } else if (key == "render_scale") {
+    ApplySetting(key, value);
+    sDynScale = 0.f;
+    ResetDynamicRes();
+    VISetFrameBufferScale(EffectiveRenderScale());
+  } else if (key == "msaa" || key == "anisotropy") {
+    ApplySetting(key, value);
+    ApplyGraphicsQuality();
+  } else {
+    return false;
+  }
+  return true;
+}
+
+// PrimedGun's launcher writes the settings file while the game runs. A few
+// times a second (or at once with `now`) the file's time and size are looked
+// at; when they changed, the keys whose value differs from what the game last
+// read or wrote are applied.
+static void PollSettingsFile(bool now) {
+  const uint64_t ms = SDL_GetTicks();
+  if (!now && ms - sSettingsPollMs < 250) {
+    return;
+  }
+  sSettingsPollMs = ms;
+  const std::filesystem::path path = PortPaths::detail::FromUtf8(SettingsFilePath());
+  std::error_code ec;
+  const std::filesystem::file_time_type time = std::filesystem::last_write_time(path, ec);
+  if (ec) {
+    return;
+  }
+  const std::uintmax_t size = std::filesystem::file_size(path, ec);
+  if (ec) {
+    return;
+  }
+  std::map< std::string, std::string > changed;
+  {
+    std::lock_guard< std::mutex > lock(sSettingsFileMutex);
+    if (time == sSettingsFileTime && size == sSettingsFileSize) {
+      return;
+    }
+    std::ifstream file(path);
+    if (!file.is_open()) {
+      return;
+    }
+    std::map< std::string, std::string > values = SettingValues(file);
+    for (const auto& [key, value] : values) {
+      const auto known = sSettingsFileValues.find(key);
+      if (known == sSettingsFileValues.end() || known->second != value) {
+        changed.emplace(key, value);
+      }
+    }
+    sSettingsFileValues = std::move(values);
+    sSettingsFileTime = time;
+    sSettingsFileSize = size;
+  }
+  for (const auto& [key, value] : changed) {
+    if (ApplyChangedSetting(key, value)) {
+      PortLog::Write("metroid_prime_port: %s=%s changed in the settings file, applied\n", key.c_str(),
+                     value.c_str());
+    }
+  }
+}
+
 void DrawUI() {
   EnsureInitialized();
+  PollSettingsFile(false);
   if (!sAudioSettingsApplied) {
     // Apply persisted audio mutes once the backends are alive.
     sAudioSettingsApplied = true;
@@ -8623,6 +8746,9 @@ void DrawUI() {
   // rewriting the settings file each time is a flash write per frame on a phone. It is
   // saved the frame the control is let go.
   if (sSettingsDirty && !ImGui::IsAnyItemActive()) {
+    // What the launcher wrote since the last poll first, or this save would
+    // write the game's old values over it.
+    PollSettingsFile(true);
     SaveSettings();
   }
 }

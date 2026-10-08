@@ -23,6 +23,8 @@ public:
 
   // Takes every key's value from the file, or its default; drops all changes.
   void Load(const PortSettingsFile& file);
+  // As Load, but the changes not saved yet are kept.
+  void Refresh(const PortSettingsFile& file);
 
   const std::string& Value(std::string_view key) const;
   bool Bool(std::string_view key) const;

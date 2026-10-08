@@ -38,16 +38,22 @@ import, and the cannon pack.
   does (`platform/include/port_paths.h`). A save re-reads the file and rewrites
   only the keys the launcher changed. Every other line, including comments and
   line endings, stays as the game wrote it.
-  - Settings are locked while the game runs, because the game rewrites the file
-    when it exits. The launcher reads the file again afterwards. Use F1 in game
-    for live changes.
+  - While the game runs, every edit is written as it is made (at most every
+    150 ms). The game looks at the file a few times a second and applies the
+    keys that changed, as the F1 overlay would (`platform/debug_ui.cpp`
+    `PollSettingsFile`). Enable VR waits for the next start.
+  - What the game saves while it runs (F1, the headset's menu) shows in the
+    launcher, keeping any edit not written yet.
+  - A cannon slot applied while the game runs also writes
+    `cannon_textures_applied`, a request the game answers by reloading the
+    user texture pack. The game drops that line at its next save.
   - Settings the game saves but does not use yet carry a "not active yet" tag
     (`active` in `core/launcher_keys.cpp`).
   - The launcher's own state, such as the selected disc and the window position,
     is kept in `primedgun_launcher.ini` beside it.
 - **Play** saves pending edits, then starts the game with the disc as its first
   argument. The game's output goes to `primedgun_last_run.log` in the user
-  folder.
+  folder. Select Game and Transfer wait until the game closes.
   - **Stop** closes the game's window, so the game exits normally. **Force
     Stop** is offered after 10 seconds.
 - **Cannon Textures.** PrimedGun's Dolphin-named DDS files are used as they

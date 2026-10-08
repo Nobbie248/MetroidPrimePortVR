@@ -2,9 +2,10 @@
 //
 // PrimedGun's launcher window (DolphinQt/MainWindow.cpp ConnectStack) for the
 // native port: the tabs, the footer, and the game as a child process. The
-// settings are edited in memory, written to port_settings.ini by Save Settings
-// or Play, and locked while the game runs, since the game rewrites that file
-// itself when it exits.
+// settings are edited in memory and written to port_settings.ini by Save
+// Settings or Play. While the game runs, every edit is written as it is made
+// and the game applies it in play (platform/debug_ui.cpp PollSettingsFile);
+// what the game saves (F1, the headset's menu) shows here in turn.
 
 #pragma once
 
@@ -17,7 +18,6 @@
 
 #include <string>
 #include <string_view>
-#include <vector>
 
 class QFileSystemWatcher;
 class QLabel;
@@ -44,6 +44,8 @@ private:
   void SaveKeyNow(std::string_view key);
   void WatchSettingsFile();
   void OnSettingsFileChanged();
+  void RefreshFromFile();
+  void OnEdited();
   void UpdateFooter();
 
   QString SelectedDisc() const;
@@ -65,7 +67,6 @@ private:
   QSettings m_ini;
 
   QTabWidget* m_tabs = nullptr;
-  std::vector<QWidget*> m_settingsPages;
   QLabel* m_selectedGame = nullptr;
   QLabel* m_discWarning = nullptr;
   QLabel* m_runStatus = nullptr;
@@ -80,6 +81,7 @@ private:
 
   QProcess* m_game = nullptr;
   QTimer* m_forceStopTimer = nullptr;
+  QTimer* m_liveSaveTimer = nullptr;
   bool m_stopRequested = false;
   bool m_forceStopOffered = false;
   bool m_closeAfterStop = false;

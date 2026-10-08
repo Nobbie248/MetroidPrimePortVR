@@ -33,7 +33,7 @@ void BuildPortConfigTab(TabContext& ctx, QTabWidget* tabs) {
 
   layout->addWidget(ctx.Section(QObject::tr("VR Headset")));
   ctx.Check(layout, QObject::tr("Enable VR"), "vr_enabled",
-            QObject::tr("Off starts the game on the desktop only."));
+            QObject::tr("Off starts the game on the desktop only. Takes effect at the next start."));
   ctx.Combo(layout, QObject::tr("Control scheme"), "vr_controller_mode",
             {{QObject::tr("PrimedGun"), QStringLiteral("primedgun")},
              {QObject::tr("Gamepad"), QStringLiteral("gamepad")},

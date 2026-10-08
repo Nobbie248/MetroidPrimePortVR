@@ -241,7 +241,7 @@ void BuildCannonTab(TabContext& ctx, QTabWidget* tabs) {
     w->status->setText(slot <= 0
                            ? QObject::tr("Default applied. Installed HD texture packs can supply "
                                          "the cannon.")
-                           : QObject::tr("Applied %1. The game uses it from its next start.")
+                           : QObject::tr("Applied %1. A running game shows it at once.")
                                  .arg(SlotName(slot)));
   });
   QObject::connect(removeShine, &QPushButton::clicked, removeShine, [&ctx, w] {

@@ -25,6 +25,14 @@ void SettingsModel::Load(const PortSettingsFile& file) {
   m_current = m_loaded;
 }
 
+void SettingsModel::Refresh(const PortSettingsFile& file) {
+  const auto changes = Changes();
+  Load(file);
+  for (const auto& [key, value] : changes) {
+    m_current[key] = value;
+  }
+}
+
 const std::string& SettingsModel::Value(std::string_view key) const {
   static const std::string kEmpty;
   const auto it = m_current.find(key);

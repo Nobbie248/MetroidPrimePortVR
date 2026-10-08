@@ -34,7 +34,7 @@ public:
   void Set(const std::string& key, const std::string& value);
 
   std::string Text() const;
-  // Writes Text() to `<path>.tmp` and renames it over `path`.
+  // Writes Text() to `<path>.launcher.tmp` and renames it over `path`.
   bool Save(const std::filesystem::path& path, std::string& error) const;
 
 private:

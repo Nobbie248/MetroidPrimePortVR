@@ -82,8 +82,13 @@ CTransform4f LevelVrBallCamera(const CCameraManager& cameras, const CStateManage
       right = CVector3f(1.f, 0.f, 0.f);
     }
     right.Normalize();
-    return CTransform4f::FromColumns(right, CVector3f::Cross(CVector3f::Up(), right),
-                                     CVector3f::Up(), xf.GetTranslation());
+    const CPlayer& player = *mgr.GetPlayer();
+    if (player.GetMorphballTransitionState() == CPlayer::kMS_Unmorphing) {
+      return PortVr::VrUnmorphCameraBase(xf);
+    }
+    return PortVr::VrBallCameraBaseTransform(
+        CTransform4f::FromColumns(right, CVector3f::Cross(CVector3f::Up(), right),
+                                  CVector3f::Up(), xf.GetTranslation()));
   }
 #endif
   return xf;

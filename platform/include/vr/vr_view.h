@@ -62,6 +62,15 @@ bool VrSurfaceCullingVolume(const CTransform4f& cameraXf,
 // Immersive: the first-person camera keeps its yaw only (the headset supplies
 // the pitch), does not bob, and the arm cannon does not fidget.
 bool VrFlattenLookPitch() noexcept;
+// Latch headset yaw once on morph entry for the simulation camera and controls.
+void VrBeginBallCamera(const CTransform4f& firstPersonXf) noexcept;
+CVector3f VrBallCameraEntryDirection() noexcept;
+// Remove the latched yaw from the render base, since stereo adds head tracking.
+CTransform4f VrBallCameraBaseTransform(const CTransform4f& camera, float weight = 1.f) noexcept;
+// Unmorphing preserves the current render-base yaw and translates to eye height.
+void VrBeginUnmorphCamera(const CTransform4f& camera, const CVector3f& eyePosition) noexcept;
+CTransform4f VrUnmorphCameraBase(const CTransform4f& camera) noexcept;
+CTransform4f VrUnmorphCameraTransform(const CVector3f& eyePosition, float progress) noexcept;
 bool VrNoCameraBob() noexcept;
 bool VrNoArmCannonFidget() noexcept;
 // The headset is running and the settings remove the letterbox: the game's

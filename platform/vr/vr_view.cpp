@@ -41,6 +41,10 @@ struct CannonState {
     CVector3f modelOffsetWorld;
 };
 CannonState s_cannon;
+float s_ballEntryYaw = 0.f;
+CVector3f s_ballEntryDirection(0.f, 1.f, 0.f);
+CTransform4f s_unmorphBase = CTransform4f::Identity();
+CVector3f s_unmorphOffset = CVector3f::Zero();
 
 bool ImmersiveNow() noexcept {
     if (!OpenXRIsRunning()) {
@@ -189,6 +193,49 @@ bool VrCullingFrustum(const CTransform4f& cameraXf, float nearZ, CFrustumPlanes&
 }
 
 bool VrFlattenLookPitch() noexcept { return ImmersiveNow(); }
+
+void VrBeginBallCamera(const CTransform4f& firstPersonXf) noexcept {
+    s_ballEntryYaw = 0.f;
+    s_ballEntryDirection = firstPersonXf.GetForward();
+    if (!ImmersiveNow()) {
+        return;
+    }
+    const CVector3f headRight = VrHeadViewRotation(firstPersonXf).GetColumn(kDX);
+    const CVector3f bodyRight = firstPersonXf.GetRight();
+    const float yaw = std::atan2(headRight.GetY(), headRight.GetX()) -
+                      std::atan2(bodyRight.GetY(), bodyRight.GetX());
+    s_ballEntryYaw = yaw;
+    s_ballEntryDirection = CVector3f(-headRight.GetY(), headRight.GetX(), 0.f);
+}
+
+CVector3f VrBallCameraEntryDirection() noexcept { return s_ballEntryDirection; }
+
+CTransform4f VrBallCameraBaseTransform(const CTransform4f& camera, float weight) noexcept {
+    if (!ImmersiveNow()) {
+        return camera;
+    }
+    CTransform4f base = camera.GetRotation() *
+        AxisQuaternion(0.f, 0.f, 1.f, -s_ballEntryYaw * std::clamp(weight, 0.f, 1.f)).BuildTransform4f();
+    base.SetTranslation(camera.GetTranslation());
+    return base;
+}
+
+void VrBeginUnmorphCamera(const CTransform4f& camera, const CVector3f& eyePosition) noexcept {
+    s_unmorphBase = camera.GetRotation();
+    s_unmorphOffset = camera.GetTranslation() - eyePosition;
+}
+
+CTransform4f VrUnmorphCameraBase(const CTransform4f& camera) noexcept {
+    CTransform4f view = s_unmorphBase;
+    view.SetTranslation(camera.GetTranslation());
+    return view;
+}
+
+CTransform4f VrUnmorphCameraTransform(const CVector3f& eyePosition, float progress) noexcept {
+    CTransform4f view = s_unmorphBase;
+    view.SetTranslation(eyePosition + s_unmorphOffset * (1.f - std::clamp(progress, 0.f, 1.f)));
+    return view;
+}
 
 bool VrSurfaceCullingVolume(const CTransform4f& cameraXf,
                             PortSurfaceCulling::StereoVolume& volume) noexcept {

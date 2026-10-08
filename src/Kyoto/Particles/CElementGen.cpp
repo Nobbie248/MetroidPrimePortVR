@@ -41,6 +41,12 @@
 #include <dolphin/gx/GXAurora.h>
 #include "port_fx_debug.h"
 #include "port_vfx_particles.h"
+#include "vr/vr_particle_billboard.h"
+#else
+class VrParticleBillboard {
+public:
+  void Emit(const CVector3f&, float x, float y, float z) { GXPosition3f32(x, y, z); }
+};
 #endif
 
 #ifdef TARGET_PC
@@ -1262,6 +1268,7 @@ bool CElementGen::PortBeginPresent(CVector3f& savedGlobal) {
 #endif
 
 void CElementGen::RenderBasicParticlesNoRotTS(const CTransform4f& xf) {
+  VrParticleBillboard billboard;
   for (int i = 0; i < x30_particles.size(); ++i) {
     CParticle& particle = x30_particles[i];
     CVector3f viewPos = xf * particle.x4_pos;
@@ -1271,28 +1278,29 @@ void CElementGen::RenderBasicParticlesNoRotTS(const CTransform4f& xf) {
     float y = viewPos.GetY();
     float z = viewPos.GetZ() + halfSize;
 
-    GXPosition3f32(x, y, z);
+    billboard.Emit(viewPos, x, y, z);
     GXColor1u32(color);
     GXTexCoord1s16(0x0202);
 
     x -= particle.x2c_lineLengthOrSize;
-    GXPosition3f32(x, y, z);
+    billboard.Emit(viewPos, x, y, z);
     GXColor1u32(color);
     GXTexCoord1s16(0x0002);
 
     z -= particle.x2c_lineLengthOrSize;
-    GXPosition3f32(x, y, z);
+    billboard.Emit(viewPos, x, y, z);
     GXColor1u32(color);
     GXTexCoord1s16(0x0000);
 
     x += particle.x2c_lineLengthOrSize;
-    GXPosition3f32(x, y, z);
+    billboard.Emit(viewPos, x, y, z);
     GXColor1u32(color);
     GXTexCoord1s16(0x0200);
   }
 }
 
 void CElementGen::RenderBasicParticlesRotTS(const CTransform4f& xf) {
+  VrParticleBillboard billboard;
   for (int i = 0; i < x30_particles.size(); ++i) {
     CParticle& particle = x30_particles[i];
     CVector3f viewPos = xf * particle.x4_pos;
@@ -1308,25 +1316,26 @@ void CElementGen::RenderBasicParticlesRotTS(const CTransform4f& xf) {
     float y = viewPos.GetY();
     float z = viewPos.GetZ();
 
-    GXPosition3f32(x + sinPlusCos, y, z - sinMinusCos);
+    billboard.Emit(viewPos, x + sinPlusCos, y, z - sinMinusCos);
     GXColor1u32(color);
     GXTexCoord1s16(0x0202);
 
-    GXPosition3f32(x + sinMinusCos, y, z + sinPlusCos);
+    billboard.Emit(viewPos, x + sinMinusCos, y, z + sinPlusCos);
     GXColor1u32(color);
     GXTexCoord1s16(0x0002);
 
-    GXPosition3f32(x - sinPlusCos, y, z + sinMinusCos);
+    billboard.Emit(viewPos, x - sinPlusCos, y, z + sinMinusCos);
     GXColor1u32(color);
     GXTexCoord1s16(0x0000);
 
-    GXPosition3f32(x - sinMinusCos, y, z - sinPlusCos);
+    billboard.Emit(viewPos, x - sinMinusCos, y, z - sinPlusCos);
     GXColor1u32(color);
     GXTexCoord1s16(0x0200);
   }
 }
 
 void CElementGen::RenderBasicParticlesNoRotNoTS(const CTransform4f& xf) {
+  VrParticleBillboard billboard;
   for (int i = 0; i < x30_particles.size(); ++i) {
     CParticle& particle = x30_particles[i];
     CVector3f viewPos =
@@ -1337,28 +1346,29 @@ void CElementGen::RenderBasicParticlesNoRotNoTS(const CTransform4f& xf) {
     float y = viewPos.GetY();
     float z = viewPos.GetZ() + halfSize;
 
-    GXPosition3f32(x, y, z);
+    billboard.Emit(viewPos, x, y, z);
     GXColor1u32(color);
     GXTexCoord1s16(0x0202);
 
     x -= particle.x2c_lineLengthOrSize;
-    GXPosition3f32(x, y, z);
+    billboard.Emit(viewPos, x, y, z);
     GXColor1u32(color);
     GXTexCoord1s16(0x0002);
 
     z -= particle.x2c_lineLengthOrSize;
-    GXPosition3f32(x, y, z);
+    billboard.Emit(viewPos, x, y, z);
     GXColor1u32(color);
     GXTexCoord1s16(0x0000);
 
     x += particle.x2c_lineLengthOrSize;
-    GXPosition3f32(x, y, z);
+    billboard.Emit(viewPos, x, y, z);
     GXColor1u32(color);
     GXTexCoord1s16(0x0200);
   }
 }
 
 void CElementGen::RenderBasicParticlesRotNoTS(const CTransform4f& xf) {
+  VrParticleBillboard billboard;
   for (int i = 0; i < x30_particles.size(); ++i) {
     CParticle& particle = x30_particles[i];
     CVector3f viewPos =
@@ -1374,25 +1384,26 @@ void CElementGen::RenderBasicParticlesRotNoTS(const CTransform4f& xf) {
     float y = viewPos.GetY();
     float z = viewPos.GetZ();
 
-    GXPosition3f32(x + sinPlusCos, y, z - sinMinusCos);
+    billboard.Emit(viewPos, x + sinPlusCos, y, z - sinMinusCos);
     GXColor1u32(color);
     GXTexCoord1s16(0x0202);
 
-    GXPosition3f32(x + sinMinusCos, y, z + sinPlusCos);
+    billboard.Emit(viewPos, x + sinMinusCos, y, z + sinPlusCos);
     GXColor1u32(color);
     GXTexCoord1s16(0x0002);
 
-    GXPosition3f32(x - sinPlusCos, y, z + sinMinusCos);
+    billboard.Emit(viewPos, x - sinPlusCos, y, z + sinMinusCos);
     GXColor1u32(color);
     GXTexCoord1s16(0x0000);
 
-    GXPosition3f32(x - sinMinusCos, y, z - sinPlusCos);
+    billboard.Emit(viewPos, x - sinMinusCos, y, z - sinPlusCos);
     GXColor1u32(color);
     GXTexCoord1s16(0x0200);
   }
 }
 
 void CElementGen::RenderParticles() {
+  VrParticleBillboard billboard;
   CGlobalRandom gr(x27c_randState);
 
   if (IsIndirectTextured()) {
@@ -1622,22 +1633,22 @@ void CElementGen::RenderParticles() {
             float y = viewPoint.GetY();
             float z = (particle.x2c_lineLengthOrSize * 0.5f) + viewPoint.GetZ();
 
-            GXPosition3f32(x, y, z);
+            billboard.Emit(viewPoint, x, y, z);
             GXColor1u32(color);
             GXTexCoord2f32(uvs.xMax, uvs.yMax);
 
             x -= particle.x2c_lineLengthOrSize;
-            GXPosition3f32(x, y, z);
+            billboard.Emit(viewPoint, x, y, z);
             GXColor1u32(color);
             GXTexCoord2f32(uvs.xMin, uvs.yMax);
 
             z -= particle.x2c_lineLengthOrSize;
-            GXPosition3f32(x, y, z);
+            billboard.Emit(viewPoint, x, y, z);
             GXColor1u32(color);
             GXTexCoord2f32(uvs.xMin, uvs.yMin);
 
             x += particle.x2c_lineLengthOrSize;
-            GXPosition3f32(x, y, z);
+            billboard.Emit(viewPoint, x, y, z);
             GXColor1u32(color);
             GXTexCoord2f32(uvs.xMax, uvs.yMin);
           } else {
@@ -1655,19 +1666,19 @@ void CElementGen::RenderParticles() {
             float vpY = viewPoint.GetY();
             float vpZ = viewPoint.GetZ();
 
-            GXPosition3f32(sinPlusCos + vpX, vpY, cosMinusSin + vpZ);
+            billboard.Emit(viewPoint, sinPlusCos + vpX, vpY, cosMinusSin + vpZ);
             GXColor1u32(color);
             GXTexCoord2f32(uvs.xMax, uvs.yMax);
 
-            GXPosition3f32(sinMinusCos + vpX, vpY, sinPlusCos + vpZ);
+            billboard.Emit(viewPoint, sinMinusCos + vpX, vpY, sinPlusCos + vpZ);
             GXColor1u32(color);
             GXTexCoord2f32(uvs.xMin, uvs.yMax);
 
-            GXPosition3f32(vpX - sinPlusCos, vpY, vpZ - cosMinusSin);
+            billboard.Emit(viewPoint, vpX - sinPlusCos, vpY, vpZ - cosMinusSin);
             GXColor1u32(color);
             GXTexCoord2f32(uvs.xMin, uvs.yMin);
 
-            GXPosition3f32(negSinPlusCos + vpX, vpY, (-cosT - sinT) + vpZ);
+            billboard.Emit(viewPoint, negSinPlusCos + vpX, vpY, (-cosT - sinT) + vpZ);
             GXColor1u32(color);
             GXTexCoord2f32(uvs.xMax, uvs.yMin);
           }
@@ -1676,22 +1687,22 @@ void CElementGen::RenderParticles() {
           float y = viewPoint.GetY();
           float z = (particle.x2c_lineLengthOrSize * 0.5f) + viewPoint.GetZ();
 
-          GXPosition3f32(x, y, z);
+          billboard.Emit(viewPoint, x, y, z);
           GXColor1u32(color);
           GXTexCoord1s16(0x0202);
 
           x -= particle.x2c_lineLengthOrSize;
-          GXPosition3f32(x, y, z);
+          billboard.Emit(viewPoint, x, y, z);
           GXColor1u32(color);
           GXTexCoord1s16(0x0002);
 
           z -= particle.x2c_lineLengthOrSize;
-          GXPosition3f32(x, y, z);
+          billboard.Emit(viewPoint, x, y, z);
           GXColor1u32(color);
           GXTexCoord1s16(0x0000);
 
           x += particle.x2c_lineLengthOrSize;
-          GXPosition3f32(x, y, z);
+          billboard.Emit(viewPoint, x, y, z);
           GXColor1u32(color);
           GXTexCoord1s16(0x0200);
         } else {
@@ -1707,19 +1718,19 @@ void CElementGen::RenderParticles() {
           float vpY = viewPoint.GetY();
           float vpZ = viewPoint.GetZ();
 
-          GXPosition3f32(vpX + sinPlusCos, vpY, vpZ - sinMinusCos);
+          billboard.Emit(viewPoint, vpX + sinPlusCos, vpY, vpZ - sinMinusCos);
           GXColor1u32(color);
           GXTexCoord1s16(0x0202);
 
-          GXPosition3f32(vpX + sinMinusCos, vpY, vpZ + sinPlusCos);
+          billboard.Emit(viewPoint, vpX + sinMinusCos, vpY, vpZ + sinPlusCos);
           GXColor1u32(color);
           GXTexCoord1s16(0x0002);
 
-          GXPosition3f32(vpX - sinPlusCos, vpY, vpZ + sinMinusCos);
+          billboard.Emit(viewPoint, vpX - sinPlusCos, vpY, vpZ + sinMinusCos);
           GXColor1u32(color);
           GXTexCoord1s16(0x0000);
 
-          GXPosition3f32(vpX - sinMinusCos, vpY, vpZ - sinPlusCos);
+          billboard.Emit(viewPoint, vpX - sinMinusCos, vpY, vpZ - sinPlusCos);
           GXColor1u32(color);
           GXTexCoord1s16(0x0200);
         }
@@ -1736,6 +1747,13 @@ void CElementGen::RenderParticles() {
       // ORNT
       CVector3f fwd = systemViewCopy.GetForward();
       CVector3f origin = systemViewCopy.GetTranslation();
+#ifdef TARGET_PC
+      const bool vrOriented = PortVr::VrImmersive();
+      if (vrOriented) {
+        origin = CGraphics::GetModelMatrix().GetInverse() *
+                 PortVr::VrHeadViewTransform(CGraphics::GetViewMatrix()).GetTranslation();
+      }
+#endif
       float canBeNormEps = FLT_EPSILON;
 
       CParticleListItem* sortIt = sortItems;
@@ -1763,6 +1781,14 @@ void CElementGen::RenderParticles() {
         }
 
         CVector3f fore = dir * particle->x2c_lineLengthOrSize;
+#ifdef TARGET_PC
+        if (vrOriented) {
+          const CVector3f away = pos - origin;
+          if (away.CanBeNormalized()) {
+            fwd = away.AsNormalized();
+          }
+        }
+#endif
 
         CVector3f right;
         if (x28_loadedGenDesc->x30_31_RSOP) {
@@ -1878,22 +1904,22 @@ void CElementGen::RenderParticles() {
             float y = viewPoint.GetY();
             float z = (0.5f * particle->x2c_lineLengthOrSize) + viewPoint.GetZ();
 
-            GXPosition3f32(x, y, z);
+            billboard.Emit(viewPoint, x, y, z);
             GXColor1u32(color);
             GXTexCoord2f32(uvs.xMax, uvs.yMax);
 
             x -= particle->x2c_lineLengthOrSize;
-            GXPosition3f32(x, y, z);
+            billboard.Emit(viewPoint, x, y, z);
             GXColor1u32(color);
             GXTexCoord2f32(uvs.xMin, uvs.yMax);
 
             z -= particle->x2c_lineLengthOrSize;
-            GXPosition3f32(x, y, z);
+            billboard.Emit(viewPoint, x, y, z);
             GXColor1u32(color);
             GXTexCoord2f32(uvs.xMin, uvs.yMin);
 
             x += particle->x2c_lineLengthOrSize;
-            GXPosition3f32(x, y, z);
+            billboard.Emit(viewPoint, x, y, z);
             GXColor1u32(color);
             GXTexCoord2f32(uvs.xMax, uvs.yMin);
           }
@@ -1916,19 +1942,19 @@ void CElementGen::RenderParticles() {
             float vpY = viewPoint.GetY();
             float vpZ = viewPoint.GetZ();
 
-            GXPosition3f32(sinPlusCos + vpX, vpY, cosMinusSin + vpZ);
+            billboard.Emit(viewPoint, sinPlusCos + vpX, vpY, cosMinusSin + vpZ);
             GXColor1u32(color);
             GXTexCoord2f32(uvs.xMax, uvs.yMax);
 
-            GXPosition3f32(sinMinusCos + vpX, vpY, sinPlusCos + vpZ);
+            billboard.Emit(viewPoint, sinMinusCos + vpX, vpY, sinPlusCos + vpZ);
             GXColor1u32(color);
             GXTexCoord2f32(uvs.xMin, uvs.yMax);
 
-            GXPosition3f32(vpX - sinPlusCos, vpY, vpZ - cosMinusSin);
+            billboard.Emit(viewPoint, vpX - sinPlusCos, vpY, vpZ - cosMinusSin);
             GXColor1u32(color);
             GXTexCoord2f32(uvs.xMin, uvs.yMin);
 
-            GXPosition3f32(negSinPlusCos + vpX, vpY, (-cosT - sinT) + vpZ);
+            billboard.Emit(viewPoint, negSinPlusCos + vpX, vpY, (-cosT - sinT) + vpZ);
             GXColor1u32(color);
             GXTexCoord2f32(uvs.xMax, uvs.yMin);
           }
@@ -1941,22 +1967,22 @@ void CElementGen::RenderParticles() {
           float y = viewPoint.GetY();
           float z = (0.5f * particle->x2c_lineLengthOrSize) + viewPoint.GetZ();
 
-          GXPosition3f32(x, y, z);
+          billboard.Emit(viewPoint, x, y, z);
           GXColor1u32(color);
           GXTexCoord1s16(0x0202);
 
           x -= particle->x2c_lineLengthOrSize;
-          GXPosition3f32(x, y, z);
+          billboard.Emit(viewPoint, x, y, z);
           GXColor1u32(color);
           GXTexCoord1s16(0x0002);
 
           z -= particle->x2c_lineLengthOrSize;
-          GXPosition3f32(x, y, z);
+          billboard.Emit(viewPoint, x, y, z);
           GXColor1u32(color);
           GXTexCoord1s16(0x0000);
 
           x += particle->x2c_lineLengthOrSize;
-          GXPosition3f32(x, y, z);
+          billboard.Emit(viewPoint, x, y, z);
           GXColor1u32(color);
           GXTexCoord1s16(0x0200);
         }
@@ -1976,19 +2002,19 @@ void CElementGen::RenderParticles() {
           float vpY = viewPoint.GetY();
           float vpZ = viewPoint.GetZ();
 
-          GXPosition3f32(vpX + sinPlusCos, vpY, vpZ - sinMinusCos);
+          billboard.Emit(viewPoint, vpX + sinPlusCos, vpY, vpZ - sinMinusCos);
           GXColor1u32(color);
           GXTexCoord1s16(0x0202);
 
-          GXPosition3f32(vpX + sinMinusCos, vpY, vpZ + sinPlusCos);
+          billboard.Emit(viewPoint, vpX + sinMinusCos, vpY, vpZ + sinPlusCos);
           GXColor1u32(color);
           GXTexCoord1s16(0x0002);
 
-          GXPosition3f32(vpX - sinPlusCos, vpY, vpZ + sinMinusCos);
+          billboard.Emit(viewPoint, vpX - sinPlusCos, vpY, vpZ + sinMinusCos);
           GXColor1u32(color);
           GXTexCoord1s16(0x0000);
 
-          GXPosition3f32(vpX - sinMinusCos, vpY, vpZ - sinPlusCos);
+          billboard.Emit(viewPoint, vpX - sinMinusCos, vpY, vpZ - sinPlusCos);
           GXColor1u32(color);
           GXTexCoord1s16(0x0200);
         }
@@ -2005,6 +2031,7 @@ void CElementGen::RenderParticles() {
 }
 
 void CElementGen::RenderParticlesFlameThrower(CElementGen* const* gens, int count) {
+  VrParticleBillboard billboard;
 #ifdef TARGET_PC
   // The batch below draws each generator's own particles as plain textured
   // cards. A Remastered effect converted to PART can need more: a root with no
@@ -2168,22 +2195,22 @@ void CElementGen::RenderParticlesFlameThrower(CElementGen* const* gens, int coun
     float negSinPlusCos = -sinT + cosT;
     float negCos = -cosT;
 
-    GXPosition3f32(sinPlusCos + readPtr->x4_viewPoint.GetX(), readPtr->x4_viewPoint.GetY(),
+    billboard.Emit(readPtr->x4_viewPoint, sinPlusCos + readPtr->x4_viewPoint.GetX(), readPtr->x4_viewPoint.GetY(),
                    cosMinusSin + readPtr->x4_viewPoint.GetZ());
     GXColor1u32(color);
     GXTexCoord2f32(uvs.xMax, uvs.yMax);
 
-    GXPosition3f32(sinMinusCos + readPtr->x4_viewPoint.GetX(), readPtr->x4_viewPoint.GetY(),
+    billboard.Emit(readPtr->x4_viewPoint, sinMinusCos + readPtr->x4_viewPoint.GetX(), readPtr->x4_viewPoint.GetY(),
                    sinPlusCos + readPtr->x4_viewPoint.GetZ());
     GXColor1u32(color);
     GXTexCoord2f32(uvs.xMin, uvs.yMax);
 
-    GXPosition3f32(readPtr->x4_viewPoint.GetX() - sinPlusCos, readPtr->x4_viewPoint.GetY(),
+    billboard.Emit(readPtr->x4_viewPoint, readPtr->x4_viewPoint.GetX() - sinPlusCos, readPtr->x4_viewPoint.GetY(),
                    readPtr->x4_viewPoint.GetZ() - cosMinusSin);
     GXColor1u32(color);
     GXTexCoord2f32(uvs.xMin, uvs.yMin);
 
-    GXPosition3f32(negSinPlusCos + readPtr->x4_viewPoint.GetX(), readPtr->x4_viewPoint.GetY(),
+    billboard.Emit(readPtr->x4_viewPoint, negSinPlusCos + readPtr->x4_viewPoint.GetX(), readPtr->x4_viewPoint.GetY(),
                    (negCos - sinT) + readPtr->x4_viewPoint.GetZ());
     GXColor1u32(color);
     GXTexCoord2f32(uvs.xMax, uvs.yMin);
@@ -2200,6 +2227,7 @@ void CElementGen::RenderParticlesFlameThrower(CElementGen* const* gens, int coun
 }
 
 void CElementGen::RenderParticlesIndirectTexture() {
+  VrParticleBillboard billboard;
   CTransform4f systemViewCopy(CGraphics::GetViewMatrix());
   systemViewCopy.SetTranslation(CVector3f::Zero());
   CTransform4f systemCameraCopy(systemViewCopy.GetQuickInverse() * x22c_globalOrientation);
@@ -2443,22 +2471,22 @@ void CElementGen::RenderParticlesIndirectTexture() {
       uint color = particle->x34_color.GetColor_u32();
       CGX::Begin(GX_QUADS, GX_VTXFMT0, 4);
 
-      GXPosition3f32(size + vpX, vpY, size + vpZ);
+      billboard.Emit(viewPoint, size + vpX, vpY, size + vpZ);
       GXColor1u32(color);
       GXTexCoord2f32(uvs.xMax, uvs.yMax);
       GXTexCoord2f32(uvsInd.xMax, uvsInd.yMax);
 
-      GXPosition3f32(vpX - size, vpY, size + vpZ);
+      billboard.Emit(viewPoint, vpX - size, vpY, size + vpZ);
       GXColor1u32(color);
       GXTexCoord2f32(uvs.xMin, uvs.yMax);
       GXTexCoord2f32(uvsInd.xMin, uvsInd.yMax);
 
-      GXPosition3f32(vpX - size, vpY, vpZ - size);
+      billboard.Emit(viewPoint, vpX - size, vpY, vpZ - size);
       GXColor1u32(color);
       GXTexCoord2f32(uvs.xMin, uvs.yMin);
       GXTexCoord2f32(uvsInd.xMin, uvsInd.yMin);
 
-      GXPosition3f32(size + vpX, vpY, vpZ - size);
+      billboard.Emit(viewPoint, size + vpX, vpY, vpZ - size);
       GXColor1u32(color);
       GXTexCoord2f32(uvs.xMax, uvs.yMin);
       GXTexCoord2f32(uvsInd.xMax, uvsInd.yMin);
@@ -2495,25 +2523,25 @@ void CElementGen::RenderParticlesIndirectTexture() {
         uint color = particle->x34_color.GetColor_u32();
         CGX::Begin(GX_QUADS, GX_VTXFMT0, 4);
 
-        GXPosition3f32(size + vpX, vpY, size + vpZ);
+        billboard.Emit(viewPoint, size + vpX, vpY, size + vpZ);
         GXColor1u32(color);
         GXTexCoord2f32(uvs.xMax, uvs.yMax);
         GXTexCoord2f32(maxU, minV);
         GXTexCoord2f32(uvsInd.xMax, uvsInd.yMax);
 
-        GXPosition3f32(vpX - size, vpY, size + vpZ);
+        billboard.Emit(viewPoint, vpX - size, vpY, size + vpZ);
         GXColor1u32(color);
         GXTexCoord2f32(uvs.xMin, uvs.yMax);
         GXTexCoord2f32(minU, minV);
         GXTexCoord2f32(uvsInd.xMin, uvsInd.yMax);
 
-        GXPosition3f32(vpX - size, vpY, vpZ - size);
+        billboard.Emit(viewPoint, vpX - size, vpY, vpZ - size);
         GXColor1u32(color);
         GXTexCoord2f32(uvs.xMin, uvs.yMin);
         GXTexCoord2f32(minU, maxV);
         GXTexCoord2f32(uvsInd.xMin, uvsInd.yMin);
 
-        GXPosition3f32(size + vpX, vpY, vpZ - size);
+        billboard.Emit(viewPoint, size + vpX, vpY, vpZ - size);
         GXColor1u32(color);
         GXTexCoord2f32(uvs.xMax, uvs.yMin);
         GXTexCoord2f32(maxU, maxV);
@@ -2828,7 +2856,8 @@ void CElementGen::RenderModels() {
   const bool faceCamera = x28_loadedGenDesc->xPortFaceCamera;
   const CTransform4f pmrtRot = rot;
   const CVector3f cameraPos =
-      x13c_globalScaleTransformInverse * CGraphics::GetViewMatrix().GetTranslation();
+      x13c_globalScaleTransformInverse *
+      PortVr::VrHeadViewTransform(CGraphics::GetViewMatrix()).GetTranslation();
 #endif
   rot = orient * rot;
 

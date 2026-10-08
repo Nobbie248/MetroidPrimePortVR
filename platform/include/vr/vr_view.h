@@ -46,6 +46,9 @@ bool VrHeadGaze(const CTransform4f& cameraXf, CVector3f& origin, CVector3f& dire
 // icons, target reticles), which would otherwise face the body and show their
 // edge when the head turns, and would roll with a tilted head.
 CMatrix3f VrHeadViewRotation(const CTransform4f& cameraXf) noexcept;
+// Head orientation and position for CPU effects; the world render camera
+// remains unchanged so stereo replay does not apply head tracking twice.
+CTransform4f VrHeadViewTransform(const CTransform4f& cameraXf) noexcept;
 
 // Replaces `frustum` with the head-facing cone of the settings' culling angle
 // when immersive and culling is enabled; false leaves it alone.

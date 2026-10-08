@@ -139,6 +139,15 @@ bool VrHeadGaze(const CTransform4f& cameraXf, CVector3f& origin, CVector3f& dire
     return true;
 }
 
+CTransform4f VrHeadViewTransform(const CTransform4f& cameraXf) noexcept {
+    CVector3f origin;
+    CVector3f direction;
+    if (!VrHeadGaze(cameraXf, origin, direction)) {
+        return cameraXf;
+    }
+    return CTransform4f(VrHeadViewRotation(cameraXf), origin);
+}
+
 CMatrix3f VrHeadViewRotation(const CTransform4f& cameraXf) noexcept {
     const CMatrix3f body = cameraXf.BuildMatrix3f();
     if (!ImmersiveNow()) {

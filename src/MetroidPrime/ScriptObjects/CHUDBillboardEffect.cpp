@@ -14,6 +14,9 @@
 #include "rstl/math.hpp"
 
 #include "port_debug.h"
+#ifdef TARGET_PC
+#include "vr/vr_view.h"
+#endif
 
 int CHUDBillboardEffect::g_BillboardCount = 0;
 int CHUDBillboardEffect::g_IndirectTexturedBillboardCount = 0;
@@ -81,6 +84,9 @@ void CHUDBillboardEffect::PreRender(CStateManager& mgr, const CFrustumPlanes& fr
   if (mgr.GetPlayer()->GetCameraState() == CPlayer::kCS_FirstPerson &&
       !PortDebug::HideVisorEffects()) {
     CTransform4f camXf = mgr.GetCameraManager()->GetCurrentCameraTransform(mgr);
+#ifdef TARGET_PC
+    camXf = PortVr::VrHeadViewTransform(camXf);
+#endif
     xe8_generator->SetGlobalTranslation(camXf * xec_translation);
     xe8_generator->SetGlobalOrientation(camXf);
     x104_25_enableRender = true;

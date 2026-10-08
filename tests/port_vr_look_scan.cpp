@@ -3,6 +3,7 @@
 // NativeRuntime.cpp gives for the same inputs.
 
 #include "vr/vr_look_scan.h"
+#include "vr/vr_billboard_math.h"
 
 #include <cmath>
 #include <cstdio>
@@ -21,6 +22,26 @@ bool Near(float a, float b) { return std::fabs(a - b) < 0.0001f; }
 
 int main() {
   using namespace PortVr::LookScan;
+
+  // World sprites must face the head's position even to either side of the
+  // body's camera, at the poles, or with a translated tracking origin.
+  const PortVr::billboard_math::Vec3 viewer{3.f, 4.f, 5.f};
+  for (const PortVr::billboard_math::Vec3 offset : {
+           PortVr::billboard_math::Vec3{0.f, 10.f, 0.f}, {10.f, 0.f, 0.f},
+           {-10.f, 0.f, 0.f}, {0.f, -10.f, 0.f}, {0.f, 0.f, 10.f}, {0.f, 0.f, -10.f}}) {
+    const auto basis = PortVr::billboard_math::Facing(
+        {viewer[0] + offset[0], viewer[1] + offset[1], viewer[2] + offset[2]}, viewer, {0.f, 0.f, 1.f});
+    Check(Near(PortVr::billboard_math::Dot(basis.forward, offset), 10.f),
+          "billboard normal follows the viewer-to-particle ray in every direction");
+    Check(Near(PortVr::billboard_math::Dot(basis.right, basis.forward), 0.f) &&
+              Near(PortVr::billboard_math::Dot(basis.up, basis.forward), 0.f) &&
+              Near(PortVr::billboard_math::Dot(basis.right, basis.right), 1.f) &&
+              Near(PortVr::billboard_math::Dot(basis.up, basis.up), 1.f),
+          "billboard edges preserve size and are perpendicular to the viewer ray");
+  }
+  const auto coincident = PortVr::billboard_math::Facing(viewer, viewer, {0.f, 0.f, 1.f});
+  Check(Near(PortVr::billboard_math::Dot(coincident.forward, coincident.forward), 1.f),
+        "a particle at the eye produces a finite billboard basis");
 
   // Rotating a target around the head must not shrink its icon as the body's
   // forward depth approaches zero, or goes negative after a head turn.

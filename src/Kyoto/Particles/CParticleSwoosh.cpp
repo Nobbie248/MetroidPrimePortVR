@@ -1,4 +1,7 @@
 #include "Kyoto/Particles/CParticleSwoosh.hpp"
+#ifdef TARGET_PC
+#include "vr/vr_view.h"
+#endif
 
 #include "Kyoto/Basics/CStopwatch.hpp"
 #include "Kyoto/Graphics/CGX.hpp"
@@ -746,7 +749,12 @@ void CParticleSwoosh::Render2SidedNoSplineNoGaps() {
       const CTransform4f inverse =
           (CTransform4f::Translate(xa4_globalTranslation) * xb0_globalOrientation * xec_scaleXf)
               .GetInverse();
-      const CTransform4f camera = inverse * CGraphics::GetViewMatrix();
+      const CTransform4f camera = inverse *
+#ifdef TARGET_PC
+          PortVr::VrHeadViewTransform(CGraphics::GetViewMatrix());
+#else
+          CGraphics::GetViewMatrix();
+#endif
       const CVector3f camToParticle = camera.GetTranslation();
       CVector3f dotVec = CVector3f::Zero();
       for (int i = 0; i < x15c_swooshes.size(); ++i) {

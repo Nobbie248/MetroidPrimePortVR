@@ -16,6 +16,10 @@
 #include "MetroidPrime/Cameras/CCameraManager.hpp"
 #include "MetroidPrime/Player/CPlayer.hpp"
 #include "MetroidPrime/ScriptObjects/CHUDBillboardEffect.hpp"
+#ifdef TARGET_PC
+#include "vr/vr_view.h"
+#include "vr/vr_billboard_math.h"
+#endif
 #include "MetroidPrime/ScriptObjects/CScriptTrigger.hpp"
 #include "MetroidPrime/ScriptObjects/CScriptWater.hpp"
 #include "MetroidPrime/TCastTo.hpp"
@@ -92,6 +96,30 @@ void CEnvFxManagerGrid::RenderRainParticles(const CTransform4f& camXf) {
   CGX::End();
 }
 
+#ifdef TARGET_PC
+static void RenderVrFlake(const CTransform4f& camera, const CTransform4f& model,
+                          const CTransform4f& inverse, const CVectorFixed8_8& p, float size) {
+  const CVector3f edgeRight = model.Rotate(camera.GetRight() * size);
+  const CVector3f edgeUp = model.Rotate(camera.GetUp() * size);
+  const CVector3f center = model * CVector3f(fixed8_8_to_real(p.x), fixed8_8_to_real(p.y),
+                                          fixed8_8_to_real(p.z)) + (edgeRight + edgeUp) * 0.5f;
+  const CVector3f viewer = camera.GetTranslation();
+  const auto basis = PortVr::billboard_math::Facing(
+      {center.GetX(), center.GetY(), center.GetZ()}, {viewer.GetX(), viewer.GetY(), viewer.GetZ()}, {0.f, 0.f, 1.f});
+  const CVector3f right = CVector3f(basis.right[0], basis.right[1], basis.right[2]) * (edgeRight.Magnitude() * 0.5f);
+  const CVector3f up = CVector3f(basis.up[0], basis.up[1], basis.up[2]) * (edgeUp.Magnitude() * 0.5f);
+  const auto vertex = [&](const CVector3f& world, u8 u, u8 v) {
+    const CVector3f local = inverse * world;
+    GXPosition3s16(real_to_fixed8_8(local.GetX()), real_to_fixed8_8(local.GetY()), real_to_fixed8_8(local.GetZ()));
+    GXTexCoord2u8(u, v);
+  };
+  vertex(center - right - up, 0, 0);
+  vertex(center - right + up, 0, 2);
+  vertex(center + right + up, 2, 2);
+  vertex(center + right - up, 2, 0);
+}
+#endif
+
 void CEnvFxManagerGrid::RenderSnowParticles(const CTransform4f& camXf) {
   int particleCount = x1c_particles.size();
   short zx = real_to_fixed8_8(0.2f * camXf.Get02());
@@ -100,9 +128,20 @@ void CEnvFxManagerGrid::RenderSnowParticles(const CTransform4f& camXf) {
   short xx = real_to_fixed8_8(0.2f * camXf.Get00());
   short xy = real_to_fixed8_8(0.2f * camXf.Get10());
   short xz = real_to_fixed8_8(0.2f * camXf.Get20());
+#ifdef TARGET_PC
+  const bool vrBillboards = PortVr::VrImmersive();
+  const CTransform4f& model = CGraphics::GetModelMatrix();
+  const CTransform4f inverse = vrBillboards ? model.GetInverse() : CTransform4f::Identity();
+#endif
   CGX::Begin(GX_QUADS, GX_VTXFMT6, particleCount * 4);
   for (int i = particleCount - 1; i >= 0; --i) {
     CVectorFixed8_8 p = x1c_particles[i];
+#ifdef TARGET_PC
+    if (vrBillboards) {
+      RenderVrFlake(camXf, model, inverse, p, 0.2f);
+      continue;
+    }
+#endif
     GXPosition3s16(p.x, p.y, p.z);
     GXTexCoord2u8(0, 0);
     p.x += zx;
@@ -132,9 +171,20 @@ void CEnvFxManagerGrid::RenderUnderwaterParticles(const CTransform4f& camXf) {
   short xx = real_to_fixed8_8(0.5f * camXf.Get00());
   short xy = real_to_fixed8_8(0.5f * camXf.Get10());
   short xz = real_to_fixed8_8(0.5f * camXf.Get20());
+#ifdef TARGET_PC
+  const bool vrBillboards = PortVr::VrImmersive();
+  const CTransform4f& model = CGraphics::GetModelMatrix();
+  const CTransform4f inverse = vrBillboards ? model.GetInverse() : CTransform4f::Identity();
+#endif
   CGX::Begin(GX_QUADS, GX_VTXFMT6, particleCount * 4);
   for (int i = particleCount - 1; i >= 0; --i) {
     CVectorFixed8_8 p = x1c_particles[i];
+#ifdef TARGET_PC
+    if (vrBillboards) {
+      RenderVrFlake(camXf, model, inverse, p, 0.5f);
+      continue;
+    }
+#endif
     GXPosition3s16(p.x, p.y, p.z);
     GXTexCoord2u8(0, 0);
     p.x += zx;
@@ -257,6 +307,9 @@ void CEnvFxManager::Cleanup() {
 void CEnvFxManager::Update(float dt, CStateManager& mgr) {
   EEnvFxType fxType = mgr.GetWorld()->GetNeededEnvFx();
   CTransform4f camXf(mgr.GetCameraManager()->GetCurrentCameraTransform(mgr));
+#ifdef TARGET_PC
+  camXf = PortVr::VrHeadViewTransform(camXf);
+#endif
 
   if (mgr.GetCameraManager()->GetFluidCounter() != 0) {
     x2c_lastBlockedGridIdx = -1;
@@ -737,6 +790,9 @@ void CEnvFxManager::Render(const CStateManager& mgr) {
       CTransform4f xf = GetParticleBoundsToWorldTransform();
       CTransform4f invXf = xf.GetInverse();
       CTransform4f camXf = mgr.GetCameraManager()->GetCurrentCameraTransform(mgr);
+#ifdef TARGET_PC
+      camXf = PortVr::VrHeadViewTransform(camXf);
+#endif
       switch (fxType) {
       case kEFX_Snow:
         SetupSnowTevs(const_cast< CStateManager& >(mgr));

@@ -13,6 +13,9 @@
 // shows its scan icon, inside the narrow "target" cone it can be picked as the
 // scan target, the best score winning.
 //
+// Look to lock-on and look to grapple pick the orbit target outside the scan
+// visor the same way, with the target cone (LockConePerp).
+//
 // No game types here, so tests/port_vr_look_scan.cpp checks it without the
 // game. platform/vr/vr_look_scan.cpp gathers the objects and applies it.
 
@@ -208,6 +211,14 @@ inline float TargetConePerp(float targetingRadius, const Metrics& metrics) noexc
     const float boundsSlack = std::min(metrics.radius, 3.0f) * 0.35f;
     const float maxPerp = std::clamp(radius * 2.75f, 3.0f, 14.0f);
     return std::min(base + distanceSlack + boundsSlack, maxPerp);
+}
+
+// Look to lock-on and look to grapple: the scan target's cone, a grapple point
+// getting PrimedGun's 1.3 times wider one (its gun ray's grapple_max_perp), as
+// a point is harder to hold the gaze on than a body.
+inline float LockConePerp(float targetingRadius, const Metrics& metrics, bool grapplePoint) noexcept {
+    const float cone = TargetConePerp(targetingRadius, metrics);
+    return grapplePoint ? cone * 1.3f : cone;
 }
 
 // The wide cone an object shows its scan icon in (PrimedGun ScanVisualAimConePerp).

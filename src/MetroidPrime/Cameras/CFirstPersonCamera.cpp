@@ -134,9 +134,10 @@ void CFirstPersonCamera::UpdateTransform(CStateManager& mgr, float dt) {
   }
 
 #ifdef TARGET_PC
-  // PortVr: look to scan: the head picked the orbit target, so the camera
-  // keeps the body's facing instead of swinging the world toward it.
-  const bool portVrHoldFacing = PortVr::VrLookToScanHoldsFacing(mgr);
+  // PortVr: look to scan / lock-on / grapple: the head picked the orbit
+  // target, so the camera keeps the body's facing instead of swinging the
+  // world toward it.
+  const bool portVrHoldFacing = PortVr::VrLookHoldsFacing(mgr, *player);
 #else
   const bool portVrHoldFacing = false;
 #endif

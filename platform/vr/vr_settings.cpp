@@ -243,6 +243,8 @@ const Field kFields[] = {
     VR_BOOL(space_warp),
     VR_BOOL(scan_zoom),
     VR_BOOL(beam_wheel_hud_highlight),
+    VR_BOOL(look_to_lock_on),
+    VR_BOOL(look_to_grapple),
     VR_FLOAT(frustum_culling_degrees, 70.0f, 175.0f),
     VR_FLOAT(metroid_hud_distance, 0.1f, 3.0f),
     VR_FLOAT(metroid_hud_size, 0.1f, 3.0f),

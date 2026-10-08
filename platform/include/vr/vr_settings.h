@@ -136,6 +136,14 @@ struct PortVrSettings {
     // HUD lit (CHudVisorBeamMenu), where PrimedGun drew its own panel of four
     // icons with a frame around the hovered one.
     bool beam_wheel_hud_highlight = true;
+    // Look to lock-on and look to grapple: outside the scan visor the head's
+    // gaze picks the L lock's target among the enemies (and other lockable
+    // objects) and among the grapple points, as look to scan
+    // (patch_gun_ray_target) does for the scan target, and the body keeps its
+    // facing during such a lock. Off, that kind is picked by the body's
+    // screen box, as on the TV (platform/vr/vr_look_scan.cpp).
+    bool look_to_lock_on = true;
+    bool look_to_grapple = true;
     float frustum_culling_degrees = 115.0f;
     float metroid_hud_distance = 0.10f;
     float metroid_hud_size = 0.75f;

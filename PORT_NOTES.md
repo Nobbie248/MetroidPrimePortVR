@@ -1,3 +1,48 @@
+## VR: look to lock-on and look to grapple (2026-10-08)
+
+Outside the scan visor, the L lock still picked its target the TV's way.
+`CPlayer::FindBestOrbitableObject` takes the objects inside the orbit zone of
+the first-person camera's screen, and in the headset that camera carries only
+the body's yaw. An enemy or a grapple point the head looked at could not be
+locked unless the body faced it. PrimedGun picked these targets with the
+cannon's aim ray (`PickGunRayTarget`). The port now picks them with the
+head's gaze, as look to scan does for the scan target.
+
+- `vr_look_to_lock_on` (enemies and every other lockable object) and
+  `vr_look_to_grapple` (grapple points), both on by default, each hand their
+  kind of target to the head. They are in the F1 VR tab's "Look targeting"
+  section and on the VR menu's CONFIG tab after LOOK TO SCAN. The launchers
+  do not show them, as they do not show look to scan.
+- `platform/vr/vr_look_scan.cpp` measures the `kMT_Orbit` objects around the
+  gaze once per tick (`VrLookTargetUpdate`, from `CPlayer::UpdateOrbitInput`).
+  It uses look to scan's measures, target cone and score; a grapple point gets
+  PrimedGun's 1.3 times wider cone (`LookScan::LockConePerp`). Reach and radius
+  are look to scan's (`vr_gun_targeting_distance`, `vr_gun_targeting_radius`).
+  Objects without the target distance test (bosses) are measured 1.75 times
+  further, as PrimedGun's gun ray did.
+- The game's rules still apply: `ValidateOrbitTargetId`, the orbit target
+  distance, line of sight, and never the current target. A grapple point also
+  needs the Grapple Beam, the orbit distance, and for a swing-locked point the
+  player in its swing plane (`FindBestOrbitableObject`'s rules).
+- `CPlayer::FindOrbitTargetId` returns the head's pick. When the head picks
+  nothing, the screen box's choice stands if it is of a kind the head does not
+  pick (a grapple point ahead of the body with look to grapple off, say).
+- During a lock the head picked, the body keeps its facing, as during a scan
+  lock (`VrLookHoldsFacing`, formerly `VrLookToScanHoldsFacing`). The camera
+  and Samus do not turn to the target, a turn under way stops (nothing damps it
+  during a lock), and `ValidateCurrentOrbitTargetId` skips its look-angle
+  test. Strafing still circles the target, since `ComputeDash` works from the
+  orbit point. The grapple's pull and swing still set Samus's facing.
+
+The look-angle test was also latent in a scan lock. A scan lock that started
+with the target dead ahead set `x374_orbitLockEstablished`, and could then
+break once strafing took the body's facing more than the orbit angle off the
+target.
+
+`port_vr_look_scan_tests` checks the cone, `port_vr_menu_tests` the rows, the
+switches and RESET CONFIG. build/vr and build/nooxr: 59/59 port tests.
+Confirmed in the headset.
+
 ## VR: the snap turn (2026-10-08)
 
 The SNAP TURN setting used to switch off smooth turning on the look stick and
@@ -309,7 +354,7 @@ switches the F1 VR tab has. It spans two pages.
 
 | Group | Rows |
 |---|---|
-| Both platforms | RENDER SCALE, EYE RESOLUTION (a readout), REFRESH RATE, WORLD SCALE, DRAW THE WORLD PER EYE, REMOVE CINEMATIC BARS, SKY AT INFINITY, SPACE WARP, SCAN WINDOW ZOOM, SCREEN DISTANCE, SCREEN WIDTH, LEAN BACK, PIPELINED RENDERING, INDEXED VERTICES ON CPU, LOOK TO SCAN, BEAM WHEEL HUD HIGHLIGHT, RESET CONFIG |
+| Both platforms | RENDER SCALE, EYE RESOLUTION (a readout), REFRESH RATE, WORLD SCALE, DRAW THE WORLD PER EYE, REMOVE CINEMATIC BARS, SKY AT INFINITY, SPACE WARP, SCAN WINDOW ZOOM, SCREEN DISTANCE, SCREEN WIDTH, LEAN BACK, PIPELINED RENDERING, INDEXED VERTICES ON CPU, LOOK TO SCAN, LOOK TO LOCK-ON, LOOK TO GRAPPLE, BEAM WHEEL HUD HIGHLIGHT, RESET CONFIG |
 | Quest only | FOVEATION, PERFORMANCE LEVEL, PASSTHROUGH, MULTIVIEW EYES, DIRECT TO HEADSET |
 | PC only | WINDOW SHOWS (the mirror) |
 

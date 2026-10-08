@@ -354,12 +354,14 @@ enum class PortItem : uint8_t {
     Pipelined,
     DeindexVertices,
     LookToScan,
+    LookToLockOn,
+    LookToGrapple,
     BeamWheelHighlight,
     Reset,
 };
 
 struct PortList {
-    std::array<PortItem, 24> items{};
+    std::array<PortItem, 28> items{};
     uint32_t count = 0;
 };
 
@@ -393,6 +395,8 @@ inline PortList PortItems(const View& view) {
     add(PortItem::Pipelined);
     add(PortItem::DeindexVertices);
     add(PortItem::LookToScan);
+    add(PortItem::LookToLockOn);
+    add(PortItem::LookToGrapple);
     add(PortItem::BeamWheelHighlight);
     add(PortItem::Reset);
     return list;
@@ -681,6 +685,10 @@ inline Row PortRow(const State& s, const PortVrSettings& v, const View& view, Po
         return {"INDEXED VERTICES ON CPU", OnOff(v.deindex_vertices)};
     case PortItem::LookToScan:
         return {"LOOK TO SCAN", OnOff(v.patch_gun_ray_target)};
+    case PortItem::LookToLockOn:
+        return {"LOOK TO LOCK-ON", OnOff(v.look_to_lock_on)};
+    case PortItem::LookToGrapple:
+        return {"LOOK TO GRAPPLE", OnOff(v.look_to_grapple)};
     case PortItem::BeamWheelHighlight:
         return {"BEAM WHEEL HUD HIGHLIGHT", OnOff(v.beam_wheel_hud_highlight)};
     case PortItem::Reset:
@@ -1209,6 +1217,8 @@ inline void ResetPortConfig(PortVrSettings& v) {
     v.pipelined_rendering = d.pipelined_rendering;
     v.deindex_vertices = d.deindex_vertices;
     v.patch_gun_ray_target = d.patch_gun_ray_target;
+    v.look_to_lock_on = d.look_to_lock_on;
+    v.look_to_grapple = d.look_to_grapple;
     v.beam_wheel_hud_highlight = d.beam_wheel_hud_highlight;
 }
 
@@ -1580,6 +1590,12 @@ inline void Activate(State& s, PortVrSettings& v, const View& view, double now, 
             break;
         case PortItem::LookToScan:
             v.patch_gun_ray_target = !v.patch_gun_ray_target;
+            break;
+        case PortItem::LookToLockOn:
+            v.look_to_lock_on = !v.look_to_lock_on;
+            break;
+        case PortItem::LookToGrapple:
+            v.look_to_grapple = !v.look_to_grapple;
             break;
         case PortItem::BeamWheelHighlight:
             v.beam_wheel_hud_highlight = !v.beam_wheel_hud_highlight;

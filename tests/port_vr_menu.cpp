@@ -372,13 +372,20 @@ void TestConfig() {
 
   // Page 2 ends with RESET CONFIG, two clicks; it leaves PrimedGun's settings alone.
   Click(s, v, pc, kNextX, kPageY, now, actions);
-  Check(s.port_page == 1 && ItemCount(s, pc) == 6, "config page 2");
+  Check(s.port_page == 1 && ItemCount(s, pc) == 8, "config page 2");
+  // LOOK TO LOCK-ON and LOOK TO GRAPPLE follow LOOK TO SCAN.
+  Check(BuildRows(s, v, pc)[4].label == std::string("LOOK TO LOCK-ON") &&
+            BuildRows(s, v, pc)[5].label == std::string("LOOK TO GRAPPLE"),
+        "look to lock-on and grapple rows");
+  Click(s, v, pc, kLabelX, RowY(kPortConfigTab, 4), now, actions);
+  Click(s, v, pc, kLabelX, RowY(kPortConfigTab, 5), now, actions);
+  Check(!v.look_to_lock_on && !v.look_to_grapple, "look to lock-on and grapple switches");
   v.metroid_hud_size = 2.0f;
-  Click(s, v, pc, kLabelX, RowY(kPortConfigTab, 5), now, actions);
+  Click(s, v, pc, kLabelX, RowY(kPortConfigTab, 7), now, actions);
   Check(s.reset_confirm == kResetPortConfig && Near(v.render_scale, kVrRenderScaleMax), "reset config armed");
-  Click(s, v, pc, kLabelX, RowY(kPortConfigTab, 5), now, actions);
+  Click(s, v, pc, kLabelX, RowY(kPortConfigTab, 7), now, actions);
   Check(Near(v.render_scale, PortVrSettings{}.render_scale) && v.display_refresh_rate == 0.0f &&
-            v.remove_cinematic_bars && Near(v.metroid_hud_size, 2.0f),
+            v.remove_cinematic_bars && v.look_to_lock_on && v.look_to_grapple && Near(v.metroid_hud_size, 2.0f),
         "reset config");
 
   // The Quest: foveation waits for the next start without density maps.

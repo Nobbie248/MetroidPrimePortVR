@@ -116,6 +116,13 @@ CPlayer::EOrbitValidationResult CPlayer::ValidateCurrentOrbitTargetId(CStateMana
       }
     }
   }
+#ifdef TARGET_PC
+  // PortVr: the body keeps its facing during a lock the head picked
+  // (vr_view.h), so how far that facing is from the target says nothing.
+  if (PortVr::VrLookHoldsFacing(mgr, *this)) {
+    return kOVR_OK;
+  }
+#endif
   const CVector3f orbitPosition = act->GetOrbitPosition(mgr);
   CVector3f eyeToOrbitFlat = orbitPosition - GetEyePosition();
   eyeToOrbitFlat.SetZ(0.f);
@@ -280,9 +287,14 @@ void CPlayer::UpdateOrbitOrientation(CStateManager& mgr) {
     return;
   }
 #ifdef TARGET_PC
-  // PortVr: look to scan: the head picked the target, so the body keeps its
-  // facing rather than turning the world toward it (vr_view.h).
-  if (PortVr::VrLookToScanHoldsFacing(mgr)) {
+  // PortVr: look to scan / lock-on / grapple: the head picked the target, so
+  // the body keeps its facing rather than turning the world toward it
+  // (vr_view.h), and a turn under way stops, as the lock's own facing would
+  // stop it: nothing else damps it during a lock.
+  if (PortVr::VrLookHoldsFacing(mgr, *this)) {
+    if (x304_orbitState == kOS_OrbitObject) {
+      SetAngularVelocityOR(CAxisAngle::Identity());
+    }
     return;
   }
 #endif
@@ -363,9 +375,9 @@ void CPlayer::UpdateOrbitInput(const CFinalInput& input, CStateManager& mgr) {
   }
   UpdateOrbitableObjects(mgr);
 #ifdef TARGET_PC
-  // PortVr: look to scan: measure the scannable objects around the head's gaze
-  // for FindOrbitTargetId and the scan icons (vr_view.h).
-  PortVr::VrLookToScanUpdate(mgr, *this);
+  // PortVr: look to scan / lock-on / grapple: measure the objects around the
+  // head's gaze for FindOrbitTargetId and the scan icons (vr_view.h).
+  PortVr::VrLookTargetUpdate(mgr, *this);
 #endif
   if (x304_orbitState == kOS_NoOrbit) {
     SetOrbitNextTargetId(FindOrbitTargetId(mgr));
@@ -850,7 +862,16 @@ TUniqueId CPlayer::FindOrbitTargetId(CStateManager& mgr) {
     return lookTarget;
   }
 #endif
-  return FindBestOrbitableObject(x354_onScreenOrbitObjects, x330_orbitZoneMode, mgr);
+  const TUniqueId bestId = FindBestOrbitableObject(x354_onScreenOrbitObjects, x330_orbitZoneMode, mgr);
+#ifdef TARGET_PC
+  // PortVr: look to lock-on / look to grapple: in the other visors the head
+  // picks the enemies and the grapple points, each kind as its setting says;
+  // the screen box still offers the kinds the head does not pick.
+  if (PortVr::VrLookToLockTarget(mgr, bestId, lookTarget)) {
+    return lookTarget;
+  }
+#endif
+  return bestId;
 }
 
 TUniqueId CPlayer::CheckEnemiesAgainstOrbitZone(const rstl::reserved_vector< TUniqueId, 1024 >& ids,

@@ -15,6 +15,15 @@
 // object must pass CPlayer::ValidateOrbitTargetId (targetable, active, scan
 // visor flag, same area, not straight above or below) and the target
 // distance test, and the target the game's line-of-sight test.
+//
+// Look to lock-on and look to grapple do the same in the other visors for the
+// orbit target (the L lock), each for its own kind of object: grapple points,
+// and everything else that can be locked. PrimedGun picked those with the
+// cannon's aim ray; here the head picks, with the scan target's cone and
+// FindBestOrbitableObject's rules (not the current target, the Grapple Beam
+// and the orbit distance for a grapple point, a swing-locked point only from
+// its swing plane, line of sight). The body keeps its facing during a lock the
+// head picked, as during a scan lock.
 
 #include "vr/vr_look_scan.h"
 #include "vr/vr_settings.h"
@@ -24,6 +33,7 @@
 #include "Collision/CMaterialList.hpp"
 #include "Collision/CRayCastResult.hpp"
 #include "Kyoto/Math/CAABox.hpp"
+#include "Kyoto/Math/CMath.hpp"
 #include "MetroidPrime/CActor.hpp"
 #include "MetroidPrime/CGameArea.hpp"
 #include "MetroidPrime/CPhysicsActor.hpp"
@@ -31,7 +41,9 @@
 #include "MetroidPrime/CWorld.hpp"
 #include "MetroidPrime/Player/CPlayer.hpp"
 #include "MetroidPrime/Player/CPlayerState.hpp"
+#include "MetroidPrime/ScriptObjects/CScriptGrapplePoint.hpp"
 #include "MetroidPrime/TCastTo.hpp"
+#include "MetroidPrime/Tweaks/CTweakPlayer.hpp"
 
 #include <algorithm>
 
@@ -43,6 +55,9 @@ constexpr int kMaxNearby = 16;
 constexpr int kMaxTargets = 8;
 // Line-of-sight tests per tick, best candidates first.
 constexpr int kMaxSightTests = 4;
+// PrimedGun's gun ray reaches 1.75 times further for objects without the
+// target distance test (bosses and other large targets).
+constexpr float kUntestedReach = 1.75f;
 
 // CPlayerOrbit.cpp's line-of-sight filters, so the head's pick obeys the same
 // visibility rule as the game's own scan targeting.
@@ -57,18 +72,36 @@ struct Ranked {
 };
 
 struct LookState {
-    bool active = false;
     unsigned int stamp = 0;
+    // Look to scan, in the scan visor.
+    bool active = false;
     TUniqueId target = kInvalidUniqueId;
     int nearbyCount = 0;
     TUniqueId nearby[kMaxNearby];
+    // Look to lock-on and look to grapple, in the other visors.
+    bool lockActive = false;
+    bool lockOn = false;
+    bool grapple = false;
+    TUniqueId lockTarget = kInvalidUniqueId;
 };
 LookState s_look;
 
 // Results are kept for the tick they were made in and the next, so readers
 // that run before the player's input in a tick still see them, and a tick
 // that skips the orbit input (morphing, cinematics) lets them lapse.
-bool Fresh(const CStateManager& mgr) noexcept { return s_look.active && mgr.GetUpdateFrameIndex() - s_look.stamp <= 2u; }
+bool Recent(const CStateManager& mgr) noexcept { return mgr.GetUpdateFrameIndex() - s_look.stamp <= 2u; }
+bool Fresh(const CStateManager& mgr) noexcept { return s_look.active && Recent(mgr); }
+bool FreshLock(const CStateManager& mgr) noexcept { return s_look.lockActive && Recent(mgr); }
+
+bool IsGrapplePoint(const CEntity* entity) noexcept {
+    return TCastToConstPtr< CScriptGrapplePoint >(entity) != nullptr;
+}
+
+// Whether the head picks this kind of orbit target (the lock settings as of
+// the last update).
+bool HeadPicks(const CStateManager& mgr, TUniqueId id) noexcept {
+    return IsGrapplePoint(mgr.GetObjectById(id)) ? s_look.grapple : s_look.lockOn;
+}
 
 LookScan::Vec3 ToLook(const CVector3f& v) noexcept { return {v.GetX(), v.GetY(), v.GetZ()}; }
 
@@ -148,34 +181,28 @@ bool InSight(CStateManager& mgr, const CVector3f& eye, const CActor& actor) noex
     return mgr.RayWorldIntersection(hitId, eye, direction, distance, kLineOfSightFilter, nearList).IsInvalid();
 }
 
-} // namespace
+// The best-scored target the eye can see, the previous pick kept while it
+// scores close to the best.
+TUniqueId PickInSight(CStateManager& mgr, const CVector3f& eye, Ranked* targets, int targetCount,
+                      TUniqueId previous) noexcept {
+    std::sort(targets, targets + targetCount, [](const Ranked& a, const Ranked& b) { return a.score < b.score; });
+    for (int i = 1; i < targetCount; ++i) {
+        if (targets[i].id == previous && LookScan::KeepPrevious(targets[i].score, targets[0].score)) {
+            std::rotate(targets, targets + i, targets + i + 1);
+            break;
+        }
+    }
+    for (int i = 0; i < targetCount && i < kMaxSightTests; ++i) {
+        const CActor* actor = TCastToConstPtr< CActor >(mgr.GetObjectById(targets[i].id));
+        if (actor != nullptr && InSight(mgr, eye, *actor)) {
+            return targets[i].id;
+        }
+    }
+    return kInvalidUniqueId;
+}
 
-void VrLookToScanUpdate(CStateManager& mgr, const CPlayer& player) noexcept {
-    const TUniqueId previous = s_look.target;
-    s_look.stamp = mgr.GetUpdateFrameIndex();
-    s_look.active = false;
-    s_look.target = kInvalidUniqueId;
-    s_look.nearbyCount = 0;
-    if (!VrImmersive() || mgr.GetPlayerState()->GetCurrentVisor() != CPlayerState::kPV_Scan ||
-        player.GetMorphballTransitionState() != CPlayer::kMS_Unmorphed) {
-        return;
-    }
-    const PortVrSettings settings = GetVrSettings();
-    if (!settings.patch_gun_ray_target) {
-        return;
-    }
-    CVector3f origin;
-    CVector3f direction;
-    if (!VrHeadGaze(player.GetFirstPersonCameraTransform(mgr), origin, direction)) {
-        return;
-    }
-    s_look.active = true;
-    // Orbit disable sources (CPlayer::UpdateOrbitableObjects): nothing to target.
-    if (player.CheckOrbitDisableSourceList()) {
-        return;
-    }
-
-    const LookScan::Ray ray{ToLook(origin), ToLook(direction)};
+void UpdateScan(CStateManager& mgr, const CPlayer& player, const PortVrSettings& settings, const LookScan::Ray& ray,
+                const CVector3f& origin, TUniqueId previous) noexcept {
     const float targetingRadius = LookScan::TargetingRadius(settings.gun_targeting_radius);
     const float maxAlong = LookScan::MaxAlong(settings.gun_targeting_distance);
     const CVector3f reach(maxAlong, maxAlong, maxAlong);
@@ -217,21 +244,7 @@ void VrLookToScanUpdate(CStateManager& mgr, const CPlayer& player) noexcept {
         }
     }
 
-    std::sort(targets, targets + targetCount, [](const Ranked& a, const Ranked& b) { return a.score < b.score; });
-    // The current pick stays while it scores close to the best.
-    for (int i = 1; i < targetCount; ++i) {
-        if (targets[i].id == previous && LookScan::KeepPrevious(targets[i].score, targets[0].score)) {
-            std::rotate(targets, targets + i, targets + i + 1);
-            break;
-        }
-    }
-    for (int i = 0; i < targetCount && i < kMaxSightTests; ++i) {
-        const CActor* actor = TCastToConstPtr< CActor >(mgr.GetObjectById(targets[i].id));
-        if (actor != nullptr && InSight(mgr, eye, *actor)) {
-            s_look.target = targets[i].id;
-            break;
-        }
-    }
+    s_look.target = PickInSight(mgr, eye, targets, targetCount, previous);
 
     for (int i = 0; i < nearbyCount; ++i) {
         s_look.nearby[i] = nearby[i].id;
@@ -248,6 +261,117 @@ void VrLookToScanUpdate(CStateManager& mgr, const CPlayer& player) noexcept {
     }
 }
 
+// FindBestOrbitableObject's grapple point rules: the Grapple Beam, within the
+// orbit distance, and a swing-locked point only from in front or behind it.
+bool GrapplePointUsable(const CStateManager& mgr, const CPlayer& player, const CScriptGrapplePoint& point,
+                        float distance) noexcept {
+    if (!mgr.GetPlayerState()->HasPowerUp(CPlayerState::kIT_GrappleBeam) ||
+        !(distance < gpTweakPlayer->GetOrbitDistanceMax())) {
+        return false;
+    }
+    if (point.GetGrappleParameters().GetLockSwingTurn()) {
+        CVector3f pointToPlayer = player.GetTranslation() - point.GetTranslation();
+        pointToPlayer.SetZ(0.f);
+        if (pointToPlayer.CanBeNormalized()) {
+            const CVector3f pointForward = point.GetTransform().GetForward().AsNormalized();
+            if (CMath::AbsF(CVector3f::Dot(pointForward, pointToPlayer.AsNormalized())) <= 0.70710677f) {
+                return false;
+            }
+        }
+    }
+    return true;
+}
+
+void UpdateLock(CStateManager& mgr, const CPlayer& player, const PortVrSettings& settings, const LookScan::Ray& ray,
+                const CVector3f& origin, TUniqueId previous) noexcept {
+    const float targetingRadius = LookScan::TargetingRadius(settings.gun_targeting_radius);
+    const float maxAlong = LookScan::MaxAlong(settings.gun_targeting_distance);
+    const float untestedAlong = maxAlong * kUntestedReach;
+    const CVector3f reach(untestedAlong, untestedAlong, untestedAlong);
+    TEntityList nearList;
+    mgr.BuildNearList(nearList, CAABox(origin - reach, origin + reach),
+                      CMaterialFilter::MakeInclude(CMaterialList(kMT_Orbit)), &player);
+
+    const CVector3f eye = player.GetEyePosition();
+    const float maxTargetDistance = player.GetOrbitMaxTargetDistance(mgr);
+    Ranked targets[kMaxTargets];
+    int targetCount = 0;
+    for (auto it = nearList.begin(); it != nearList.end(); ++it) {
+        const CActor* actor = TCastToConstPtr< CActor >(mgr.GetObjectById(*it));
+        // The current target is not a next one (FindBestOrbitableObject).
+        if (actor == nullptr || actor->GetUniqueId() == player.GetUniqueId() ||
+            actor->GetUniqueId() == player.GetOrbitTargetId() || !actor->GetMaterialList().HasMaterial(kMT_Orbit)) {
+            continue;
+        }
+        const CScriptGrapplePoint* point = TCastToConstPtr< CScriptGrapplePoint >(actor);
+        if (point != nullptr ? !settings.look_to_grapple : !settings.look_to_lock_on) {
+            continue;
+        }
+        // The game's own target rules (CPlayer::FindOrbitableObjects).
+        if (player.ValidateOrbitTargetId(actor->GetUniqueId(), mgr) != CPlayer::kOVR_OK) {
+            continue;
+        }
+        const float distance = (actor->GetOrbitPosition(mgr) - eye).Magnitude();
+        if (actor->GetDoTargetDistanceTest() && distance > maxTargetDistance) {
+            continue;
+        }
+        if (point != nullptr && !GrapplePointUsable(mgr, player, *point, distance)) {
+            continue;
+        }
+        const float along = actor->GetDoTargetDistanceTest() ? maxAlong : untestedAlong;
+        const LookScan::Metrics metrics = MeasureActor(*actor, mgr, ray, along, targetingRadius);
+        if (!metrics.valid) {
+            continue;
+        }
+        const float cone = LookScan::LockConePerp(targetingRadius, metrics, point != nullptr);
+        if (metrics.perp <= cone) {
+            Insert(targets, targetCount, kMaxTargets, actor->GetUniqueId(), LookScan::TargetScore(metrics, cone));
+        }
+    }
+
+    s_look.lockTarget = PickInSight(mgr, eye, targets, targetCount, previous);
+}
+
+} // namespace
+
+void VrLookTargetUpdate(CStateManager& mgr, const CPlayer& player) noexcept {
+    const TUniqueId previousScan = s_look.target;
+    const TUniqueId previousLock = s_look.lockTarget;
+    s_look.stamp = mgr.GetUpdateFrameIndex();
+    s_look.active = false;
+    s_look.target = kInvalidUniqueId;
+    s_look.nearbyCount = 0;
+    s_look.lockActive = false;
+    s_look.lockTarget = kInvalidUniqueId;
+    if (!VrImmersive() || player.GetMorphballTransitionState() != CPlayer::kMS_Unmorphed) {
+        return;
+    }
+    const PortVrSettings settings = GetVrSettings();
+    const bool scanVisor = mgr.GetPlayerState()->GetCurrentVisor() == CPlayerState::kPV_Scan;
+    if (scanVisor ? !settings.patch_gun_ray_target : (!settings.look_to_lock_on && !settings.look_to_grapple)) {
+        return;
+    }
+    CVector3f origin;
+    CVector3f direction;
+    if (!VrHeadGaze(player.GetFirstPersonCameraTransform(mgr), origin, direction)) {
+        return;
+    }
+    s_look.active = scanVisor;
+    s_look.lockActive = !scanVisor;
+    s_look.lockOn = settings.look_to_lock_on;
+    s_look.grapple = settings.look_to_grapple;
+    // Orbit disable sources (CPlayer::UpdateOrbitableObjects): nothing to target.
+    if (player.CheckOrbitDisableSourceList()) {
+        return;
+    }
+    const LookScan::Ray ray{ToLook(origin), ToLook(direction)};
+    if (scanVisor) {
+        UpdateScan(mgr, player, settings, ray, origin, previousScan);
+    } else {
+        UpdateLock(mgr, player, settings, ray, origin, previousLock);
+    }
+}
+
 bool VrLookToScanTarget(const CStateManager& mgr, TUniqueId& id) noexcept {
     if (!Fresh(mgr)) {
         return false;
@@ -261,6 +385,23 @@ const TUniqueId* VrLookToScanNearby(const CStateManager& mgr, int& count) noexce
     return count > 0 ? s_look.nearby : nullptr;
 }
 
-bool VrLookToScanHoldsFacing(const CStateManager& mgr) noexcept { return Fresh(mgr); }
+bool VrLookToLockTarget(const CStateManager& mgr, TUniqueId gamePick, TUniqueId& id) noexcept {
+    if (!FreshLock(mgr)) {
+        return false;
+    }
+    id = s_look.lockTarget;
+    if (id == kInvalidUniqueId && gamePick != kInvalidUniqueId && !HeadPicks(mgr, gamePick)) {
+        id = gamePick;
+    }
+    return true;
+}
+
+bool VrLookHoldsFacing(const CStateManager& mgr, const CPlayer& player) noexcept {
+    if (Fresh(mgr)) {
+        return true;
+    }
+    return FreshLock(mgr) && player.GetOrbitState() == CPlayer::kOS_OrbitObject &&
+           player.GetOrbitTargetId() != kInvalidUniqueId && HeadPicks(mgr, player.GetOrbitTargetId());
+}
 
 } // namespace PortVr

@@ -218,9 +218,15 @@ void DrawVrDebugTab() {
   ImGui::SeparatorText("Scan visor");
   changed |= ImGui::Checkbox("Scan window zoom", &s.scan_zoom);
   ImGui::TextWrapped("Off, the scan window shows the view behind it unmagnified, keeping its frame.");
+
+  ImGui::SeparatorText("Look targeting");
   changed |= ImGui::Checkbox("Look to scan", &s.patch_gun_ray_target);
   ImGui::TextWrapped("The scan target and the scan icons follow where the head looks, and a scan lock keeps the "
                      "body's facing (PrimedGun's gun ray / scan target hook).");
+  changed |= ImGui::Checkbox("Look to lock-on", &s.look_to_lock_on);
+  changed |= ImGui::Checkbox("Look to grapple", &s.look_to_grapple);
+  ImGui::TextWrapped("In the other visors, L locks on to the enemy or the grapple point the head looks at, and the "
+                     "body keeps its facing during that lock. Off, that kind is picked in front of the body.");
   changed |= ImGui::SliderFloat("Look reach", &s.gun_targeting_distance, 15.f, 100.f, "%.0f units");
   changed |= ImGui::SliderFloat("Look radius", &s.gun_targeting_radius, 0.5f, 12.f, "%.1f units");
   ImGui::TextWrapped("The radius widens the cones around the gaze that pick the target and show icons "

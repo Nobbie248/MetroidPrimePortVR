@@ -66,6 +66,8 @@ int main() {
   far.along = 60.f;
   Check(Near(TargetConePerp(4.f, far), 11.f) && Near(VisualConePerp(4.f, far), 32.f), "both cones are capped");
   Check(Near(TargetConePerp(nan, at10), 3.06f), "a broken radius falls back to 4");
+  Check(Near(LockConePerp(4.f, at10, false), 3.06f) && Near(LockConePerp(4.f, at10, true), 3.978f),
+        "lock-on uses the target cone, a grapple point 1.3 times wider");
 
   // Scores: nearer the gaze wins, then nearer the head.
   Metrics onGaze = at10;

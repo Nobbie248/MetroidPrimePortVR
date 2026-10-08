@@ -99,9 +99,14 @@ void VrResetCannonSmoothing() noexcept;
 // in the scan visor the head picks the scan target and the scan icons, rather
 // than the body's facing (vr/vr_look_scan.h has the maths). Game thread.
 //
+// Look to lock-on and look to grapple (vr_look_to_lock_on, vr_look_to_grapple)
+// do the same outside the scan visor for the orbit target, each for its kind:
+// grapple points, and everything else that can be locked.
+//
 // Once per tick from CPlayer::UpdateOrbitInput, after the orbitable objects
-// are gathered: measures the scannable objects around the head's gaze.
-void VrLookToScanUpdate(CStateManager& mgr, const CPlayer& player) noexcept;
+// are gathered: measures the scannable objects (scan visor) or the orbitable
+// ones (other visors) around the head's gaze.
+void VrLookTargetUpdate(CStateManager& mgr, const CPlayer& player) noexcept;
 // True when look to scan owns this tick's choice (immersive, scan visor,
 // unmorphed, setting on); `id` is then the head's pick, possibly none.
 // CPlayer::FindOrbitTargetId returns it instead of its screen-box choice.
@@ -109,12 +114,19 @@ bool VrLookToScanTarget(const CStateManager& mgr, TUniqueId& id) noexcept;
 // The scannable objects near where the head looks, for their scan icons
 // (CPlayerVisor::UpdateScanObjectIndicators); null and 0 when inactive.
 const TUniqueId* VrLookToScanNearby(const CStateManager& mgr, int& count) noexcept;
-// While look to scan is active the body keeps its facing: an orbit lock on
-// the target the head picked does not turn the camera and the player toward
-// it, which would swing the whole world around the headset and take the
-// target out from under the gaze (CFirstPersonCamera::UpdateTransform,
-// CPlayer::UpdateOrbitOrientation).
-bool VrLookToScanHoldsFacing(const CStateManager& mgr) noexcept;
+// True when look to lock-on or look to grapple owns this tick's choice
+// (immersive, not the scan visor, unmorphed, either setting on); `id` is then
+// the head's pick, or else `gamePick` (FindBestOrbitableObject's screen-box
+// choice) if that is of a kind the head does not pick, or none.
+// CPlayer::FindOrbitTargetId returns it.
+bool VrLookToLockTarget(const CStateManager& mgr, TUniqueId gamePick, TUniqueId& id) noexcept;
+// The body keeps its facing while look to scan is active, and during an orbit
+// lock on a target of a kind the head picks: the lock does not turn the
+// camera and the player toward it, which would swing the whole world around
+// the headset and take the target out from under the gaze
+// (CFirstPersonCamera::UpdateTransform, CPlayer::UpdateOrbitOrientation), nor
+// break when the body's facing drifts off it (CPlayer::ValidateCurrentOrbitTargetId).
+bool VrLookHoldsFacing(const CStateManager& mgr, const CPlayer& player) noexcept;
 // The rendered model's offset from the tracked pose (PrimedGun's model offset
 // and its base forward offset), in world units; zero when not tracked.
 CVector3f VrCannonModelOffsetWorld() noexcept;

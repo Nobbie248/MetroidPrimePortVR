@@ -14,6 +14,10 @@
 
 #include "rstl/math.hpp"
 
+#ifdef TARGET_PC
+#include "vr/vr_view.h"
+#endif
+
 CCameraShakeData CameraShaker = CCameraShakeData::HardVertShake(0.125f, 0.25f);
 static const ushort kSoundId[2] = {SFXsam_a_plafire_00, SFXsam_a_plachfire_00};
 
@@ -97,7 +101,10 @@ void CPlasmaBeam::Fire(const bool underwater, const float dt,
     }
   } else {
     CGunWeapon::Fire(underwater, dt, chargeState, xf, mgr, homingTarget, chargeFactor1, 1.f);
-    mgr.CameraManager()->AddCameraShaker(CameraShaker, false);
+#ifdef TARGET_PC
+    if (!PortVr::VrImmersive())
+#endif
+      mgr.CameraManager()->AddCameraShaker(CameraShaker, false);
     x238_lightingResetDelayTimer = 0.65f;
     SetWorldLighting(mgr, mgr.GetPlayer()->GetCurrentAreaId(), 8.f, 0.7f);
     fired = true;

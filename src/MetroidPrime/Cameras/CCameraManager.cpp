@@ -63,6 +63,31 @@ CTransform4f InterpolateCameraTransform(const CTransform4f& previous,
                                                        CQuaternion::FromMatrix(current), t);
   return rotation.BuildTransform4f(translation);
 }
+
+CTransform4f LevelVrBallCamera(const CCameraManager& cameras, const CStateManager& mgr,
+                               const CTransform4f& xf) {
+#ifdef TARGET_PC
+  if (PortVr::VrImmersive() && !cameras.IsInCinematicCamera() &&
+      mgr.GetPlayer()->GetMorphballTransitionState() != CPlayer::kMS_Unmorphed) {
+    // PrimedGun's ball-camera level patch: retain yaw and translation while
+    // removing the game's pitch/roll. Head tracking supplies the viewer's tilt.
+    CVector3f right = xf.GetRight();
+    right[kDZ] = 0.f;
+    if (!right.CanBeNormalized()) {
+      CVector3f forward = xf.GetForward();
+      forward[kDZ] = 0.f;
+      right = CVector3f::Cross(forward, CVector3f::Up());
+    }
+    if (!right.CanBeNormalized()) {
+      right = CVector3f(1.f, 0.f, 0.f);
+    }
+    right.Normalize();
+    return CTransform4f::FromColumns(right, CVector3f::Cross(CVector3f::Up(), right),
+                                     CVector3f::Up(), xf.GetTranslation());
+  }
+#endif
+  return xf;
+}
 } // namespace
 
 CCameraManager::CCameraManager(TUniqueId curCamera)
@@ -537,11 +562,11 @@ CTransform4f CCameraManager::GetCurrentCameraTransform(const CStateManager& mgr)
         latest = look * latest.GetRotation();
       }
       latest.SetTranslation(presentation.GetTranslation());
-      return latest;
+      return LevelVrBallCamera(*this, mgr, latest);
     }
-    return presentation;
+    return LevelVrBallCamera(*this, mgr, presentation);
   }
-  return GetSimulationCameraTransform(mgr);
+  return LevelVrBallCamera(*this, mgr, GetSimulationCameraTransform(mgr));
 }
 
 bool CCameraManager::GetPresentedLookRotation(const CStateManager& mgr,

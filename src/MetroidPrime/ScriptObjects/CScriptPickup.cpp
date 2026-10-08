@@ -7,20 +7,15 @@
 #include "MetroidPrime/CWorld.hpp"
 #include "MetroidPrime/CModelData.hpp"
 #include "MetroidPrime/CStateManager.hpp"
-#include "MetroidPrime/Cameras/CCameraManager.hpp"
-#include "MetroidPrime/Cameras/CFirstPersonCamera.hpp"
 #include "MetroidPrime/Player/CGameState.hpp"
 #include "MetroidPrime/Player/CPlayer.hpp"
 #include "MetroidPrime/Player/CPlayerGun.hpp"
 #include "MetroidPrime/Player/CPlayerState.hpp"
-#include "MetroidPrime/Tweaks/CTweakGame.hpp"
 
 #include "MetroidPrime/HUD/CHUDMemoParms.hpp"
 #include "MetroidPrime/HUD/CSamusHud.hpp"
 
 #include "Kyoto/CResFactory.hpp"
-#include "Kyoto/Math/CAbsAngle.hpp"
-#include "Kyoto/Math/CMath.hpp"
 #include "Kyoto/Text/CStringTable.hpp"
 
 #include "port_apclient.h"
@@ -126,12 +121,11 @@ void CScriptPickup::Think(float dt, CStateManager& mgr) {
   } else if (x28c_24_generated) {
     if (mgr.GetPlayer()->GetPlayerGun()->GetChargePercentage() >
         CPlayerGun::GetTractorBeamFactor()) {
-      const CFirstPersonCamera* camera = mgr.CameraManager()->FirstPersonCamera();
-      CVector3f posDelta = GetTranslation() - camera->GetTranslation();
-      CVector3f cameraFront = camera->GetTransform().GetColumn(kDY);
-      float dot = CVector3f::Dot(cameraFront, posDelta.AsNormalized());
-      float fovCos = cosine(CAbsAngle::FromDegrees(gpTweakGame->GetFirstPersonFOV()));
-      if (dot > fovCos && posDelta.MagSquared() < skDrawInDistance * skDrawInDistance) {
+      // Charge attraction is a sphere around the collection point, independent
+      // of the game camera, headset facing, and cannon aim.
+      const CVector3f posDelta =
+          GetTranslation() - (mgr.GetPlayer()->GetTranslation() + CVector3f::Up() * 2.f);
+      if (posDelta.MagSquared() < skDrawInDistance * skDrawInDistance) {
         x28c_25_inTractor = true;
         x28c_26_enableTractorTest = true;
         x274_tractorTime = 0.f;

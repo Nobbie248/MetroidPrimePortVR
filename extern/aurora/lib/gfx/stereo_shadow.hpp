@@ -48,7 +48,8 @@ uint64_t epoch() noexcept;
 // An EFB copy into `mono` from a pass that replays per eye, whose mono EFB is
 // `efb` and whose eye targets are `eyeTargets`: the two eye textures to copy
 // into, created like `mono` but each as many times larger as its eye target
-// is than the EFB, and reused while `mono` lives and the sizes hold.
+// is than the EFB, and reused while `mono` lives, the sizes hold and the
+// stand-ins keep being written or looked up (freed after a few idle frames).
 EyeTextures copy_targets(const TextureHandle& mono, EyeSize efb, const std::array<EyeSize, 2>& eyeTargets) noexcept;
 // `mono` was written without eye copies: its stand-ins no longer apply.
 void invalidate(const TextureRef* mono) noexcept;

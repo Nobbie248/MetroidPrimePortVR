@@ -18,7 +18,12 @@ struct Entry {
   bool valid = false;
   // The eyes are the two layers of one texture (multiview, stereo_multiview.hpp).
   bool layered = false;
+  // The last frame (g_frames) the stand-ins were written or looked up.
+  uint32_t lastUse = 0;
 };
+
+// Frames a stand-in survives without being written or looked up.
+constexpr uint32_t kIdleFrames = 4;
 
 absl::flat_hash_map<const TextureRef*, Entry> g_entries;
 bool g_active = false;
@@ -104,11 +109,13 @@ Entry* find(const TextureRef* mono) noexcept {
     g_entries.erase(it);
     return nullptr;
   }
+  it->second.lastUse = g_frames;
   return &it->second;
 }
 
 Entry& ensure(const TextureHandle& mono, const std::array<EyeSize, 2>& sizes) noexcept {
   auto& entry = g_entries[mono.get()];
+  entry.lastUse = g_frames;
   const auto current = entry.mono.lock();
   // Layers share a size: multiview eyes always do (stereo_multiview::usable).
   const bool layered = g_multiview && sizes[0].width == sizes[1].width && sizes[0].height == sizes[1].height;
@@ -139,15 +146,16 @@ void begin_frame(bool immersive, bool multiview) noexcept {
   g_active = immersive;
   g_multiview = immersive && multiview;
   ++g_epoch;
-  if ((++g_frames % 600) == 0) {
-    for (auto it = g_entries.begin(); it != g_entries.end();) {
-      if (it->second.mono.expired()) {
-        g_entries.erase(it++);
-      } else {
-        ++it;
-      }
-    }
-  }
+  ++g_frames;
+  // Stand-ins are eye-sized, many times the copy they shadow, so they go as soon as
+  // the copy is gone or idle. A copy whose size follows the view (Metroid Prime's fog
+  // volumes, gx copy_tex) gets a new mono texture at nearly every size change, freed
+  // once 16 newer sizes exist (trim_copy_sizes); a sweep every 600 frames kept
+  // hundreds of their stand-ins alive in Magmoor, and Dawn's pools keep the peak, so
+  // the Quest game grew past 3.8 GB until the system killed it.
+  absl::erase_if(g_entries, [](const auto& item) {
+    return item.second.mono.expired() || g_frames - item.second.lastUse > kIdleFrames;
+  });
 }
 
 bool active() noexcept { return g_active; }

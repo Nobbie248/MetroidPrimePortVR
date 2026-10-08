@@ -1,3 +1,47 @@
+## VR: eye copies of the fog volumes' EFB chunks filled the Quest's memory (2026-10-08)
+
+On the Quest, after about 20 minutes of play ending in Magmoor Caverns, the
+sound crackled, the image froze for up to 1.4 s at a time (pipeline compiles
+took 1.5 s) and the game was gone. Android's exit record (`dumpsys activity
+exit-info org.primedgun.v2`) shows a SIGKILL while in the foreground with
+PSS = RSS = 3.8 GB. The kernel OOM killer had not run (`oom_kill 0`), lmkd
+would have reported LOW_MEMORY, and the game's log just stops: Horizon OS
+reclaimed the memory after the system had thrashed.
+
+Metroid Prime's fog volumes copy an EFB chunk the size of the volume's
+projected box into two fixed buffers, so the copy size follows the view.
+Upstream's f9983a8b (2026-10-03) bounds the mono copies: `copy_tex` keeps the
+16 sizes a destination wrote most recently and frees the rest. In stereo
+replay every one of those copies also gets two eye-sized stand-ins
+(`stereo_shadow`), and those were only freed by a sweep every 600 frames
+(6.7 s at 90 Hz), long after their mono copy was gone. A headset never holds
+still, so a fog room makes a new size nearly every frame. Dawn also keeps
+freed memory in its pools, so each fog room raised a peak that never came back
+down.
+
+Measured on the Quest 3 with the debug console (`adb shell setprop
+debug.mport.env 'MP_CONSOLE=4777 MP_LOG_COPY_TEX=1'`, `adb forward tcp:4777
+tcp:4777`): warping from Transport to Phendrana Drifts South into Save Station
+Magmoor B, whose two fog-volume buffers get up to 85 new sizes a second even
+with the headset on a desk. With the v2.0.0-alpha.1 APK, live render targets
+reached 846 (1.2 GiB) within a minute, GPU memory 1.75 GB and PSS 2.54 GB
+(2.1 GB once the sweep ran). With this fix, in the same minute (1292 new mono
+copies against 1327, still "4 EFB copies (4 taken per eye)"): 66-86 render
+targets (at most 46 MiB), GPU memory 530-617 MB and PSS 1.33-1.42 GB flat. A
+360-degree turn in 1-degree steps in the same room (812 new copies) stayed at
+PSS 1.29-1.48 GB with no upward trend.
+
+- `stereo_shadow`: every lookup or write stamps the entry with the frame, and
+  `begin_frame` drops entries each frame once the mono copy is gone or has
+  gone 4 frames neither written nor looked up. A stand-in that is still drawn
+  is looked up each frame (the per-eye bind groups are rebuilt per epoch), so
+  only stale ones go; a mono copy sampled again later without a new copy
+  falls back to the mono texture in both eyes, as before its first eye copy.
+
+Not addressed here: the pipeline compiles of up to 1.6 s on first entering
+new rooms (upstream's whole-game pipeline seed, e55e8b6a, is a candidate) and
+upstream's front-end movie texture fix (068db40e).
+
 ## VR: look to lock-on and look to grapple (2026-10-08)
 
 Outside the scan visor, the L lock still picked its target the TV's way.

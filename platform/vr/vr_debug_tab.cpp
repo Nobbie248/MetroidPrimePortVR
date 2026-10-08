@@ -225,8 +225,11 @@ void DrawVrDebugTab() {
                      "body's facing (PrimedGun's gun ray / scan target hook).");
   changed |= ImGui::Checkbox("Look to lock-on", &s.look_to_lock_on);
   changed |= ImGui::Checkbox("Look to grapple", &s.look_to_grapple);
-  ImGui::TextWrapped("In the other visors, L locks on to the enemy or the grapple point the head looks at, and the "
-                     "body keeps its facing during that lock. Off, that kind is picked in front of the body.");
+  ImGui::TextWrapped("In the other visors, L locks on to the enemy or the grapple point the head looks at. Off, "
+                     "that kind is picked in front of the body.");
+  changed |= ImGui::Checkbox("No camera turn on lock", &s.look_lock_no_camera_turn);
+  ImGui::TextWrapped("During a lock the head picked, the body and the camera keep their facing instead of turning "
+                     "to the target. Off, they turn as on the TV, which keeps a boss ahead while strafing.");
   changed |= ImGui::SliderFloat("Look reach", &s.gun_targeting_distance, 15.f, 100.f, "%.0f units");
   changed |= ImGui::SliderFloat("Look radius", &s.gun_targeting_radius, 0.5f, 12.f, "%.1f units");
   ImGui::TextWrapped("The radius widens the cones around the gaze that pick the target and show icons "

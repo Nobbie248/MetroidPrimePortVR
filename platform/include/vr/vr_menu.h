@@ -356,6 +356,7 @@ enum class PortItem : uint8_t {
     LookToScan,
     LookToLockOn,
     LookToGrapple,
+    LookLockNoCameraTurn,
     BeamWheelHighlight,
     Reset,
 };
@@ -397,6 +398,7 @@ inline PortList PortItems(const View& view) {
     add(PortItem::LookToScan);
     add(PortItem::LookToLockOn);
     add(PortItem::LookToGrapple);
+    add(PortItem::LookLockNoCameraTurn);
     add(PortItem::BeamWheelHighlight);
     add(PortItem::Reset);
     return list;
@@ -689,6 +691,8 @@ inline Row PortRow(const State& s, const PortVrSettings& v, const View& view, Po
         return {"LOOK TO LOCK-ON", OnOff(v.look_to_lock_on)};
     case PortItem::LookToGrapple:
         return {"LOOK TO GRAPPLE", OnOff(v.look_to_grapple)};
+    case PortItem::LookLockNoCameraTurn:
+        return {"NO CAMERA TURN ON LOCK", OnOff(v.look_lock_no_camera_turn)};
     case PortItem::BeamWheelHighlight:
         return {"BEAM WHEEL HUD HIGHLIGHT", OnOff(v.beam_wheel_hud_highlight)};
     case PortItem::Reset:
@@ -1219,6 +1223,7 @@ inline void ResetPortConfig(PortVrSettings& v) {
     v.patch_gun_ray_target = d.patch_gun_ray_target;
     v.look_to_lock_on = d.look_to_lock_on;
     v.look_to_grapple = d.look_to_grapple;
+    v.look_lock_no_camera_turn = d.look_lock_no_camera_turn;
     v.beam_wheel_hud_highlight = d.beam_wheel_hud_highlight;
 }
 
@@ -1596,6 +1601,9 @@ inline void Activate(State& s, PortVrSettings& v, const View& view, double now, 
             break;
         case PortItem::LookToGrapple:
             v.look_to_grapple = !v.look_to_grapple;
+            break;
+        case PortItem::LookLockNoCameraTurn:
+            v.look_lock_no_camera_turn = !v.look_lock_no_camera_turn;
             break;
         case PortItem::BeamWheelHighlight:
             v.beam_wheel_hud_highlight = !v.beam_wheel_hud_highlight;

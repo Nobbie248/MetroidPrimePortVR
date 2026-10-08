@@ -120,8 +120,9 @@ const TUniqueId* VrLookToScanNearby(const CStateManager& mgr, int& count) noexce
 // choice) if that is of a kind the head does not pick, or none.
 // CPlayer::FindOrbitTargetId returns it.
 bool VrLookToLockTarget(const CStateManager& mgr, TUniqueId gamePick, TUniqueId& id) noexcept;
-// The body keeps its facing while look to scan is active, and during an orbit
-// lock on a target of a kind the head picks: the lock does not turn the
+// The body keeps its facing while look to scan is active, and, with
+// vr_look_lock_no_camera_turn, during an orbit lock on a target of a kind the
+// head picks (look to lock-on, look to grapple): the lock does not turn the
 // camera and the player toward it, which would swing the whole world around
 // the headset and take the target out from under the gaze
 // (CFirstPersonCamera::UpdateTransform, CPlayer::UpdateOrbitOrientation), nor

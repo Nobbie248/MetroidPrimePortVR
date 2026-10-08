@@ -335,7 +335,7 @@ void TestConfig() {
   Check(!has(quest, PortItem::MirrorView) && has(quest, PortItem::Foveation) &&
             has(quest, PortItem::PerformanceLevel) && has(quest, PortItem::DirectPresent),
         "Quest rows");
-  Check(PageCount(kPortConfigTab, pc) == 2 && PageCount(kPortConfigTab, quest) == 2, "two pages each");
+  Check(PageCount(kPortConfigTab, pc) == 2 && PageCount(kPortConfigTab, quest) == 3, "two pages, three on the Quest");
 
   State s{};
   Click(s, v, pc, TabX(kPortConfigTab), kTabY, now, actions);
@@ -372,20 +372,25 @@ void TestConfig() {
 
   // Page 2 ends with RESET CONFIG, two clicks; it leaves PrimedGun's settings alone.
   Click(s, v, pc, kNextX, kPageY, now, actions);
-  Check(s.port_page == 1 && ItemCount(s, pc) == 8, "config page 2");
-  // LOOK TO LOCK-ON and LOOK TO GRAPPLE follow LOOK TO SCAN.
+  Check(s.port_page == 1 && ItemCount(s, pc) == 9, "config page 2");
+  // LOOK TO LOCK-ON, LOOK TO GRAPPLE and NO CAMERA TURN ON LOCK follow LOOK TO SCAN.
   Check(BuildRows(s, v, pc)[4].label == std::string("LOOK TO LOCK-ON") &&
-            BuildRows(s, v, pc)[5].label == std::string("LOOK TO GRAPPLE"),
+            BuildRows(s, v, pc)[5].label == std::string("LOOK TO GRAPPLE") &&
+            BuildRows(s, v, pc)[6].label == std::string("NO CAMERA TURN ON LOCK"),
         "look to lock-on and grapple rows");
+  Check(!v.look_lock_no_camera_turn, "the camera turns on a lock by default");
   Click(s, v, pc, kLabelX, RowY(kPortConfigTab, 4), now, actions);
   Click(s, v, pc, kLabelX, RowY(kPortConfigTab, 5), now, actions);
-  Check(!v.look_to_lock_on && !v.look_to_grapple, "look to lock-on and grapple switches");
+  Click(s, v, pc, kLabelX, RowY(kPortConfigTab, 6), now, actions);
+  Check(!v.look_to_lock_on && !v.look_to_grapple && v.look_lock_no_camera_turn,
+        "look to lock-on, grapple and camera turn switches");
   v.metroid_hud_size = 2.0f;
-  Click(s, v, pc, kLabelX, RowY(kPortConfigTab, 7), now, actions);
+  Click(s, v, pc, kLabelX, RowY(kPortConfigTab, 8), now, actions);
   Check(s.reset_confirm == kResetPortConfig && Near(v.render_scale, kVrRenderScaleMax), "reset config armed");
-  Click(s, v, pc, kLabelX, RowY(kPortConfigTab, 7), now, actions);
+  Click(s, v, pc, kLabelX, RowY(kPortConfigTab, 8), now, actions);
   Check(Near(v.render_scale, PortVrSettings{}.render_scale) && v.display_refresh_rate == 0.0f &&
-            v.remove_cinematic_bars && v.look_to_lock_on && v.look_to_grapple && Near(v.metroid_hud_size, 2.0f),
+            v.remove_cinematic_bars && v.look_to_lock_on && v.look_to_grapple && !v.look_lock_no_camera_turn &&
+            Near(v.metroid_hud_size, 2.0f),
         "reset config");
 
   // The Quest: foveation waits for the next start without density maps.

@@ -22,8 +22,9 @@
 // cannon's aim ray; here the head picks, with the scan target's cone and
 // FindBestOrbitableObject's rules (not the current target, the Grapple Beam
 // and the orbit distance for a grapple point, a swing-locked point only from
-// its swing plane, line of sight). The body keeps its facing during a lock the
-// head picked, as during a scan lock.
+// its swing plane, line of sight). With vr_look_lock_no_camera_turn the body
+// keeps its facing during a lock the head picked, as during a scan lock;
+// otherwise it turns to the target as on the TV.
 
 #include "vr/vr_look_scan.h"
 #include "vr/vr_settings.h"
@@ -82,6 +83,7 @@ struct LookState {
     bool lockActive = false;
     bool lockOn = false;
     bool grapple = false;
+    bool noCameraTurn = false;
     TUniqueId lockTarget = kInvalidUniqueId;
 };
 LookState s_look;
@@ -360,6 +362,7 @@ void VrLookTargetUpdate(CStateManager& mgr, const CPlayer& player) noexcept {
     s_look.lockActive = !scanVisor;
     s_look.lockOn = settings.look_to_lock_on;
     s_look.grapple = settings.look_to_grapple;
+    s_look.noCameraTurn = settings.look_lock_no_camera_turn;
     // Orbit disable sources (CPlayer::UpdateOrbitableObjects): nothing to target.
     if (player.CheckOrbitDisableSourceList()) {
         return;
@@ -400,7 +403,7 @@ bool VrLookHoldsFacing(const CStateManager& mgr, const CPlayer& player) noexcept
     if (Fresh(mgr)) {
         return true;
     }
-    return FreshLock(mgr) && player.GetOrbitState() == CPlayer::kOS_OrbitObject &&
+    return FreshLock(mgr) && s_look.noCameraTurn && player.GetOrbitState() == CPlayer::kOS_OrbitObject &&
            player.GetOrbitTargetId() != kInvalidUniqueId && HeadPicks(mgr, player.GetOrbitTargetId());
 }
 

@@ -139,11 +139,15 @@ struct PortVrSettings {
     // Look to lock-on and look to grapple: outside the scan visor the head's
     // gaze picks the L lock's target among the enemies (and other lockable
     // objects) and among the grapple points, as look to scan
-    // (patch_gun_ray_target) does for the scan target, and the body keeps its
-    // facing during such a lock. Off, that kind is picked by the body's
-    // screen box, as on the TV (platform/vr/vr_look_scan.cpp).
+    // (patch_gun_ray_target) does for the scan target. Off, that kind is
+    // picked by the body's screen box, as on the TV (platform/vr/vr_look_scan.cpp).
     bool look_to_lock_on = true;
     bool look_to_grapple = true;
+    // No camera turn on lock: during a lock the head picked, the body and the
+    // camera keep their facing instead of turning to the target, as during a
+    // scan lock. Off (the default), they turn as on the TV, which boss fights
+    // need: the target stays ahead while strafing circles it.
+    bool look_lock_no_camera_turn = false;
     float frustum_culling_degrees = 115.0f;
     float metroid_hud_distance = 0.10f;
     float metroid_hud_size = 0.75f;

@@ -1,3 +1,24 @@
+## VR: the lock turns the camera again unless NO CAMERA TURN ON LOCK (2026-10-08)
+
+Look to lock-on and look to grapple kept the body's facing during a lock the
+head picked, as a scan lock does. In the headset that made boss fights
+impossible: the boss leaves the view as soon as strafing circles it, and the
+lock cannot turn the body while L is held.
+
+Picking and facing are now separate settings. `vr_look_lock_no_camera_turn`
+(off by default) holds the facing during such a lock, as before. Off, the
+head still picks the target, and the lock then turns Samus and the camera to
+it as on the TV (`UpdateOrbitOrientation`, `CFirstPersonCamera`, and
+`ValidateCurrentOrbitTargetId`'s look-angle test all run as in the game).
+`VrLookHoldsFacing` reads the setting only for these locks; look to scan
+still always keeps the facing. The setting is in the F1 VR tab's "Look
+targeting" section and on the VR menu's CONFIG tab as NO CAMERA TURN ON LOCK,
+after LOOK TO GRAPPLE. That row gives the Quest's CONFIG tab a third page,
+holding RESET CONFIG.
+
+`port_vr_menu_tests` checks the row, its default, the switch and RESET CONFIG.
+build/vr and build/nooxr: 63/63 port tests.
+
 ## Merged upstream port 710e4f8c (2026-10-08)
 
 Upstream's 170 commits since b02f932b (2026-10-07 20:36 to 2026-10-08 13:13):
@@ -508,11 +529,11 @@ counts the game's own frames (`CGraphics::EndScene`) rather than using
 window, so that read 0 there.
 
 **CONFIG** holds the launcher's Port Config VR settings and the renderer
-switches the F1 VR tab has. It spans two pages.
+switches the F1 VR tab has. It spans two pages (three on the Quest).
 
 | Group | Rows |
 |---|---|
-| Both platforms | RENDER SCALE, EYE RESOLUTION (a readout), REFRESH RATE, WORLD SCALE, DRAW THE WORLD PER EYE, REMOVE CINEMATIC BARS, SKY AT INFINITY, SPACE WARP, SCAN WINDOW ZOOM, SCREEN DISTANCE, SCREEN WIDTH, LEAN BACK, PIPELINED RENDERING, INDEXED VERTICES ON CPU, LOOK TO SCAN, LOOK TO LOCK-ON, LOOK TO GRAPPLE, BEAM WHEEL HUD HIGHLIGHT, RESET CONFIG |
+| Both platforms | RENDER SCALE, EYE RESOLUTION (a readout), REFRESH RATE, WORLD SCALE, DRAW THE WORLD PER EYE, REMOVE CINEMATIC BARS, SKY AT INFINITY, SPACE WARP, SCAN WINDOW ZOOM, SCREEN DISTANCE, SCREEN WIDTH, LEAN BACK, PIPELINED RENDERING, INDEXED VERTICES ON CPU, LOOK TO SCAN, LOOK TO LOCK-ON, LOOK TO GRAPPLE, NO CAMERA TURN ON LOCK, BEAM WHEEL HUD HIGHLIGHT, RESET CONFIG |
 | Quest only | FOVEATION, PERFORMANCE LEVEL, PASSTHROUGH, MULTIVIEW EYES, DIRECT TO HEADSET |
 | PC only | WINDOW SHOWS (the mirror) |
 

@@ -3,6 +3,7 @@
 // implementations for correct audio/VI/OS behaviour. Signatures are taken from
 // the same headers the game compiled against (Aurora's dolphin/*).
 
+#include <atomic>
 #include <cmath>
 #include <cstdio>
 #include <cstdlib>
@@ -76,6 +77,12 @@ extern "C" void GXSetMisc(GXMiscToken token, u32 val) {
 }
 
 // --- OS gaps ----------------------------------------------------------------
+namespace {
+// A native install has no console SRAM setting. Start with stereo so loading
+// game options preserves directional sound; honor later Mono/Stereo choices.
+std::atomic<u32> s_soundMode{OS_SOUND_MODE_STEREO};
+}
+
 extern "C" void OSCancelAlarm(OSAlarm* alarm) {
     (void)alarm;
 }
@@ -116,7 +123,7 @@ extern "C" void OSGetSavedRegion(void** start, void** end) {
     }
 }
 extern "C" u32 OSGetSoundMode(void) {
-    return 0;
+    return s_soundMode.load(std::memory_order_relaxed);
 }
 extern "C" BOOL OSLink(OSModuleInfo* newModule, void* bss) {
     (void)newModule;
@@ -162,7 +169,9 @@ extern "C" void OSSetSaveRegion(void* start, void* end) {
     (void)end;
 }
 extern "C" void OSSetSoundMode(u32 mode) {
-    (void)mode;
+    if (mode == OS_SOUND_MODE_MONO || mode == OS_SOUND_MODE_STEREO) {
+        s_soundMode.store(mode, std::memory_order_relaxed);
+    }
 }
 extern "C" BOOL OSUnlink(OSModuleInfo* oldModule) {
     (void)oldModule;

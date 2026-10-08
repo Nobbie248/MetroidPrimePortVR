@@ -341,7 +341,7 @@ TextureHandle new_dynamic_texture_2d(uint32_t width, uint32_t height, uint32_t m
                                      const char* label) noexcept {
   return {};
 }
-TextureHandle new_render_texture(uint32_t width, uint32_t height, u32 gxFormat, const char* label) noexcept {
+TextureHandle new_render_texture(uint32_t width, uint32_t height, u32 gxFormat, const char* label, uint32_t mips) noexcept {
   return {};
 }
 TextureHandle new_conv_texture(uint32_t width, uint32_t height, u32 gxFormat, const char* label) noexcept { return {}; }
@@ -359,7 +359,7 @@ std::atomic<uint32_t> offscreenHeight{0};
 } // namespace testing
 
 void resolve_pass_into(TextureHandle texture, ClipRect rect, bool clearColor, bool clearAlpha, bool clearDepth,
-                       Vec4<float> clearColorValue, float clearDepthValue, GXTexFmt resolveFormat, int probeFace) {
+                       Vec4<float> clearColorValue, float clearDepthValue, GXTexFmt resolveFormat, int probeFace, bool resolveMips) {
   testing::resolvePassCount.fetch_add(1, std::memory_order_release);
 }
 namespace probe {

@@ -142,6 +142,14 @@ void CStreamAudioManager::FadeInSoftwareAudio(CStreamAudioManager::ESoftwareChan
     return;
   if (p.x10_playState == 0)
     return;
+#ifdef TARGET_PC
+  // A track fading out to make way for a queued one stays stopped. Retail
+  // brings it back: Thardus's music fades out over 12 s, and a skipped death
+  // cinematic lets the Spider Ball's "fade music back in" land inside that
+  // window, so the boss theme played on and the queued room theme never did.
+  if (p.x10_playState == 3 && s_QueuedPlayers[chan].x10_playState != 0)
+    return;
+#endif
   p.x18_fadeIn = fadeTime;
   p.x10_playState = 1;
 }

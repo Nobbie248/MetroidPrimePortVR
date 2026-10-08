@@ -1,5 +1,6 @@
 // Draws a mod's distance-field font in place of the disc's glyph images (port_hd_font.h).
 
+#include "port_debug.h"
 #include "port_env.h"
 #include "port_hd_font.h"
 #include "port_strings.h"
@@ -93,7 +94,7 @@ bool Enabled() {
   if (sEnabled < 0) {
     sEnabled = port::EnvFlag("MP_HD_FONT", true) ? 1 : 0;
   }
-  return sEnabled != 0;
+  return sEnabled != 0 && !PortDebug::OriginalExperience();
 }
 
 void SetEnabled(bool enabled) { sEnabled = enabled ? 1 : 0; }

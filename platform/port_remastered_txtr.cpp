@@ -3031,8 +3031,74 @@ bool DecodeTxtrVolumeRgba8(const uint8_t* data, size_t size, uint32_t& width, ui
   return true;
 }
 
-bool DecodeTxtrCubeRgba8(const uint8_t* data, size_t size, uint32_t& edge, std::vector<uint8_t>& rgba,
-                         std::string& error) {
+bool DecodeTxtrVolume(const uint8_t* data, size_t size, uint32_t& width, uint32_t& height, uint32_t& depth,
+                      bool& srgb, std::vector<uint8_t>& rgba, std::string& error) {
+  rgba.clear();
+  if (data == nullptr || size == 0) {
+    error = "remastered txtr: no data";
+    return false;
+  }
+  TextureHeader head;
+  if (!ReadHeader(data, size, head, error)) {
+    return false;
+  }
+  if (head.kind != 2) {
+    error = "remastered txtr: not a 3D texture";
+    return false;
+  }
+  width = head.width;
+  height = head.height;
+  depth = head.layers;
+  srgb = FormatIsSrgb(head.format);
+  if (width == 0 || height == 0 || depth == 0 || width > 256 || height > 256 || depth > 256) {
+    error = "remastered txtr: a volume of " + std::to_string(width) + "x" + std::to_string(height) + "x" +
+            std::to_string(depth);
+    return false;
+  }
+  BlockSize block{};
+  size_t bytesPerPixel = 1;
+  if (!FormatBlockSize(head.format, block, bytesPerPixel)) {
+    error = "remastered txtr: cannot decode " + std::string(FormatName(head.format));
+    return false;
+  }
+  Meta meta;
+  if (!ReadMeta(data, size, meta, error)) {
+    return false;
+  }
+  std::vector<uint8_t> surface;
+  if (!BuildSurface(data, size, meta, surface, error)) {
+    return false;
+  }
+  // DecodeTxtr's layout, every slice: blocks one GOB tall, the block depth from BlockDepth. DeswizzleMip
+  // writes each slice it is given to the same place, so it is called per slice with that slice's offset.
+  const size_t mipWidth = DivRoundUp(size_t(width), block.width);
+  const size_t mipHeight = DivRoundUp(size_t(height), block.height);
+  const size_t mipBlockDepth = MipBlockDepth(depth, BlockDepth(depth));
+  const uint32_t mipBlockHeight = MipBlockHeight(mipHeight, 1);
+  if (surface.size() < SwizzledMipSize(mipWidth, mipHeight, depth, mipBlockHeight, bytesPerPixel)) {
+    error = "remastered txtr: the volume's surface is short";
+    return false;
+  }
+  const size_t rowBytes = mipWidth * bytesPerPixel;
+  const size_t sliceSize = DivRoundUp(mipHeight, size_t(mipBlockHeight) * kGobHeightBytes) * kGobSizeBytes *
+                           mipBlockHeight * mipBlockDepth * DivRoundUp(rowBytes, kGobWidthBytes);
+  std::vector<uint8_t> untiled(mipWidth * mipHeight * bytesPerPixel);
+  const size_t sliceBytes = size_t(width) * height * 4;
+  rgba.assign(sliceBytes * depth, 0);
+  for (size_t z = 0; z < depth; ++z) {
+    const size_t offsetZ = (z / mipBlockDepth) * sliceSize + (z & (mipBlockDepth - 1)) * kGobSizeBytes * mipBlockHeight;
+    DeswizzleMip(mipWidth, mipHeight, 1, mipBlockHeight, mipBlockDepth, bytesPerPixel, surface.data(), offsetZ,
+                 untiled.data());
+    if (!DecodeBlocks(head.format, width, height, untiled.data(), rgba.data() + z * sliceBytes, error)) {
+      rgba.clear();
+      return false;
+    }
+  }
+  return true;
+}
+
+bool DecodeTxtrCubeLinear(const uint8_t* data, size_t size, uint32_t& edge, std::vector<float>& rgba,
+                          std::string& error) {
   rgba.clear();
   if (data == nullptr || size == 0) {
     error = "remastered txtr: no data";
@@ -3066,8 +3132,12 @@ bool DecodeTxtrCubeRgba8(const uint8_t* data, size_t size, uint32_t& edge, std::
   // top mip of each face is decoded.
   edge = head.width;
   const uint32_t blockHeightMip0 = BlockHeightMip0(DivRoundUp(size_t(head.height), block.height));
-  const size_t faceBytes = size_t(edge) * edge * 4;
-  rgba.assign(faceBytes * 6, 0);
+  const size_t faceFloats = size_t(edge) * edge * 4;
+  rgba.assign(faceFloats * 6, 0.0f);
+  const bool bc6h = head.format == kTxtrFormatBc6hUfloat || head.format == kTxtrFormatBc6hSfloat;
+  const bool srgb = FormatIsSrgb(head.format);
+  std::vector<uint8_t> ldr(bc6h ? 0 : faceFloats);
+  std::vector<uint16_t> hdr(bc6h ? faceFloats : 0);
   size_t srcOffset = 0;
   for (uint32_t layer = 0; layer < 6; ++layer) {
     for (uint32_t mip = 0; mip < head.mipSizes.size(); ++mip) {
@@ -3085,9 +3155,21 @@ bool DecodeTxtrCubeRgba8(const uint8_t* data, size_t size, uint32_t& edge, std::
         std::vector<uint8_t> untiled(blocksX * blocksY * bytesPerPixel);
         DeswizzleMip(blocksX, blocksY, 1, mipBlockHeight, 1, bytesPerPixel, surface.data(), srcOffset,
                      untiled.data());
-        if (!DecodeBlocks(head.format, edge, edge, untiled.data(), rgba.data() + faceBytes * layer, error)) {
-          rgba.clear();
-          return false;
+        float* dst = rgba.data() + faceFloats * layer;
+        if (bc6h) {
+          DecodeBc6hImage(untiled.data(), edge, edge, head.format == kTxtrFormatBc6hSfloat, hdr.data());
+          for (size_t i = 0; i < faceFloats; ++i) {
+            dst[i] = HalfBitsToFloat(hdr[i]);
+          }
+        } else {
+          if (!DecodeBlocks(head.format, edge, edge, untiled.data(), ldr.data(), error)) {
+            rgba.clear();
+            return false;
+          }
+          for (size_t i = 0; i < faceFloats; ++i) {
+            const float c = float(ldr[i]) / 255.0f;
+            dst[i] = srgb && i % 4 != 3 ? (c <= 0.04045f ? c / 12.92f : std::pow((c + 0.055f) / 1.055f, 2.4f)) : c;
+          }
         }
       }
       srcOffset += swizzled;
@@ -3132,7 +3214,7 @@ bool DecodeTxtrLayersRgba8(const uint8_t* data, size_t size, uint32_t& width, ui
   if (!BuildSurface(data, size, meta, surface, error)) {
     return false;
   }
-  // The cube's layout (see DecodeTxtrCubeRgba8) with the layer count and a
+  // The cube's layout (see DecodeTxtrCubeLinear) with the layer count and a
   // non-square top mip. Only the top mip of each layer is decoded.
   width = head.width;
   height = head.height;

@@ -1,6 +1,9 @@
 #include "MetroidPrime/Player/CGrappleArm.hpp"
 
 #include "Kyoto/Animation/CSkinnedModel.hpp"
+#ifdef TARGET_PC
+#include "port_room_env.h"
+#endif
 #include "Kyoto/Animation/CVertexMorphEffect.hpp"
 #include "Kyoto/Audio/CSfxManager.hpp"
 #include "Kyoto/CDependencyGroup.hpp"
@@ -147,6 +150,11 @@ void CGrappleArm::PreRender(CStateManager& mgr, const CFrustumPlanes& frustum,
 void CGrappleArm::Render(const CStateManager& mgr, const CVector3f& pos, const CModelFlags& flags,
                          const CActorLights* lights) const {
   if (CanRender()) {
+#ifdef TARGET_PC
+    const CVector3f probePos = mgr.GetPlayer()->GetTranslation();
+    const float probeXyz[3] = {probePos.GetX(), probePos.GetY(), probePos.GetZ()};
+    const PortRoomEnv::ProbeOverrideScope probeScope(probeXyz);
+#endif
     const CTransform4f xf = CTransform4f::Translate(pos) * x220_xf * x2e0_auxXf;
     if (x50_grappleArmSkeletonModel) {
       RenderXRayModel(mgr, xf, flags);

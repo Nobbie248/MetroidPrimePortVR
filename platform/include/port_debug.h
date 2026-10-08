@@ -1,5 +1,8 @@
 #ifndef METROID_PRIME_PORT_PORT_DEBUG_H
 #define METROID_PRIME_PORT_PORT_DEBUG_H
+
+#include "port_rando_gen.h"
+
 #include <chrono>
 #include <cstdint>
 #include <string>
@@ -273,6 +276,18 @@ void SetAnisotropy(int level);
 // creation, so it takes a restart; aurora falls back to Vulkan if it fails.
 bool OpenGles();
 void SetOpenGles(bool enabled);
+// Setting `gpu_driver`: the custom Vulkan driver (PortGpuDriver id) to load at the
+// next start, "" = the system's. Android only.
+const std::string& GpuDriver();
+void SetGpuDriver(const std::string& id);
+// Setting `gpu_driver_ok`: the driver the user kept after its trial run.
+const std::string& GpuDriverKept();
+// main(), after a driver not yet kept started: asks the user to keep it. Until they
+// do, `markerPath` stays, so a closed game comes back on the system driver.
+void BeginGpuDriverTrial(const std::string& markerPath);
+// Setting `storage_clamp` (Auto/Off/On): sets MP_STORAGE_CLAMP for aurora's shader
+// generator unless it's already in the environment. Call before aurora_initialize.
+void ApplyStorageClamp();
 // Extras normally earned by finishing the game (or, for the Fusion Suit, by a
 // GBA link to Metroid Fusion). They only change what the title screen offers;
 // nothing is written into the save's persistent flags.
@@ -317,6 +332,8 @@ bool BeamShiftHeld();
 // The touch twin layout's Beam button is held: the D-pad picks beams (false off Android / without touch).
 bool TouchBeamShift();
 void SetBeamShiftHeld(bool held);
+// The touch overlay's Turbo button is held (false off Android / without touch).
+bool TouchTurboFire();
 // Spring Ball (C-stick up in morph ball, as in Metroid Prime Trilogy) once the
 // Morph Ball Bombs are held. A connected Archipelago seed overrides it.
 bool SpringBall();
@@ -330,6 +347,10 @@ void SetSwapScanXray(bool enabled);
 // (SDL gamepad button or PAD_NATIVE_BUTTON_TRIGGER_*); -1 for none.
 int ShiftBinding(int slot);
 void SetShiftBinding(int slot, int code);
+// The turbo fire's bindings (PortControls::TurboHeld), laid out as ShiftBinding's
+// (slot 2 reads -1 while touch is in use); all -1 (none) by default.
+int TurboBinding(int slot);
+void SetTurboBinding(int slot, int code);
 // A second controller button for a GameCube button (Aurora maps one each),
 // ORed in by CDolphinController: `bit` is the PAD_BUTTON_* / PAD_TRIGGER_* bit's
 // position, the code as ShiftBinding's slot 2; -1 for none.
@@ -357,6 +378,14 @@ void SetDiscordPresence(bool enabled);
 // off, '/'-separated. Both take effect on the next launch.
 bool ModsEnabled();
 void SetModsEnabled(bool enabled);
+// Original experience: the game as it shipped. While on, the getters for the
+// port's additions (render scale, MSAA, aspect, wide HUD, FOV, interpolation,
+// sim rate, mods, unlocks, the gameplay assists, turbo, ...) return retail's
+// values; the saved settings are not changed, so turning it off restores them.
+// Input aids, cheats, save states, the randomizer/Archipelago, timers and
+// Discord follow their own settings.
+bool OriginalExperience();
+void SetOriginalExperience(bool enabled);
 std::string ModsDisabled();
 void SetModsDisabled(const std::string& list);
 // Starts a Remastered import (port_remastered_import.h) with the mods unloaded
@@ -397,10 +426,13 @@ bool LockOnToggle();
 void SetLockOnToggle(bool enabled);
 bool StickyCharge();
 void SetStickyCharge(bool enabled);
-// Remastered charge: holding fire first shoots a few quick shots (Power 2,
-// Wave 1, Plasma 1, Ice none), then charges faster, with Remastered's per-beam
-// timings (CPlayerGun::PortRapidCharge*).
+// Remastered charge: holding fire shoots a few quick shots after the press shot
+// (Power 2, Wave 1, Plasma 1, Ice none), then charges faster (without the Charge
+// Beam: stops until release), with Remastered's per-beam timings
+// (CPlayerGun::PortRapidCharge*).
 bool RapidCharge();
+// The Randomizer page's saved options (rando_settings= in the settings file).
+PortRandoGen::Settings RandoSettings();
 void SetRapidCharge(bool enabled);
 // Spring Ball on a gyro flick (pad or phone tilted up sharply, like Trilogy's
 // nunchuk flick), on top of C-stick up. Rate is the pitch speed in rad/s a flick
@@ -459,6 +491,12 @@ unsigned MouseMenuButtons(unsigned held, bool focused);
 void NoteMouseButton(bool synthetic, unsigned mask, bool down);
 void ClearMouseButtons();
 unsigned MouseHeldButtons();
+// The "newer release" toast: while it shows, the cursor stays visible outside
+// mouse capture, and a tap inside it (window-relative 0..1 coordinates, from a
+// finger event: in relative mouse mode SDL drops a touch's mouse position)
+// opens the release page (on the next frame; true if it hit). Thread-safe.
+bool UpdateToastShowing();
+bool TapUpdateToast(float x, float y);
 // Called during simulation, using the effective unbobbed camera direction.
 bool UpdateMouseAim(bool active, bool locked, float x, float y, float z);
 void SynchronizeMouseAim(float x, float y, float z);
@@ -571,6 +609,10 @@ bool OverlayVisible();
 bool TouchColorsFlag();
 // Whether it writes each button's function under its letter. Same rules.
 bool TouchLabelsFlag();
+// Whether it shows the Turbo fire button. Same rules.
+bool TouchTurboFlag();
+// Whether the left stick floats (hidden, centred where the left half is touched). Same rules.
+bool TouchFloatingStickFlag();
 // The touch overlay's side margin, the left stick's extra inset and the face
 // buttons' extra inset, in dp. Also safe to call from the UI thread.
 float TouchSideMarginDp();
@@ -590,7 +632,7 @@ void RequestToggle();
 // and handles F1. Call once per frame before the frame is built.
 void UpdateControllerNav();
 
-// GPU self-test (F1 > Video > Quality, console `gpuselftest`, or MP_GPU_SELFTEST=1 once after the first
+// GPU self-test (F1 > Video > Compatibility, console `gpuselftest`, or MP_GPU_SELFTEST=1 once after the first
 // frames): renders known patterns offscreen, reads them back and logs "gpu selftest: <case>: PASS|FAIL".
 void RequestGpuSelfTest();
 // Runs a requested self-test. Call right after a frame begins, before the game draws; it resets the

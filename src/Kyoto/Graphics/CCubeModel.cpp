@@ -112,7 +112,11 @@ void CCubeModel::SetArraysCurrent() const {
 #endif
   CGX::SetArray(GX_VA_POS, x0_instance.GetVertexPointer(), x0_instance.GetVertexSize(),
                 sizeof(CVector3f));
-  const int stride = (x41_visorFlags & 1) ? sizeof(short) * 3 : sizeof(CVector3f);
+  // Not a skinned draw: no bind pose (see SetSkinningArraysCurrent).
+  CGX::ClearArray(GX_VA_TEX7);
+  const int stride = HasNbtNormals()          ? sizeof(float) * 3 * NormalVecs()
+                     : (x41_visorFlags & 1) ? sizeof(short) * 3
+                                            : sizeof(CVector3f);
   CGX::SetArray(GX_VA_NRM, x0_instance.GetNormalPointer(), x0_instance.GetNormalSize(), stride);
   SetStaticArraysCurrent();
 }
@@ -132,6 +136,9 @@ void CCubeModel::SetSkinningArraysCurrent(const float* positions, const float* n
 #endif
   CGX::ClearArray(GX_VA_POS);
   CGX::ClearArray(GX_VA_NRM);
+  // The bind pose (the file's positions) goes in as GX_VA_TEX7's array for the PBR backlight,
+  // which fades by the bind-pose height, as Remastered's CharacterBacklight does.
+  CGX::SetArray(GX_VA_TEX7, x0_instance.GetVertexPointer(), x0_instance.GetVertexSize(), sizeof(CVector3f));
   CGraphics::sRenderState.SetVtxState(positions, normals,
                                       static_cast< const uint* >(x0_instance.GetColorPointer()));
   SetStaticArraysCurrent();
@@ -457,6 +464,11 @@ f32 CCubeModel::PortSetPBRMaterial(const int idx, const f32 fade, const bool fad
     }
     values[7] = f32(mode & ~(32 | 64));
   }
+  if ((mode & 131072) != 0) {
+    // A bare unlit surface: the backlight's place holds the exposure GlowScale leaves.
+    const f32 gain = PortRoomEnv::UnlitGain(frameExposed);
+    values[3] = values[4] = values[5] = gain;
+  }
   if (sPortSky) {
     // Unlit (1) and a sky (16), keeping the material's other flags: the backlight's place
     // holds the gain (see GXSetPBRMaterial).
@@ -483,11 +495,16 @@ f32 CCubeModel::PortSetPBRMaterial(const int idx, const f32 fade, const bool fad
   }
   // A liquid's surface (kinds 5 and 6) moves: its first parameter is a rate, and the
   // shader gets the phase. So do falling water (kind 7), the beam glow (9) and the
-  // Waste Disposal tank's distortion (11) and the Frigate's force fields (14); glass (8) does not
+  // Waste Disposal tank's distortion (11), the Frigate's force fields (14) and the Phazon3 stone (21); glass (8) does not
   // move.
   if ((values[13] > 4.5f && values[13] < 7.5f) || (values[13] > 8.5f && values[13] < 9.5f) ||
-      (values[13] > 10.5f && values[13] < 11.5f) || (values[13] > 13.5f && values[13] < 15.5f) || (values[13] > 17.5f && values[13] < 18.5f)) {
-    values[15] *= CGraphics::GetSecondsMod900();
+      (values[13] > 10.5f && values[13] < 11.5f) || (values[13] > 13.5f && values[13] < 15.5f) || (values[13] > 17.5f && values[13] < 18.5f) ||
+      (values[13] > 20.5f && values[13] < 22.5f) || (values[13] > 28.5f && values[13] < 29.5f) ||
+      (values[13] > 31.5f && values[13] < 32.5f)) {
+    // The Phazon3 stone and the PhazonPool blister read Remastered's scene clock (stops while paused, wraps at 15120 s).
+    values[15] *= ((values[13] > 20.5f && values[13] < 22.5f) || (values[13] > 31.5f && values[13] < 32.5f))
+                      ? CGraphics::GetSimTime()
+                      : CGraphics::GetSecondsMod900();
   }
   const CTransform4f& view = CGraphics::GetViewMatrix();
   // The pickup (kind 15) reads its gradient at the world position: rows 4 and 5 of its constants
@@ -503,9 +520,58 @@ f32 CCubeModel::PortSetPBRMaterial(const int idx, const f32 fade, const bool fad
     shield[22] = -view.Get11();
     shield[23] = view.Get13();
   }
-  // Only the boundary shield, the pickup and the holograms (16-18) have constants; every other material
-  // clears the last one's.
-  GXSetPBRShield(kind > 13.5f && kind < 19.5f ? reinterpret_cast< const f32(*)[4] >(shield) : nullptr);
+  // The HoloGlass (kind 29) offsets its layers by a per-object phase: the sum of the model matrix's
+  // translation, times 0.33 (row 4 x of its constants).
+  if (kind > 28.5f && kind < 29.5f) {
+    const CTransform4f& model = CGraphics::GetModelMatrix();
+    shield[16] = (model.Get03() + model.Get13() + model.Get23()) * 0.33f;
+  }
+  // Mode bit 32768: Remastered's procedural wind. The record holds the model's WIND set (v1, v2,
+  // rate, b, c); the shader gets CWindModelDataSourceManager::SimulateSingle's constants for
+  // the default wind (direction (0, 0, -1), strength 0.3, no impulses) in rows 0-3, and the
+  // inverse of the model->world 3x3 with the world translation in rows 4-6.
+  bool wind = false;
+  if ((int(values[7] + 0.5f) & 32768) != 0) {
+    wind = true;
+    const CTransform4f& m = CGraphics::GetModelMatrix();
+    const f32 a00 = m.Get00(), a01 = m.Get01(), a02 = m.Get02();
+    const f32 a10 = m.Get10(), a11 = m.Get11(), a12 = m.Get12();
+    const f32 a20 = m.Get20(), a21 = m.Get21(), a22 = m.Get22();
+    const f32 c00 = a11 * a22 - a12 * a21, c01 = a12 * a20 - a10 * a22, c02 = a10 * a21 - a11 * a20;
+    const f32 det = a00 * c00 + a01 * c01 + a02 * c02;
+    const f32 id = std::fabs(det) > 1e-12f ? 1.f / det : 0.f;
+    const f32 v1[3] = {shield[0], shield[1], shield[2]};
+    const f32 v2[3] = {shield[3], shield[4], shield[5]};
+    const f32 rate = shield[6], b = shield[7], c = shield[8];
+    constexpr f32 kStrength = 0.3f;
+    constexpr f32 kDir[3] = {0.f, 0.f, -1.f};
+    f32 rows[32] = {};
+    for (int i = 0; i < 3; ++i) {
+      rows[i] = kDir[i] * ((1.f - b) * kStrength);
+      rows[4 + i] = v1[i];
+      rows[8 + i] = v2[i];
+      rows[12 + i] = b + (1.f - b) * (std::fabs(kDir[i]) * 0.75f + 0.25f);
+    }
+    rows[3] = 0.5f * kStrength + b * (c - 0.5f * kStrength);
+    rows[7] = rate * CGraphics::GetSimTime();
+    // Inverse rows (adjugate / det) with the world translation in w.
+    rows[16] = c00 * id;
+    rows[17] = (a02 * a21 - a01 * a22) * id;
+    rows[18] = (a01 * a12 - a02 * a11) * id;
+    rows[19] = m.Get03();
+    rows[20] = c01 * id;
+    rows[21] = (a00 * a22 - a02 * a20) * id;
+    rows[22] = (a02 * a10 - a00 * a12) * id;
+    rows[23] = m.Get13();
+    rows[24] = c02 * id;
+    rows[25] = (a01 * a20 - a00 * a21) * id;
+    rows[26] = (a00 * a11 - a01 * a10) * id;
+    rows[27] = m.Get23();
+    std::memcpy(shield, rows, sizeof(shield));
+  }
+  // Only the boundary shield, the pickup, the holograms (16-18) and the Phazon3 stone (21) have constants;
+  // every other material clears the last one's.
+  GXSetPBRShield(wind || (kind > 13.5f && kind < 19.5f) || (kind > 20.5f && kind < 22.5f) || (kind > 24.5f && kind < 25.5f) || (kind > 27.5f && kind < 29.5f) || (kind > 30.5f && kind < 33.5f) ? reinterpret_cast< const f32(*)[4] >(shield) : nullptr);
   // World up as the shader sees it: view space is right, up, -forward.
   const f32 up[3] = {view.Get20(), view.Get22(), -view.Get21()};
   GXSetPBRMaterial(values, values + 3, values[6], values[7], values + 8, values + 13, up);
@@ -526,8 +592,9 @@ struct SPortGlassCopy {
   u32 serial;
   int frame;
   int left, top, width, height;
+  bool mips; // copied with a mip chain (kind 23 samples blurred levels; the others read level 0)
 };
-SPortGlassCopy sPortGlassCopy = {false, 0, 0, 0, 0, 0, 0};
+SPortGlassCopy sPortGlassCopy = {false, 0, 0, 0, 0, 0, 0, false};
 } // namespace
 #endif
 
@@ -576,6 +643,13 @@ void CCubeModel::DrawSurface(const CCubeSurface& surface, const CModelFlags& mod
     }
   }
   material.SetCurrent(drawFlags, surface, *this);
+  if (material.IsFlagSet(kStateFlag_PortHudGlow) && !material.IsFlagSet(kStateFlag_PortPBR)) {
+    // Remastered's 3853595c on FRME_Helmet: rgb = T*v1 + T*ICNC (ICNC white), alpha T.a^2*v1.a,
+    // drawn with the widget's own blend (additive: src alpha, one) into the UNORM target after
+    // tone mapping, so the sum clamps at 1 before the blend. The material's stage 0 is
+    // texture * vertex colour; T + T*c is that sum and the TEV clamps it the same way.
+    CGX::SetTevColorIn(GX_TEVSTAGE0, GX_CC_ZERO, GX_CC_TEXC, GX_CC_RASC, GX_CC_TEXC);
+  }
   // Port: PBR mod materials. The fallback TEV set above stays valid for the
   // paths PortPBRAllowed rejects.
   const bool pbr = fadeBlend || (material.IsFlagSet(kStateFlag_PortPBR) &&
@@ -606,8 +680,14 @@ void CCubeModel::DrawSurface(const CCubeSurface& surface, const CModelFlags& mod
     };
     // A room environment from a mod has a cube for where the model stands, which replaces
     // the live probe; it needs no captures, so only `probe off` turns it off.
-    const CVector3f origin = CGraphics::GetModelMatrix().GetTranslation();
-    const float pos[3] = {origin.GetX(), origin.GetY(), origin.GetZ()};
+    // Remastered's RequestLightProbeIfApplicable samples at the world centre of the
+    // model's local box (the node translation when the box is invalid); the first-person
+    // gun overrides it with the player's position.
+    const CTransform4f& modelXf = CGraphics::GetModelMatrix();
+    const CVector3f origin = x20_bounds.Invalid() ? modelXf.GetTranslation()
+                                                  : modelXf * x20_bounds.GetCenterPoint();
+    float pos[3] = {origin.GetX(), origin.GetY(), origin.GetZ()};
+    PortRoomEnv::ProbeOverride(pos);
     PortRoomEnv::Selection env;
     const int mode = CCubeMaterial::sPortPBRProbeMode;
     const bool found = PortRoomEnv::Select(pos, env);
@@ -714,7 +794,7 @@ void CCubeModel::DrawSurface(const CCubeSurface& surface, const CModelFlags& mod
       return env != nullptr && env[0] == '0';
     }();
     if (sBacklightOff) {
-      GXSetPBRBacklight(nullptr, nullptr, 0.f, 0.f);
+      GXSetPBRBacklight(nullptr, nullptr, 0.f, 0.f, 0.f, 0.f);
     } else {
       const CAABox& box = GetBoundingBox();
       const f32 bottom = box.GetMinPoint().GetY();
@@ -737,7 +817,7 @@ void CCubeModel::DrawSurface(const CCubeSurface& surface, const CModelFlags& mod
       float top = 2.f;
       float back = 4.f;
       PortRoomEnv::Backlight(top, back);
-      GXSetPBRBacklight(plane, backDir, back, top);
+      GXSetPBRBacklight(plane, backDir, back, top, scale, -bottom * scale);
     }
     // An opaque material's own alpha (dst factor zero) means nothing to a blend.
     uint materialCube = 0;
@@ -756,23 +836,29 @@ void CCubeModel::DrawSurface(const CCubeSurface& surface, const CModelFlags& mod
           {viewToWorld[2][0], viewToWorld[2][1], viewToWorld[2][2]},
           {viewToWorld[1][0], viewToWorld[1][1], viewToWorld[1][2]},
       };
-      GXSetPBRProbeEx(viewToCube, 1.f, 1.f, 1.f);
+      // The ice (kind 28, 088e025e) darkens its reflection by the room's occlusion as the room cubes do.
+      const bool occluded = found && kind > 27.5f && kind < 28.5f;
+      GXSetPBRProbeEx(viewToCube, 1.f, occluded ? env.occlusionMin : 1.f, occluded ? env.occlusionInvMax : 1.f);
       GXSetPBRCube(materialCubeId, materialCubeParams);
     }
     // Glass (kinds 8 and 11) and the force fields (14) see what is behind them: the screen so far,
     // copied into map 7 as the refracting particles copy it (CElementGen).
-    if (((kind > 7.5f && kind < 8.5f) || (kind > 10.5f && kind < 11.5f) || (kind > 13.5f && kind < 14.5f)) &&
+    if (((kind > 7.5f && kind < 8.5f) || (kind > 10.5f && kind < 11.5f) || (kind > 13.5f && kind < 14.5f) ||
+         (kind > 22.5f && kind < 23.5f) || (kind > 28.5f && kind < 30.5f) || (kind > 33.5f && kind < 34.5f)) &&
         CCubeMaterial::PortScreenCopyUsed()) {
       int portLeft, portTop, portWidth, portHeight;
       CGraphics::GetViewport(portLeft, portTop, portWidth, portHeight);
       SPortGlassCopy& copy = sPortGlassCopy;
+      const bool wantMips = (kind > 22.5f && kind < 23.5f) || (kind > 28.5f && kind < 30.5f);
       const bool current = copy.valid && copy.serial == GXPortCopySerial() &&
                            copy.frame == CGraphics::GetFrameCounter() && copy.left == portLeft &&
-                           copy.top == portTop && copy.width == portWidth && copy.height == portHeight;
+                           copy.top == portTop && copy.width == portWidth && copy.height == portHeight &&
+                           (copy.mips || !wantMips);
       if (!current) {
         GXSetTexCopySrc(static_cast< u16 >(portLeft), static_cast< u16 >(portTop), static_cast< u16 >(portWidth),
                         static_cast< u16 >(portHeight));
-        GXSetTexCopyDst(static_cast< u16 >(portWidth), static_cast< u16 >(portHeight), GX_TF_RGB565, GX_FALSE);
+        GXSetTexCopyDst(static_cast< u16 >(portWidth), static_cast< u16 >(portHeight), GX_TF_RGB565,
+                         wantMips ? GX_TRUE : GX_FALSE);
         const bool useVideoFilter = CGraphics::GetUseVideoFilter();
         CGraphics::SetUseVideoFilter(false);
         GXCopyTex(CGraphics::GetDolphinSpareBuffer(), GX_FALSE);
@@ -785,10 +871,21 @@ void CCubeModel::DrawSurface(const CCubeSurface& surface, const CModelFlags& mod
         copy.top = portTop;
         copy.width = portWidth;
         copy.height = portHeight;
+        copy.mips = wantMips;
       }
       // Map 7 is shared, so it is bound again either way.
       CGraphics::LoadDolphinSpareTexture(portWidth, portHeight, GX_TF_RGB565, nullptr,
                                          CGraphics::kSpareBufferTexMapID);
+      if (wantMips) {
+        // The shader picks the level (textureSampleLevel); the sampler must allow them all.
+        GXTexObj mipObj;
+        GXInitTexObj(&mipObj, CGraphics::GetDolphinSpareBuffer(), static_cast< u16 >(portWidth),
+                     static_cast< u16 >(portHeight), GX_TF_RGB565, GX_CLAMP, GX_CLAMP, GX_TRUE);
+        GXInitTexObjLOD(&mipObj, GX_LIN_MIP_LIN, GX_LINEAR, 0.f, 16.f, 0.f, GX_DISABLE, GX_DISABLE,
+                        GX_ANISO_1);
+        GXLoadTexObj(&mipObj, CGraphics::kSpareBufferTexMapID);
+        CTexture::InvalidateTexmap(CGraphics::kSpareBufferTexMapID);
+      }
     }
     GXSetPBR(GX_TRUE);
     ++CCubeMaterial::sPortPBRDraws;
@@ -808,8 +905,24 @@ void CCubeModel::DrawSurface(const CCubeSurface& surface, const CModelFlags& mod
     PortBeginDraw(surface, pbr);
   }
 #endif
+#ifdef TARGET_PC
+  // A converted Remastered HUD picture: its alpha squared after the filter, or its
+  // UI_Interference static (aurora's GX_AURORA_SET_HUD_SAMPLE).
+  u8 hudSample = 0;
+  if (material.IsFlagSet(kStateFlag_PortHudInterference)) {
+    hudSample = static_cast< u8 >(
+        2 + ((material.GetFlags() >> kStateFlag_PortHudInterferenceShift) & 7));
+    GXSetHudSample(hudSample, CCubeMaterial::sPortHudDyin[0], CCubeMaterial::sPortHudDyin[1]);
+  } else if (material.IsFlagSet(kStateFlag_PortHudSquare)) {
+    hudSample = 1;
+    GXSetHudSample(hudSample, 0.f, 0.f);
+  }
+#endif
   surface.CallDisplayList();
 #ifdef TARGET_PC
+  if (hudSample != 0) {
+    GXSetHudSample(0, 0.f, 0.f);
+  }
   if (portDrawTag) {
     GXSetDrawTag(0, 0xFFFFFFFF, 0);
   }

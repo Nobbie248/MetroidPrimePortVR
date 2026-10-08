@@ -38,6 +38,25 @@ LEVEL_FUNCS = {"can_xray", "can_thermal", "can_combat_omega_pirate", "can_crashe
 DOOR_LOCK = {"IceBeam": "Ice Beam", "WaveBeam": "Wave Beam", "PlasmaBeam": "Plasma Beam",
              "PowerBeam": "Power Beam Only"}
 
+# Rules the pack lacks but the apworld has, appended to a room's own rules.
+EXTRA_RULES = {
+    # Transport Tunnel E leads onto Great Tree Hall's upper level, which opens
+    # straight into Hydro Access Tunnel (apworld: Transport Tunnel E door 1,
+    # sub_region_door_index=0 with an always-true override). Without it a seed
+    # that reaches Tallon only from the Mines East elevator, without Wave Beam
+    # and Thermal, showed the rest of Tallon as a sequence break.
+    ("Tallon Overworld", "Hydro Access Tunnel"): [
+        "@Tallon Overworld/Transport Tunnel E,$can_open|Tallon Overworld|Transport Tunnel E|Great Tree Hall",
+    ],
+    # Beating Flaahgra opens Sunchamber's door to Sun Tower Access (apworld:
+    # Sunchamber door 0, rule can_flaahgra); the pack has only a sequence
+    # break there. Without it a Sunchamber Lobby start, which can't go back
+    # through Arboretum, reached nothing past Flaahgra.
+    ("Chozo Ruins", "Sun Tower Access"): [
+        "@Chozo Ruins/Sunchamber,@rules/can_flaahgra",
+    ],
+}
+
 OPTIONAL, BRACE, LEVEL = 1, 2, 4
 
 
@@ -108,7 +127,7 @@ class Compiler:
                     self.add(area["name"], room)
 
     def add(self, area, room):
-        rules = room.get("access_rules", [])
+        rules = room.get("access_rules", []) + EXTRA_RULES.get((area, room["name"]), [])
         self.index[f"{area}/{room['name']}"] = len(self.nodes)
         self.nodes.append((area, room["name"], None, [r.split(",") for r in rules]))
         for section in room.get("sections", []):

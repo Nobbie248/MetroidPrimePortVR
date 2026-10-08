@@ -272,6 +272,7 @@ uint CGraphics::mFifoSize = 0;
 #endif
 uint CGraphics::mRenderTimings;
 float CGraphics::mSecondsMod900;
+uint CGraphics::mSimTicks;
 CTimeProvider* CGraphics::mpExternalTimeProvider;
 int CGraphics::mScreenStretch;
 int CGraphics::mScreenPositionX;
@@ -1375,6 +1376,19 @@ void CGraphics::SetDefaultVtxAttrFmt() {
   GXSetVtxAttrFmt(GX_VTXFMT1, GX_VA_POS, GX_POS_XYZ, GX_F32, 0);
   GXSetVtxAttrFmt(GX_VTXFMT2, GX_VA_POS, GX_POS_XYZ, GX_F32, 0);
   GXSetVtxAttrFmt(GX_VTXFMT0, GX_VA_NRM, GX_NRM_XYZ, GX_F32, 0);
+  GXSetVtxAttrFmt(GX_VTXFMT3, GX_VA_POS, GX_POS_XYZ, GX_F32, 0);
+  GXSetVtxAttrFmt(GX_VTXFMT3, GX_VA_NRM, GX_NRM_NBT, GX_F32, 0);
+  GXSetVtxAttrFmt(GX_VTXFMT3, GX_VA_CLR0, GX_CLR_RGBA, GX_RGBA8, 0);
+  for (int i = 0; i <= 7; ++i) {
+    GXSetVtxAttrFmt(GX_VTXFMT3, static_cast< GXAttr >(GX_VA_TEX0 + i), GX_TEX_ST, GX_F32, 0);
+  }
+  // VTXFMT4: as VTXFMT3 with the second tangent frame (15-float normals).
+  GXSetVtxAttrFmt(GX_VTXFMT4, GX_VA_POS, GX_POS_XYZ, GX_F32, 0);
+  GXSetVtxAttrFmt(GX_VTXFMT4, GX_VA_NRM, GX_NRM_NBT5, GX_F32, 0);
+  GXSetVtxAttrFmt(GX_VTXFMT4, GX_VA_CLR0, GX_CLR_RGBA, GX_RGBA8, 0);
+  for (int i = 0; i <= 7; ++i) {
+    GXSetVtxAttrFmt(GX_VTXFMT4, static_cast< GXAttr >(GX_VA_TEX0 + i), GX_TEX_ST, GX_F32, 0);
+  }
   GXSetVtxAttrFmt(GX_VTXFMT1, GX_VA_NRM, GX_NRM_XYZ, GX_S16, 14);
   GXSetVtxAttrFmt(GX_VTXFMT2, GX_VA_NRM, GX_NRM_XYZ, GX_S16, 14);
   GXSetVtxAttrFmt(GX_VTXFMT0, GX_VA_CLR0, GX_CLR_RGBA, GX_RGBA8, 0);
@@ -1420,6 +1434,17 @@ void CGraphics::LoadDolphinSpareTexture(int width, int height, GXCITexFmt fmt, G
 void CGraphics::TickRenderTimings(uint ticks) {
   mRenderTimings = (mRenderTimings + ticks) % (900 * 60);
   mSecondsMod900 = static_cast< float >(mRenderTimings) / 60.f;
+}
+
+// Remastered's CScene::SimulateScene adds floor(dt * 600 + 0.5) ticks (1/600 s) and wraps the
+// total at floor(15120 * 600 + 0.5) = 9,072,000 ticks.
+void CGraphics::TickSimTime(float dt) {
+  const uint add = static_cast< uint >(static_cast< double >(dt) * 600.0 + 0.5);
+  mSimTicks = (mSimTicks + add) % 9072000u;
+}
+
+float CGraphics::GetSimTime() {
+  return static_cast< float >(static_cast< double >(mSimTicks) / 600.0);
 }
 
 float CGraphics::GetSecondsMod900() {
@@ -1696,7 +1721,7 @@ void CGraphics::CRenderState::Flush() {}
 
 int CGraphics::CRenderState::SetVtxState(const float* pos, const float* nrm, const uint* clr) {
   CGX::SetArrayNative(GX_VA_POS, pos, x8_skinnedPosBytes, 12);
-  CGX::SetArrayNative(GX_VA_NRM, nrm, xc_skinnedNrmBytes, 12);
+  CGX::SetArrayNative(GX_VA_NRM, nrm, xc_skinnedNrmBytes, x10_skinnedNrmStride);
   CGX::SetArray(GX_VA_CLR0, clr, 0, 4);
   int result = 1;
   if (nrm != nullptr) {

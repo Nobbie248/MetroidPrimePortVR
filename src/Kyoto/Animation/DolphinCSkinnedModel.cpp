@@ -193,6 +193,15 @@ CSkinnedModel::CSkinnedModel(const CSkinnedModel& other)
 
 CSkinnedModel::~CSkinnedModel() { Skinning::DelSkinnedRef(); }
 
+#ifdef TARGET_PC
+// Bytes per skinned normal: nine floats (N, B, T) when the model has NBT normals, fifteen with a second frame.
+static uint NormalStride(const CModel& model) {
+  return model.GetCubeModel()->NormalVecs() * 12;
+}
+#else
+static uint NormalStride(const CModel&) { return 12; }
+#endif
+
 void CSkinnedModel::Construct() {
   Skinning::AddSkinnedRef();
   if (!x38_owned) {
@@ -201,7 +210,7 @@ void CSkinnedModel::Construct() {
     const uint vertexCount = x10_skinRules->GetNumPoints();
     const uint normalCount = x10_skinRules->GetNumNormals();
     const uint vertSize = (vertexCount * 12 + 31) & ~31u;
-    const uint normSize = (normalCount * 12 + 31) & ~31u;
+    const uint normSize = (normalCount * NormalStride(**x4_model) + 31) & ~31u;
     float* ptr = rs_new float[(vertSize + normSize) / sizeof(float)];
     x28_vertWorkspace = rstl::auto_ptr< float[] >(ptr);
     x30_normalWorkspace = rstl::auto_ptr< float[] >(
@@ -214,8 +223,9 @@ void CSkinnedModel::Construct() {
 }
 
 void CSkinnedModel::Draw(const CModelFlags& flags) const {
-  CGraphics::sRenderState.SetSkinnedArraySizes(x10_skinRules->GetNumPoints() * 12,
-                                               x10_skinRules->GetNumNormals() * 12);
+  CGraphics::sRenderState.SetSkinnedArraySizes(
+      x10_skinRules->GetNumPoints() * 12,
+      x10_skinRules->GetNumNormals() * NormalStride(**x4_model), NormalStride(**x4_model));
   if (x39_disableWorkspaces) {
     CTransform4f saved(CGraphics::GetModelMatrix());
     CGraphics::SetModelMatrix(saved * x10_skinRules->GetVirtualBones()[0].GetTransform());
@@ -230,8 +240,9 @@ void CSkinnedModel::Draw(const CModelFlags& flags) const {
 }
 
 void CSkinnedModel::Draw(const TDrawFunc func, void* data) {
-  CGraphics::sRenderState.SetSkinnedArraySizes(x10_skinRules->GetNumPoints() * 12,
-                                               x10_skinRules->GetNumNormals() * 12);
+  CGraphics::sRenderState.SetSkinnedArraySizes(
+      x10_skinRules->GetNumPoints() * 12,
+      x10_skinRules->GetNumNormals() * NormalStride(**x4_model), NormalStride(**x4_model));
   if (x39_disableWorkspaces) {
     CTransform4f saved(CGraphics::GetModelMatrix());
     CGraphics::SetModelMatrix(saved * x10_skinRules->GetVirtualBones()[0].GetTransform());
@@ -243,7 +254,7 @@ void CSkinnedModel::Draw(const TDrawFunc func, void* data) {
     func(x28_vertWorkspace.get(), x30_normalWorkspace.get(), data);
     uint vertSize = (x10_skinRules->GetNumPoints() * 12 + 31) & ~31u;
     DCFlushRangeNoSync(x28_vertWorkspace.get(), vertSize);
-    uint normSize = (x10_skinRules->GetNumNormals() * 12 + 31) & ~31u;
+    uint normSize = (x10_skinRules->GetNumNormals() * NormalStride(**x4_model) + 31) & ~31u;
     DCFlushRangeNoSync(x30_normalWorkspace.get(), normSize);
     PPCSync();
     PostDrawFunc();
@@ -252,8 +263,9 @@ void CSkinnedModel::Draw(const TDrawFunc func, void* data) {
 
 void CSkinnedModel::Draw(const float* positions, const float* normals,
                          const CModelFlags& flags) const {
-  CGraphics::sRenderState.SetSkinnedArraySizes(x10_skinRules->GetNumPoints() * 12,
-                                               x10_skinRules->GetNumNormals() * 12);
+  CGraphics::sRenderState.SetSkinnedArraySizes(
+      x10_skinRules->GetNumPoints() * 12,
+      x10_skinRules->GetNumNormals() * NormalStride(**x4_model), NormalStride(**x4_model));
   x4_model->Draw(positions, normals, flags);
   PostDrawFunc();
 }
@@ -265,7 +277,7 @@ void CSkinnedModel::Calculate(const CPoseAsTransforms& pose,
   size_t alignedVertSize = 0;
   size_t totalSize = 0;
   size_t vertSize = x10_skinRules->GetNumPoints() * sizeof(CVector3f);
-  size_t normSize = x10_skinRules->GetNumNormals() * sizeof(CVector3f);
+  size_t normSize = x10_skinRules->GetNumNormals() * NormalStride(**x4_model);
   float* verts;
 
   if (workVerts != nullptr) {
@@ -289,7 +301,9 @@ void CSkinnedModel::Calculate(const CPoseAsTransforms& pose,
 
 #ifdef TARGET_PC
   const PortSkin::Clock::time_point skinStart = PortSkin::Now();
-  if (PortSkin::Legacy()) {
+  // The locked-cache path knows only 12-byte normals; NBT models always skin the fast way.
+  const bool legacy = PortSkin::Legacy() && NormalStride(**x4_model) == 12;
+  if (legacy) {
     x10_skinRules->InitLockedCacheState(**x4_model);
   }
 #else
@@ -307,13 +321,13 @@ void CSkinnedModel::Calculate(const CPoseAsTransforms& pose,
 
   x10_skinRules->BuildNormals(pipe);
 #else
-  if (PortSkin::Legacy()) {
+  if (legacy) {
     PortBuildLegacy(pipe);
   } else {
     float* normals = reinterpret_cast< float* >(reinterpret_cast< uchar* >(verts) + alignedVertSize);
     x10_skinRules->PortBuildPointsAndNormals(**x4_model, verts, normals);
     memset(reinterpret_cast< uchar* >(verts) + vertSize, 0, alignedVertSize - vertSize);
-    if (PortSkin::Verify()) {
+    if (PortSkin::Verify() && !legacy && NormalStride(**x4_model) == 12) {
       PortVerify(verts, alignedVertSize + normSize);
     }
   }
@@ -434,7 +448,7 @@ void CSkinnedModel::AllocateStorage() {
     int vertexCount = x10_skinRules->GetNumPoints();
     int normalCount = x10_skinRules->GetNumNormals();
     TickAllocations();
-    int normSize = (normalCount * 12 + 31) & ~31;
+    int normSize = (normalCount * NormalStride(**x4_model) + 31) & ~31;
     int vertSize = (vertexCount * 12 + 31) & ~31;
     int totalSize = vertSize + normSize + 32;
     void* ptr = EnsureAllocation(totalSize);
@@ -474,7 +488,7 @@ float* CSkinnedModel::AllocateNewWorkspace(float** vertOut) {
   const CSkinRules* skinRules = *x10_skinRules;
   int normalCount = skinRules->GetNumNormals();
   int vertexCount = skinRules->GetNumPoints();
-  int alignedNormSize = (normalCount * 12 + 31) & ~31;
+  int alignedNormSize = (normalCount * NormalStride(**x4_model) + 31) & ~31;
   int alignedVertSize = (vertexCount * 12 + 31) & ~31;
   int vertSize = vertexCount * 12;
   float* ptr = static_cast< float* >(

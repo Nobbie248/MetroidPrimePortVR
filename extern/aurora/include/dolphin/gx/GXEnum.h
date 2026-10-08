@@ -389,6 +389,7 @@ typedef enum {
   GX_NRM_XYZ = 0,
   GX_NRM_NBT = 1,
   GX_NRM_NBT3 = 2,
+  GX_NRM_NBT5 = 3, // port: N, B, T, then a second tangent frame (B1, T1), 15 floats
   GX_CLR_RGB = 0,
   GX_CLR_RGBA = 1,
   GX_TEX_S = 0,

@@ -2,6 +2,7 @@
 
 #include "port_prompts.h"
 
+#include "port_debug.h"
 #include "port_embedded.h"
 #include "port_textures.h"
 
@@ -768,6 +769,10 @@ const char* ActiveDevice() {
   static const char* const env = std::getenv("MP_TEXTURE_DEVICE");
   if (env != nullptr && env[0] != '\0') {
     return env;
+  }
+  // Original experience shows the disc's own prompts, whatever is being pressed.
+  if (PortDebug::OriginalExperience()) {
+    return "gamecube";
   }
   switch (sActiveInput.load(std::memory_order_relaxed)) {
   case ActiveInput::Keyboard:

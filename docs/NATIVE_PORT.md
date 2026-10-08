@@ -277,6 +277,48 @@ Without it the run creates the device and then dies at surface creation with
 does). Software Vulkan (lavapipe) fails differently, segfaulting inside Dawn's
 surface setup rather than logging.
 
+### Custom Vulkan drivers (Android, Turnip)
+
+On Adreno phones the game can run on Mesa's Turnip (or another custom Vulkan
+driver) instead of the phone's own. It loads the driver through
+[libadrenotools](https://github.com/bylaws/libadrenotools) (`extern/adrenotools`,
+`platform/port_gpu_driver.cpp`), the same way Android GameCube/Switch emulators do,
+and takes the same driver zips (a `meta.json` naming the library, plus that
+library; e.g. the AdrenoToolsDrivers releases). None is bundled.
+
+F1 > Video > Compatibility > "Install driver (.zip)..." unpacks a zip into the app's
+internal storage (`gpu_drivers/<id>/`; dlopen refuses shared storage) and selects
+it. The "Vulkan driver" combo switches between installed drivers and System, and
+the setting `gpu_driver=<id>` (empty = System) takes effect at the next start.
+`MP_GPU_DRIVER=<id>` overrides it for one run. "Running:" under the combo shows
+the driver the GPU reports, e.g. `Mesa Turnip ...`, since adrenotools quietly falls
+back to the system driver when its hooks fail. The OpenGL ES backend always uses
+the system driver.
+
+A driver can start and still draw garbage (Turnip builds for another GPU did), so
+the first run on a newly chosen driver shows "Keep this Vulkan driver?" for 30 s.
+Without "Keep" the game closes and the next start uses System. While that prompt is
+up, `gpu_driver_starting` stays in the user folder, so a crash (or a closed game)
+also reverts at the next start, like the OpenGL ES toggle does. A kept driver is
+saved as `gpu_driver_ok=<id>` and isn't asked about again; `MP_GPU_DRIVER` runs
+skip the prompt.
+
+If Vulkan doesn't start at all with the chosen driver (Qualcomm's own driver
+packs for the Adreno 840 failed this way), the game retries Vulkan with the
+system driver in the same run instead of falling back to OpenGL ES, switches the
+setting back to System and shows the error under the combo.
+
+A library named `vulkan.*` is installed as `mportv.*`, and a `vulkan.*` SONAME is
+patched to match: Android's linker would otherwise hand back the system
+`vulkan.adreno.so` that HWUI already loaded under the same SONAME.
+
+How it reaches Dawn: Dawn only opens `libvulkan.so` by name from its search paths.
+The port copies `libmport_vkshim.so` (which exports only `vkGetInstanceProcAddr`,
+forwarding to the custom driver's) to `<internal>/vkshim/libvulkan.so`, loads it,
+points it at the driver adrenotools opened, and puts that folder first in
+`DawnInstanceDescriptor::additionalRuntimeSearchPaths` (`AuroraConfig::vulkanLibraryDir`).
+The log says `GPU driver <id> ... loaded through adrenotools`, or why it was not.
+
 ### Running out of device memory
 
 A Vulkan allocation that does not fit is fatal:
@@ -783,6 +825,19 @@ unpacks to a temporary directory instead of mounting.
   path and has a **Save settings now** button. Environment variables still
   override the file for that run, and are written back into it if any setting is
   changed during that run.
+- Original experience (top of F1 > Game and the pause-menu options, persisted as
+  `original_experience`, `MP_ORIGINAL=1`, console `original [on|off]`): plays the
+  game as retail without touching the saved settings, so turning it off restores
+  them. It forces 640x480 (EFB scale 1x, no dynamic resolution, MSAA and
+  anisotropy off), 4:3 without the widescreen HUD or Vert+, FOV 55, HUD scale
+  100, the helmet and visor effects, cutscene bars, unskippable cutscenes and
+  elevator rides, a 60 Hz simulation with the frame cap and no interpolation,
+  the disc's font and GameCube button prompts, no mods, unlocks or revealed map,
+  and retail controls (no spring ball, fast morph, sticky or rapid charge,
+  lock-on toggle, turbo fire or scan/X-ray swap). Mouse aim, gyro, twin stick,
+  touch controls, bindings, cheats, save states, the randomizer and Archipelago,
+  rich presence and the timer stay available; the settings it forces are greyed
+  out in F1.
 - EFB scale (F1 > Video > Quality, persisted as `render_scale`): 1x-4x of the GameCube's
   640x528 EFB, or the window's own size with "Auto render scale". Above 2x it
   supersamples (4x at 16:9 is 3755x2112; with MSAA 4 the targets take
@@ -857,6 +912,13 @@ unpacks to a temporary directory instead of mounting.
   button or trigger, default none, because Aurora maps LB on many pads to L), and
   it can go on a mouse button. Twin stick keeps left shift as its own modifier,
   and L and LB too while `shift_pad` is unbound.
+- Turbo fire (Controls > Options, "Turbo fire (hold)"): while it is held, A is
+  pressed and released on alternate ticks, as if fire were mashed, so each beam
+  shoots as fast as its own shot delay allows (it doesn't charge). Two key slots
+  (`turbo_key`, `turbo_key_alt`) and a pad slot (`turbo_pad`), all unbound by
+  default; presets leave them alone. On Android, F1 Touch controls "Turbo fire
+  button" (`touch_turbo=`, off by default) adds a "T" button to either touch
+  layout, movable and resizable in the layout editor (issue #10).
 - Alt controller buttons (Controls > Controller, "Alt button" column, persisted as
   `pad_alt`, 16 comma-separated native codes indexed by the PAD bit, -1 for
   none): a second controller button or trigger per GameCube button. Aurora maps
@@ -960,6 +1022,18 @@ unpacks to a temporary directory instead of mounting.
   The logic is `PortLiveSplit::Tracker` (`platform/include/port_livesplit.h`,
   covered by `port_livesplit_tests`). Console: `timer <0|1>`, `igt <seconds>`,
   `livesplit <0|1> | addr <host:port> | send <command> | status`.
+- Update check (F1 > System > Updates; on by default, `update_check`,
+  `MP_UPDATE_CHECK=0` turns it off for a run). At every launch it asks
+  `api.github.com/repos/Odrannnn/MetroidPrimePort/releases/latest` (an HTTPS
+  GET with nothing but a User-Agent naming the version) whether that tag is newer
+  than this build's version (`MP_BUILD_VERSION`, from `versionName` in
+  `android/app/build.gradle`). If it is, a toast shows at the top for 12 s
+  (click or tap it to open the release page) and F1 offers "Open release page". The answer is kept in `<user>/update-check.txt`,
+  so a known newer release shows at once, offline too; after a failed check,
+  F1 "Check now" tries again. Logic in `platform/port_update_check.cpp`, covered by
+  `port_update_check_tests` (`MP_UPDATE_LIVE=1` adds a real request). mprig runs
+  set `MP_UPDATE_CHECK=0`. On Windows, TLS (this and Archipelago `wss://`) trusts
+  the system ROOT store, since the static OpenSSL has no default one.
 - Discord Rich Presence (F1 > System > Discord; desktop only, on by default,
   `discord_presence`). Shows the current room as the activity, with energy,
   missiles (once the launcher is found) and the item percentage below it, a
@@ -1202,7 +1276,7 @@ other `X:\Users\<name>`: `X:\Users\<user>`); the
   gyro rates in rad/s), `shot` (prints the bmp path), `present
   <0..1|cycle|tick|off>`, `hold <0|1>` (stop ticking), `step [ticks]` (run
   that many ticks while held), `interp [actor|pose|particle|all <0|1>]`,
-  `aspect <4:3|16:9|window>`, `fov <45..90>`, `window [<w> <h>]` (resizes the window, leaving fullscreen, e.g. for square screenshots; prints the size), `msaa <1|4>`, `aniso <1..16>`, `hudscale <50..100>`, `helmet <0|1>`, `visorfx <0|1>`, `crosshair <25..100>`, `reveal <0|1>`, `pickups <0|1>`, `tracker`, `state list | last | save [n] | load [n] | undo | slot <n>`, `viewmodel <cmdl> [dist] [yaw] [pitch] | off | status | light <0|1>` (draws any model, retail or a mod's, in front of the camera with the arm cannon hidden; dist 0 fits its bounds; `light 1` swaps the flat white ambient for a key light, which PBR mod materials need to shade), `probe [off|on|mirror|window]` (the PBR reflection probe, live: `mirror` and `window` show the probe itself on PBR materials, as a reflection and looked straight through; no argument prints the mode), `remastered [start <image.nsp> [key file] | cancel]` (the Remastered model import and its progress), `mods [reload]` (what is loaded; `reload` reads the mods folder again), `roomgeo [on|off|overlay | at <x> <y> <z> [margin] | hide <cmdl> | show [cmdl]]` (a mod's room geometry: in place of the retail area, off, or drawn over it; `at` lists the instances whose box holds a point and `hide` stops drawing a model, for finding which one a surface belongs to; no argument prints what is loaded and drawn), `roomgeo lights on|off` (light room geometry with the area's lights even where the room has baked light), `roomgeo script` (Remastered's own visibility scripts in each loaded area: the camera in area space, each camera zone, counter and relay, and how much of each geometry group is shown), `roomgeo group <n> show|hide` (sets that group in every loaded area until its script next changes it), `roomgeo minpx <n>` (skip room geometry instances smaller than n pixels; see `MP_ROOM_GEO_MIN_PX`), `roomgeo lod <scale>` (see `MP_ROOM_GEO_LOD`), `roomgeo pick` (the instances the middle of the view looks through, nearest first, with each model's materials), `roomgeo mats <cmdl>` (a model's materials: flags, PBR or TEV, the PBR record; any CMDL drawn since `drawlog on` or `view drawid`, not just room geometry), `roomgeo mat <cmdl> <material> <field> <value...> | mat clear` (changes a value of a material's PBR record as drawn, until cleared or the next start; fields `emissive`, `backlight`, `height`, `mode`, `kind`, `strength`, `p0`-`p3`, or an index 0 to 18; emissive multiplies the emissive map, so it shows only on a material that has one), `roomliquid [on|off]` (a mod's liquid surfaces in place of the retail fluid planes; no argument prints what is loaded and drawn), `collision [off|overlay|only]` (draws what Samus collides with: the areas' static collision shaded by facing, walls grey, floors blue, ceilings red, lava orange, phazon cyan, grates yellow, with each triangle's edges, and active solid actors such as gates and platforms as orange boxes; `only` hides the world but Samus, so walls with no surface on them show), `colldump <x0> <y0> <z0> <x1> <y1> <z1> <file.obj>` (the current area's collision triangles touching a box, as an OBJ with each face's material bits in a comment), `roomenv [on|off|exposure on|off|bloom on|off|grade on|off|volume on|off|ambient <scale>|show off|coords|light|info [<x> <y> <z>]|balllight on|off|<scale>]` (room environments: `volume` is the baked light per pixel, `ambient` scales the baked ambient, `show` draws the grid's coordinates or light in place of the surface, `info` prints exposure, tone curve, probe and baked ambient at the view or a point), `view [off|albedo|normal|rough|metal|ao|ambient|reflection|glow|exposure|kind|sun|drawid]` (what PBR surfaces show: one input of the shading in place of the result), `drawlog [on|off|dump <file>]` (numbers every model surface drawn and records it; `dump` writes the last frame as TSV: serial, CMDL, material, owner, record, PBR or TEV, shader hash), `pick <x> <y>` (the draw at a window pixel, top-left origin, by way of `view drawid`), `shader dump <dir>|override <dir>|off|reload` (the generated WGSL as `<hash>.wgsl` plus `index.tsv`, also `MP_WGSL_DUMP`; compile edited copies in place of the generated ones, also `MP_WGSL_OVERRIDE`; see `docs/DEBUGGING.md` "Shaders"), `gpuselftest` (GPU self-test: known patterns rendered offscreen through the game's GX path, read back and logged as `gpu selftest: <case>: PASS|FAIL`; also F1 > Video > Quality "GPU self-test" and `MP_GPU_SELFTEST=1` once after the first frames; see `docs/DEBUGGING.md` "GPU self-test"), `gputimes on|off|show` (per-render-pass GPU times from timestamp queries, 60-frame averages: ms and passes per frame for each pass name, plus the total and first-begin-to-last-end span; also F1 > Debug > Remastered "GPU pass times"; free while off), `stats` (the last frame's draws and buffers, the heap, room geometry and environments), `hdfont [on|off]`, `touchpad [attach|detach|stick <x> <y>]` (a virtual gamepad of the kind Android's touch overlay uses, to test controller hotplug against it on any platform), `minimap` (the minimap's screen rect as 0..1 fractions of the window, top-left origin, or `invalid` when it is not drawn: morph ball, map screen, hidden HUD), `maptap` (queues one Z press, as a tap on the minimap does on Android), `mappan <dx> <dy> [hold s]` (drags the open map screen by dx,dy dp, as a finger would), `mapzoom <ratio>` (pinch zoom of the open map screen; above 1 zooms in), `maprotate <degrees>` (twist of the open map screen's yaw; positive is clockwise), `freecam [on|off|freeze on|off|player on|off|speed <n>|pos <x> <y> <z>|look <yaw> <pitch>]` (see below), `timer <0|1>`, `igt <seconds>`, `livesplit <0|1> | addr <host:port> | send <command> | status`, `discord <0|1> | status`, `gci list | import <path> | export <dir or .raw> | dolphin import|export`, `ap [connect <server> <slot> [password] | disconnect | recent | resume <n> | say <text> | chat]`, `wait <frames>`, `quit`; `help` lists them. Ids are hex editor ids, `u<n>`
+  `aspect <4:3|16:9|window>`, `original [on|off]`, `fov <45..90>`, `window [<w> <h>]` (resizes the window, leaving fullscreen, e.g. for square screenshots; prints the size), `msaa <1|4>`, `aniso <1..16>`, `hudscale <50..100>`, `helmet <0|1>`, `visorfx <0|1>`, `crosshair <25..100>`, `reveal <0|1>`, `pickups <0|1>`, `tracker`, `state list | last | save [n] | load [n] | undo | slot <n>`, `viewmodel <cmdl> [dist] [yaw] [pitch] | off | status | light <0|1>` (draws any model, retail or a mod's, in front of the camera with the arm cannon hidden; dist 0 fits its bounds; `light 1` swaps the flat white ambient for a key light, which PBR mod materials need to shade), `probe [off|on|mirror|window]` (the PBR reflection probe, live: `mirror` and `window` show the probe itself on PBR materials, as a reflection and looked straight through; no argument prints the mode), `remastered [start <image.nsp> [key file] | cancel]` (the Remastered model import and its progress), `mods [reload]` (what is loaded; `reload` reads the mods folder again), `roomgeo [on|off|overlay | at <x> <y> <z> [margin] | hide <cmdl> | show [cmdl]]` (a mod's room geometry: in place of the retail area, off, or drawn over it; `at` lists the instances whose box holds a point and `hide` stops drawing a model, for finding which one a surface belongs to; no argument prints what is loaded and drawn), `roomgeo lights on|off` (light room geometry with the area's lights even where the room has baked light), `roomgeo script` (Remastered's own visibility scripts in each loaded area: the camera in area space, each camera zone, counter and relay, and how much of each geometry group is shown), `roomgeo group <n> show|hide` (sets that group in every loaded area until its script next changes it), `roomgeo minpx <n>` (skip room geometry instances smaller than n pixels; see `MP_ROOM_GEO_MIN_PX`), `roomgeo lod <scale>` (see `MP_ROOM_GEO_LOD`), `roomgeo pick` (the instances the middle of the view looks through, nearest first, with each model's materials), `roomgeo mats <cmdl>` (a model's materials: flags, PBR or TEV, the PBR record; any CMDL drawn since `drawlog on` or `view drawid`, not just room geometry), `roomgeo mat <cmdl> <material> <field> <value...> | mat clear` (changes a value of a material's PBR record as drawn, until cleared or the next start; fields `emissive`, `backlight`, `height`, `mode`, `kind`, `strength`, `p0`-`p3`, or an index 0 to 18; emissive multiplies the emissive map, so it shows only on a material that has one), `roomliquid [on|off]` (a mod's liquid surfaces in place of the retail fluid planes; no argument prints what is loaded and drawn), `collision [off|overlay|only]` (draws what Samus collides with: the areas' static collision shaded by facing, walls grey, floors blue, ceilings red, lava orange, phazon cyan, grates yellow, with each triangle's edges, and active solid actors such as gates and platforms as orange boxes; `only` hides the world but Samus, so walls with no surface on them show), `colldump <x0> <y0> <z0> <x1> <y1> <z1> <file.obj>` (the current area's collision triangles touching a box, as an OBJ with each face's material bits in a comment), `roomenv [on|off|exposure on|off|bloom on|off|grade on|off|volume on|off|ambient <scale>|show off|coords|light|info [<x> <y> <z>]|balllight on|off|<scale>]` (room environments: `volume` is the baked light per pixel, `ambient` scales the baked ambient, `show` draws the grid's coordinates or light in place of the surface, `info` prints exposure, tone curve, probe and baked ambient at the view or a point), `view [off|albedo|normal|rough|metal|ao|ambient|reflection|glow|exposure|kind|sun|drawid]` (what PBR surfaces show: one input of the shading in place of the result), `drawlog [on|off|dump <file>]` (numbers every model surface drawn and records it; `dump` writes the last frame as TSV: serial, CMDL, material, owner, record, PBR or TEV, shader hash), `pick <x> <y>` (the draw at a window pixel, top-left origin, by way of `view drawid`), `shader dump <dir>|override <dir>|off|reload` (the generated WGSL as `<hash>.wgsl` plus `index.tsv`, also `MP_WGSL_DUMP`; compile edited copies in place of the generated ones, also `MP_WGSL_OVERRIDE`; see `docs/DEBUGGING.md` "Shaders"), `gpuselftest` (GPU self-test: known patterns rendered offscreen through the game's GX path, read back and logged as `gpu selftest: <case>: PASS|FAIL`; also F1 > Video > Compatibility "GPU self-test" and `MP_GPU_SELFTEST=1` once after the first frames; see `docs/DEBUGGING.md` "GPU self-test"), `gputimes on|off|show` (per-render-pass GPU times from timestamp queries, 60-frame averages: ms and passes per frame for each pass name, plus the total and first-begin-to-last-end span; also F1 > Debug > Remastered "GPU pass times"; free while off), `stats` (the last frame's draws and buffers, the heap, room geometry and environments), `hdfont [on|off]`, `touchpad [attach|detach|stick <x> <y>]` (a virtual gamepad of the kind Android's touch overlay uses, to test controller hotplug against it on any platform), `minimap` (the minimap's screen rect as 0..1 fractions of the window, top-left origin, or `invalid` when it is not drawn: morph ball, map screen, hidden HUD), `maptap` (queues one Z press, as a tap on the minimap does on Android), `mappan <dx> <dy> [hold s]` (drags the open map screen by dx,dy dp, as a finger would), `mapzoom <ratio>` (pinch zoom of the open map screen; above 1 zooms in), `maprotate <degrees>` (twist of the open map screen's yaw; positive is clockwise), `freecam [on|off|freeze on|off|player on|off|speed <n>|pos <x> <y> <z>|look <yaw> <pitch>]` (see below), `timer <0|1>`, `igt <seconds>`, `livesplit <0|1> | addr <host:port> | send <command> | status`, `discord <0|1> | status`, `gci list | import <path> | export <dir or .raw> | dolphin import|export`, `ap [connect <server> <slot> [password] | disconnect | recent | resume <n> | say <text> | chat]`, `rando [gen [seedtext] | play <name> | delete <name> | list]` (the built-in randomizer: `gen` makes a seed from the F1 Randomizer page's saved options and plays it, or only saves it while a game is loaded, an empty seed text picks one at random; `play` replays a saved seed, from the title screen or file select once a game is loaded; `delete` removes a seed with its progress and save card, not the one being played; `list` names the saved seeds), `wait <frames>`, `quit`, `title` (quits the game to the title screen, through the attract sequence as after a game over); `help` lists them. Ids are hex editor ids, `u<n>`
   unique ids or exact debug names. Every reply ends with `=> ok` or
   `=> err: <why>`, and the client exits 1 if any command failed. Game commands
   run inside the state manager tick, so they fail with "not ticking" on the

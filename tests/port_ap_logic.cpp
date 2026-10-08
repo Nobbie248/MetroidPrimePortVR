@@ -172,6 +172,17 @@ int main() {
     CHECK(At(options, items, "Hive Totem", "Hive Mecha") == Level::Normal);
   }
 
+  // Transport Tunnel E reaches Hydro Access Tunnel over Great Tree Hall's
+  // upper level, as in the apworld: no Wave Beam or Thermal Visor needed.
+  {
+    Options options;
+    options.startRoom = "Transport to Phazon Mines East";
+    Items items{{kBase + 6, 1}, {kBase + 16, 1}, {kBase + 21, 1}};
+    CHECK(At(options, items, "Hydro Access Tunnel", "Underwater bomb puzzle") == Level::None);
+    items[kBase + 1] = 1;
+    CHECK(At(options, items, "Hydro Access Tunnel", "Underwater bomb puzzle") == Level::Normal);
+  }
+
   // Doors: the Landing Site's door to the Alcove behind a blast shield, a
   // disabled door, or another colour.
   {

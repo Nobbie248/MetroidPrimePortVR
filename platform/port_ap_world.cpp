@@ -1,3 +1,4 @@
+#include "port_strings.h"
 #include "port_ap_world.h"
 
 #include <cstdio>
@@ -189,23 +190,6 @@ Resolved Resolve(const Layout& layout) {
   return out;
 }
 
-std::string Quote(const std::string& text) {
-  std::string out = "\"";
-  for (const char c : text) {
-    if (c == '"' || c == '\\') {
-      out += '\\';
-      out += c;
-    } else if (static_cast< unsigned char >(c) < 0x20) {
-      char escape[8];
-      std::snprintf(escape, sizeof(escape), "\\u%04x", c);
-      out += escape;
-    } else {
-      out += c;
-    }
-  }
-  return out + "\"";
-}
-
 } // namespace
 
 void Parse(const PortJson::Value& data, Layout& layout) {
@@ -292,16 +276,16 @@ void Parse(const PortJson::Value& data, Layout& layout) {
 
 std::string Text(const Layout& layout) {
   std::ostringstream text;
-  text << "{\"starting_room_name\":" << Quote(layout.startRoom)
+  text << "{\"starting_room_name\":" << port::JsonQuote(layout.startRoom)
        << ",\"final_bosses\":" << layout.finalBosses
        << ",\"required_artifacts\":" << layout.requiredArtifacts << ",\"elevator_mapping\":{";
   bool firstArea = true;
   for (const auto& area : layout.elevators) {
-    text << (firstArea ? "" : ",") << Quote(area.first) << ":{";
+    text << (firstArea ? "" : ",") << port::JsonQuote(area.first) << ":{";
     firstArea = false;
     bool first = true;
     for (const auto& entry : area.second) {
-      text << (first ? "" : ",") << Quote(entry.first) << ':' << Quote(entry.second);
+      text << (first ? "" : ",") << port::JsonQuote(entry.first) << ':' << port::JsonQuote(entry.second);
       first = false;
     }
     text << '}';
@@ -315,11 +299,11 @@ std::string Text(const Layout& layout) {
     text << ",\"door_color_mapping\":{";
     firstArea = true;
     for (const auto& area : layout.doorColors) {
-      text << (firstArea ? "" : ",") << Quote(area.first) << ":{\"type_mapping\":{";
+      text << (firstArea ? "" : ",") << port::JsonQuote(area.first) << ":{\"type_mapping\":{";
       firstArea = false;
       bool first = true;
       for (const auto& entry : area.second) {
-        text << (first ? "" : ",") << Quote(entry.first) << ':' << Quote(entry.second);
+        text << (first ? "" : ",") << port::JsonQuote(entry.first) << ':' << port::JsonQuote(entry.second);
         first = false;
       }
       text << "}}";
@@ -330,15 +314,15 @@ std::string Text(const Layout& layout) {
     text << ",\"blast_shield_mapping\":{";
     firstArea = true;
     for (const auto& area : layout.shields) {
-      text << (firstArea ? "" : ",") << Quote(area.first) << ":{\"type_mapping\":{";
+      text << (firstArea ? "" : ",") << port::JsonQuote(area.first) << ":{\"type_mapping\":{";
       firstArea = false;
       bool firstRoom = true;
       for (const auto& room : area.second) {
-        text << (firstRoom ? "" : ",") << Quote(room.first) << ":{";
+        text << (firstRoom ? "" : ",") << port::JsonQuote(room.first) << ":{";
         firstRoom = false;
         bool first = true;
         for (const auto& entry : room.second) {
-          text << (first ? "" : ",") << '"' << entry.first << "\":" << Quote(entry.second);
+          text << (first ? "" : ",") << '"' << entry.first << "\":" << port::JsonQuote(entry.second);
           first = false;
         }
         text << '}';
@@ -349,6 +333,30 @@ std::string Text(const Layout& layout) {
   }
   text << '}';
   return text.str();
+}
+
+int DockTo(const std::string& area, const std::string& room, const std::string& dest) {
+  const std::string areaName = Folded(area);
+  const std::string roomName = Folded(room);
+  const std::string destName = Folded(dest);
+  for (const Door& door : kDoors) {
+    const Room& r = kRooms[door.room];
+    if (door.dest >= 0 && Folded(kAreas[r.area]) == areaName && Folded(r.name) == roomName &&
+        Folded(kRooms[door.dest].name) == destName)
+      return door.dock;
+  }
+  return -1;
+}
+
+std::vector< std::pair< std::string, int > > DiscShields(const std::string& area) {
+  const std::string areaName = Folded(area);
+  std::vector< std::pair< std::string, int > > out;
+  for (const Door& door : kDoors) {
+    const Room& r = kRooms[door.room];
+    if (door.shield >= 0 && Folded(kAreas[r.area]) == areaName)
+      out.emplace_back(r.name, door.dock);
+  }
+  return out;
 }
 
 bool StartRoom(const Layout& layout, Place& out) {

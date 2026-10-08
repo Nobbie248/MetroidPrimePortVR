@@ -883,6 +883,14 @@ uint8_t SrgbToLinearByte(uint8_t value) {
   return uint8_t(std::clamp(int(std::lround(Tables().toLinear[value] * 255.f)), 0, 255));
 }
 
+float SrgbByteToLinear(uint8_t value) {
+  return Tables().toLinear[value];
+}
+
+uint8_t LinearToSrgbByteExact(float linear) {
+  return LinearToSrgbByte(linear);
+}
+
 uint8_t ScaleSrgbByte(uint8_t value, double scale) {
   return LinearToSrgbByte(Tables().toLinear[value] * float(scale));
 }
@@ -1197,7 +1205,7 @@ DdsFormat NormalDdsFormat() {
   return WantedTextureFormat() == TextureFormat::ASTC ? DdsFormat::ASTC4x4Normal : DdsFormat::BC5;
 }
 
-std::vector<uint8_t> EncodeDds(const Image& image, DdsFormat format, bool punch, MapKind kind) {
+std::vector<uint8_t> EncodeDds(const Image& image, DdsFormat format, bool punch, MapKind kind, bool srgb) {
   std::vector<Image> levels{image};
   if (punch) {
     BleedColour(levels[0]);
@@ -1229,8 +1237,9 @@ std::vector<uint8_t> EncodeDds(const Image& image, DdsFormat format, bool punch,
   AppendLE32(out, 0x00401008);
   out.resize(out.size() + 16);
   const bool astc = format == DdsFormat::ASTC4x4 || format == DdsFormat::ASTC4x4Normal;
-  // DXGI format: BC7_UNORM, BC5_UNORM, ASTC_4X4_UNORM.
-  AppendLE32(out, astc ? 134 : format == DdsFormat::BC7 ? 98 : 83);
+  // DXGI format: BC7_UNORM(_SRGB), BC5_UNORM, ASTC_4X4_UNORM(_SRGB). A normal map is never sRGB.
+  const bool colour = format == DdsFormat::BC7 || format == DdsFormat::ASTC4x4;
+  AppendLE32(out, astc ? (srgb && colour ? 135 : 134) : format == DdsFormat::BC7 ? (srgb ? 99 : 98) : 83);
   AppendLE32(out, 3);  // TEXTURE2D
   AppendLE32(out, 0);
   AppendLE32(out, 1);  // array size

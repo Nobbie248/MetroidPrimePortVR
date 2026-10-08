@@ -233,7 +233,7 @@ colour, a 3-stage TEV combine, RGBA8 / IA8 / I8 / CMPR textures, alpha blend and
 draw orders, EFB copy sampled back.
 A silent warm-up pass runs first so the async pipeline compiles finish, then the logged pass (a few frames later).
 
-    F1 > Video > Quality > "GPU self-test"      # or: console `gpuselftest`, or MP_GPU_SELFTEST=1 (once, ~120 frames in)
+    F1 > Video > Compatibility > "GPU self-test"      # or: console `gpuselftest`, or MP_GPU_SELFTEST=1 (once, ~120 frames in)
     grep 'gpu selftest' game.log
 
     gpu selftest: backend Vulkan, adapter "...", clamped storage loads active|off

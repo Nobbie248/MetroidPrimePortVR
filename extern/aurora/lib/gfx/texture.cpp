@@ -205,7 +205,8 @@ TextureHandle new_dynamic_texture_2d(uint32_t width, uint32_t height, uint32_t m
                                       mips, gxFormat);
 }
 
-TextureHandle new_render_texture(uint32_t width, uint32_t height, u32 gxFormat, const char* label) noexcept {
+TextureHandle new_render_texture(uint32_t width, uint32_t height, u32 gxFormat, const char* label,
+                                 uint32_t mips) noexcept {
   ZoneScoped;
 
   const auto wgpuFormat = webgpu::g_graphicsConfig.surfaceConfiguration.format;
@@ -221,7 +222,7 @@ TextureHandle new_render_texture(uint32_t width, uint32_t height, u32 gxFormat, 
       .dimension = wgpu::TextureDimension::e2D,
       .size = size,
       .format = wgpuFormat,
-      .mipLevelCount = 1,
+      .mipLevelCount = mips,
       .sampleCount = 1,
   };
   auto texture = g_device.CreateTexture(&textureDescriptor);
@@ -232,11 +233,16 @@ TextureHandle new_render_texture(uint32_t width, uint32_t height, u32 gxFormat, 
       .label = viewLabel.c_str(),
       .format = wgpuFormat,
       .dimension = wgpu::TextureViewDimension::e2D,
+      .mipLevelCount = 1,
   };
   auto attachmentTextureView = texture.CreateView(&textureViewDescriptor);
   wgpu::TextureView sampleTextureView = attachmentTextureView;
+  if (mips > 1) {
+    textureViewDescriptor.mipLevelCount = mips;
+    sampleTextureView = texture.CreateView(&textureViewDescriptor);
+  }
   return std::make_shared<TextureRef>(std::move(texture), std::move(sampleTextureView),
-                                      std::move(attachmentTextureView), size, wgpuFormat, 1, gxFormat);
+                                      std::move(attachmentTextureView), size, wgpuFormat, mips, gxFormat);
 }
 
 TextureHandle new_conv_texture(uint32_t width, uint32_t height, u32 gxFormat, const char* label) noexcept {

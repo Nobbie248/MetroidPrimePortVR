@@ -158,7 +158,15 @@ class PrimedGunVrActivity : SDLActivity() {
             val textures = File(filesDir, "textures")
             textures.deleteRecursively()
             copyAssetTree("textures", textures)
-            copyAsset("initial_pipeline_cache.db", File(filesDir, "initial_pipeline_cache.db"))
+            // The APK carries a seed only once one is recorded on the Quest (see
+            // syncPortAssets in build.gradle.kts). Without one, an earlier build's
+            // copy goes, since aurora would keep merging its rows at every start.
+            val seed = File(filesDir, "initial_pipeline_cache.db")
+            if (assets.list("")?.contains("initial_pipeline_cache.db") == true) {
+                copyAsset("initial_pipeline_cache.db", seed)
+            } else {
+                seed.delete()
+            }
             stamp.writeText(expected)
             Log.i(TAG, "Unpacked the game's resources into ${filesDir.absolutePath}")
         } catch (e: IOException) {

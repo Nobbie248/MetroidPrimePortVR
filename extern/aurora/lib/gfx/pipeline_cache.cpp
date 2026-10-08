@@ -16,6 +16,7 @@
 #include <condition_variable>
 #include <chrono>
 #include <cstdint>
+#include <cstdlib>
 #include <deque>
 #include <filesystem>
 #include <limits>
@@ -33,6 +34,10 @@ namespace aurora::gfx {
 static Module Log("aurora::gfx::pipeline_cache");
 
 constexpr int PipelineCacheSchema = 1;
+// PrimedGun: the layout of the GX rows in a user's cache, kept in SQLite's user_version
+// (purge_previous_layout_gx_rows). Raise it when the fork's ShaderConfig bytes move again
+// without a GXPipelineConfigVersion bump, so the rows of the older layout are dropped once.
+constexpr int PortGxLayoutEpoch = 1;
 constexpr const char* InitialPipelineCacheName = "initial_pipeline_cache.db";
 // The name the seed VFS maps to AuroraConfig::pipelineCacheSeedData instead of a file.
 constexpr const char* EmbeddedSeedName = ":embedded-initial-pipeline-cache:";
@@ -800,6 +805,63 @@ static void seed_pipeline_cache() {
   }
 }
 
+// PrimedGun: the 2026-10-08 upstream merge moved the fork's ShaderConfig fields into upstream's
+// spare bytes without changing GXPipelineConfigVersion or the config size. The GX rows that
+// 2.0.0-alpha.1 and earlier builds wrote therefore pass the version and size checks but read back
+// as other configs (hudSample 255, multiview taken from the old nativeVertices byte, and so on).
+// No draw ever asks for them, yet every start would compile them in the background, and a
+// combination Dawn rejects is fatal. A cache whose user_version is below PortGxLayoutEpoch loses
+// all of its GX rows once; the clear and RmlUi rows stay, and the bundled seed is merged back
+// afterwards. Upstream does not use user_version. Returns false when the cache cannot be read or
+// written, which the caller treats like any other cache failure.
+static bool purge_previous_layout_gx_rows() {
+  int userVersion = 0;
+  auto ret = sqlite::exec(g_pipelineCacheDb, "PRAGMA user_version;", [&userVersion](int count, char** values, char**) {
+    userVersion = count > 0 && values[0] != nullptr ? std::atoi(values[0]) : 0;
+  });
+  if (ret != SQLITE_OK) {
+    Log.error("Failed to read the pipeline cache layout epoch: {}", sqlite3_errmsg(g_pipelineCacheDb));
+    return false;
+  }
+  if (userVersion >= PortGxLayoutEpoch) {
+    return true;
+  }
+
+  // The delete and the new epoch commit together, so an interrupted purge runs again next start.
+  sqlite::Transaction tx(g_pipelineCacheDb, Log, true);
+  if (!tx) {
+    Log.error("Failed to begin pipeline cache layout purge transaction");
+    return false;
+  }
+  const auto gxDelete = fmt::format("DELETE FROM pipeline_cache WHERE type = {}", underlying(ShaderType::GX));
+  ret = sqlite::exec(g_pipelineCacheDb, gxDelete.c_str());
+  if (ret != SQLITE_OK) {
+    Log.error("Failed to drop GX pipeline cache rows of the previous layout: {}", sqlite3_errmsg(g_pipelineCacheDb));
+    // Before the transaction's rollback resets the connection's error code.
+    note_pipeline_cache_corrupt();
+    return false;
+  }
+  const auto droppedRows = sqlite3_changes(g_pipelineCacheDb);
+  const auto epochSql = fmt::format("PRAGMA user_version = {};", PortGxLayoutEpoch);
+  ret = sqlite::exec(g_pipelineCacheDb, epochSql.c_str());
+  if (ret != SQLITE_OK) {
+    Log.error("Failed to set the pipeline cache layout epoch: {}", sqlite3_errmsg(g_pipelineCacheDb));
+    note_pipeline_cache_corrupt();
+    return false;
+  }
+  tx.commit();
+  if (tx) {
+    // The commit failed and the transaction is still open; its destructor rolls it back.
+    note_pipeline_cache_corrupt();
+    return false;
+  }
+
+  if (droppedRows > 0) {
+    Log.info("Dropped {} GX pipeline cache rows recorded in PrimedGun's previous ShaderConfig layout", droppedRows);
+  }
+  return true;
+}
+
 static bool prepare_pipeline_cache_db() {
   if (g_pipelineCacheBroken) {
     return false;
@@ -878,6 +940,12 @@ INSERT INTO aurora_schema VALUES ({});)",
   }
 
   if (schemaFailed) {
+    pipeline_cache_abort();
+    return false;
+  }
+
+  // PrimedGun: before the bundled seed is merged and before any row is loaded.
+  if (!purge_previous_layout_gx_rows()) {
     pipeline_cache_abort();
     return false;
   }

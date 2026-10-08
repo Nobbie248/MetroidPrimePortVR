@@ -8,6 +8,7 @@
 #ifdef TARGET_PC
 #include "Kyoto/Basics/CBasics.hpp"
 #include <atomic>
+#include <cmath>
 #include <condition_variable>
 #include <functional>
 #include <mutex>
@@ -120,13 +121,54 @@ static inline float LoadBigFloat(const uchar* p) {
   return CBasics::SwapBytes(value);
 }
 
+static inline void Normalize3(float* v) {
+  const float len2 = v[0] * v[0] + v[1] * v[1] + v[2] * v[2];
+  if (len2 > 0.f) {
+    const float inv = 1.f / std::sqrt(len2);
+    v[0] *= inv;
+    v[1] *= inv;
+    v[2] *= inv;
+  }
+}
+
+// The sign of dot(cross(n, t), b): the frame's handedness, which the shader reads off B.
+static inline float Handedness(const float* n, const float* t, const float* b) {
+  const float cx = n[1] * t[2] - n[2] * t[1];
+  const float cy = n[2] * t[0] - n[0] * t[2];
+  const float cz = n[0] * t[1] - n[1] * t[0];
+  return cx * b[0] + cy * b[1] + cz * b[2] >= 0.f ? 1.f : -1.f;
+}
+
+// Remastered's skinned vertex shader (e400bbf9, faa085bd) normalises the skinned N and T,
+// and its handedness is the authored one: a mirrored bone does not flip it. The skinned
+// entry (N, B, T[, B1, T1]) is made so: N and T unit, and B = w * cross(N, T) with the
+// source's w, which is all the shader reads of B.
+static void FinishTangentFrame(const uchar* src, float* out, int vecs) {
+  float in[15];
+  for (int k = 0; k < vecs * 3; ++k) {
+    in[k] = LoadBigFloat(src + k * 4);
+  }
+  float* const n = out;
+  Normalize3(n);
+  for (int f = 1; f + 1 < vecs; f += 2) {
+    float* const b = out + f * 3;
+    float* const t = out + (f + 1) * 3;
+    const float w = Handedness(in, in + (f + 1) * 3, in + f * 3);
+    Normalize3(t);
+    b[0] = w * (n[1] * t[2] - n[2] * t[1]);
+    b[1] = w * (n[2] * t[0] - n[0] * t[2]);
+    b[2] = w * (n[0] * t[1] - n[1] * t[0]);
+  }
+}
+
 // Skins the bones [first, end), whose vertices start at `offset`. Each virtual
 // bone owns the next run of vertices, in the same order for the point and
 // normal arrays. The expressions match CTransform4f/CMatrix3f's operator*, so
 // the output is bit-identical to the retail path.
+// `vecs` is the vectors per normal entry (1, or 3 for N, B, T, or 5 with a second frame); all rotate alike.
 static void BuildBoneRange(const CVirtualBone* bones, int first, int end, int offset,
                            const uchar* srcPoints, const uchar* srcNormals, float* points,
-                           float* normals) {
+                           float* normals, int vecs) {
   const uchar* src = srcPoints + offset * 12;
   float* out = points + offset * 3;
   for (int b = first; b < end; ++b) {
@@ -143,19 +185,26 @@ static void BuildBoneRange(const CVirtualBone* bones, int first, int end, int of
     }
   }
 
-  src = srcNormals + offset * 12;
-  out = normals + offset * 3;
+  src = srcNormals + offset * 12 * vecs;
+  out = normals + offset * 3 * vecs;
   for (int b = first; b < end; ++b) {
     const CMatrix3f& rot = bones[b].GetRotation();
     const float m00 = rot.Get00(), m01 = rot.Get01(), m02 = rot.Get02();
     const float m10 = rot.Get10(), m11 = rot.Get11(), m12 = rot.Get12();
     const float m20 = rot.Get20(), m21 = rot.Get21(), m22 = rot.Get22();
     const int count = bones[b].GetNumIndices();
-    for (int i = 0; i < count; ++i, src += 12, out += 3) {
-      const float x = LoadBigFloat(src), y = LoadBigFloat(src + 4), z = LoadBigFloat(src + 8);
-      out[0] = x * m00 + y * m01 + z * m02;
-      out[1] = x * m10 + y * m11 + z * m12;
-      out[2] = x * m20 + y * m21 + z * m22;
+    for (int i = 0; i < count; ++i) {
+      const uchar* const vsrc = src;
+      float* const vout = out;
+      for (int v = 0; v < vecs; ++v, src += 12, out += 3) {
+        const float x = LoadBigFloat(src), y = LoadBigFloat(src + 4), z = LoadBigFloat(src + 8);
+        out[0] = x * m00 + y * m01 + z * m02;
+        out[1] = x * m10 + y * m11 + z * m12;
+        out[2] = x * m20 + y * m21 + z * m22;
+      }
+      if (vecs >= 3) {
+        FinishTangentFrame(vsrc, vout, vecs);
+      }
     }
   }
 }
@@ -269,12 +318,13 @@ void CSkinRules::PortBuildPointsAndNormals(const CModel& model, float* points,
                                            float* normals) const {
   const uchar* srcPoints = static_cast< const uchar* >(model.GetCubeModel()->GetPositions());
   const uchar* srcNormals = static_cast< const uchar* >(model.GetCubeModel()->GetNormals());
+  const int nbt = static_cast< int >(model.GetCubeModel()->NormalVecs());
   const CVirtualBone* bones = x0_virtualBones.data();
   const int boneCount = x0_virtualBones.size();
 
   const int threads = x10_vertexCount >= ThreadThreshold() ? SkinPool::Get().Threads() : 1;
   if (threads <= 1 || boneCount < 2) {
-    BuildBoneRange(bones, 0, boneCount, 0, srcPoints, srcNormals, points, normals);
+    BuildBoneRange(bones, 0, boneCount, 0, srcPoints, srcNormals, points, normals, nbt);
     return;
   }
 
@@ -301,7 +351,7 @@ void CSkinRules::PortBuildPointsAndNormals(const CModel& model, float* points,
 
   const std::function< void(int) > job = [&](int c) {
     BuildBoneRange(bones, chunkFirst[c], chunkFirst[c + 1], chunkOffset[c], srcPoints, srcNormals,
-                   points, normals);
+                   points, normals, nbt);
   };
   SkinPool::Get().Run(count, job);
 }

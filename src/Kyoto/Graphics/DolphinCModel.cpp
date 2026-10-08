@@ -50,6 +50,8 @@ CModel::CModel(const rstl::auto_ptr< uchar[] >& data, int length, IObjectStore& 
   const uint version = CBasics::SwapBytes(*reinterpret_cast< const uint* >(dataPtr + 4));
   const uint visorFlags = (flags >> 1) & 1;
   const bool hasShortUvs = (flags >> 2) & 1;
+  const bool nbtNormals = (flags >> 3) & 1;
+  const bool nbtNormals5 = (flags >> 4) & 1;
   if (version == 1) {
     sectionSizeStart = 0x28;
   }
@@ -108,7 +110,8 @@ CModel::CModel(const rstl::auto_ptr< uchar[] >& data, int length, IObjectStore& 
   x28_modelInstance =
       rs_new CCubeModel(&x8_surfaces, &x18_matSets.front().x0_textures, x18_matSets.front().x10_data,
                         positions, normals, vtxColors, floatUvs, shortUvs, aabb,
-                        visorFlags ? 1 : 0, true, -1, positionsSize, normalsSize, colorsSize,
+                        (visorFlags ? 1 : 0) | (nbtNormals ? CCubeModel::kNbtNormals : 0) |
+                            (nbtNormals && nbtNormals5 ? CCubeModel::kNbtNormals5 : 0), true, -1, positionsSize, normalsSize, colorsSize,
                         floatUvsSize, shortUvsSize);
   sThisFrameList = this;
   if (x34_next != nullptr) {

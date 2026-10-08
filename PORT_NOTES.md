@@ -1,3 +1,110 @@
+## Merged upstream port 710e4f8c (2026-10-08)
+
+Upstream's 170 commits since b02f932b (2026-10-07 20:36 to 2026-10-08 13:13):
+mostly Remastered material work (PBR kinds 21-34, tangent frames, detail and
+macro normal maps, wind sway, room point and spot lights, exact sRGB output,
+bloom after the grade), Remastered HUD pictures, the built-in randomizer,
+turbo fire, the Original experience toggle, a release update check, custom
+Vulkan drivers on Android phones (adrenotools), the Adreno shader fix, a
+whole-game initial pipeline cache with a compilation toast, and leak fixes
+(front-end movie textures, 068db40e; Remastered room data at world teardown,
+8bcdc039). Backup of the branch before the merge:
+`backup/OpenXR-before-upstream-merge-2026-10-08`. Eleven files conflicted;
+upstream's code was also checked against the fork where git merged silently.
+
+- **FIFO command IDs (again).** Upstream's GX_AURORA_SET_HUD_SAMPLE
+  (4d078a28), PORT_ROOM_LIGHTS (1d2f3b24, 2bb921da) and PORT_PARTICLE_FOG
+  (95a91688) took 0x68-0x6A, ours since the last merge, and room lights is
+  sent on every world draw, so the FIFO would have desynced on the first
+  in-game frame. Ours are now 0xF000-0xF005, in a block of their own
+  (`PRIMEDGUN_AURORA_SUBCMD_FIRST..LAST` = 0xF000-0xF0FF in GXAurora.h) that
+  upstream's numbering does not reach. A duplicate now fails the build: a
+  static_assert over every subcommand handle_aurora dispatches and another
+  that keeps ours in the block (command_processor.cpp), plus a
+  configure-time scan of every `#define` in GXAurora.h
+  (extern/aurora/CMakeLists.txt).
+- **ShaderConfig.** Upstream's fields keep upstream's offsets (bytes 0-9,
+  pinned by offsetof static_asserts in gx.hpp), so the rows of upstream's
+  bundled pipeline seed decode to the same configs here. Ours moved to bytes
+  10-11: currentPnMtx, then a bitfield with multiview, mapBatch, mapCull and
+  nativeVertices. GXPipelineConfigVersion stays 15 (the port_pipeline_seed
+  test checks it), so rows that 2.0.0-alpha.1 cached read back as other
+  configs. pipeline_cache.cpp drops every GX row once, before the seed is
+  merged, keyed by SQLite's `user_version` (`PortGxLayoutEpoch` = 1). Raise
+  it whenever our ShaderConfig bytes move without a version bump. Running
+  alpha.1 again afterwards writes old-layout rows the purge no longer sees:
+  delete pipeline_cache.db then.
+- **De-indexed vertices against upstream's bind pose.** Upstream reads a
+  skinned model's bind pose through GX_VA_TEX7 by the vertex's position
+  index (bind_pos_active, the pbrBindPos fetch). A de-indexed record holds
+  the position itself, so both are off under de-indexing and the shader
+  falls back to its view-space height fade.
+- **Multiview rewrite.** Upstream's `textureLoad` on GX textures goes through
+  a new `mvLoad` helper like `textureSample` does. The module-scope
+  volumetric fog helpers (`vf_*`, emitted before vs_main) read `ubuf`, which
+  the multiview and eye-clip rewrites rename, so every fogged draw's eye
+  pipeline failed to compile (a gap since the volfog came in with the last
+  merge): they now read the mono uniform or the first eye copy.
+- **Sun shadow casters from the geometry cache.** vs_shadow now declares the
+  native vertex inputs it reads, and gfx/shadow.cpp binds the geometry
+  buffer's group, its vertex buffer and 32-bit indices for cached casters
+  (pre-existing with Remastered sun shadows). Still open, in upstream too: a
+  caster is a copy of the draw taken before strip or surface merging, so it
+  casts only the first piece of a merged run.
+- **Bloom and grade in the headset.** The post process's in-pass composite
+  made the eye passes clear the world (eye passes run neither encoder tasks
+  nor custom draws). Immersive frames now skip bloom and grade; they keep the
+  exposure measurement only when the mono image is drawn anyway (not on the
+  Quest, nor with a desktop mirror showing the eyes), since the break would
+  bring back a whole mono render.
+- **Quest build.** No custom Vulkan drivers: the OpenXR runtime creates the
+  device, and linkernsbypass patches the dynamic linker from a load-time
+  constructor. adrenotools is linked only into Android builds without
+  OpenXR (`MP_CUSTOM_GPU_DRIVERS`), elsewhere port_gpu_driver is stubs. The
+  Adreno shader fix's Auto, which upstream turned on for every Adreno 7xx,
+  means Off on the Quest until an A/B on the headset shows the clamp is
+  image-identical and not slower (`MP_STORAGE_CLAMP=1` through
+  debug.mport.env). The APK does not ship upstream's seed: its rows are the
+  phone's and desktop's mono configs, mostly indexed, which the headset never
+  asks for, at ~2249 background compiles per start. A seed recorded on the
+  headset can go in `quest/assets/initial_pipeline_cache.db`, which ships
+  when present; the activity deletes a stale unpacked seed. No pointer
+  capture on the Quest (a98aa72c is for phones' navigation bars).
+- **Update check.** Upstream's asks Odrannnn/MetroidPrimePort about
+  upstream's versionName, so it would point PrimedGun players at the flat
+  port: it is off (ApplyUpdateCheck), and F1's Updates section links to
+  PrimedGun's releases. The check itself stays in the tree for small merges.
+- **Version.** The generated port_build_info.h also defines
+  `MP_PRIMEDGUN_VERSION`, read from launcher/CMakeLists.txt's
+  `set(PRIMEDGUN_LAUNCHER_VERSION "...")` (keep that form). --version, the
+  log header and F1 About show "PrimedGun x (native port y), build z";
+  MP_BUILD_VERSION stays upstream's.
+- **Original experience.** While the headset runs it leaves the helmet and
+  the frame, actor, pose and particle interpolation to their own settings
+  (the helmet is head-locked in VR and the headset presents above 60 Hz).
+  The minimap row follows the toggle like the helmet's.
+
+Known gaps with Remastered content in the headset (all predate this merge,
+none affect retail assets): the Remastered particles, water and the
+volumetric fog's full-screen apply are custom draws or encoder tasks, which
+reach only the mono image; the volumetric fog's froxels follow the game
+camera; refraction glass samples mipped screen copies (b5008e57) whose eye
+stand-ins have one level; the probe-face capture pass is replayed per eye.
+Upstream bugs seen during the merge, to report rather than diverge on:
+SetStaticArraysCurrent's TEX1-TEX7 loop overwrites the skinned bind pose in
+GX_VA_TEX7; GX's 2:1 copy mipmap flag now builds a mip chain for every copy;
+PortRoomEnv::ProbeOverrideScope does not nest (CPlayerGun::Render and
+CGrappleArm::Render); shadow casters miss merged draws (above).
+
+Tested: build/vr and build/nooxr 63/63 port tests, gx_fifo_tests 247/247.
+PC desktop boots (Landing Site, Save Station Magmoor B) run clean at 120 FPS
+and log the purge (4881 rows on the dev PC). Quest 3: the first start purged
+6401 rows; the Landing Site runs immersive at 90/90 FPS with no stale frames
+and no shader compile failure or missed multiview anchor; Save Station Magmoor
+B stays at PSS 1.19-1.28 GB with 66-86 render targets (the eye-copy fix
+holds), and the native heap is ~100 MB lower without the seed's compiles.
+Not yet played in a headset: PC VR (D3D12) and Remastered content.
+
 ## VR: eye copies of the fog volumes' EFB chunks filled the Quest's memory (2026-10-08)
 
 On the Quest, after about 20 minutes of play ending in Magmoor Caverns, the
@@ -179,8 +286,9 @@ had, so these are reconciled rather than doubled:
   (0x50-0x55) had the same numbers as upstream's new commands. The processor's
   if-chain sent one side's commands to the other's handler: the first Quest
   run crashed reading a cached display list's address from a draw tag. Ours
-  are now 0x68-0x6D, after upstream's last ID (0x67). Check for duplicate IDs
-  in GXAurora.h after every upstream merge.
+  then moved to 0x68-0x6D, after upstream's last ID (0x67), which upstream
+  reached the next day: they now live in a block of their own (merge of
+  2026-10-08 below).
 - **Texture group cache.** Upstream's bind_texture_group and our
   bind_gx_textures both remembered group 2. Ours is kept, with upstream's
   rule: a draw without textures doesn't inherit a shadow receiver's group
@@ -193,7 +301,8 @@ had, so these are reconciled rather than doubled:
 - **ShaderConfig.** Our multiview, map batch and map cull bits fill the
   first bitfield byte. Upstream's drawId and shadow bits get a byte of their
   own. Our currentPnMtx and nativeVertices follow upstream's four new bytes,
-  so the header is 12 bytes and the struct still has no padding.
+  so the header is 12 bytes and the struct still has no padding. (Moved again
+  by the 2026-10-08 merge so upstream's bytes keep upstream's offsets.)
 - **Multiview layouts.** The multiview texture group layout is now built from
   the same entries as the mono one, with only the GX textures as 2D arrays.
   It therefore has upstream's lightmap, BRDF table and volumetric fog
@@ -269,6 +378,11 @@ each vertex has its own position group (134 of 134, 371 of 371).
 - `CAnimData`: the constructor and `SetModel` accumulate `x108_aabb`, the
   fallback bounding box of a character with no per-animation boxes, from the
   same raw position array. Same swap (`PortReadBigVector`).
+- Since upstream's NBT normals (ff4aa620, 7ecee577: N, B, T and sometimes a
+  second B, T per entry), the swap reads each vertex's N at `NormalVecs()`
+  vectors per entry, and `nativeNormals` keeps one vector per vertex.
+  Upstream's version of this constructor still averages the raw big-endian
+  floats: keep ours on merges.
 
 Confirmed in the headset by the user: no more spiking ice. 42/42 port tests in
 `build/vr` and `build/nooxr`.

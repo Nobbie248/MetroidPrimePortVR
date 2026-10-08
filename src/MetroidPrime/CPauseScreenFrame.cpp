@@ -204,6 +204,7 @@ enum EPortOption {
   kPO_MapPickups,
   kPO_ElevatorRide,
   kPO_RapidCharge,
+  kPO_OriginalExperience,
 };
 #define PORT_OPTION(opt) static_cast< EGameOption >(opt)
 
@@ -237,6 +238,7 @@ static const SGameOption skPortDisplayOptions[] = {
     {kGO_ScreenOffsetX, 26, -30.f, 30.f, 1.f, kOT_Float},
     {kGO_ScreenOffsetY, 27, -30.f, 30.f, 1.f, kOT_Float},
     {kGO_ScreenStretch, 28, -10.f, 10.f, 1.f, kOT_Float},
+    {PORT_OPTION(kPO_OriginalExperience), -1, 0.f, 1.f, 1.f, kOT_DoubleEnum},
     {PORT_OPTION(kPO_AspectRatio), -1, 0.f, 2.f, 1.f, kOT_TripleEnum},
     {PORT_OPTION(kPO_WidescreenHUD), -1, 0.f, 1.f, 1.f, kOT_DoubleEnum},
     {PORT_OPTION(kPO_HudScale), -1, PortDebug::kHudScaleMin, PortDebug::kHudScaleMax, 5.f, kOT_Float},
@@ -260,7 +262,7 @@ static const SGameOption skPortControllerOptions[] = {
     {kGO_RestoreDefaults, 35, 0.f, 1.f, 1.f, kOT_RestoreDefaults},
 };
 static SOptionCategory skPauseOptions[] = {
-    {11, skPortVisorOptions},     {11, skPortDisplayOptions}, {4, skSoundOptions},
+    {11, skPortVisorOptions},     {12, skPortDisplayOptions}, {4, skSoundOptions},
     {11, skPortControllerOptions}, {0, nullptr},
 };
 
@@ -306,6 +308,8 @@ static const wchar_t* PortOptionTitle(EGameOption option) {
     return L"Skippable Cutscenes";
   case kPO_ElevatorRide:
     return L"Elevator Ride";
+  case kPO_OriginalExperience:
+    return L"Original Experience";
   default:
     return L"";
   }
@@ -353,12 +357,44 @@ static int GetPortOption(EGameOption option) {
     return PortDebug::ElevatorRide();
   case kPO_CrosshairSize:
     return PortDebug::CrosshairSize();
+  case kPO_OriginalExperience:
+    return PortDebug::OriginalExperience() ? 1 : 0;
   default:
     return 0;
   }
 }
 
+// Rows the Original experience overrides: they show the retail value and keep
+// the saved one until it's turned off.
+static bool IsOriginalLocked(EGameOption option) {
+  if (!PortDebug::OriginalExperience()) {
+    return false;
+  }
+  switch (static_cast< int >(option)) {
+  case kPO_AspectRatio:
+  case kPO_WidescreenHUD:
+  case kPO_FastMorph:
+  case kPO_LockOnToggle:
+  case kPO_StickyCharge:
+  case kPO_RapidCharge:
+  case kPO_Fov:
+  case kPO_AntiAliasing:
+  case kPO_HudScale:
+  case kPO_HideHelmet:
+  case kPO_HideVisorEffects:
+  case kPO_RevealMap:
+  case kPO_SkippableCutscenes:
+  case kPO_ElevatorRide:
+    return true;
+  default:
+    return false;
+  }
+}
+
 static void SetPortOption(EGameOption option, int value) {
+  if (IsOriginalLocked(option)) {
+    return;
+  }
   switch (static_cast< int >(option)) {
   case kPO_AspectRatio:
     if (value >= PortDebug::kAspect_4_3 && value <= PortDebug::kAspect_Window) {
@@ -418,6 +454,9 @@ static void SetPortOption(EGameOption option, int value) {
     break;
   case kPO_CrosshairSize:
     PortDebug::SetCrosshairSize(value);
+    break;
+  case kPO_OriginalExperience:
+    PortDebug::SetOriginalExperience(value > 0);
     break;
   default:
     break;
@@ -589,6 +628,7 @@ void CGameOptions::TryRestoreDefaults(const CFinalInput& input, int category, in
         PortDebug::SetMsaa(1);
         PortDebug::SetHudScale(PortDebug::kHudScaleMax);
         PortDebug::SetSpeedrunTimer(false);
+        PortDebug::SetOriginalExperience(false);
         break;
       case 3:
         PortDebug::SetTwinStick(false);

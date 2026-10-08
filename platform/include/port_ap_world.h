@@ -76,6 +76,14 @@ struct Place {
 // tables don't have (the retail start then).
 bool StartRoom(const Layout& layout, Place& out);
 
+// For the built-in generator. The dock of the first door of `room` in `area`
+// that leads to `dest` on the disc (the apworld's get_door_data_by_room_names),
+// -1 when there is none.
+int DockTo(const std::string& area, const std::string& room, const std::string& dest);
+// The doors of `area` with a blast shield on the disc, as (room, dock), in the
+// order the apworld walks them.
+std::vector< std::pair< std::string, int > > DiscShields(const std::string& area);
+
 // Where the world teleporter `editorId` of world `mlvl`, which leads to
 // `retail` on the disc, leads in this seed. False when it is left alone.
 bool TeleporterDestination(const Layout& layout, uint32_t mlvl, uint32_t editorId,

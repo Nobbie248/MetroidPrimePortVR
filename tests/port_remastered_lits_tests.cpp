@@ -237,9 +237,9 @@ bool Convert(const Model& model, std::vector<uint8_t>& cmdl, std::vector<Materia
     return true;
   };
   if (withCube) {
-    io.cube = [](const ModelUuid&, uint32_t& edge, std::vector<uint8_t>& rgba, std::string&) {
+    io.cube = [](const ModelUuid&, uint32_t& edge, std::vector<float>& rgba, std::string&) {
       edge = 1;
-      rgba.assign(24, 128);
+      rgba.assign(24, 0.5f);
       return true;
     };
   }
@@ -627,7 +627,7 @@ void TestHologramKind() {
     Check(readable, "kind 18 without CCH0..3 converts");
     if (readable) {
       Check(!BlobShield(bareCmdl, bstart, bsize).has, "kind 18 without CCH0..3: no PBR8 trailer");
-      Check(BlobTag(bareCmdl, bstart, bsize) == "PBRM", "kind 18 without CCH0..3: the standard record");
+      Check(BlobTag(bareCmdl, bstart, bsize) == "PBR2", "kind 18 without CCH0..3: the standard record (PBR2: no REFL, mode bit 256)");
     }
     Check(!bareDecisions.empty() && bareDecisions[0].kind == 0, "kind 18 without CCH0..3: kind 0");
     Check(!bareDecisions.empty() && bareDecisions[0].kindReason.find("fallback: hologram") != std::string::npos,
@@ -695,7 +695,7 @@ void TestGunFxKind() {
     Check(readable, "kind 19 without REFV converts");
     if (readable) {
       Check(!BlobShield(bareCmdl, bstart, bsize).has, "kind 19 without REFV: no PBR8 trailer");
-      Check(BlobTag(bareCmdl, bstart, bsize) == "PBRM", "kind 19 without REFV: the standard record");
+      Check(BlobTag(bareCmdl, bstart, bsize) == "PBR2", "kind 19 without REFV: the standard record (PBR2: no REFL, mode bit 256)");
     }
     Check(!bareDecisions.empty() && bareDecisions[0].kind == 0, "kind 19 without REFV: kind 0");
   }
@@ -721,7 +721,7 @@ void TestLambertFx() {
   size_t start = 0, size = 0;
   Check(FirstBlob(cmdl, start, size), "lambert-fx: the material blob is readable");
   Check(!BlobShield(cmdl, start, size).has, "lambert-fx: no PBR8 trailer");
-  Check(BlobTag(cmdl, start, size) == "PBRM", "lambert-fx: the standard record");
+  Check(BlobTag(cmdl, start, size) == "PBR2", "lambert-fx: the standard record (PBR2: no REFL, mode bit 256)");
   {  // Blended-flagged, over retail's blended surface: opaque blend words (dst 0, src 1).
     ModelMaterial blended = material;
     blended.unk1 = 0x1;

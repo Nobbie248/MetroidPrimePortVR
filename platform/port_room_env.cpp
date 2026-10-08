@@ -82,6 +82,15 @@ struct Area {
     float cap = 0.f;
   };
   std::vector<Transition> transitions;
+  // A point or spot light's state (CLightDynamicGOC): active, and its timeline.
+  struct Light {
+    bool active = false;
+    bool playing = false;
+    bool forward = true;
+    double time = 0.;
+    int group = -1; // what its script group last said (PortRoomGeo::GroupShown)
+  };
+  std::vector<Light> lights;
 };
 
 // The frame's exposure and tone curve, as CPostFXManager::UpdateTonemapping moves them.
@@ -700,6 +709,108 @@ void StepTransitions(Area& area, float dt) {
   }
 }
 
+// The lights `sender` drives on `state` (AcceptScriptMsg).
+void DriveLights(uint32_t mrea, Area& area, uint32_t sender, int state) {
+  for (size_t i = 0; i < area.lights.size() && i < area.file.lights.size(); ++i) {
+    Area::Light& l = area.lights[i];
+    for (const GradeLink& link : area.file.lights[i].links) {
+      if (link.sender != sender || link.state != state) {
+        continue;
+      }
+      switch (link.action) {
+      case PortRoomGeo::kShow:
+      case PortRoomGeo::kHide:
+        l.active = link.action == PortRoomGeo::kShow;
+        break;
+      case PortRoomGeo::kToggle:
+        l.active = !l.active;
+        break;
+      case kLightStart:
+      case kLightStop:
+        if (l.active) {
+          l.playing = link.action == kLightStart;
+        }
+        break;
+      case kLightReset:
+        if (l.active) {
+          l.time = 0.;
+        }
+        break;
+      case kLightForward:
+      case kLightBackward:
+        if (l.active) {
+          l.forward = link.action == kLightForward;
+        }
+        break;
+      case kLightReverse:
+        if (l.active) {
+          l.forward = !l.forward;
+        }
+        break;
+      default:
+        continue;
+      }
+      PortLog::Write("room env: %08X light %zu action %d by %08X state %d\n", mrea, i, int(link.action), sender,
+                     state);
+    }
+  }
+}
+
+// Think: the script groups' word on each light, then one frame of every playing timeline
+// (CTimePlaybackManager::Update). One that ends without a loop stops there, and switches its
+// light off when its finished event is linked to do so.
+void StepLights(uint32_t mrea, Area& area, float dt) {
+  for (size_t i = 0; i < area.lights.size() && i < area.file.lights.size(); ++i) {
+    Area::Light& l = area.lights[i];
+    const PointLight& file = area.file.lights[i];
+    if (file.group != PortRoomGeo::kNoGroup) {
+      const int shown = PortRoomGeo::GroupShown(mrea, file.group);
+      if (shown >= 0 && shown != l.group) {
+        l.active = shown == 1;
+      }
+      l.group = shown;
+    }
+    if (!file.animated || !l.playing || !l.active ||
+        (file.layer >= 0 && file.layer < 64 && (area.layers >> file.layer & 1) == 0)) {
+      continue;
+    }
+    const double length = file.length;
+    bool ended = false;
+    if (l.forward) {
+      l.time = QuantiseTime(l.time + dt);
+      if (l.time > length) {
+        if (file.loop && length > 0.) {
+          l.time = QuantiseTime(std::fmod(l.time, length));
+        } else {
+          l.time = length;
+          ended = true;
+        }
+      } else if (l.time == length && !file.loop) {
+        ended = true;
+      }
+    } else {
+      l.time = QuantiseTime(l.time - dt);
+      if (l.time < 0.) {
+        if (file.loop && length > 0.) {
+          l.time = QuantiseTime(length - std::fmod(-l.time, length));
+        } else {
+          l.time = 0.;
+          ended = true;
+        }
+      } else if (l.time == 0. && !file.loop) {
+        ended = true;
+      }
+    }
+    if (ended) {
+      l.playing = false;
+      // Only the backward end (t = 0) sends the event these links answer; the forward end's is unlinked.
+      if (file.offAtStart && !l.forward) {
+        l.active = false;
+      }
+    }
+  }
+}
+
 // The grades and backlights `sender` drives on `state`.
 void DriveGrades(uint32_t mrea, Area& area, uint32_t sender, int state) {
   DriveHints(mrea, "grade", area.file.grades, area.grades, sGradeOrder, sender, state);
@@ -707,6 +818,7 @@ void DriveGrades(uint32_t mrea, Area& area, uint32_t sender, int state) {
   DriveHints(mrea, "fog", area.file.fogs, area.fogs, sFogOrder, sender, state);
   DriveHints(mrea, "fog region", area.file.regions, area.regions, sRegionOrder, sender, state);
   DriveTransitions(mrea, area, sender, state);
+  DriveLights(mrea, area, sender, state);
 }
 
 // Every grade and backlight as it starts, then the fluids the player and camera are in already.
@@ -732,6 +844,11 @@ void StartGrades(uint32_t mrea, Area& area) {
     area.regions[i].on = area.file.regions[i].on;
   }
   area.live = area.file.regions;
+  area.lights.assign(area.file.lights.size(), {});
+  for (size_t i = 0; i < area.lights.size(); ++i) {
+    area.lights[i].active = area.file.lights[i].on;
+    area.lights[i].playing = area.file.lights[i].playing;
+  }
   area.transitions.assign(area.file.transitions.size(), {});
   for (size_t i = 0; i < area.transitions.size(); ++i) {
     area.transitions[i].active = area.file.transitions[i].on;
@@ -1438,6 +1555,16 @@ float GlowGain(bool frameExposed) {
   return std::isfinite(gain) && gain > 0.f ? gain : kFallback;
 }
 
+float UnlitGain(bool frameExposed) {
+  // Outside an exposed room Remastered's static default (exposure 1) applies: nothing to add.
+  if (!sFrame.hasTone || !Enabled() || !RoomExposed()) {
+    return 1.f;
+  }
+  const float sky = SkyGain();
+  const float gain = frameExposed || sky <= 0.f ? sFrame.exposure : sky;
+  return std::isfinite(gain) && gain > 0.f ? gain : 1.f;
+}
+
 void SetStaticExposure(bool on) { sStatic = on ? 1 : 0; }
 
 bool StaticExposure() {
@@ -1739,6 +1866,159 @@ std::string SunInfo() {
   return out;
 }
 
+namespace {
+// A light now, in world space, as build_light makes it (kb func/light-dynamic.md).
+struct LightNow {
+  float color[3];
+  float nearFar[2];
+  float cone[2];
+  uint8_t falloff;
+};
+LightNow EvalLight(const PointLight& l, const Area::Light& state) {
+  LightNow n{{l.color[0], l.color[1], l.color[2]}, {l.nearFar[0], l.nearFar[1]}, {l.cone[0], l.cone[1]}, l.falloff};
+  if (!l.animated) {
+    return n;
+  }
+  const float t = float(state.time);
+  const auto at = [&](LightSpline s, float fallback) {
+    return l.hasSpline[s] ? l.splines[s].Eval(t) : fallback;
+  };
+  const float intensity = at(kLightSplineIntensity, l.intensity);
+  float rgb[3] = {l.rgb[0], l.rgb[1], l.rgb[2]};
+  if (l.hasSpline[kLightSplineGradient] && l.hasSpline[kLightSplineGradient + 1] &&
+      l.hasSpline[kLightSplineGradient + 2]) {
+    const float x = std::clamp(at(kLightSplineColor, 0.f), 0.f, 1.f);
+    for (int c = 0; c < 3; ++c) {
+      rgb[c] = l.splines[kLightSplineGradient + c].Eval(x);
+    }
+  }
+  for (int c = 0; c < 3; ++c) {
+    n.color[c] = rgb[c] * intensity;
+  }
+  // The stored near and far already have the entity's scale; the splines' don't.
+  if (l.hasSpline[kLightSplineNear] && l.hasSpline[kLightSplineFar]) {
+    n.nearFar[0] = l.scale[0] * l.splines[kLightSplineNear].Eval(t);
+    n.nearFar[1] = l.scale[1] * l.splines[kLightSplineFar].Eval(t);
+    n.falloff = l.animFalloff;
+  }
+  if (l.hasSpline[kLightSplineInner] && l.hasSpline[kLightSplineOuter]) {
+    n.cone[0] = l.splines[kLightSplineInner].Eval(t);
+    n.cone[1] = l.splines[kLightSplineOuter].Eval(t);
+  }
+  return n;
+}
+} // namespace
+
+void RoomLights(const float worldToView[3][4], std::vector<float>& out) {
+  static const bool sOn = port::EnvFlag("MP_ROOM_LIGHTS", true);
+  if (!sOn || !Enabled()) {
+    return;
+  }
+  const auto view = sAreas.find(sViewArea);
+  if (view == sAreas.end() || !view->second.hasFile) {
+    return;
+  }
+  const float exposure = RoomExposed() ? FrameExposure(view->second) : 0.f;
+  if (exposure <= 0.f) {
+    return;
+  }
+  // As the sun's (see Sun).
+  const float scale = exposure * LightGain() / 3.14159265f;
+  constexpr float kDegrees = 3.14159265f / 180.f;
+  for (const auto& [mrea, area] : sAreas) {
+    if (!area.hasFile) {
+      continue;
+    }
+    for (size_t i = 0; i < area.lights.size() && i < area.file.lights.size(); ++i) {
+      const PointLight& l = area.file.lights[i];
+      if (!area.lights[i].active || (l.layer >= 0 && l.layer < 64 && (area.layers >> l.layer & 1) == 0)) {
+        continue;
+      }
+      const LightNow n = EvalLight(l, area.lights[i]);
+      float color[3];
+      bool lit = false;
+      for (int c = 0; c < 3; ++c) {
+        color[c] = std::isfinite(n.color[c]) ? std::max(n.color[c], 0.f) * scale : 0.f;
+        lit = lit || color[c] > 0.f;
+      }
+      if (!lit) {
+        continue;
+      }
+      // FromValues: far <= near moves far just past near.
+      const float near = std::max(n.nearFar[0], 0.f);
+      float far = std::max(n.nearFar[1], 0.f);
+      if (!(far > near)) {
+        far = near + 0.001f;
+      }
+      const float a = 1.f / (far - near);
+      const float b = -near * a;
+      float coneScale = 0.f;
+      float coneBias = 1.f;
+      if (l.spot) {
+        const float cosIn = std::cos(n.cone[0] * 0.5f * kDegrees);
+        const float cosOut = std::cos(n.cone[1] * 0.5f * kDegrees);
+        const float span = cosIn - cosOut;
+        if (std::fabs(span) > 1e-6f) {
+          coneScale = 1.f / span;
+          coneBias = -cosOut / span;
+        } else {
+          coneScale = 0.f;
+          coneBias = 0.f;
+        }
+      }
+      float pos[3];
+      float axis[3];
+      for (int r = 0; r < 3; ++r) {
+        const float* m = worldToView[r];
+        pos[r] = m[0] * l.pos[0] + m[1] * l.pos[1] + m[2] * l.pos[2] + m[3];
+        axis[r] = m[0] * l.toLight[0] + m[1] * l.toLight[1] + m[2] * l.toLight[2];
+      }
+      const float record[16] = {pos[0],  pos[1],  pos[2],  a,         color[0],       color[1],
+                                color[2], b,      axis[0], axis[1],   axis[2],        coneScale,
+                                coneBias, float(n.falloff), l.spot ? 1.f : 0.f, 0.f};
+      if (!std::all_of(std::begin(record), std::end(record), [](float v) { return std::isfinite(v); })) {
+        continue;
+      }
+      // The game's fullest room (the frigate hangar) has 16; the cap only bounds a hostile file's FIFO write and shader loop.
+      constexpr size_t kMaxRoomLights = 64;
+      if (out.size() >= kMaxRoomLights * 16) {
+        return;
+      }
+      out.insert(out.end(), std::begin(record), std::end(record));
+    }
+  }
+}
+
+std::string RoomLightInfo() {
+  std::string out;
+  for (const auto& [mrea, area] : sAreas) {
+    for (size_t i = 0; i < area.lights.size() && i < area.file.lights.size(); ++i) {
+      const PointLight& l = area.file.lights[i];
+      const Area::Light& state = area.lights[i];
+      const LightNow n = EvalLight(l, state);
+      char line[320];
+      std::snprintf(line, sizeof(line),
+                    "%08X light %zu: %s at %.2f %.2f %.2f colour %.2f %.2f %.2f range %.2f..%.2f kind %d layer %d%s "
+                    "group %s%s%s\n",
+                    mrea, i, l.spot ? "spot" : "point", l.pos[0], l.pos[1], l.pos[2], n.color[0], n.color[1],
+                    n.color[2], n.nearFar[0], n.nearFar[1], int(n.falloff), int(l.layer),
+                    l.layer >= 0 && l.layer < 64 && (area.layers >> l.layer & 1) == 0 ? " (off)" : "",
+                    l.group != PortRoomGeo::kNoGroup ? std::to_string(l.group).c_str() : "-",
+                    state.active ? "" : ", inactive",
+                    l.animated ? (std::string(", t ") + std::to_string(state.time) + "/" + std::to_string(l.length) +
+                                  (state.playing ? " playing" : " stopped") + (state.forward ? "" : " backward"))
+                                     .c_str()
+                               : "");
+      out += line;
+    }
+  }
+  if (out.empty()) {
+    return "no Remastered point or spot lights in the loaded areas";
+  }
+  out.pop_back();
+  return out;
+}
+
 bool Backlight(float& top, float& back) {
   top = kBacklightTop;
   back = kBacklightBack;
@@ -1845,6 +2125,7 @@ void UpdateFog(LayerActive layerActive, void* context, float dt) {
   dt = std::isfinite(dt) ? std::clamp(dt, 0.f, 1.f) : 0.f;
   for (auto& [mrea, area] : sAreas) {
     StepTransitions(area, dt);
+    StepLights(mrea, area, dt);
   }
   // As the backlight picks: of the requested hints whose layer is active, the highest
   // priority, then the one turned on last. A room without a file has no hints.
@@ -2255,6 +2536,23 @@ void ClearVolumeHint() {
   sHintLightmap[2] = 0.f;
 }
 
+static bool sProbeOverride = false;
+static float sProbeOverridePos[3] = {};
+
+void SetProbeOverride(const float pos[3]) {
+  sProbeOverride = true;
+  std::memcpy(sProbeOverridePos, pos, sizeof(sProbeOverridePos));
+}
+
+void ClearProbeOverride() { sProbeOverride = false; }
+
+bool ProbeOverride(float pos[3]) {
+  if (sProbeOverride) {
+    std::memcpy(pos, sProbeOverridePos, sizeof(sProbeOverridePos));
+  }
+  return sProbeOverride;
+}
+
 bool HasVolume(uint32_t mrea) {
   if (!Enabled() || !VolumesEnabled()) {
     return false;
@@ -2470,17 +2768,14 @@ void Locate(const float pos[3], Located& out) {
     }
   }
   if (AmbientScale() > 0.f) {
-    // A model's origin is often on the floor, where the grid has no point for it, so the
-    // spot a metre up counts too. The first grid with light at the first spot is the one.
-    const float above[3] = {pos[0], pos[1], pos[2] + 1.f};
-    for (const float* spot : {pos, above}) {
-      for (auto& [mrea, area] : sAreas) {
-        for (const Grid& grid : area.file.grids) {
-          if (grid.average > 0.f && SampleGrid(area.file, grid, spot, out.sample)) {
-            out.ambientArea = &area;
-            out.average = grid.average;
-            return;
-          }
+    // The first grid with light whose texture holds the point is the one. Remastered has
+    // no fallback spot: outside a texture the sampler reads its transparent black border.
+    for (auto& [mrea, area] : sAreas) {
+      for (const Grid& grid : area.file.grids) {
+        if (grid.average > 0.f && SampleGrid(area.file, grid, pos, out.sample)) {
+          out.ambientArea = &area;
+          out.average = grid.average;
+          return;
         }
       }
     }

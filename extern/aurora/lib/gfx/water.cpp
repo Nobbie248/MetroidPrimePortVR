@@ -253,6 +253,17 @@ fn env_at(r: vec3f, lod: f32) -> vec3f {
 
 // The EFB's tone curve (GXSetPBRTone, or the PBR path's fallback roll-off) and its inverse,
 // as volfog.cpp's full-screen pass has them.
+// The EFB holds colour as Remastered's sRGB swapchain does: the exact piecewise sRGB curve.
+fn srgb_enc(c: vec3f) -> vec3f {
+  let l = clamp(c, vec3f(0.0), vec3f(1.0));
+  return select(1.055 * pow(l, vec3f(1.0 / 2.4)) - 0.055, 12.92 * l, l <= vec3f(0.0031308));
+}
+
+fn srgb_dec(c: vec3f) -> vec3f {
+  let e = clamp(c, vec3f(0.0), vec3f(1.0));
+  return select(pow((e + 0.055) / 1.055, vec3f(2.4)), e / 12.92, e <= vec3f(0.04045));
+}
+
 fn tone(x: f32) -> f32 {
   if (u.tone1.x <= 0.0) {
     return min(x, 0.6) + 0.4 * (1.0 - exp(-max(x - 0.6, 0.0) / 0.4));
@@ -384,11 +395,11 @@ fn fs_main(in: VOut) -> @location(0) vec4f {
 
   // Remastered's blend, dst = o0 + dst * (1 - o1), in the light the EFB holds tone mapped.
   let snap = textureLoad(sceneColor, px, 0);
-  let y = pow(clamp(snap.rgb, vec3f(0.0), vec3f(1.0)), vec3f(2.2));
+  let y = srgb_dec(snap.rgb);
   let dst = min(vec3f(untone(y.r), untone(y.g), untone(y.b)), vec3f(4.0));
   let x = max(o0 + dst * (1.0 - o1), vec3f(0.0));
   let drawn = vec3f(tone(x.r), tone(x.g), tone(x.b));
-  return vec4f(pow(clamp(drawn, vec3f(0.0), vec3f(1.0)), vec3f(1.0 / 2.2)), snap.a);
+  return vec4f(srgb_enc(drawn), snap.a);
 }
 )";
 

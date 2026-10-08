@@ -55,6 +55,21 @@ std::vector<ConnectionDetails> RecentGames();
 // (the status line shows the progress). False, with `error`, when the details
 // are incomplete or the file cannot be written; nothing changes then.
 bool Connect(const ConnectionDetails& details, std::string& error);
+// Plays a built-in randomizer seed (randomizer_seeds/<name>.json) as a
+// one-player game through an in-process server, as slot "Samus" on the server
+// "solo:<name>". Saves the details and restarts the client like Connect; false,
+// with `error`, when the seed cannot be loaded, or while a game is loaded and
+// the seed is not the one in play (the game keeps its save card until the
+// title screen).
+bool PlaySolo(const std::string& seedName, std::string& error);
+// The built-in seed the connection plays, or "" (another server, or
+// disconnected).
+std::string SoloSeedInPlay();
+// Two seed names that select the same seed file.
+bool SameSoloSeed(const std::string& a, const std::string& b);
+// Deletes a built-in seed: its file, progress, spoiler file and save card.
+// False, with `error`, for the seed in play or a file that cannot be removed.
+bool DeleteSolo(const std::string& seedName, std::string& error);
 // Ends the session and keeps it off at the next launch, until Connect.
 bool Disconnect(std::string& error);
 // The directory whose memory card the running Archipelago game saves to, or ""

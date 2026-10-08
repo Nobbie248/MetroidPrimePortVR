@@ -13,6 +13,7 @@
 #include "port_log_file.h"
 #include "port_paths.h"
 #include "port_apclient.h"
+#include "port_rando_gen.h"
 #include "port_controls.h"
 #include "port_data_folder.h"
 #include "port_gci.h"
@@ -22,6 +23,7 @@
 #include "port_remastered_import.h"
 #include "port_remastered_text.h"
 #include "port_discord.h"
+#include "port_update_check.h"
 #include "port_gallery.h"
 #include "port_livesplit.h"
 #include "port_map_pickups.h"
@@ -33,10 +35,18 @@
 #include "port_input_map.h"
 #include "port_textures.h"
 #include "port_build_info.h"
+#include "port_gpu_driver.h"
+#include "vr/openxr_integration.h"
 #include "vr/vr_debug_tab.h"
 #include "vr/vr_settings.h"
 #if defined(__ANDROID__)
 #include "touch_pad.h"
+#endif
+// PrimedGun: cmake/BuildRevision.cmake writes the fork's release version next to
+// MP_BUILD_VERSION in port_build_info.h. A header generated before it did must not
+// break the build, so the About line then shows an empty version.
+#ifndef MP_PRIMEDGUN_VERSION
+#define MP_PRIMEDGUN_VERSION ""
 #endif
 
 #include "MetroidPrime/Cameras/CCameraManager.hpp"
@@ -105,6 +115,7 @@
 #include <fstream>
 #include <iterator>
 #include <mutex>
+#include <optional>
 #include <sstream>
 #include <string>
 #include <utility>
@@ -168,6 +179,7 @@ int sDynHoldFor = 30;       // the next such hold; doubles each time
 PortDebug::EAspectMode sAspectMode = PortDebug::kAspect_Window;
 bool sHudWide = true;
 bool sCinemaBars = false;
+bool sShowShaderCompilation = true;
 int sHudScale = PortDebug::kHudScaleMax;
 bool sHideHelmet = true;
 bool sHideVisorEffects = false;
@@ -194,10 +206,13 @@ bool sTwinStick = false;
 float sTwinStickRightY = 0.f;
 bool sBeamShiftHeld = false;
 std::atomic<bool> sTouchBeamShift{false}; // the touch twin layout's held Beam button
+std::atomic<bool> sTouchTurboFire{false}; // the touch Turbo button, held
 bool sSpringBall = true;
 bool sSwapScanXray = false;
 bool sTouchColors = false; // Android touch overlay: the GameCube pad's colours
 bool sTouchLabels = true;  // and each button's function under its letter
+bool sTouchTurbo = false;  // a Turbo button beside Fire
+bool sTouchFloatingStick = true;  // the left stick appears where the left half is touched
 bool sFastMorph = false;
 bool sInvulnerable = false;
 // MP_GODMODE, for this run only: -1 unset, else 0 or 1. Never saved, and changing the
@@ -209,6 +224,9 @@ bool sLogFile = true;
 bool sLockOnToggle = false;
 bool sStickyCharge = false;
 bool sRapidCharge = false;
+// The Randomizer page's options; the console's `rando gen` reads them too.
+std::mutex sRandoMutex;
+PortRandoGen::Settings sRandoSettings;
 bool sSpringFlick = false;
 float sSpringFlickRate = 6.f;
 float sStickAimRate = 900.f;
@@ -223,7 +241,17 @@ int sAnisotropy = 16;
 // Setting `opengles`; sOpenGlesAtStart is what this run was started with.
 bool sOpenGles = false;
 bool sOpenGlesAtStart = false;
+// Setting `gpu_driver`: an installed custom Vulkan driver's id (port_gpu_driver.h), "" = the system's.
+std::string sGpuDriver;
+std::string sGpuDriverAtStart;
+// Setting `gpu_driver_ok`: the driver last kept after its trial run (DrawGpuDriverTrial).
+std::string sGpuDriverKept;
+// This run is a driver's trial: the marker main() left, removed once the user keeps it.
+std::string sGpuDriverTrialMarker;
 bool sUnlockHardMode = false;
+// Setting `storage_clamp`: -1 auto (aurora decides), 0 off, 1 on; read once when shaders are first made.
+int sStorageClamp = -1;
+int sStorageClampAtStart = -1;
 bool sUnlockFusionSuit = false;
 bool sUnlockGalleries = false;
 bool sSpeedrunTimer = false;
@@ -231,9 +259,18 @@ bool sLiveSplit = false;
 std::string sLiveSplitAddress = "127.0.0.1:16834";
 bool sLiveSplitSplitUpgrades = true;
 bool sDiscord = true;
+// PrimedGun: off by default, and ApplyUpdateCheck ignores it: PortUpdateCheck asks
+// upstream's repo (port_update_check.h kRepo) about upstream's version
+// (MP_BUILD_VERSION from android/app/build.gradle), not this fork's. The setting and
+// its update_check= line stay so merges from upstream stay small.
+bool sUpdateCheck = false;
 // Mods folder (port_mods.h): read at startup only.
 bool sModsEnabled = true;
 std::string sModsDisabled;
+// Original experience (`original_experience=`, MP_ORIGINAL): the getters return retail
+// values for the port's additions while it is on. The saved settings are left as they
+// are, so turning it off brings them back.
+bool sOriginalExperience = false;
 // Gyro aiming: off / hold / always, auto / controller / phone, and how fast a
 // rotation turns into aim travel.
 int sGyroMode = 0;
@@ -316,6 +353,7 @@ int sMouseActions[PortInputMap::kMouseButtonCount] = {
 // a controller button (an SDL gamepad button or PAD_NATIVE_BUTTON_TRIGGER_*),
 // -1 for none.
 int sShiftBindings[3] = {SDL_SCANCODE_LSHIFT, -1, -1};
+int sTurboBindings[3] = {-1, -1, -1}; // turbo fire: two keys, then a controller button
 // A second controller button per PAD button, indexed by the PAD bit's position;
 // the same codes as the shift's pad slot, -1 for none.
 int sPadAltButtons[PortDebug::kPadAltCount] = {-1, -1, -1, -1, -1, -1, -1, -1,
@@ -384,6 +422,8 @@ std::atomic< bool > sOverlayVisible{false};
 // Same idea for whether the Android touch overlay draws the GameCube pad's colours.
 std::atomic< bool > sTouchColorsFlag{false};
 std::atomic< bool > sTouchLabelsFlag{true};
+std::atomic< bool > sTouchTurboFlag{false};
+std::atomic< bool > sTouchFloatingStickFlag{true};
 // The Android touch overlay's gap to the side edges for every control, and the
 // left stick's extra gap on top of it, in dp. Read from the UI thread.
 constexpr float kTouchMarginMaxDp = 300.f;
@@ -498,6 +538,15 @@ void ApplyDiscord() {
   PortDiscord::Configure(sDiscord, PortDiscord::kDefaultAppId);
 }
 
+void ApplyUpdateCheck() {
+  // PrimedGun: upstream's check asks Odrannnn/MetroidPrimePort whether a release newer
+  // than upstream's versionName is out, which would send PrimedGun players to the flat
+  // port. It stays off until it asks this fork's releases with PrimedGun's version.
+  // Switched off, no worker thread starts, CheckNow() returns at once and the update
+  // toast never shows.
+  PortUpdateCheck::Configure(false, std::string(), std::string());
+}
+
 void ApplySetting(const std::string& key, const std::string& value) {
   // VR (PrimedGun) settings live in their own table (vr/vr_settings.cpp).
   if (PortVr::ApplyVrSetting(key, value)) {
@@ -548,6 +597,8 @@ void ApplySetting(const std::string& key, const std::string& value) {
     }
   } else if (key == "cinema_bars") {
     sCinemaBars = ParseBool(value);
+  } else if (key == "show_shader_compilation") {
+    sShowShaderCompilation = ParseBool(value);
   } else if (key == "hud_wide") {
     sHudWide = ParseBool(value);
   } else if (key == "hud_scale") {
@@ -598,6 +649,15 @@ void ApplySetting(const std::string& key, const std::string& value) {
   } else if (key == "opengles") {
     sOpenGles = ParseBool(value);
     sOpenGlesAtStart = sOpenGles;
+  } else if (key == "gpu_driver") {
+    sGpuDriver = value;
+    sGpuDriverAtStart = value;
+  } else if (key == "gpu_driver_ok") {
+    sGpuDriverKept = value;
+  } else if (key == "storage_clamp") {
+    const int v = std::atoi(value.c_str());
+    sStorageClamp = v < 0 ? -1 : (v > 0 ? 1 : 0);
+    sStorageClampAtStart = sStorageClamp;
   } else if (key == "anisotropy") {
     const int a = std::atoi(value.c_str());
     if (a >= 1 && a <= 16) {
@@ -616,6 +676,10 @@ void ApplySetting(const std::string& key, const std::string& value) {
     sTouchColors = ParseBool(value);
   } else if (key == "touch_labels") {
     sTouchLabels = ParseBool(value);
+  } else if (key == "touch_turbo") {
+    sTouchTurbo = ParseBool(value);
+  } else if (key == "touch_floating_stick") {
+    sTouchFloatingStick = ParseBool(value);
   } else if (key == "stick_aim_rate") {
     const float f = static_cast< float >(std::atof(value.c_str()));
     if (std::isfinite(f) && f >= 50.f && f <= 4000.f) {
@@ -700,6 +764,13 @@ void ApplySetting(const std::string& key, const std::string& value) {
     if (end != value.c_str() && *end == '\0') {
       sShiftBindings[slot] = static_cast< int >(code);
     }
+  } else if (key == "turbo_key" || key == "turbo_key_alt" || key == "turbo_pad") {
+    const int slot = key == "turbo_key" ? 0 : key == "turbo_key_alt" ? 1 : 2;
+    char* end = nullptr;
+    const long code = std::strtol(value.c_str(), &end, 10);
+    if (end != value.c_str() && *end == '\0') {
+      sTurboBindings[slot] = static_cast< int >(code);
+    }
   } else if (key == "pad_alt") {
     // kPadAltCount comma-separated codes; a short or malformed list keeps the
     // rest as they are.
@@ -731,8 +802,12 @@ void ApplySetting(const std::string& key, const std::string& value) {
   } else if (key == "discord_presence") {
     // Not "discord": 0.16.0 saved discord=0 for everyone while it was opt-in.
     sDiscord = ParseBool(value);
+  } else if (key == "update_check") {
+    sUpdateCheck = ParseBool(value);
   } else if (key == "mods") {
     sModsEnabled = ParseBool(value);
+  } else if (key == "original_experience") {
+    sOriginalExperience = ParseBool(value);
   } else if (key == "mods_disabled") {
     sModsDisabled = value;
   } else if (key == "fast_morph") {
@@ -749,6 +824,13 @@ void ApplySetting(const std::string& key, const std::string& value) {
     sStickyCharge = ParseBool(value);
   } else if (key == "rapid_charge") {
     sRapidCharge = ParseBool(value);
+  } else if (key == "rando_settings") {
+    PortRandoGen::Settings parsed;
+    if (!PortRandoGen::ParseSettings(value, parsed)) {
+      parsed = PortRandoGen::Settings();
+    }
+    std::lock_guard< std::mutex > lock(sRandoMutex);
+    sRandoSettings = parsed;
   } else if (key == "spring_ball_flick") {
     sSpringFlick = ParseBool(value);
   } else if (key == "spring_ball_flick_rate") {
@@ -845,6 +927,7 @@ void SaveSettings() {
   file << "aspect=" << aspect << '\n';
   file << "hud_wide=" << (sHudWide ? 1 : 0) << '\n';
   file << "cinema_bars=" << (sCinemaBars ? 1 : 0) << '\n';
+  file << "show_shader_compilation=" << (sShowShaderCompilation ? 1 : 0) << '\n';
   file << "hud_scale=" << sHudScale << '\n';
   file << "hide_helmet=" << (sHideHelmet ? 1 : 0) << '\n';
   file << "hide_visor_effects=" << (sHideVisorEffects ? 1 : 0) << '\n';
@@ -863,16 +946,21 @@ void SaveSettings() {
   file << "fov=" << sFirstPersonFov << '\n';
   file << "msaa=" << sMsaa << '\n';
   file << "opengles=" << (sOpenGles ? 1 : 0) << '\n';
+  file << "gpu_driver=" << sGpuDriver << '\n';
+  file << "gpu_driver_ok=" << sGpuDriverKept << '\n';
   file << "anisotropy=" << sAnisotropy << '\n';
   file << "unlock_hard_mode=" << (sUnlockHardMode ? 1 : 0) << '\n';
   file << "unlock_fusion_suit=" << (sUnlockFusionSuit ? 1 : 0) << '\n';
   file << "unlock_galleries=" << (sUnlockGalleries ? 1 : 0) << '\n';
+  file << "storage_clamp=" << sStorageClamp << '\n';
   file << "speedrun_timer=" << (sSpeedrunTimer ? 1 : 0) << '\n';
   file << "livesplit=" << (sLiveSplit ? 1 : 0) << '\n';
   file << "livesplit_address=" << sLiveSplitAddress << '\n';
   file << "livesplit_split_upgrades=" << (sLiveSplitSplitUpgrades ? 1 : 0) << '\n';
   file << "discord_presence=" << (sDiscord ? 1 : 0) << '\n';
+  file << "update_check=" << (sUpdateCheck ? 1 : 0) << '\n';
   file << "mods=" << (sModsEnabled ? 1 : 0) << '\n';
+  file << "original_experience=" << (sOriginalExperience ? 1 : 0) << '\n';
   file << "mods_disabled=" << sModsDisabled << '\n';
   file << "vsync=" << (sVsyncEnabled ? 1 : 0) << '\n';
   file << "fullscreen=" << (sFullscreen ? 1 : 0) << '\n';
@@ -897,11 +985,16 @@ void SaveSettings() {
   file << "twin_stick=" << (sTwinStick ? 1 : 0) << '\n';
   file << "touch_colors=" << (sTouchColors ? 1 : 0) << '\n';
   file << "touch_labels=" << (sTouchLabels ? 1 : 0) << '\n';
+  file << "touch_turbo=" << (sTouchTurbo ? 1 : 0) << '\n';
+  file << "touch_floating_stick=" << (sTouchFloatingStick ? 1 : 0) << '\n';
   file << "spring_ball=" << (sSpringBall ? 1 : 0) << '\n';
   file << "swap_scan_xray=" << (sSwapScanXray ? 1 : 0) << '\n';
   file << "shift_key=" << sShiftBindings[0] << '\n';
   file << "shift_key_alt=" << sShiftBindings[1] << '\n';
   file << "shift_pad=" << sShiftBindings[2] << '\n';
+  file << "turbo_key=" << sTurboBindings[0] << '\n';
+  file << "turbo_key_alt=" << sTurboBindings[1] << '\n';
+  file << "turbo_pad=" << sTurboBindings[2] << '\n';
   file << "pad_alt=";
   for (int i = 0; i < PortDebug::kPadAltCount; ++i) {
     file << (i != 0 ? "," : "") << sPadAltButtons[i];
@@ -913,6 +1006,10 @@ void SaveSettings() {
   file << "lock_on_toggle=" << (sLockOnToggle ? 1 : 0) << '\n';
   file << "sticky_charge=" << (sStickyCharge ? 1 : 0) << '\n';
   file << "rapid_charge=" << (sRapidCharge ? 1 : 0) << '\n';
+  {
+    std::lock_guard< std::mutex > lock(sRandoMutex);
+    file << "rando_settings=" << PortRandoGen::SettingsText(sRandoSettings) << '\n';
+  }
   file << "spring_ball_flick=" << (sSpringFlick ? 1 : 0) << '\n';
   file << "spring_ball_flick_rate=" << sSpringFlickRate << '\n';
   file << "stick_aim_rate=" << sStickAimRate << '\n';
@@ -1169,10 +1266,13 @@ void EnsureInitialized() {
   if (port::EnvFlag("MP_SIM_ADAPTIVE")) {
     sSimAdaptive = true;
   }
+  sOriginalExperience = port::EnvFlag("MP_ORIGINAL", sOriginalExperience);
 
   std::atexit(SaveSettings);
   ApplyLiveSplit();
   ApplyDiscord();
+  ApplyUpdateCheck();
+  PortUpdateCheck::CheckNow(); // once per launch
 }
 } // namespace
 
@@ -1214,7 +1314,7 @@ float CutsceneSpeed() {
 
 unsigned SimRate() {
   EnsureInitialized();
-  return sSimRate;
+  return sOriginalExperience ? 60u : sSimRate;
 }
 
 void SetSimRate(unsigned hz) {
@@ -1230,7 +1330,7 @@ float SimPeriod() { return 1.f / static_cast< float >(SimRate()); }
 
 bool SimAdaptive() {
   EnsureInitialized();
-  return sSimAdaptive;
+  return sSimAdaptive && !sOriginalExperience;
 }
 
 bool Turbo() {
@@ -1262,10 +1362,27 @@ void SetTickPeriod(float dt) {
 
 float TickFrames() { return sTickPeriod * 60.f; }
 
+// What the frame code uses: the settings, or retail's under Original experience.
+static bool EffectiveFrameLimit() { return sFrameLimitEnabled || sOriginalExperience; }
+static float EffectiveRenderScale() { return sOriginalExperience ? 1.f : sRenderScale; }
+static int EffectiveMsaa() { return sOriginalExperience ? 1 : sMsaa; }
+static int EffectiveAnisotropy() { return sOriginalExperience ? 1 : sAnisotropy; }
+// PortVr: what Original experience leaves alone while the headset runs. The helmet
+// frame is head-locked there (PrimedGun hides it by default), and the headset presents
+// at 72-120 Hz over the 60 Hz simulation, so actors, poses, particles and the tracked
+// cannon stay interpolated. On a flat screen it overrides them as upstream does.
+static bool OriginalOverridesComfort() { return sOriginalExperience && !PortVr::OpenXRIsRunning(); }
+
+static void ApplyGraphicsQuality() {
+  aurora_set_graphics_quality(static_cast< uint32_t >(EffectiveMsaa()),
+                              static_cast< uint16_t >(EffectiveAnisotropy()));
+}
+
 bool FrameLimitEnabled() {
   EnsureInitialized();
-  return sFrameLimitEnabled;
+  return EffectiveFrameLimit();
 }
+
 
 static double DynamicResTargetFps() {
   double target = sDynamicResTarget;
@@ -1273,7 +1390,7 @@ static double DynamicResTargetFps() {
     const SDL_DisplayMode* mode = SDL_GetCurrentDisplayMode(SDL_GetPrimaryDisplay());
     target = mode != nullptr && mode->refresh_rate > 0.f ? mode->refresh_rate : 60.0;
   }
-  return sFrameLimitEnabled ? std::min(target, 60.0) : target;
+  return EffectiveFrameLimit() ? std::min(target, 60.0) : target;
 }
 
 static void ResetDynamicRes() {
@@ -1284,7 +1401,7 @@ static void ResetDynamicRes() {
   sDynFpsBefore = 0.0;
   if (sDynScale > 0.f) {
     sDynScale = 0.f;
-    VISetFrameBufferScale(sRenderScale);
+    VISetFrameBufferScale(EffectiveRenderScale());
   }
 }
 
@@ -1292,9 +1409,9 @@ static void ResetDynamicRes() {
 // GPU, so it steps rarely: down after two slow seconds, up after a steady stretch that
 // doubles each time a step up turns out too slow.
 static void UpdateDynamicRes(double fps, unsigned frames) {
-  const float top = sRenderScale;
+  const float top = EffectiveRenderScale();
   const float bottom = std::min(sDynamicResMin, top);
-  if (!sDynamicRes || top <= bottom || sTurbo) {
+  if (!sDynamicRes || sOriginalExperience || top <= bottom || sTurbo) {
     ResetDynamicRes();
     return;
   }
@@ -1395,7 +1512,7 @@ void RecordFrame(uint64_t durationNs, unsigned ticks, bool presented) {
     if (sTraceTiming) {
       std::fprintf(stderr,
                    "[timing] presented=%.1f FPS throughput=%.1f FPS simulation=%.1f ticks/s cap=%s\n",
-                   sActualFps, sThroughputFps, sActualTps, sFrameLimitEnabled ? "60" : "off");
+                   sActualFps, sThroughputFps, sActualTps, EffectiveFrameLimit() ? "60" : "off");
     }
     UpdateDynamicRes(sActualFps, sTimingFrames);
     sTimingNs = 0;
@@ -1406,6 +1523,10 @@ void RecordFrame(uint64_t durationNs, unsigned ticks, bool presented) {
 
 void SetFrameLimitEnabled(bool enabled) {
   EnsureInitialized();
+  // Original experience holds the cap; F10 must not change what it restores.
+  if (sOriginalExperience) {
+    return;
+  }
   if (sFrameLimitEnabled != enabled) {
     sFrameLimitEnabled = enabled;
     MarkDirty();
@@ -1443,7 +1564,7 @@ void SetFullscreen(bool enabled) {
 
 float RenderScale() {
   EnsureInitialized();
-  return sRenderScale;
+  return EffectiveRenderScale();
 }
 
 void SetRenderScale(float scale) {
@@ -1454,12 +1575,12 @@ void SetRenderScale(float scale) {
   sRenderScale = scale;
   sDynScale = 0.f;
   ResetDynamicRes();
-  VISetFrameBufferScale(scale);
+  VISetFrameBufferScale(EffectiveRenderScale());
 }
 
 bool DynamicRes() {
   EnsureInitialized();
-  return sDynamicRes;
+  return sDynamicRes && !sOriginalExperience;
 }
 
 int DynamicResTarget() {
@@ -1474,7 +1595,7 @@ float DynamicResMin() {
 
 EAspectMode AspectMode() {
   EnsureInitialized();
-  return sAspectMode;
+  return sOriginalExperience ? kAspect_4_3 : sAspectMode;
 }
 
 void SetAspectMode(EAspectMode mode) {
@@ -1485,7 +1606,7 @@ void SetAspectMode(EAspectMode mode) {
 
 bool HudWide() {
   EnsureInitialized();
-  return sHudWide;
+  return sHudWide && !sOriginalExperience;
 }
 
 void SetHudWide(bool enabled) {
@@ -1496,12 +1617,12 @@ void SetHudWide(bool enabled) {
 
 bool CinemaBars() {
   EnsureInitialized();
-  return sCinemaBars;
+  return sCinemaBars || sOriginalExperience;
 }
 
 int HudScale() {
   EnsureInitialized();
-  return sHudScale;
+  return sOriginalExperience ? kHudScaleMax : sHudScale;
 }
 
 void SetHudScale(int percent) {
@@ -1512,7 +1633,7 @@ void SetHudScale(int percent) {
 
 bool HideHelmet() {
   EnsureInitialized();
-  return sHideHelmet;
+  return sHideHelmet && !OriginalOverridesComfort();
 }
 
 void SetHideHelmet(bool enabled) {
@@ -1523,7 +1644,7 @@ void SetHideHelmet(bool enabled) {
 
 bool HideVisorEffects() {
   EnsureInitialized();
-  return sHideVisorEffects;
+  return sHideVisorEffects && !sOriginalExperience;
 }
 
 void SetHideVisorEffects(bool enabled) {
@@ -1534,7 +1655,8 @@ void SetHideVisorEffects(bool enabled) {
 
 bool HideMinimap() {
   EnsureInitialized();
-  return sHideMinimap;
+  // A port addition like Hide helmet: Original experience shows the retail HUD.
+  return sHideMinimap && !sOriginalExperience;
 }
 
 void SetHideMinimap(bool enabled) {
@@ -1559,7 +1681,7 @@ double FramePhaseMs(FramePhase phase) { return sPhaseMs[phase]; }
 
 bool RevealMap() {
   EnsureInitialized();
-  return sRevealMap;
+  return sRevealMap && !sOriginalExperience;
 }
 
 void SetRevealMap(bool enabled) {
@@ -1603,7 +1725,7 @@ void SetApSuitDamage(int mode) {
 
 bool SkippableCutscenes() {
   EnsureInitialized();
-  return sSkippableCutscenes;
+  return sSkippableCutscenes && !sOriginalExperience;
 }
 
 void SetSkippableCutscenes(bool enabled) {
@@ -1630,7 +1752,7 @@ void SetTextLanguage(const char* code) {
 
 EElevatorRide ElevatorRide() {
   EnsureInitialized();
-  return static_cast< EElevatorRide >(sElevatorRide);
+  return sOriginalExperience ? kElevatorRide_Original : static_cast< EElevatorRide >(sElevatorRide);
 }
 
 void SetElevatorRide(EElevatorRide mode) {
@@ -1642,7 +1764,7 @@ void SetElevatorRide(EElevatorRide mode) {
 
 float FirstPersonFov() {
   EnsureInitialized();
-  return sFirstPersonFov;
+  return sOriginalExperience ? kFovRetail : sFirstPersonFov;
 }
 
 void SetFirstPersonFov(float degrees) {
@@ -1655,7 +1777,7 @@ void SetFirstPersonFov(float degrees) {
 
 int Msaa() {
   EnsureInitialized();
-  return sMsaa;
+  return EffectiveMsaa();
 }
 
 void SetMsaa(int samples) {
@@ -1663,7 +1785,7 @@ void SetMsaa(int samples) {
   samples = samples >= 4 ? 4 : 1;
   if (sMsaa != samples) {
     sMsaa = samples;
-    aurora_set_graphics_quality(static_cast< uint32_t >(sMsaa), static_cast< uint16_t >(sAnisotropy));
+    ApplyGraphicsQuality();
     MarkDirty();
   }
 }
@@ -1681,24 +1803,77 @@ void SetOpenGles(bool enabled) {
   }
 }
 
+const std::string& GpuDriver() {
+  EnsureInitialized();
+  return sGpuDriver;
+}
+
+void SetGpuDriver(const std::string& id) {
+  EnsureInitialized();
+  if (sGpuDriver != id) {
+    sGpuDriver = id;
+    MarkDirty();
+  }
+  // Keeping confirms only the current choice: another one gets its own trial.
+  if (sGpuDriverKept != id) {
+    sGpuDriverKept.clear();
+  }
+}
+
+const std::string& GpuDriverKept() {
+  EnsureInitialized();
+  return sGpuDriverKept;
+}
+
+void BeginGpuDriverTrial(const std::string& markerPath) {
+  EnsureInitialized();
+  sGpuDriverTrialMarker = markerPath;
+}
+
 int Anisotropy() {
   EnsureInitialized();
-  return sAnisotropy;
+  return EffectiveAnisotropy();
 }
+void ApplyStorageClamp() {
+  EnsureInitialized();
+  // Set and non-empty, as aurora reads it (an empty one would leave aurora on its own Auto).
+  if (const char* env = std::getenv("MP_STORAGE_CLAMP"); env != nullptr && *env != '\0') {
+    return;
+  }
+  int clamp = sStorageClamp;
+#if defined(__ANDROID__) && defined(MP_ENABLE_OPENXR)
+  // PortVr (Quest): Auto keeps load_word's bounds-check branch, the one the headset's
+  // image was checked with. Upstream's Auto would take the clamp on the Quest 3's
+  // Adreno 740 (any Adreno 7xx on Vulkan). The saved setting stays Auto, so changing
+  // this after an A/B test needs no settings migration.
+  if (clamp < 0) {
+    clamp = 0;
+  }
+#endif
+  if (clamp < 0) {
+    return;
+  }
+#ifdef _WIN32
+  _putenv_s("MP_STORAGE_CLAMP", clamp > 0 ? "1" : "0");
+#else
+  setenv("MP_STORAGE_CLAMP", clamp > 0 ? "1" : "0", 1);
+#endif
+}
+
 
 void SetAnisotropy(int level) {
   EnsureInitialized();
   level = std::clamp(level, 1, 16);
   if (sAnisotropy != level) {
     sAnisotropy = level;
-    aurora_set_graphics_quality(static_cast< uint32_t >(sMsaa), static_cast< uint16_t >(sAnisotropy));
+    ApplyGraphicsQuality();
     MarkDirty();
   }
 }
 
 bool UnlockHardMode() {
   EnsureInitialized();
-  return sUnlockHardMode;
+  return sUnlockHardMode && !sOriginalExperience;
 }
 
 void SetUnlockHardMode(bool enabled) {
@@ -1709,7 +1884,7 @@ void SetUnlockHardMode(bool enabled) {
 
 bool UnlockFusionSuit() {
   EnsureInitialized();
-  return sUnlockFusionSuit;
+  return sUnlockFusionSuit && !sOriginalExperience;
 }
 
 void SetUnlockFusionSuit(bool enabled) {
@@ -1720,7 +1895,7 @@ void SetUnlockFusionSuit(bool enabled) {
 
 bool UnlockGalleries() {
   EnsureInitialized();
-  return sUnlockGalleries;
+  return sUnlockGalleries && !sOriginalExperience;
 }
 
 void SetUnlockGalleries(bool enabled) {
@@ -1790,11 +1965,15 @@ bool BeamShiftHeld() { return sBeamShiftHeld; }
 
 bool TouchBeamShift() { return sTouchBeamShift.load(std::memory_order_acquire) && TouchActive(); }
 
+bool TouchTurboFire() {
+  return sTouchTurboFire.load(std::memory_order_acquire) && TouchActive() && !sOriginalExperience;
+}
+
 void SetBeamShiftHeld(bool held) { sBeamShiftHeld = held; }
 
 bool SpringBall() {
   EnsureInitialized();
-  return sSpringBall;
+  return sSpringBall && !sOriginalExperience;
 }
 
 void SetSpringBall(bool enabled) {
@@ -1805,13 +1984,29 @@ void SetSpringBall(bool enabled) {
 
 bool SwapScanXray() {
   EnsureInitialized();
-  return sSwapScanXray && !TouchActive();
+  return sSwapScanXray && !TouchActive() && !sOriginalExperience;
 }
 
 void SetSwapScanXray(bool enabled) {
   EnsureInitialized();
   sSwapScanXray = enabled;
   MarkDirty();
+}
+
+int TurboBinding(int slot) {
+  EnsureInitialized();
+  if (slot == 2 && TouchActive()) {
+    return -1;
+  }
+  return slot >= 0 && slot < 3 ? sTurboBindings[slot] : -1;
+}
+
+void SetTurboBinding(int slot, int code) {
+  EnsureInitialized();
+  if (slot >= 0 && slot < 3) {
+    sTurboBindings[slot] = code;
+    MarkDirty();
+  }
 }
 
 int ShiftBinding(int slot) {
@@ -1912,13 +2107,36 @@ void SetLiveSplitAddress(const std::string& address) {
 
 bool ModsEnabled() {
   EnsureInitialized();
-  return sModsEnabled;
+  return sModsEnabled && !sOriginalExperience;
 }
 
 void SetModsEnabled(bool enabled) {
   EnsureInitialized();
   sModsEnabled = enabled;
   MarkDirty();
+}
+
+bool OriginalExperience() {
+  EnsureInitialized();
+  return sOriginalExperience;
+}
+
+void SetOriginalExperience(bool enabled) {
+  EnsureInitialized();
+  if (sOriginalExperience == enabled) {
+    return;
+  }
+  sOriginalExperience = enabled;
+  MarkDirty();
+  PortLog::Write("port: original experience %s\n", enabled ? "on" : "off");
+  // The rest reads the getters each frame; these were applied once.
+  sDynScale = 0.f;
+  ResetDynamicRes();
+  VISetFrameBufferScale(EffectiveRenderScale());
+  ApplyGraphicsQuality();
+  if (PortMods::CurrentStatus().active != ModsEnabled() && !PortMods::Suspended()) {
+    PortSaveState::RequestModReload();
+  }
 }
 
 std::string ModsDisabled() {
@@ -1957,7 +2175,7 @@ void SetLogFile(bool enabled) {
 
 bool FastMorph() {
   EnsureInitialized();
-  return sFastMorph;
+  return sFastMorph && !sOriginalExperience;
 }
 
 void SetFastMorph(bool enabled) {
@@ -1968,7 +2186,7 @@ void SetFastMorph(bool enabled) {
 
 bool LockOnToggle() {
   EnsureInitialized();
-  return sLockOnToggle;
+  return sLockOnToggle && !sOriginalExperience;
 }
 
 void SetLockOnToggle(bool enabled) {
@@ -1979,7 +2197,7 @@ void SetLockOnToggle(bool enabled) {
 
 bool StickyCharge() {
   EnsureInitialized();
-  return sStickyCharge;
+  return sStickyCharge && !sOriginalExperience;
 }
 
 void SetStickyCharge(bool enabled) {
@@ -1988,9 +2206,15 @@ void SetStickyCharge(bool enabled) {
   MarkDirty();
 }
 
+PortRandoGen::Settings RandoSettings() {
+  EnsureInitialized();
+  std::lock_guard< std::mutex > lock(sRandoMutex);
+  return sRandoSettings;
+}
+
 bool RapidCharge() {
   EnsureInitialized();
-  return sRapidCharge;
+  return sRapidCharge && !sOriginalExperience;
 }
 
 void SetRapidCharge(bool enabled) {
@@ -2001,7 +2225,7 @@ void SetRapidCharge(bool enabled) {
 
 bool SpringBallFlick() {
   EnsureInitialized();
-  return sSpringFlick;
+  return sSpringFlick && !sOriginalExperience;
 }
 
 void SetSpringBallFlick(bool enabled) {
@@ -2750,7 +2974,7 @@ bool TakeTouchLook(float& dyaw, float& dpitch) {
 
 bool PresentedAimDelta(float fraction, float& dyaw, float& dpitch) {
   dyaw = dpitch = 0.f;
-  if (!sFrameInterpolation || !sMouseGameplayActive || !sAimAppliedLastTick ||
+  if (!FrameInterpolation() || !sMouseGameplayActive || !sAimAppliedLastTick ||
       !std::isfinite(fraction) || fraction < 0.f) {
     return false;
   }
@@ -2779,7 +3003,7 @@ bool PresentedAimDelta(float fraction, float& dyaw, float& dpitch) {
 
 bool FrameInterpolation() {
   EnsureInitialized();
-  return sFrameInterpolation;
+  return sFrameInterpolation && !OriginalOverridesComfort();
 }
 
 void SetFrameInterpolation(bool enabled) {
@@ -2789,7 +3013,7 @@ void SetFrameInterpolation(bool enabled) {
 
 bool SmoothFrames() {
   EnsureInitialized();
-  return sSmoothFrames;
+  return sSmoothFrames && !OriginalOverridesComfort();
 }
 
 void SetSmoothFrames(bool enabled) {
@@ -2801,7 +3025,7 @@ void SetSmoothFrames(bool enabled) {
 
 bool ActorInterpolation() {
   EnsureInitialized();
-  return sActorInterpolation;
+  return sActorInterpolation && !OriginalOverridesComfort();
 }
 
 void SetActorInterpolation(bool enabled) {
@@ -2811,7 +3035,7 @@ void SetActorInterpolation(bool enabled) {
 
 bool PoseInterpolation() {
   EnsureInitialized();
-  return sPoseInterpolation;
+  return sPoseInterpolation && !OriginalOverridesComfort();
 }
 
 void SetPoseInterpolation(bool enabled) {
@@ -2853,7 +3077,7 @@ bool RoomGeoResidentAtStartup() {
 
 bool ParticleInterpolation() {
   EnsureInitialized();
-  return sParticleInterpolation;
+  return sParticleInterpolation && !OriginalOverridesComfort();
 }
 
 void SetParticleInterpolation(bool enabled) {
@@ -3287,6 +3511,8 @@ bool OverlayVisible() { return sOverlayVisible.load(std::memory_order_acquire); 
 
 bool TouchColorsFlag() { return sTouchColorsFlag.load(std::memory_order_acquire); }
 bool TouchLabelsFlag() { return sTouchLabelsFlag.load(std::memory_order_acquire); }
+bool TouchTurboFlag() { return sTouchTurboFlag.load(std::memory_order_acquire); }
+bool TouchFloatingStickFlag() { return sTouchFloatingStickFlag.load(std::memory_order_acquire); }
 float TouchSideMarginDp() { return sTouchSideMargin.load(); }
 float TouchStickInsetDp() { return sTouchStickInset.load(); }
 float TouchButtonInsetDp() { return sTouchButtonInset.load(); }
@@ -3773,6 +3999,8 @@ void UpdateControllerNav() {
   sOverlayVisible.store(sVisible, std::memory_order_release);
   sTouchColorsFlag.store(sTouchColors, std::memory_order_release);
   sTouchLabelsFlag.store(sTouchLabels, std::memory_order_release);
+  sTouchTurboFlag.store(sTouchTurbo && !sOriginalExperience, std::memory_order_release);
+  sTouchFloatingStickFlag.store(sTouchFloatingStick, std::memory_order_release);
 
   ImGuiIO& io = ImGui::GetIO();
   io.BackendFlags |= ImGuiBackendFlags_HasGamepad;
@@ -3885,8 +4113,26 @@ void SameLineAfterHelp() {
 }
 } // namespace
 
+// Rows the Original experience overrides: shown with their saved values, which
+// come back when it's turned off.
+bool BeginOriginalLocked() {
+  if (!sOriginalExperience) {
+    return false;
+  }
+  ImGui::TextDisabled("Original experience is on: these keep their values for later.");
+  ImGui::BeginDisabled();
+  return true;
+}
+
+void EndOriginalLocked(bool locked) {
+  if (locked) {
+    ImGui::EndDisabled();
+  }
+}
+
 void DrawPerformanceTab() {
   ImGui::SeparatorText("Frame rate");
+  const bool locked = BeginOriginalLocked();
   bool frameLimit = sFrameLimitEnabled;
   if (ImGui::Checkbox("60 FPS cap (target)", &frameLimit)) {
     SetFrameLimitEnabled(frameLimit);
@@ -3900,10 +4146,10 @@ void DrawPerformanceTab() {
               static_cast< double >(ImGui::GetIO().DeltaTime) * 1000.0);
   ImGui::SetItemTooltip("Presented is what reaches the screen. Throughput leaves out the wait for the\n"
                         "frame cap: the gap between the two is the headroom at the current frame cost.");
-  if (sSimAdaptive) {
+  if (SimAdaptive()) {
     ImGui::Text("Simulation %.1f ticks/s (adaptive)", sActualTps);
   } else {
-    ImGui::Text("Simulation %.1f ticks/s (target %u)", sActualTps, sSimRate);
+    ImGui::Text("Simulation %.1f ticks/s (target %u)", sActualTps, SimRate());
   }
   ImGui::Text("Game thread per frame: update %.2f ms, world draw %.2f ms, HUD draw %.2f ms", sPhaseMs[kPhaseUpdate],
               sPhaseMs[kPhaseDrawWorld], sPhaseMs[kPhaseDrawGui]);
@@ -3936,6 +4182,7 @@ void DrawPerformanceTab() {
            "game logic at that rate instead of smoothing frames between 60 Hz ticks; leave the "
            "FPS cap off for it to matter. For smooth high frame rates, use Smooth uncapped "
            "frames instead.");
+  EndOriginalLocked(locked);
 }
 
 // Memory card transfer (port_gci.h). The work runs on the main thread; the
@@ -4593,6 +4840,112 @@ void DrawStaleImportToast() {
   ImGui::End();
 }
 
+// Once per launch, for 12 s: a newer release than this build is out.
+// Taps arrive on Android's UI thread (TouchControlsView), so the rect is shared under
+// a lock and a hit only sets a flag; the page opens on the game thread.
+bool sUpdateToastDone = false;
+std::mutex sUpdateToastMutex;
+bool sUpdateToastShowing = false;
+ImVec4 sUpdateToastRect; // last drawn: x0, y0, x1, y1 as fractions of the window
+std::atomic<bool> sUpdateToastTapped{false};
+
+void SetUpdateToastShowing(bool showing, const ImVec4& rect = ImVec4()) {
+  std::lock_guard lock(sUpdateToastMutex);
+  sUpdateToastShowing = showing;
+  sUpdateToastRect = rect;
+}
+
+void OpenUpdateToastRelease() {
+  SDL_OpenURL(PortUpdateCheck::Latest().url.c_str());
+  sUpdateToastDone = true;
+  SetUpdateToastShowing(false);
+}
+
+void DrawUpdateToast() {
+  static double sShownAt = -1.0;
+  SetUpdateToastShowing(false);
+  if (sUpdateToastDone || PortUpdateCheck::Status() != PortUpdateCheck::kStatus_Available) {
+    return;
+  }
+  if (sUpdateToastTapped.exchange(false)) {
+    OpenUpdateToastRelease();
+    return;
+  }
+  const double now = ImGui::GetTime();
+  if (sShownAt < 0.0) {
+    sShownAt = now;
+  }
+  if (now - sShownAt > 12.0) {
+    sUpdateToastDone = true;
+    return;
+  }
+  const ImGuiViewport* viewport = ImGui::GetMainViewport();
+  ImGui::SetNextWindowPos(ImVec2(viewport->Pos.x + viewport->Size.x * 0.5f, viewport->Pos.y + 24.f), ImGuiCond_Always,
+                          ImVec2(0.5f, 0.f));
+  ImGui::SetNextWindowSize(ImVec2(std::min(viewport->Size.x - 32.f, 560.f), 0.f));
+  ImGui::SetNextWindowBgAlpha(0.8f);
+  if (ImGui::Begin("##update-toast", nullptr,
+                   ImGuiWindowFlags_NoDecoration | ImGuiWindowFlags_NoMove | ImGuiWindowFlags_NoNav |
+                       ImGuiWindowFlags_NoFocusOnAppearing | ImGuiWindowFlags_NoSavedSettings)) {
+    ImGui::TextWrapped("Version %s is out (this is %s). Click or tap here to open its release page.",
+                       PortUpdateCheck::Latest().version.c_str(), MP_BUILD_VERSION);
+    const ImVec2 pos = ImGui::GetWindowPos();
+    const ImVec2 size = ImGui::GetWindowSize();
+    if (viewport->Size.x > 0.f && viewport->Size.y > 0.f) {
+      SetUpdateToastShowing(true, ImVec4((pos.x - viewport->Pos.x) / viewport->Size.x,
+                                         (pos.y - viewport->Pos.y) / viewport->Size.y,
+                                         (pos.x + size.x - viewport->Pos.x) / viewport->Size.x,
+                                         (pos.y + size.y - viewport->Pos.y) / viewport->Size.y));
+    }
+    // A mouse click; taps go through PortDebug::TapUpdateToast.
+    if (ImGui::IsWindowHovered() && ImGui::IsMouseReleased(ImGuiMouseButton_Left)) {
+      OpenUpdateToastRelease();
+    }
+  }
+  ImGui::End();
+}
+
+// While pipelines compile in the background (the shipped seed on a first start, then new
+// shaders as they appear): after half a second, a count and a bar since the toast opened.
+void DrawShaderCompilationToast() {
+  static double sQueuedSince = -1.0;
+  static uint32_t sBase = 0; // createdPipelines when the toast opened
+  const AuroraStats* stats = aurora_get_stats();
+  if (!sShowShaderCompilation || stats == nullptr || stats->queuedPipelines == 0) {
+    sQueuedSince = -1.0;
+    return;
+  }
+  const double now = ImGui::GetTime();
+  if (sQueuedSince < 0.0) {
+    sQueuedSince = now;
+    sBase = stats->createdPipelines;
+  }
+  if (now - sQueuedSince < 0.5) {
+    return;
+  }
+  const uint32_t done = stats->createdPipelines >= sBase ? stats->createdPipelines - sBase : 0;
+  const uint32_t total = done + stats->queuedPipelines;
+  const ImGuiViewport* viewport = ImGui::GetMainViewport();
+  // Top centre: the Android touch overlay has its pause/F1 buttons in the bottom corners.
+  ImGui::SetNextWindowPos(ImVec2(viewport->Pos.x + viewport->Size.x * 0.5f, viewport->Pos.y + 16.f), ImGuiCond_Always,
+                          ImVec2(0.5f, 0.f));
+  ImGui::SetNextWindowBgAlpha(0.7f);
+  // Sized to its text: the font scale differs per platform (Android's is larger).
+  if (ImGui::Begin("##shader-compilation-toast", nullptr,
+                   ImGuiWindowFlags_NoDecoration | ImGuiWindowFlags_NoInputs | ImGuiWindowFlags_NoNav |
+                       ImGuiWindowFlags_NoFocusOnAppearing | ImGuiWindowFlags_NoSavedSettings |
+                       ImGuiWindowFlags_AlwaysAutoResize)) {
+    char label[64];
+    std::snprintf(label, sizeof(label), "Compiling shaders %u / %u", total, total); // widest, so the count doesn't jitter
+    const float width = ImGui::CalcTextSize(label).x;
+    std::snprintf(label, sizeof(label), "Compiling shaders %u / %u", done, total);
+    ImGui::TextUnformatted(label);
+    ImGui::ProgressBar(total != 0 ? static_cast<float>(done) / static_cast<float>(total) : 0.f,
+                       ImVec2(width, std::max(6.f, ImGui::GetFontSize() * 0.4f)), "");
+  }
+  ImGui::End();
+}
+
 // Once per launch, for longer and in red: the last session ended on a failed disc read.
 void DrawDiscReadFailedAlert() {
   static double sShownAt = -1.0;
@@ -4628,6 +4981,72 @@ void DrawDiscReadFailedAlert() {
   ImGui::End();
   ImGui::PopStyleVar(2);
   ImGui::PopStyleColor(3);
+}
+
+// A custom driver's first run: it may start fine and still draw garbage (Turnip
+// builds made for another GPU did), which leaves no readable menu to switch back.
+// So it has to be kept here within kTrialSeconds; otherwise, or if the game closes
+// first (main() finds the marker), the system driver comes back.
+void DrawGpuDriverTrial() {
+  constexpr float kTrialSeconds = 30.f;
+  static float sElapsed = 0.f;
+  if (sGpuDriverTrialMarker.empty()) {
+    return;
+  }
+  // The panel stays open meanwhile: it's what routes taps and clicks to this window.
+  sVisible = true;
+  // Long frames (pipeline builds, the app in the background) don't eat into the time
+  // the user has to read the prompt.
+  sElapsed += std::min(ImGui::GetIO().DeltaTime, 0.1f);
+  const auto finish = [](bool keep) {
+    std::error_code ec;
+    std::filesystem::remove(sGpuDriverTrialMarker, ec);
+    sGpuDriverTrialMarker.clear();
+    sVisible = false;
+    if (keep) {
+      sGpuDriverKept = PortGpuDriver::Active();
+    } else if (sGpuDriver == PortGpuDriver::Active()) {
+      sGpuDriver.clear();
+    }
+    MarkDirty();
+    SaveSettings();
+    if (!keep) {
+      // The driver can't be swapped while running; the next start uses the system's.
+      PortLog::Write("port: GPU driver %s not kept; closing to start on the system driver\n",
+                     PortGpuDriver::Active().c_str());
+      SDL_Event quit{};
+      quit.type = SDL_EVENT_QUIT;
+      SDL_PushEvent(&quit);
+    }
+  };
+  const float left = kTrialSeconds - sElapsed;
+  if (left <= 0.f) {
+    finish(false);
+    return;
+  }
+  const ImGuiViewport* viewport = ImGui::GetMainViewport();
+  ImGui::SetNextWindowPos(viewport->GetCenter(), ImGuiCond_Always, ImVec2(0.5f, 0.5f));
+  ImGui::SetNextWindowSize(ImVec2(std::min(viewport->Size.x - 32.f, ImGui::GetFontSize() * 32.f), 0.f));
+  const bool open = ImGui::Begin("Keep this Vulkan driver?", nullptr,
+                                 ImGuiWindowFlags_NoCollapse | ImGuiWindowFlags_NoMove | ImGuiWindowFlags_NoResize |
+                                     ImGuiWindowFlags_NoSavedSettings);
+  // Drawn before the panel, which would otherwise cover it.
+  ImGui::BringWindowToDisplayFront(ImGui::GetCurrentWindow());
+  if (open) {
+    ImGui::TextWrapped("The game is running on %s.", aurora_get_gpu_driver());
+    ImGui::TextWrapped("If the picture looks right, keep it. Otherwise the game closes in %d s and starts on the "
+                       "system driver next time.",
+                       int(left) + 1);
+    const float width = (ImGui::GetContentRegionAvail().x - ImGui::GetStyle().ItemSpacing.x) * 0.5f;
+    if (ImGui::Button("Keep", ImVec2(width, 0.f))) {
+      finish(true);
+    }
+    ImGui::SameLine();
+    if (ImGui::Button("Use system driver", ImVec2(width, 0.f))) {
+      finish(false);
+    }
+  }
+  ImGui::End();
 }
 
 void DrawRemasteredImport() {
@@ -4887,6 +5306,9 @@ void DrawImporters() {
 void DrawMods() {
   ImGui::SeparatorText("Mods");
   const PortMods::Status& status = PortMods::CurrentStatus();
+  if (sOriginalExperience) {
+    ImGui::TextDisabled("Original experience is on: no mods are loaded.");
+  }
   bool enabled = sModsEnabled;
   if (ImGui::Checkbox("Load mods", &enabled)) {
     SetModsEnabled(enabled);
@@ -4896,7 +5318,7 @@ void DrawMods() {
            "type (1A2B3C4D.TXTR) replaces it in every PAK. Mods load at startup.");
   // What the settings would load next time, against what this launch loaded.
   std::vector<std::string> disabled = PortMods::SplitDisabled(sModsDisabled);
-  bool changed = sModsEnabled != status.active;
+  bool changed = ModsEnabled() != status.active;
   if (status.mods.empty()) {
     ImGui::TextDisabled("No mods in the folder.");
   }
@@ -4927,7 +5349,7 @@ void DrawMods() {
       ImGui::SameLine();
       ImGui::TextColored(ThemeWarnColor(), "re-import needed");
     }
-    changed = changed || (sModsEnabled && on) != mod.enabled;
+    changed = changed || (ModsEnabled() && on) != mod.enabled;
   }
   if (PortMods::Suspended()) {
     ImGui::TextColored(ThemeWarnColor(), "Unloaded while the Remastered import runs; they load again when it ends.");
@@ -4968,10 +5390,26 @@ void DrawMods() {
 }
 } // namespace
 
+bool UpdateToastShowing() {
+  std::lock_guard lock(sUpdateToastMutex);
+  return sUpdateToastShowing;
+}
+
+bool TapUpdateToast(float x, float y) {
+  std::lock_guard lock(sUpdateToastMutex);
+  const ImVec4& r = sUpdateToastRect;
+  if (!sUpdateToastShowing || x < r.x || x > r.z || y < r.y || y > r.w) {
+    return false;
+  }
+  sUpdateToastTapped.store(true);
+  return true;
+}
+
 void DrawGameSection();
 
 void DrawCutscenesSection() {
   ImGui::SeparatorText("Cutscenes");
+  const bool locked = BeginOriginalLocked();
   bool skippable = sSkippableCutscenes;
   if (ImGui::Checkbox("Skippable cutscenes", &skippable)) {
     SetSkippableCutscenes(skippable);
@@ -4990,11 +5428,13 @@ void DrawCutscenesSection() {
            "far faster; Fast ends it about 2 s in, once the next area is loaded; Skip shows black "
            "until the area is loaded. The cinematic played in the elevator room before the ride is "
            "not affected.");
+  EndOriginalLocked(locked);
 
 }
 
 void DrawUnlocksSection() {
   ImGui::SeparatorText("Unlocks");
+  const bool locked = BeginOriginalLocked();
   bool hardMode = sUnlockHardMode;
   if (ImGui::Checkbox("Hard mode", &hardMode)) {
     SetUnlockHardMode(hardMode);
@@ -5023,6 +5463,7 @@ void DrawUnlocksSection() {
   ImGui::TextDisabled("What finishing the game unlocks. Not written into the save.");
   ItemHelp("Turning an option off locks it again. Metroid (NES) stays locked: its emulator can't run "
            "in the port.");
+  EndOriginalLocked(locked);
 
 }
 
@@ -5109,6 +5550,16 @@ void DrawDiscordSection() {
 
 }
 
+// PrimedGun: upstream's update check stays off (ApplyUpdateCheck), so its checkbox and
+// status would only ever read "off". This links this fork's releases instead.
+void DrawUpdateSection() {
+  ImGui::SeparatorText("Updates");
+  if (ImGui::Button("PrimedGun releases")) {
+    SDL_OpenURL("https://github.com/iChris4/MetroidPrimePortVR/releases");
+  }
+  ImGui::SetItemTooltip("Opens github.com/iChris4/MetroidPrimePortVR/releases in the browser.");
+}
+
 #if defined(__ANDROID__)
 // The folder picker's progress, set from the Java copy thread.
 std::mutex sTexturePackStatusMutex;
@@ -5193,6 +5644,7 @@ void DrawVideoDisplay() {
     MarkDirty();
   }
 
+  const bool locked = BeginOriginalLocked();
   int aspect = static_cast< int >(sAspectMode);
   if (ImGui::Combo("Aspect ratio", &aspect, "4:3\0" "16:9\0" "Follow window\0")) {
     SetAspectMode(static_cast< EAspectMode >(aspect));
@@ -5252,55 +5704,152 @@ void DrawVideoDisplay() {
     ImGui::SetItemTooltip("First-person vertical FOV (retail 55). The arm cannon stays at the retail\n"
                           "FOV; morph ball and cutscene cameras are unchanged.");
   }
+  EndOriginalLocked(locked);
 
 }
 
+// Custom Vulkan drivers (port_gpu_driver.h, Android only). The file dialog answers
+// on another thread, so its pick waits in sGpuDriverPick for ProcessGpuDriverPick.
+namespace {
+std::mutex sGpuDriverPickMutex;
+std::optional<std::string> sGpuDriverPick;
+std::atomic<bool> sGpuDriverDialogOpen{false};
+std::string sGpuDriverStatus;
+std::vector<PortGpuDriver::Driver> sGpuDrivers;
+bool sGpuDriversListed = false;
+
+void OpenGpuDriverDialog() {
+  int windowCount = 0;
+  SDL_Window** windows = SDL_GetWindows(&windowCount);
+  SDL_Window* window = windows != nullptr && windowCount > 0 ? windows[0] : nullptr;
+  SDL_free(windows);
+  const SDL_DialogFileCallback done = [](void*, const char* const* files, int) {
+    std::lock_guard lock(sGpuDriverPickMutex);
+    // Empty = cancelled; a leading \x01 marks a failed dialog's error.
+    sGpuDriverPick = files != nullptr ? std::string(files[0] != nullptr ? files[0] : "")
+                                      : std::string("\x01") + SDL_GetError();
+    sGpuDriverDialogOpen = false;
+  };
+  sGpuDriverDialogOpen = true;
+  SDL_ShowOpenFileDialog(done, nullptr, window, nullptr, 0, nullptr, false);
+}
+
+void ProcessGpuDriverPick() {
+  std::string path;
+  {
+    std::lock_guard lock(sGpuDriverPickMutex);
+    if (!sGpuDriverPick) {
+      return;
+    }
+    path = std::move(*sGpuDriverPick);
+    sGpuDriverPick.reset();
+  }
+  if (path.empty() || path[0] == '\x01') {
+    if (path.size() > 1) {
+      sGpuDriverStatus = "The file dialog failed: " + path.substr(1);
+    }
+    return;
+  }
+  std::string error;
+  const std::string id = PortGpuDriver::Install(path, error);
+  sGpuDriversListed = false;
+  if (id.empty()) {
+    sGpuDriverStatus = "Couldn't install it: " + error + ".";
+  } else {
+    // A reinstalled id may be a different build of the driver.
+    sGpuDriverKept.clear();
+    SetGpuDriver(id);
+    sGpuDriverStatus = "Installed " + id + ".";
+  }
+}
+
+void DrawGpuDriver() {
+  if (!PortGpuDriver::Supported() || aurora_get_backend() != BACKEND_VULKAN) {
+    return;
+  }
+  if (!sGpuDriversListed) {
+    sGpuDrivers = PortGpuDriver::List();
+    sGpuDriversListed = true;
+  }
+  const auto label = [](const PortGpuDriver::Driver& d) {
+    return d.version.empty() ? d.name : d.name + " " + d.version;
+  };
+  std::string preview = "System";
+  for (const auto& d : sGpuDrivers) {
+    if (d.id == sGpuDriver) {
+      preview = label(d);
+    }
+  }
+  if (ImGui::BeginCombo("Vulkan driver", preview.c_str())) {
+    if (ImGui::Selectable("System", sGpuDriver.empty())) {
+      SetGpuDriver("");
+    }
+    for (const auto& d : sGpuDrivers) {
+      ImGui::PushID(d.id.c_str());
+      if (ImGui::Selectable(label(d).c_str(), d.id == sGpuDriver)) {
+        SetGpuDriver(d.id);
+      }
+      if (!d.description.empty()) {
+        ImGui::SetItemTooltip("%s", d.description.c_str());
+      }
+      ImGui::PopID();
+    }
+    ImGui::EndCombo();
+  }
+  ImGui::SetItemTooltip("Loads a custom Vulkan driver instead of the phone's, such as Mesa Turnip for\n"
+                        "Adreno GPUs. Install one from a driver zip (the kind Android emulators use).\n"
+                        "Takes effect after a restart; if it crashes starting, the next start goes\n"
+                        "back to the system driver.");
+  // main() already switched a driver that crashed back to System: nothing to restart for.
+  const bool crashedBack = sGpuDriver.empty() && !PortGpuDriver::LoadError().empty();
+  if (sGpuDriver != sGpuDriverAtStart && !crashedBack) {
+    ImGui::SameLine();
+    ImGui::TextColored(ThemeWarnColor(), "Restart to apply");
+  }
+  ImGui::BeginDisabled(sGpuDriverDialogOpen);
+  if (ImGui::Button("Install driver (.zip)...")) {
+    sGpuDriverStatus.clear();
+    OpenGpuDriverDialog();
+  }
+  ImGui::EndDisabled();
+  const bool removable = !sGpuDriver.empty() && sGpuDriver != PortGpuDriver::Active();
+  if (removable) {
+    ImGui::SameLine();
+    if (ImGui::Button("Remove")) {
+      const std::string id = sGpuDriver;
+      sGpuDriverStatus = PortGpuDriver::Remove(id) ? "Removed " + id + "." : "Couldn't remove " + id + ".";
+      SetGpuDriver("");
+      sGpuDriversListed = false;
+    }
+  }
+  if (!PortGpuDriver::LoadError().empty() && !sGpuDriverAtStart.empty()) {
+    ImGui::TextColored(ThemeWarnColor(), "%s didn't load: %s", sGpuDriverAtStart.c_str(),
+                       PortGpuDriver::LoadError().c_str());
+  }
+  ImGui::TextDisabled("Running: %s", aurora_get_gpu_driver());
+  ImGui::SetItemTooltip("What the GPU reports right now. A loaded custom driver says so here\n"
+                        "(Turnip: \"Mesa Turnip ...\"); otherwise the phone's driver is in use.");
+  if (!sGpuDriverStatus.empty()) {
+    ImGui::TextWrapped("%s", sGpuDriverStatus.c_str());
+  }
+}
+} // namespace
+
 void DrawVideoQuality() {
   ImGui::SeparatorText("Quality");
+  bool locked = BeginOriginalLocked();
   int msaa = sMsaa >= 4 ? 1 : 0;
   if (ImGui::Combo("Anti-aliasing", &msaa, "Off\0" "4x MSAA\0")) {
     SetMsaa(msaa == 1 ? 4 : 1);
   }
   ImGui::SetItemTooltip("Smooths polygon edges, at about 4x the framebuffer memory.");
-  size_t backendCount = 0;
-  const AuroraBackend* backends = aurora_get_available_backends(&backendCount);
-  if (std::find(backends, backends + backendCount, BACKEND_OPENGLES) != backends + backendCount) {
-    bool gles = sOpenGles;
-    if (ImGui::Checkbox("Use OpenGL ES", &gles)) {
-      SetOpenGles(gles);
-    }
-    ImGui::SetItemTooltip("Renders through OpenGL ES instead of Vulkan. Try it if the world draws black\n"
-                          "or untextured (some Adreno drivers). Takes effect after a restart; if the\n"
-                          "driver crashes starting it, the next start goes back to Vulkan.");
-    const AuroraBackend live = aurora_get_backend();
-    if (sOpenGles != sOpenGlesAtStart) {
-      ImGui::SameLine();
-      ImGui::TextColored(ThemeWarnColor(), "Restart to apply");
-    } else if (sOpenGles && live != BACKEND_OPENGLES) {
-      ImGui::SameLine();
-      ImGui::TextColored(ThemeWarnColor(), "OpenGL ES failed to start; using %s",
-                         live == BACKEND_VULKAN ? "Vulkan" : "another API");
-    }
+  EndOriginalLocked(locked);
+  if (ImGui::Checkbox("Show shader compilation", &sShowShaderCompilation)) {
+    MarkDirty();
   }
-  {
-    const bool pending = aurora_gpu_selftest_pending();
-    ImGui::BeginDisabled(pending);
-    if (ImGui::Button("GPU self-test")) {
-      RequestGpuSelfTest();
-    }
-    ImGui::EndDisabled();
-    ImGui::SetItemTooltip("Renders known patterns offscreen through the game's own GX path, reads them back\n"
-                          "and logs one PASS or FAIL line per feature (indexed vertices, TEV, textures, blend,\n"
-                          "depth, EFB copy). For GPU driver bugs such as a black world; attach the log to a report.");
-    char summary[160];
-    if (pending) {
-      ImGui::SameLine();
-      ImGui::TextDisabled("running...");
-    } else if (aurora_gpu_selftest_summary(summary, sizeof(summary)) != 0) {
-      ImGui::SameLine();
-      ImGui::TextUnformatted(summary);
-    }
-  }
+  ImGui::SetItemTooltip("A small progress bar while shaders compile in the background (mostly the first start\n"
+                        "after an install or update). Draws whose shader isn't ready yet are skipped.");
+  locked = BeginOriginalLocked();
   {
     int aniso = 0;
     while ((2 << aniso) <= sAnisotropy && aniso < 4) {
@@ -5375,13 +5924,80 @@ void DrawVideoQuality() {
                   DynamicResTargetFps());
     }
   }
+  EndOriginalLocked(locked);
+  ImGui::BeginDisabled(sOriginalExperience);
   bool font = PortHdFont::Enabled();
   if (ImGui::Checkbox("HD font", &font)) {
     PortHdFont::SetEnabled(font);
   }
+  ImGui::EndDisabled();
   ImGui::SetItemTooltip("Draws the game's text with a sharp, high-resolution font. Recommended: on.\n"
-                        "Not saved: it is on at each start.");
+                        "Not saved: it is on at each start. Off under Original experience.");
+}
 
+// Rendering API, driver and workarounds for GPU driver bugs, and the self-test that finds them.
+void DrawVideoCompatibility() {
+  ImGui::SeparatorText("Compatibility");
+  ImGui::PushTextWrapPos(0.f);
+  ImGui::TextDisabled("For GPU driver problems, such as a black world or a crash at start. Most of these "
+                      "take effect after a restart.");
+  ImGui::PopTextWrapPos();
+  size_t backendCount = 0;
+  const AuroraBackend* backends = aurora_get_available_backends(&backendCount);
+  if (std::find(backends, backends + backendCount, BACKEND_OPENGLES) != backends + backendCount) {
+    bool gles = sOpenGles;
+    if (ImGui::Checkbox("Use OpenGL ES", &gles)) {
+      SetOpenGles(gles);
+    }
+    ImGui::SetItemTooltip("Renders through OpenGL ES instead of Vulkan. Try it if the world draws black\n"
+                          "or untextured (some Adreno drivers). Takes effect after a restart; if the\n"
+                          "driver crashes starting it, the next start goes back to Vulkan.");
+    const AuroraBackend live = aurora_get_backend();
+    if (sOpenGles != sOpenGlesAtStart) {
+      ImGui::SameLine();
+      ImGui::TextColored(ThemeWarnColor(), "Restart to apply");
+    } else if (sOpenGles && live != BACKEND_OPENGLES) {
+      ImGui::SameLine();
+      ImGui::TextColored(ThemeWarnColor(), "OpenGL ES failed to start; using %s",
+                         live == BACKEND_VULKAN ? "Vulkan" : "another API");
+    }
+  }
+  DrawGpuDriver();
+  {
+    static const char* const kClampNames[] = {"Auto", "Off", "On"};
+    int clamp = sStorageClamp + 1;
+    ImGui::SetNextItemWidth(ImGui::GetFontSize() * 8.f);
+    if (ImGui::Combo("Adreno shader fix", &clamp, kClampNames, 3)) {
+      sStorageClamp = clamp - 1;
+      MarkDirty();
+    }
+    ImGui::SetItemTooltip("Reads GPU buffers without the bounds-check branch some Adreno Vulkan drivers\n"
+                          "miscompile (the world draws black, issue #7). Auto turns it on for Adreno 7xx GPUs;\n"
+                          "try On if the world is black on another Adreno. Takes effect after a restart.");
+    if (sStorageClamp != sStorageClampAtStart) {
+      ImGui::SameLine();
+      ImGui::TextColored(ThemeWarnColor(), "Restart to apply");
+    }
+  }
+  {
+    const bool pending = aurora_gpu_selftest_pending();
+    ImGui::BeginDisabled(pending);
+    if (ImGui::Button("GPU self-test")) {
+      RequestGpuSelfTest();
+    }
+    ImGui::EndDisabled();
+    ImGui::SetItemTooltip("Renders known patterns offscreen through the game's own GX path, reads them back\n"
+                          "and logs one PASS or FAIL line per feature (indexed vertices, TEV, textures, blend,\n"
+                          "depth, EFB copy). For GPU driver bugs such as a black world; attach the log to a report.");
+    char summary[160];
+    if (pending) {
+      ImGui::SameLine();
+      ImGui::TextDisabled("running...");
+    } else if (aurora_gpu_selftest_summary(summary, sizeof(summary)) != 0) {
+      ImGui::SameLine();
+      ImGui::TextUnformatted(summary);
+    }
+  }
 }
 
 // The HD texture set and the user's texture pack: the Mods page.
@@ -5434,6 +6050,7 @@ void DrawTexturePack() {
 
 void DrawControlsOptions() {
   ImGui::SeparatorText("Buttons");
+  const bool locked = BeginOriginalLocked();
   bool lockOnToggle = sLockOnToggle;
   if (ImGui::Checkbox("Toggle Lock-On", &lockOnToggle)) {
     SetLockOnToggle(lockOnToggle);
@@ -5450,9 +6067,9 @@ void DrawControlsOptions() {
   if (ImGui::Checkbox("Remastered charge (rapid fire)", &rapidCharge)) {
     SetRapidCharge(rapidCharge);
   }
-  ItemHelp("As in Metroid Prime Remastered: holding fire first shoots a few quick shots (Power 2, "
-           "Wave 1, Plasma 1, Ice none), then charges faster, so a full charge takes about as "
-           "long as before. Needs the Charge Beam.");
+  ItemHelp("As in Metroid Prime Remastered: holding fire fires a few shots before charging (3 in all "
+           "with Power, 2 with Wave or Plasma, 1 with Ice), then charges faster, so a full charge takes about as "
+           "long as before. Without the Charge Beam it fires the same shots, then waits for you to let go.");
   bool swapScanXray = sSwapScanXray;
   if (ImGui::Checkbox("Swap the Scan and X-Ray visor buttons", &swapScanXray)) {
     SetSwapScanXray(swapScanXray);
@@ -5486,6 +6103,7 @@ void DrawControlsOptions() {
              "held. Twin stick still passes the right stick up to it, and the beam shift (X in the "
              "Remastered preset) springs too.");
   }
+  EndOriginalLocked(locked);
 }
 
 void DrawControlsKeyboardMouse() {
@@ -5568,6 +6186,22 @@ void DrawControlsTouchGyro() {
   }
   ItemHelp("Writes what each on-screen button does next to its letter (Fire, Jump, Lock...). "
            "Off, only the letters are shown.");
+  ImGui::BeginDisabled(sOriginalExperience);
+  if (ImGui::Checkbox("Turbo fire button", &sTouchTurbo)) {
+    if (!sTouchTurbo) {
+      sTouchTurboFire.store(false, std::memory_order_release);
+    }
+    MarkDirty();
+  }
+  ImGui::EndDisabled();
+  ItemHelp("Adds a Turbo button next to Fire: holding it fires as if Fire were tapped as fast as the "
+           "game accepts. It can be moved and resized in Edit layout.");
+  if (ImGui::Checkbox("Floating left stick", &sTouchFloatingStick)) {
+    MarkDirty();
+  }
+  ItemHelp("Hides the left stick until a finger touches a free spot on the left half of the screen, "
+           "then centres it under that finger. Another finger on the left half aims, like the rest "
+           "of the free area. The map screen keeps the fixed stick.");
   int touchLayout = sTouchClassic ? 1 : sTouchTwinStick ? 2 : 0;
   static const char* const kTouchLayouts[] = {"Default", "Classic GameCube", "Twin stick (Remastered)"};
   if (ImGui::Combo("Layout", &touchLayout, kTouchLayouts, 3)) {
@@ -6493,7 +7127,7 @@ void DrawRemasteredRoomModels() {
                         "top of them to compare the two. Does nothing without a room geometry mod.");
 #ifdef __ANDROID__
   // The defaults (MSAA off, 1x) are fine; this catches a phone set up for the original rooms.
-  if (PortRoomGeo::GetMode() != PortRoomGeo::Mode::Off && (sMsaa > 1 || sRenderScale <= 0.f || sRenderScale > 2.f)) {
+  if (PortRoomGeo::GetMode() != PortRoomGeo::Mode::Off && (EffectiveMsaa() > 1 || EffectiveRenderScale() <= 0.f || EffectiveRenderScale() > 2.f)) {
     ImGui::TextColored(ThemeWarnColor(), "Slow on phones with MSAA or native scale.");
     ImGui::SameLine();
     if (ImGui::SmallButton("Use 2x, MSAA off")) {
@@ -6922,9 +7556,11 @@ void DrawTrackerLogic() {
 
 void DrawTrackerTab() {
   bool reveal = sRevealMap;
+  ImGui::BeginDisabled(sOriginalExperience);
   if (ImGui::Checkbox("Reveal map", &reveal)) {
     SetRevealMap(reveal);
   }
+  ImGui::EndDisabled();
   ItemHelp("Shows every world's map as if its map station had been used, and lists every world on "
            "the star map. Rooms a map station leaves hidden stay hidden, and rooms you haven't "
            "entered keep the unexplored colour. The save is not changed.");
@@ -7122,7 +7758,22 @@ void DrawGameAudio() {
                         "file the next time you save, and loading a save restores its volumes.");
 }
 
+void DrawOriginalSection() {
+  bool original = sOriginalExperience;
+  if (ImGui::Checkbox("Original experience", &original)) {
+    SetOriginalExperience(original);
+  }
+  ItemHelp("Plays the game as on the GameCube: 640x480 at 4:3, 60 Hz with no interpolation, no "
+           "mods, the retail HUD, font, button icons, FOV and cutscenes, and none of the gameplay extras (spring ball, "
+           "fast morph, charge and lock-on options, turbo fire, unlocks). The other settings keep "
+           "their values and come back when it's turned off. Controls, cheats, save states, the "
+           "randomizer, Archipelago and the timer still work."
+           // PortVr: OriginalOverridesComfort.
+           " In the headset, the helmet and the frame interpolation keep their own settings.");
+}
+
 void DrawGameTab() {
+  DrawOriginalSection();
   DrawGameSection();
   DrawCutscenesSection();
   DrawUnlocksSection();
@@ -7170,6 +7821,10 @@ void DrawVideoTab() {
     DrawPerformanceTab();
     ImGui::EndTabItem();
   }
+  if (SubTab("Video", "Compatibility")) {
+    DrawVideoCompatibility();
+    ImGui::EndTabItem();
+  }
   ImGui::EndTabBar();
 }
 
@@ -7187,8 +7842,12 @@ void DrawSystemTab() {
 #endif
   DrawLogSection();
   DrawDiscordSection();
+  DrawUpdateSection();
   ImGui::SeparatorText("About");
-  ImGui::TextDisabled("Build: %s", MP_BUILD_REVISION);
+  // PrimedGun: the fork's release first; MP_BUILD_VERSION is the native port's (upstream's
+  // versionName in android/app/build.gradle).
+  ImGui::TextDisabled("PrimedGun %s (native port %s), build %s", MP_PRIMEDGUN_VERSION, MP_BUILD_VERSION,
+                      MP_BUILD_REVISION);
 }
 
 struct DebugPage {
@@ -7196,12 +7855,380 @@ struct DebugPage {
   void (*draw)();
 };
 
+// Trick names are comma-separated in the settings; the box shows them so.
+std::string JoinNames(const std::vector< std::string >& names) {
+  std::string text;
+  for (const std::string& name : names) {
+    text += (text.empty() ? "" : ", ") + name;
+  }
+  return text;
+}
+
+std::vector< std::string > SplitNames(const char* text) {
+  std::vector< std::string > names;
+  std::string item;
+  for (const char* c = text;; ++c) {
+    if (*c == ',' || *c == '\0') {
+      item = Trim(item);
+      if (!item.empty()) {
+        names.push_back(item);
+      }
+      item.clear();
+      if (*c == '\0') {
+        break;
+      }
+    } else {
+      item += *c;
+    }
+  }
+  return names;
+}
+
+struct RandoSeedRow {
+  std::string name;
+  std::string summary;
+  long long modified = 0;
+};
+
+std::string RandoSummary(const PortRandoGen::Settings& s) {
+  static const char* const kBosses[] = {"both bosses", "Ridley", "Prime", "no boss"};
+  std::string text = std::to_string(s.requiredArtifacts) + " artifacts, " +
+                     kBosses[std::clamp(s.finalBosses, 0, 3)];
+  if (s.elevatorRandomization) {
+    text += ", elevators";
+  }
+  if (s.doorColorRandomization != 0) {
+    text += s.doorColorRandomization == 1 ? ", doors global" : ", doors regional";
+  }
+  if (s.startingRoom != 0) {
+    text += s.startingRoom == 1 ? ", safe start" : ", buckle-up start";
+  }
+  if (s.blastShieldRandomization != 0) {
+    text += s.blastShieldRandomization == 1 ? ", shields replaced" : ", shields mixed";
+  }
+  if (s.lockedDoorCount > 0) {
+    text += ", " + std::to_string(s.lockedDoorCount) + " locked";
+  }
+  if (s.trickDifficulty >= 0) {
+    static const char* const kTricks[] = {"easy", "medium", "hard"};
+    text += std::string(", tricks ") + kTricks[std::min(s.trickDifficulty, 2)];
+  }
+  return text;
+}
+
+std::vector< RandoSeedRow > ScanRandoSeeds() {
+  std::vector< RandoSeedRow > rows;
+  std::error_code ec;
+  for (const auto& entry : std::filesystem::directory_iterator(PortRandoGen::SeedDirectory(), ec)) {
+    const std::string file = entry.path().filename().string();
+    if (file.size() <= 5 || file.compare(file.size() - 5, 5, ".json") != 0 ||
+        (file.size() > 11 && file.compare(file.size() - 11, 11, ".state.json") == 0)) {
+      continue;
+    }
+    RandoSeedRow row;
+    row.name = file.substr(0, file.size() - 5);
+    PortRandoGen::Seed seed;
+    std::string error;
+    row.summary = PortRandoGen::Load(entry.path().string(), seed, error) ? RandoSummary(seed.settings)
+                                                                          : "unreadable: " + error;
+    const auto time = std::filesystem::last_write_time(entry.path(), ec);
+    row.modified = ec ? 0 : static_cast< long long >(time.time_since_epoch().count());
+    rows.push_back(std::move(row));
+  }
+  std::sort(rows.begin(), rows.end(),
+            [](const RandoSeedRow& a, const RandoSeedRow& b) { return a.modified > b.modified; });
+  return rows;
+}
+
+// The built-in randomizer: options, seed text, and the seeds made so far.
+// Playing goes through the Archipelago client, so it replaces any session.
+void DrawRandomizerTab() {
+  static bool sScanned = false;
+  static std::vector< RandoSeedRow > sRows;
+  static char sSeedText[64];
+  static char sAllow[256];
+  static char sDeny[256];
+  static bool sTextLoaded = false;
+  static std::string sMessage;
+  static bool sMessageError = false;
+  static std::string sSpoilerName;
+  static std::string sSpoilerText;
+  static std::string sSpoilerNote;
+  // The list is read again each time the page is opened (a frame passed
+  // without it), so seeds made with the console's `rando gen` show up.
+  static int sLastFrame = -2;
+  if (ImGui::GetFrameCount() != sLastFrame + 1)
+    sScanned = false;
+  sLastFrame = ImGui::GetFrameCount();
+  if (!sScanned) {
+    sRows = ScanRandoSeeds();
+    sScanned = true;
+  }
+
+  PortRandoGen::Settings s;
+  {
+    std::lock_guard< std::mutex > lock(sRandoMutex);
+    s = sRandoSettings;
+  }
+  if (!sTextLoaded) {
+    sTextLoaded = true;
+    SDL_strlcpy(sAllow, JoinNames(s.trickAllow).c_str(), sizeof(sAllow));
+    SDL_strlcpy(sDeny, JoinNames(s.trickDeny).c_str(), sizeof(sDeny));
+  }
+  bool changed = false;
+  const auto check = [&](const char* label, bool& value, const char* help) {
+    changed |= ImGui::Checkbox(label, &value);
+    ItemHelp(help);
+  };
+
+  ImGui::TextWrapped("Makes a seed from these options and plays it as a one-player Archipelago game "
+                     "(slot Samus), with its own save card. The same options and seed text give the "
+                     "same seed everywhere.");
+
+  ImGui::SeparatorText("Goal");
+  changed |= ImGui::SliderInt("Required artifacts", &s.requiredArtifacts, 1, 12);
+  ItemHelp("How many of the 12 Chozo artifacts open the way to the end.");
+  changed |= ImGui::Combo("Final bosses", &s.finalBosses, "Ridley and Prime\0Ridley\0Prime\0None\0");
+  ItemHelp("Which bosses must be beaten to finish. None finishes at the artifact temple.");
+  check("Artifact hints", s.artifactHints, "The Artifact Temple totems say where each artifact is.");
+
+  ImGui::SeparatorText("Start");
+  changed |= ImGui::Combo("Starting room", &s.startingRoom, "Normal\0Safe\0Buckle up\0");
+  ItemHelp("Normal starts at the Landing Site (Save Station 1 with random elevators). Safe and Buckle up "
+           "start in a random room with that room's items; Buckle up's rooms are harder to get out of.");
+  check("Random starting beam", s.randomizeStartingBeam,
+        "Start with the Wave, Ice or Plasma Beam instead of the Power Beam.");
+
+  ImGui::SeparatorText("Items");
+  check("Missile Launcher", s.missileLauncher, "Missiles are useless until the Missile Launcher is found.");
+  check("Main Power Bomb", s.mainPowerBomb, "Power bombs need the main Power Bomb item.");
+  check("Shuffle Scan Visor", s.shuffleScanVisor, "The Scan Visor is an item to find, not a start item.");
+  check("Progressive beams", s.progressiveBeams, "Each beam has upgrades received in order, not as named items.");
+  check("Spring Ball", s.springBall, "Morph Ball Bombs also give the Spring Ball (jump in Morph Ball form).");
+  changed |= ImGui::Combo("Remove X-Ray requirement", &s.removeXray,
+                          "None\0Most\0All but the Omega Pirate\0");
+  ItemHelp("Takes the X-Ray Visor out of the logic where it is needed to see hidden things.");
+  changed |= ImGui::Combo("Remove Thermal requirement", &s.removeThermal, "None\0Most\0All\0");
+  ItemHelp("Takes the Thermal Visor out of the logic where it is needed.");
+  check("Remove Hive Mecha", s.removeHiveMecha, "Skips the Hive Mecha fight in Hive Totem.");
+
+  ImGui::SeparatorText("World");
+  check("Pre-scanned elevators", s.preScanElevators, "Elevator destinations are known without scanning them.");
+  check("Elevator randomization", s.elevatorRandomization, "Elevators lead to other areas.");
+  changed |= ImGui::Combo("Door colours", &s.doorColorRandomization, "None\0Global\0Regional\0");
+  ItemHelp("Shuffles the coloured door locks, everywhere or within each area.");
+  check("Power Beam doors", s.includePowerBeamDoors,
+        "Door colours may turn a colour into Power Beam doors (with a random starting beam, the start "
+        "beam's doors open to the Power Beam instead).");
+  check("Morph Ball Bomb doors", s.includeMorphBallBombDoors,
+        "With door colours, one colour of one area other than the start's opens to Morph Ball Bombs.");
+  changed |= ImGui::Combo("Blast shields", &s.blastShieldRandomization, "None\0Replace existing\0Mix it up\0");
+  ItemHelp("Replace existing gives the disc's missile shields random types. Mix it up puts random shields on "
+           "doors all over each area instead.");
+  ImGui::BeginDisabled(s.blastShieldRandomization != 2);
+  int frequency = s.blastShieldFrequency >= 6 ? 2 : s.blastShieldFrequency >= 4 ? 1 : 0;
+  if (ImGui::Combo("Blast shield frequency", &frequency, "Low (10%)\0Medium (40%)\0High (60%)\0")) {
+    s.blastShieldFrequency = frequency == 0 ? 1 : frequency == 1 ? 4 : 6;
+    changed = true;
+  }
+  ItemHelp("How many of each area's doors take a shield under Mix it up.");
+  ImGui::EndDisabled();
+  ImGui::BeginDisabled(s.blastShieldRandomization == 0);
+  changed |= ImGui::Combo("Blast shield types", &s.blastShieldAvailableTypes, "No beam combos\0All\0");
+  ItemHelp("All adds Flamethrower, Ice Spreader and Wavebuster shields, at most one per area.");
+  ImGui::EndDisabled();
+  changed |= ImGui::SliderInt("Locked doors", &s.lockedDoorCount, 0, 2);
+  ItemHelp("How many areas (not Magmoor) get one door locked for good.");
+  check("Backwards Lower Mines", s.backwardsLowerMines, "Phazon Mines' lower levels can be entered from the other end.");
+  check("Flaahgra power bombs", s.flaahgraPowerBombs, "Flaahgra can be beaten with power bombs.");
+
+  ImGui::SeparatorText("Logic");
+  check("Heat damage without the Varia Suit", s.nonVariaHeatDamage, "Hot rooms hurt without Varia, so other suits or tanks can carry you through.");
+  changed |= ImGui::Combo("Staggered suit damage", &s.staggeredSuitDamage, "Default\0Progressive\0Additive\0");
+  ItemHelp("How the suits split damage between them.");
+  int combat = s.combatLogic + 1;
+  if (ImGui::Combo("Combat logic", &combat, "None\0Normal\0Minimal\0")) {
+    s.combatLogic = combat - 1;
+    changed = true;
+  }
+  ItemHelp("How strictly the logic expects you to have the gear to win fights.");
+  int tricks = s.trickDifficulty + 1;
+  if (ImGui::Combo("Trick difficulty", &tricks, "None\0Easy\0Medium\0Hard\0")) {
+    s.trickDifficulty = tricks - 1;
+    changed = true;
+  }
+  ItemHelp("Sequence breaks the logic may expect, up to this difficulty.");
+  if (ImGui::InputText("Allow tricks", sAllow, sizeof(sAllow))) {
+    s.trickAllow = SplitNames(sAllow);
+    changed = true;
+  }
+  ItemHelp("Trick names, separated by commas, always expected whatever the difficulty.");
+  if (ImGui::InputText("Deny tricks", sDeny, sizeof(sDeny))) {
+    s.trickDeny = SplitNames(sDeny);
+    changed = true;
+  }
+  ItemHelp("Trick names, separated by commas, never expected whatever the difficulty.");
+
+  if (changed) {
+    {
+      std::lock_guard< std::mutex > lock(sRandoMutex);
+      sRandoSettings = s;
+    }
+    MarkDirty();
+  }
+  if (ImGui::Button("Reset options")) {
+    {
+      std::lock_guard< std::mutex > lock(sRandoMutex);
+      sRandoSettings = PortRandoGen::Settings();
+    }
+    sTextLoaded = false;
+    MarkDirty();
+  }
+
+  ImGui::SeparatorText("New seed");
+  ImGui::InputTextWithHint("Seed", "empty picks a random one", sSeedText, sizeof(sSeedText));
+  ItemHelp("Any text. The same text with the same options makes the same seed.");
+  ImGui::SameLine();
+  if (ImGui::Button("Random")) {
+    sSeedText[0] = '\0';
+  }
+  // A loaded game keeps its save card until the title screen, so seeds are
+  // only switched there (PortAp::PlaySolo refuses too).
+  const bool inGame = PortDebug::StateManager() != nullptr;
+  const std::string inPlay = PortAp::SoloSeedInPlay();
+  if (ImGui::Button(inGame ? "Generate" : "Generate & Play")) {
+    PortRandoGen::Seed seed;
+    std::string error;
+    sMessageError = true;
+    if (!PortRandoGen::Generate(s, sSeedText, seed, error) || !PortRandoGen::Save(seed, error)) {
+      sMessage = error;
+    } else if (inGame) {
+      sMessageError = false;
+      sMessage = "Saved seed " + seed.name + ". Quit to the title screen to play it.";
+    } else if (!PortAp::PlaySolo(seed.name, error)) {
+      sMessage = error;
+    } else {
+      sMessageError = false;
+      sMessage = "Playing seed " + seed.name;
+    }
+    sScanned = false;
+  }
+  ItemHelp(inGame ? "Makes the seed and saves it. Quit to the title screen to play it."
+                  : "Makes the seed, saves it and starts playing it. If an Archipelago session is running, "
+                    "it is replaced.");
+  if (!sMessage.empty()) {
+    ImGui::TextColored(sMessageError ? ImVec4(1.f, 0.4f, 0.4f, 1.f) : ImVec4(0.5f, 1.f, 0.5f, 1.f), "%s",
+                       sMessage.c_str());
+  }
+
+  ImGui::SeparatorText("Seeds");
+  if (sRows.empty()) {
+    ImGui::TextDisabled("No seeds yet.");
+  } else if (inGame) {
+    ImGui::TextDisabled("Quit to the title screen to switch seeds.");
+  }
+  bool deleted = false;
+  for (const RandoSeedRow& row : sRows) {
+    const bool current = !inPlay.empty() && PortAp::SameSoloSeed(inPlay, row.name);
+    ImGui::PushID(row.name.c_str());
+    if (current) {
+      ImGui::Text("%s (playing)", row.name.c_str());
+    } else {
+      ImGui::TextUnformatted(row.name.c_str());
+    }
+    ImGui::TextDisabled("%s", row.summary.c_str());
+    ImGui::BeginDisabled(inGame && !current);
+    if (ImGui::Button("Play")) {
+      std::string error;
+      sMessageError = !PortAp::PlaySolo(row.name, error);
+      sMessage = sMessageError ? error : "Playing seed " + row.name;
+    }
+    ImGui::EndDisabled();
+    ItemHelp("Plays this seed with its own save card. A running Archipelago session is replaced. "
+             "Seeds are switched at the title screen.");
+    ImGui::SameLine();
+    if (ImGui::Button("Spoiler")) {
+      PortRandoGen::Seed seed;
+      std::string error;
+      sSpoilerName = row.name;
+      sSpoilerNote.clear();
+      sSpoilerText = PortRandoGen::Load(PortRandoGen::SeedPath(row.name), seed, error) ? seed.spoiler
+                                                                                       : "Could not read: " + error;
+    }
+    ImGui::SameLine();
+    if (ImGui::Button("Write spoiler file")) {
+      PortRandoGen::Seed seed;
+      std::string error;
+      sSpoilerName = row.name;
+      if (!PortRandoGen::Load(PortRandoGen::SeedPath(row.name), seed, error)) {
+        sSpoilerNote = "Could not read: " + error;
+      } else {
+        const std::string path = PortRandoGen::SeedDirectory() + "/" + row.name + ".spoiler.txt";
+        std::ofstream out(path, std::ios::trunc);
+        out << seed.spoiler;
+        sSpoilerNote = out.good() ? "Wrote " + path : "Could not write " + path;
+      }
+    }
+    ImGui::SameLine();
+    ImGui::BeginDisabled(current);
+    if (ImGui::Button("Delete")) {
+      ImGui::OpenPopup("Delete seed?");
+    }
+    ImGui::EndDisabled();
+    ItemHelp(current ? "This seed is being played. Play another seed or disconnect first."
+                     : "Deletes the seed, its progress and its save card.");
+    if (ImGui::BeginPopupModal("Delete seed?", nullptr, ImGuiWindowFlags_AlwaysAutoResize)) {
+      ImGui::Text("Delete seed %s, its progress and its save card?", row.name.c_str());
+      ImGui::TextUnformatted("This can't be undone.");
+      if (ImGui::Button("Delete")) {
+        std::string error;
+        sMessageError = !PortAp::DeleteSolo(row.name, error);
+        sMessage = sMessageError ? error : "Deleted seed " + row.name;
+        if (sSpoilerName == row.name) {
+          sSpoilerText.clear();
+          sSpoilerNote.clear();
+        }
+        sScanned = false;
+        deleted = true;
+        ImGui::CloseCurrentPopup();
+      }
+      ImGui::SameLine();
+      if (ImGui::Button("Cancel")) {
+        ImGui::CloseCurrentPopup();
+      }
+      ImGui::EndPopup();
+    }
+    ImGui::PopID();
+    ImGui::Separator();
+    if (deleted) {
+      break; // sRows is read again next frame
+    }
+  }
+  if (!sSpoilerNote.empty()) {
+    ImGui::TextWrapped("%s", sSpoilerNote.c_str());
+  }
+  if (!sSpoilerText.empty()) {
+    ImGui::SeparatorText("Spoiler");
+    ImGui::TextColored(ImVec4(1.f, 0.8f, 0.3f, 1.f), "This shows where everything is in seed %s.",
+                       sSpoilerName.c_str());
+    if (ImGui::Button("Hide")) {
+      sSpoilerText.clear();
+    } else if (ImGui::BeginChild("randoSpoiler", ImVec2(0, ImGui::GetFontSize() * 24.f), ImGuiChildFlags_Borders)) {
+      ImGui::TextUnformatted(sSpoilerText.c_str());
+    }
+    if (!sSpoilerText.empty()) {
+      ImGui::EndChild();
+    }
+  }
+}
+
 const DebugPage kDebugPages[] = {
     {"Game", DrawGameTab},
     {"Controls", DrawControlsTab},
     {"Video", DrawVideoTab},
     {"Remastered", DrawRemasteredTab},
     {"Mods", DrawModsTab},
+    {"Randomizer", DrawRandomizerTab},
     {"Archipelago", DrawArchipelagoTab},
     {"Tracker", DrawTrackerTab},
     {"Save states", DrawSaveStatesTab},
@@ -7556,6 +8583,7 @@ void DrawUI() {
   }
 #endif
   ProcessCardPicks();
+  ProcessGpuDriverPick();
 #if !defined(__ANDROID__)
   // Every frame, not only with the panel open: an importer stops when its
   // output pipe fills.
@@ -7563,7 +8591,10 @@ void DrawUI() {
 #endif
   FinishRemasteredImport();
   DrawStaleImportToast();
+  DrawUpdateToast();
   DrawDiscReadFailedAlert();
+  DrawGpuDriverTrial();
+  DrawShaderCompilationToast();
   if (sTouchLayoutSavePending.exchange(false, std::memory_order_acq_rel)) {
     MarkDirty();
     SaveSettings();
@@ -7820,6 +8851,11 @@ Java_org_metroidprime_port_TouchControlsView_nativeMapTap(JNIEnv*, jclass) {
 #endif
 
 extern "C" JNIEXPORT jboolean JNICALL
+Java_org_metroidprime_port_TouchControlsView_nativeTapUpdateToast(JNIEnv*, jclass, jfloat x, jfloat y) {
+  return PortDebug::TapUpdateToast(x, y) ? JNI_TRUE : JNI_FALSE;
+}
+
+extern "C" JNIEXPORT jboolean JNICALL
 Java_org_metroidprime_port_TouchControlsView_nativeDebugOverlayVisible(JNIEnv*, jclass) {
   return PortDebug::OverlayVisible() ? JNI_TRUE : JNI_FALSE;
 }
@@ -7827,6 +8863,16 @@ Java_org_metroidprime_port_TouchControlsView_nativeDebugOverlayVisible(JNIEnv*, 
 extern "C" JNIEXPORT void JNICALL
 Java_org_metroidprime_port_TouchControlsView_nativeTouchBeamShift(JNIEnv*, jclass, jboolean held) {
   sTouchBeamShift.store(held == JNI_TRUE, std::memory_order_release);
+}
+
+extern "C" JNIEXPORT void JNICALL
+Java_org_metroidprime_port_TouchControlsView_nativeTouchTurboFire(JNIEnv*, jclass, jboolean held) {
+  sTouchTurboFire.store(held == JNI_TRUE, std::memory_order_release);
+}
+
+extern "C" JNIEXPORT jboolean JNICALL
+Java_org_metroidprime_port_TouchControlsView_nativeTouchTurbo(JNIEnv*, jclass) {
+  return PortDebug::TouchTurboFlag() ? JNI_TRUE : JNI_FALSE;
 }
 
 extern "C" JNIEXPORT void JNICALL
@@ -7843,6 +8889,11 @@ Java_org_metroidprime_port_TouchControlsView_nativeTouchColors(JNIEnv*, jclass) 
 extern "C" JNIEXPORT jboolean JNICALL
 Java_org_metroidprime_port_TouchControlsView_nativeTouchLabels(JNIEnv*, jclass) {
   return PortDebug::TouchLabelsFlag() ? JNI_TRUE : JNI_FALSE;
+}
+
+extern "C" JNIEXPORT jboolean JNICALL
+Java_org_metroidprime_port_TouchControlsView_nativeTouchFloatingStick(JNIEnv*, jclass) {
+  return PortDebug::TouchFloatingStickFlag() ? JNI_TRUE : JNI_FALSE;
 }
 
 extern "C" JNIEXPORT jfloat JNICALL

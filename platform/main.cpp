@@ -31,6 +31,7 @@
 #include "port_importers.h"
 #include "port_remastered_import.h"
 #include "port_gci.h"
+#include "port_gpu_driver.h"
 
 #include <SDL3/SDL_dialog.h>
 #include <SDL3/SDL_events.h>
@@ -71,6 +72,13 @@ extern "C" void AIPortShutdown(void);
 // PortVr: the OpenXR host layer (platform/vr).
 #include "vr/openxr_integration.h"
 #include "vr/vr_settings.h"
+
+// PrimedGun: the fork's release version (launcher/CMakeLists.txt), which
+// cmake/BuildRevision.cmake writes beside upstream's MP_BUILD_VERSION. A
+// port_build_info.h generated before that change lacks it.
+#ifndef MP_PRIMEDGUN_VERSION
+#define MP_PRIMEDGUN_VERSION ""
+#endif
 
 namespace {
 #if defined(__ANDROID__)
@@ -800,7 +808,10 @@ int main(int argc, char** argv) {
     PortLogFile::AttachParentConsole();
 #endif
     if (argc == 2 && std::strcmp(argv[1], "--version") == 0) {
-        std::printf("Metroid Prime native port %s\n", MP_BUILD_REVISION);
+        // PrimedGun: the fork's version first, then upstream's. The port_version test
+        // (CMakeLists.txt) looks for "Metroid Prime native port" in this line.
+        std::printf("PrimedGun %s (Metroid Prime native port %s), build %s\n", MP_PRIMEDGUN_VERSION,
+                    MP_BUILD_VERSION, MP_BUILD_REVISION);
         return 0;
     }
 #if defined(__ANDROID__)
@@ -862,7 +873,9 @@ int main(int argc, char** argv) {
         }
     }
     PortCrash::Install();
-    PortLog::Write( "metroid_prime_port: build %s\n", MP_BUILD_REVISION);
+    // PrimedGun: the same versions as --version.
+    PortLog::Write("metroid_prime_port: PrimedGun %s (native port %s), build %s\n", MP_PRIMEDGUN_VERSION,
+                   MP_BUILD_VERSION, MP_BUILD_REVISION);
     for (const std::string& line : PortPaths::MigrationLog()) {
         PortLog::Write("port: portable data: %s\n", line.c_str());
     }
@@ -1032,6 +1045,8 @@ int main(int argc, char** argv) {
         // An embedded seed wins over a stale initial_pipeline_cache.db beside the executable.
         .pipelineCacheSeedData = embeddedSeed.data(),
         .pipelineCacheSeedSize = embeddedSeed.size(),
+        // Set below when a custom Vulkan driver (port_gpu_driver.h) is loaded.
+        .vulkanLibraryDir = nullptr,
     };
 
 #if defined(_WIN32)
@@ -1114,10 +1129,72 @@ int main(int argc, char** argv) {
             std::ofstream(glesMarker) << "1\n";
         }
     }
+    // A custom Vulkan driver (Turnip) can crash while it starts, just like GL above; the
+    // same kind of marker sends the next start back to the system driver.
+    // MP_GPU_DRIVER=<id> (empty = system) overrides the setting for one run.
+    const std::filesystem::path driverMarker =
+        std::filesystem::path(userFolder.empty() ? "." : userFolder) / "gpu_driver_starting";
+    static std::string vulkanLibraryDir;
+    const char* envDriver = std::getenv("MP_GPU_DRIVER");
+    {
+        const std::string driver = envDriver != nullptr ? envDriver : PortDebug::GpuDriver();
+        std::error_code ec;
+        // PortVr: with the headset, the OpenXR runtime creates Dawn's Vulkan instance and
+        // device (openxr_vulkan_direct.cpp) and gives it eye swapchain images shared with
+        // its compositor, which has only been tried on the system driver; a saved driver
+        // setting is left for a flat start. No OpenXR build has custom drivers, though:
+        // CMakeLists.txt defines MP_CUSTOM_GPU_DRIVERS only for upstream's arm64 phone
+        // build, so in PrimedGun's PC and Quest builds PortGpuDriver::Supported() is false
+        // and neither the setting nor MP_GPU_DRIVER loads a driver. This guard (which
+        // MP_GPU_DRIVER skips) only matters to a build that would have both.
+        const bool headsetKeepsSystemDriver =
+            vrStartup == PortVr::OpenXRStartupResult::Prepared && envDriver == nullptr;
+        if (!driver.empty() && headsetKeepsSystemDriver && PortGpuDriver::Supported()) {
+            PortLog::Write("port: GPU driver %s is not used with the headset; using the system driver\n",
+                           driver.c_str());
+            PortGpuDriver::SetLoadError("the headset runs on the system driver");
+        }
+        if (!driver.empty() && !headsetKeepsSystemDriver && config.desiredBackend != BACKEND_OPENGLES &&
+            PortGpuDriver::Supported()) {
+            if (std::filesystem::exists(driverMarker, ec)) {
+                PortLog::Write("port: the last start with GPU driver %s crashed or wasn't kept; using the system driver\n",
+                               driver.c_str());
+                PortDebug::SetGpuDriver("");
+                PortGpuDriver::SetLoadError("it crashed or wasn't kept last time; switched back to the system driver");
+                std::filesystem::remove(driverMarker, ec);
+            } else {
+                std::ofstream(driverMarker) << driver << '\n';
+                vulkanLibraryDir = PortGpuDriver::Prepare(driver);
+                config.vulkanLibraryDir = vulkanLibraryDir.empty() ? nullptr : vulkanLibraryDir.c_str();
+            }
+        } else {
+            // Left by a crash before the user switched back to System: don't hold it against the next driver.
+            std::filesystem::remove(driverMarker, ec);
+        }
+    }
+    PortDebug::ApplyStorageClamp();
     const AuroraInfo auroraInfo = aurora_initialize(argc, argv, &config);
     if (config.desiredBackend == BACKEND_OPENGLES) {
         std::error_code ec;
         std::filesystem::remove(glesMarker, ec);
+    }
+    // Aurora went back to the system driver when Vulkan failed with the custom one.
+    if (aurora_vulkan_library_failed() && !PortGpuDriver::Active().empty()) {
+        PortLog::Write("port: Vulkan failed with GPU driver %s; using the system driver\n",
+                       PortGpuDriver::Active().c_str());
+        if (envDriver == nullptr) {
+            PortDebug::SetGpuDriver("");
+        }
+        PortGpuDriver::SetLoadError("Vulkan failed to start with it; switched back to the system driver");
+    }
+    // A driver's first run (not yet kept; MP_GPU_DRIVER runs are tests) keeps its
+    // marker until the user keeps it, since one that starts can still draw garbage.
+    if (!PortGpuDriver::Active().empty() && envDriver == nullptr &&
+        PortGpuDriver::Active() != PortDebug::GpuDriverKept()) {
+        PortDebug::BeginGpuDriverTrial(driverMarker.string());
+    } else {
+        std::error_code ec;
+        std::filesystem::remove(driverMarker, ec);
     }
     // From what the device gave, which can be less than was asked for.
     if (aurora_get_frame_buffer_scale() != frameBufferScale) {

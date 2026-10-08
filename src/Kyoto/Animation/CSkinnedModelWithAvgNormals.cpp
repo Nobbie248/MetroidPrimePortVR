@@ -31,6 +31,9 @@ CSkinnedModelWithAvgNormals::CSkinnedModelWithAvgNormals(const CSkinnedModel& sk
   // normalised average was 0/0 or x/0, and CVertexMorphEffect, which weights
   // each vertex of the frozen (ice beam) shell by these normals, pushed the
   // vertices of a NaN or infinite normal out to infinity. Swap them once here.
+  // NBT normals are nine (N, B, T) or fifteen floats per vertex; N is the first,
+  // and only N is kept, so nativeNormals holds one vector per vertex.
+  const uint srcNormalVecs = skinnedModel.GetModel()->GetCubeModel()->NormalVecs();
   rstl::vector< CVector3f > nativePositions(vertexCount);
   rstl::vector< CVector3f > nativeNormals(vertexCount);
   {
@@ -42,7 +45,7 @@ CSkinnedModelWithAvgNormals::CSkinnedModelWithAvgNormals(const CSkinnedModel& sk
       float p[3];
       float n[3];
       memcpy(p, srcPositions + i * sizeof(p), sizeof(p));
-      memcpy(n, srcNormals + i * sizeof(n), sizeof(n));
+      memcpy(n, srcNormals + i * srcNormalVecs * sizeof(n), sizeof(n));
       nativePositions.push_back(CVector3f(CBasics::SwapBytes(p[0]), CBasics::SwapBytes(p[1]),
                                           CBasics::SwapBytes(p[2])));
       nativeNormals.push_back(CVector3f(CBasics::SwapBytes(n[0]), CBasics::SwapBytes(n[1]),
@@ -81,9 +84,13 @@ CSkinnedModelWithAvgNormals::CSkinnedModelWithAvgNormals(const CSkinnedModel& sk
 
 #ifdef TARGET_PC
   const CVector3f* normals = nativeNormals.data();
+  // The NBT entry stride (NormalVecs) was applied in the swap above: nativeNormals
+  // already holds one N per vertex.
+  const uint normalStride = 1;
 #else
   const CVector3f* normals =
       reinterpret_cast< const CVector3f* >(skinnedModel.GetModel()->GetNormals());
+  const uint normalStride = 1;
 #endif
 #if VERSION >= VERSION_GM8P_00 && VERSION != VERSION_GM8E_02
   CVector3f* avgNormals = reinterpret_cast< CVector3f* >(x3c_avgNormals.get());
@@ -100,7 +107,7 @@ CSkinnedModelWithAvgNormals::CSkinnedModelWithAvgNormals(const CSkinnedModel& sk
     AUTO(lit, mapCur->second.begin());
     AUTO(listEnd, mapCur->second.end());
     for (; lit != listEnd; ++lit) {
-      accum += normals[*lit];
+      accum += normals[*lit * normalStride];
     }
 
     lit = mapCur->second.begin();

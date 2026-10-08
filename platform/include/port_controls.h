@@ -14,6 +14,8 @@ bool Capturing();
 // True while a bound beam shift key or pad input is held (Controls tab;
 // PortDebug::ShiftBinding stores them).
 bool ShiftHeld();
+// True while a bound turbo fire key or pad input is held (PortDebug::TurboBinding).
+bool TurboHeld();
 // The PAD bits whose alt controller button (PortDebug::PadAltButton) is held.
 unsigned HeldAltPadButtons();
 // The Controls page's Keyboard & mouse and Controller sub-tabs of the debug

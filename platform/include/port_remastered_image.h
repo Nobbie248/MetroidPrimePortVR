@@ -24,6 +24,7 @@ struct Image {
   int width = 0;
   int height = 0;
   std::vector<uint8_t> rgba;  // width * height * 4
+  bool srgb = false;          // as decoded: the source format is an sRGB one (the bytes are encoded either way)
 };
 
 enum class DdsFormat {
@@ -61,6 +62,11 @@ Image Resize(const Image& image, int width, int height, MapKind kind = MapKind::
 // An sRGB byte as the linear value it encodes, rounded to a byte.
 uint8_t SrgbToLinearByte(uint8_t value);
 
+// An sRGB byte as linear light (0..1), exact.
+float SrgbByteToLinear(uint8_t value);
+// Linear light (0..1) as the nearest sRGB byte.
+uint8_t LinearToSrgbByteExact(float linear);
+
 // An sRGB byte times `scale` in linear light, back to an sRGB byte.
 uint8_t ScaleSrgbByte(uint8_t value, double scale);
 
@@ -73,7 +79,10 @@ std::vector<uint8_t> EncodeTxtrRgba8(const Image& image, int minSize = 8, MapKin
 std::vector<uint8_t> EncodeTxtrCmpr(const Image& image, bool alpha, MapKind kind = MapKind::Data);
 // A .dds with the whole mip chain down to 1x1. `punch` (a cut-out alpha) keeps
 // the share of opaque texels in the smaller levels, as EncodeTxtrCmpr does.
-std::vector<uint8_t> EncodeDds(const Image& image, DdsFormat format, bool punch = false, MapKind kind = MapKind::Data);
+// `srgb` writes the sRGB DXGI code (BC7, ASTC), so the GPU decodes RGB itself;
+// the texels are the same sRGB-encoded bytes.
+std::vector<uint8_t> EncodeDds(const Image& image, DdsFormat format, bool punch = false, MapKind kind = MapKind::Data,
+                                 bool srgb = false);
 
 // One 4x4 block, 16 RGBA texels in, 16 bytes out; exposed for the tests.
 void EncodeBc7Block(const uint8_t* rgba, uint8_t* out);

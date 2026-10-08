@@ -136,6 +136,19 @@ void CDolphinController::ReadDevices() {
     status[0].err = PAD_ERR_NONE;
     status[0].button |= PAD_TRIGGER_Z;
   }
+  // Turbo fire (Controls tab binding, unbound by default, or the touch Turbo
+  // button): A pressed on one poll and released on the next, so the gun sees a
+  // press edge every other tick and its own shot delays set the rate. A real A
+  // held alongside wins, as mashing would not release it either.
+  static unsigned sTurboTicks = 0;
+  if (PortControls::TurboHeld() || PortDebug::TouchTurboFire()) {
+    if ((sTurboTicks++ & 1) == 0) {
+      status[0].err = PAD_ERR_NONE;
+      status[0].button |= PAD_BUTTON_A;
+    }
+  } else {
+    sTurboTicks = 0;
+  }
   // The beam shift, bound in the Controls tab (left shift by default).
   const bool shiftHeld = mouseShift || PortControls::ShiftHeld() || PortDebug::TouchBeamShift();
   for (int i = 0; i < 4; ++i) {

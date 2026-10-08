@@ -142,7 +142,10 @@ android {
         externalNativeBuild {
             cmake {
                 arguments(*cmakeArguments)
-                targets "metroid_prime_port"
+                // The rest are libadrenotools' hooks and the Vulkan shim, loaded by
+                // path for custom GPU drivers (platform/port_gpu_driver.cpp).
+                targets "metroid_prime_port", "mport_vkshim", "hook_impl", "main_hook",
+                        "file_redirect_hook", "gsl_alloc_hook"
             }
         }
     }
@@ -217,6 +220,8 @@ tasks.register("syncLicenseNotices", Sync) {
     from("../../extern/aurora/LICENSE") { rename { "aurora.txt" } }
     from("../../extern/musyx/LICENSE") { rename { "musyx.txt" } }
     from("../../extern/astcenc/LICENSE.txt") { rename { "astcenc.txt" } }
+    from("../../extern/adrenotools/LICENSE") { rename { "adrenotools.txt" } }
+    from("../../extern/adrenotools/lib/linkernsbypass/LICENSE") { rename { "linkernsbypass.txt" } }
     // The fetched packages live beside the native build output, so they are
     // only present once a native build has run at least once. Each is named
     // after its package: the same notice appears in several build variants, and

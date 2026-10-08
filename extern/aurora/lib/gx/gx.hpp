@@ -8,6 +8,7 @@
 
 #include <absl/container/flat_hash_map.h>
 #include <type_traits>
+#include <cstddef>
 #include <cstring>
 #include <bitset>
 #include <memory>
@@ -364,14 +365,16 @@ struct GXState {
     u32 width = 0;
     u32 height = 0;
     GXTexFmt format = GX_TF_I4;
+    bool mips = false;
 
     bool operator==(const CopyTextureKey& rhs) const {
-      return dest == rhs.dest && width == rhs.width && height == rhs.height && format == rhs.format;
+      return dest == rhs.dest && width == rhs.width && height == rhs.height && format == rhs.format &&
+             mips == rhs.mips;
     }
 
     template <typename H>
     friend H AbslHashValue(H h, const CopyTextureKey& key) {
-      return H::combine(std::move(h), key.dest, key.width, key.height, key.format);
+      return H::combine(std::move(h), key.dest, key.width, key.height, key.format, key.mips);
     }
   };
 
@@ -433,6 +436,8 @@ struct GXState {
   u8 pbr = 0; // GX_AURORA_SET_PBR: above 1, a cost test (GXSetPBRCostTest)
   u8 sdf = 0; // GX_AURORA_SET_SDF
   bool mapBatch = false; // GX_AURORA_MAP_BATCH
+  u8 hudSample = 0; // GX_AURORA_SET_HUD_SAMPLE
+  Vec4<float> hudDyin{0.f, 0.f, 0.f, 0.f}; // its DYIN
   u8 depthPrepass = 0; // GX_AURORA_PORT_DEPTH_PREPASS
   std::array<u32, 3> drawTag{0, UINT32_MAX, 0}; // GX_AURORA_SET_DRAW_TAG: asset, model index, material
   u32 drawSerial = 0; // GX_AURORA_PORT_DRAW_SERIAL
@@ -453,6 +458,7 @@ struct GXState {
   u32 pbrLightmap = 0; // GX_AURORA_SET_PBR_LIGHTMAP
   Vec4<float> pbrLightmapRect{};                  // offU, offV, scale (0: off), level
   std::array<Vec4<float>, 3> pbrLightmapAxes{};   // xyz: a row taking a view-space normal to the lightmap's axes
+  Vec4<float> pbrRoomLights{}; // GX_AURORA_PORT_ROOM_LIGHTS: x the first record (u32 bits, in words), y the count
   u8 pbrLightmapAttr = GX_VA_NULL; // GX_AURORA_SET_PBR_LIGHTMAP_ATTR
   std::array<Vec4<float>, 3> pbrTone{}; // GX_AURORA_SET_PBR_TONE
   Vec4<float> pbrLightSkip{}; // GX_AURORA_SET_PBR_LIGHT_SKIP: x the mask
@@ -472,6 +478,8 @@ struct GXState {
   std::array<Vec4<float>, 3> volFogTone{};
   // GX_AURORA_PORT_SHADOW_*: the following draws are the world's (they cast and receive the sun's
   // shadow), and this frame's sun (shadowActive) with its uniform (gfx/shadow.hpp's Uniform).
+  // GX_AURORA_PORT_PARTICLE_FOG: the draws are particles (vol_fog_mode)
+  bool particleFog = false;
   bool shadowCaster = false;
   bool shadowCasterOnly = false; // they cast but aren't drawn (GXPortSetShadowCasterOnly)
   bool shadowActive = false;
@@ -497,6 +505,7 @@ struct GXState {
   u32 texCopyDstWidth = 0;
   u32 texCopyDstHeight = 0;
   bool texCopyDstWide = false;
+  bool texCopyMips = false; // GXSetTexCopyDst mipmap flag: the copy gets a full mip chain
   const void* texCopyDest = nullptr;
   absl::flat_hash_map<const void*, CopyTextureRef> copyTextures;
   absl::flat_hash_map<CopyTextureKey, CopyTextureRef> copyTextureCache;
@@ -530,6 +539,19 @@ struct GXState {
   void clearVtxSizeCache() { lastVtxFmt = GX_MAX_VTXFMT; }
 };
 extern GXState g_gxState;
+
+// The bind-pose positions of a skinned draw: the array at GX_VA_TEX7 (which the draw's own vertices
+// must not use), read with the same index as GX_VA_POS, when the backlight asks for them (its z in
+// row 2 is the height scale).
+// Port: not with indexed vertices resolved by the FIFO processor (deindexVertices, also under the
+// geometry cache's native vertices): their records carry the POS element, not its index, and the
+// draw binds no arrays, so the shader would read the bind pose at a garbage index.
+inline bool bind_pos_active() noexcept {
+  const auto& s = g_gxState;
+  return s.pbr != 0 && !s.deindexVertices && s.arrays[GX_VA_TEX7].data != nullptr && s.arrays[GX_VA_TEX7].size != 0 &&
+         s.vtxDesc[GX_VA_TEX7] == GX_NONE && (s.vtxDesc[GX_VA_POS] == GX_INDEX8 || s.vtxDesc[GX_VA_POS] == GX_INDEX16) &&
+         s.pbrBacklightLights[2].z() > 0.f;
+}
 struct ShaderInfo;
 
 void initialize() noexcept;
@@ -606,18 +628,16 @@ struct ShaderConfig {
   u8 vtxStride = 0;
   u8 lineMode : 2 = 0; // 1 = GX_LINES, 2 = GX_LINESTRIP, 3 = GX_POINTS
   u8 fogRangeEnabled : 1 = false;
-  // Stereo replay (gfx/stereo_multiview.hpp): the shader draws both views of a
-  // multiview eye pass (MultiviewClip or MultiviewFull), or one eye of a per-eye pass
-  // from the same clip block (EyeClipImmediate). Taken from the padding, so the
-  // configs (and pipeline cache keys) without it keep their bytes.
-  u8 multiview : 2 = 0;
-  u8 mapBatch : 1 = false;
-  u8 mapCull : 2 = 0; // Fill culling in a batch whose line quads must be uncullable.
   u8 drawId : 1 = false; // debug view "drawid": the fragment is the draw serial (DrawImmediateData::serial)
   // GX_AURORA_PORT_SHADOW_CASTER while a shadow frame is set: the draw casts into the sun's shadow
   // map (an extra vs_shadow entry) and, when PBR, receives the sun through it.
   u8 shadow : 1 = false;
-  u8 pad1 : 6 = 0;
+  // With pbr, the draw is a skinned model whose bind-pose positions (GX_VA_TEX7's array, indexed
+  // like GX_VA_POS) feed the character backlight's height fade (GXSetPBRBacklight); the array's
+  // endianness.
+  u8 pbrBindPos : 1 = false;
+  u8 pbrBindLe : 1 = false;
+  u8 pad1 : 1 = 0;
   u8 pbr = 0; // GX_AURORA_SET_PBR
   u8 sdf = 0; // GX_AURORA_SET_SDF
   u8 depthOnly = 0; // pass 1 of GX_AURORA_PORT_DEPTH_PREPASS: the colour is not written
@@ -626,14 +646,30 @@ struct ShaderConfig {
   u8 volFog = 0;
   // With pbr, the vertex attribute holding the baked lightmap's UV (GX_VA_TEX0..7), or GX_VA_NULL: a varying in the shader.
   u8 pbrLightmapAttr = GX_VA_NULL;
+  u8 hudSample = 0; // GX_AURORA_SET_HUD_SAMPLE
+  // Port (VR / Quest) fields from here to attrs, in what upstream keeps as its spare bytes
+  // (pad2): every field above sits where upstream has it, so a config without these (zero)
+  // keeps upstream's bytes and pipeline cache keys, and upstream's rows (the bundled
+  // initial_pipeline_cache.db) read back as the same mono configs. Pack new fields into the
+  // spare bits; when upstream claims a spare byte, move these, don't grow the struct.
+  //
   // Without GX_VA_PNMTXIDX, the position (and normal) matrix every vertex takes: a
   // constant index lets the GPU keep that one matrix in its constant memory instead
   // of loading it for each vertex (on the Quest's Adreno, the vertex fetch stall
   // dominated the eye passes).
   u8 currentPnMtx = 0;
-  u8 nativeVertices = false;
+  // Stereo replay (gfx/stereo_multiview.hpp): the shader draws both views of a
+  // multiview eye pass (MultiviewClip or MultiviewFull), or one eye of a per-eye pass
+  // from the same clip block (EyeClipImmediate).
+  u8 multiview : 2 = 0;
+  u8 mapBatch : 1 = false; // GX_AURORA_MAP_BATCH
+  u8 mapCull : 2 = 0; // Fill culling in a batch whose line quads must be uncullable.
+  // The draw reads native vertex attributes (GXState::nativeVertices: the geometry cache's
+  // resident static world records) instead of fetching them from vbuf.
+  u8 nativeVertices : 1 = false;
+  u8 pad2 : 2 = 0;
   // 12 bytes so far, a multiple of the u32 fields' alignment: the struct has no padding
-  // (memcmp and hash; the static_assert below).
+  // (memcmp and hash; the static_asserts below).
   std::array<AttrConfig, MaxVtxAttr> attrs;
   std::array<TevSwap, MaxTevSwap> tevSwapTable;
   std::array<TevStage, MaxTevStages> tevStages;
@@ -647,6 +683,22 @@ struct ShaderConfig {
   bool operator==(const ShaderConfig& rhs) const { return memcmp(this, &rhs, sizeof(*this)) == 0; }
 };
 static_assert(std::has_unique_object_representations_v<ShaderConfig>);
+// Upstream's size up to attrs: the port's fields packed into its spare bytes (see currentPnMtx).
+static_assert(offsetof(ShaderConfig, attrs) == 12);
+// PrimedGun: and every field upstream has at upstream's offset. Upstream's pipeline seed (the bundled
+// initial_pipeline_cache.db) holds these configs as bytes, which must read back here as the same
+// configs, and tools/pipeline_seed.py reads pbr, sdf, pbrKind, volFog and pbrLightmapAttr from them
+// by offset. It reads the shadow bit too (bit 4 of byte 2), which offsetof cannot check: the
+// bit-fields of byte 2 keep upstream's order. currentPnMtx (10) sits in upstream's spare bytes.
+static_assert(offsetof(ShaderConfig, fogType) == 0);
+static_assert(offsetof(ShaderConfig, vtxStride) == 1);
+static_assert(offsetof(ShaderConfig, pbr) == 3);
+static_assert(offsetof(ShaderConfig, sdf) == 4);
+static_assert(offsetof(ShaderConfig, depthOnly) == 5);
+static_assert(offsetof(ShaderConfig, pbrKind) == 6);
+static_assert(offsetof(ShaderConfig, volFog) == 7);
+static_assert(offsetof(ShaderConfig, pbrLightmapAttr) == 8);
+static_assert(offsetof(ShaderConfig, hudSample) == 9);
 // Whether a draw samples the sun's shadow map: a lit PBR surface drawn in colour without per-pixel fog.
 inline bool shadow_receives(const ShaderConfig& sc) noexcept {
   return sc.shadow && sc.pbr != 0 && sc.volFog == VolFogNone && sc.depthOnly == 0 && sc.lineMode == 0 && !sc.drawId;
@@ -688,6 +740,7 @@ struct ShaderInfo {
   bool lightingEnabled : 1 = false;
   u8 lineMode : 2 = 0;
   bool usesPbr : 1 = false;
+  bool usesHudDyin : 1 = false; // ShaderConfig::hudSample >= 2: the hud_dyin uniform
   bool usesLightmap : 1 = false; // ShaderConfig::pbrLightmapAttr is set
   bool usesVolFog : 1 = false;
   bool usesShadow : 1 = false;    // ShaderConfig::shadow: the shadow uniforms and vs_shadow

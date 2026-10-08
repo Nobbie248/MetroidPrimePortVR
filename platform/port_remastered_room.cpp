@@ -102,6 +102,41 @@ constexpr uint32_t kPropLightType = 0x932dd7d8;
 constexpr uint32_t kPropLightColor[2] = {0xb73ed9c3, 0x8f421907};
 constexpr uint32_t kPropLightIntensity[2] = {0xc3eabcbf, 0xbdfc8a9e};
 constexpr uint32_t kLightDirectional = 1;
+constexpr uint32_t kLightPoint = 2;
+constexpr uint32_t kLightSpot = 3;
+constexpr uint32_t kPropLightShown = 0x2c66744c;  // u8, default 1
+constexpr uint32_t kPropLightDistance = 0x76df827d;  // .kind (enum), .near, .far
+constexpr uint32_t kPropLightDistanceKind = 0x174c8abc;
+constexpr uint32_t kPropLightDistanceNear = 0xe5ceaf7c;
+constexpr uint32_t kPropLightDistanceFar = 0x68ac20b3;
+constexpr uint32_t kLightFalloffSquared = 0x5e3252a0;  // (1-t)^2
+constexpr uint32_t kLightFalloffLinear = 0xf75d18cf;   // 1-t; any other value is the smooth cubic
+constexpr uint32_t kPropLightCone = 0xf5125ed1;  // .outer, .inner: full angles in degrees
+constexpr uint32_t kPropLightConeOuter = 0xb0a71764;
+constexpr uint32_t kPropLightConeInner = 0x635dfcc7;
+// The animated path (kb func/light-dynamic.md): Attributes .length (f32 s), .animated, .playing
+// (at load), .loop (u8 each), and the CMayaSplines over the timeline: intensity, near and far
+// (with their own falloff enum, smooth when absent), inner and outer cone, and the colour, a
+// spline into a CColorGradient (u32 4, then four CMayaSplines R, G, B, A).
+constexpr uint32_t kPropLightAttributes = 0x31f63c93;
+constexpr uint32_t kPropLightLength = 0xdd24b4b2;
+constexpr uint32_t kPropLightAnimated = 0x4440e44c;
+constexpr uint32_t kPropLightPlaying = 0xc5e97577;
+constexpr uint32_t kPropLightLoop = 0x319a91c2;
+constexpr uint32_t kPropLightIntensitySpline[2] = {0xe8a62a55, 0xef7256b5};
+constexpr uint32_t kPropLightDistanceDynamic = 0xa327083f;  // .kind, .near, .far
+constexpr uint32_t kPropLightDistanceDynamicKind = 0xb234567c;
+constexpr uint32_t kPropLightDistanceDynamicNear = 0xe15a6749;
+constexpr uint32_t kPropLightDistanceDynamicFar = 0xba147368;
+constexpr uint32_t kPropLightConeDynamic = 0xe2fe5508;  // .inner, .outer
+constexpr uint32_t kPropLightConeDynamicInner = 0xa306f8b6;
+constexpr uint32_t kPropLightConeDynamicOuter = 0xca7e1d6f;
+constexpr uint32_t kPropLightColorDynamic = 0xe9141c0f;  // .spline, .gradient
+constexpr uint32_t kPropLightColorDynamicSpline = 0x085586c6;
+constexpr uint32_t kPropLightColorDynamicGradient = 0xe6222427;
+// What a LightDynamic sends when a backward, non-looping play reaches t = 0 (CLightDynamicGOC::Think,
+// CTimePlaybackManager::Update result 1). The forward end sends c6ef90ff, which no room links.
+constexpr uint32_t kEventLightReachedStart = 0xeb2a4a08;
 constexpr uint32_t kPropRegionMode = 0xd4aa2ccb;
 constexpr uint32_t kPropRegionDistance = 0xbaf7ac02;
 constexpr uint32_t kPropRegionTransmittance = 0xd1fc0ce8;
@@ -226,8 +261,15 @@ constexpr uint32_t kPropWaterMaterial[5] = {0x9201a855, 0x00c267c0, 0x50c8ac86, 
 
 constexpr size_t kMaxChunks = 1u << 20;
 constexpr size_t kMaxVolumeFloats = size_t(1) << 28;
-// A grid above this is halved: 24 bytes a point, so no file's grid passes 24 MB.
+// A grid above this is halved: 24 bytes a point. Desktop keeps every grid whole (the
+// largest, the hangar's, is 14.5M points: 349 MB on disk, 465 MB of volume textures),
+// as Remastered samples them; Android keeps each file's grid under 24 MB so low-memory
+// devices aren't killed in the 9 rooms past it.
+#ifdef __ANDROID__
 constexpr size_t kMaxGridPoints = size_t(1) << 20;
+#else
+constexpr size_t kMaxGridPoints = size_t(1) << 30;
+#endif
 
 // Remastered room coordinates -> GameCube area coordinates: (x, y, z) -> (-x, z, y).
 constexpr double kR2G[3][3] = {{-1, 0, 0}, {0, 0, 1}, {0, 1, 0}};
@@ -1009,7 +1051,7 @@ bool HintTakes(uint32_t action) {
 constexpr uint32_t kActionTransitionStart = 0x6c4d551c;
 constexpr uint32_t kActionTransitionRestart = 0xfb05eadb;
 constexpr uint32_t kActionTransitionStop = 0x4208824e;
-constexpr uint32_t kActionComponentActivate = 0x4143504d;    // 'ACPM'
+constexpr uint32_t kActionComponentActivate = 0x41434d50;    // 'ACMP'
 constexpr uint32_t kActionComponentDeactivate = 0x49434d50;  // 'ICMP'
 uint8_t TransitionAct(uint32_t action) {
   switch (action) {
@@ -1025,6 +1067,30 @@ uint8_t TransitionAct(uint32_t action) {
   case kActionComponentActivate:
     return PortRoomGeo::kShow;
   case kActionEntityDeactivate:
+  case kActionComponentDeactivate:
+    return PortRoomGeo::kHide;
+  default:
+    return 0;
+  }
+}
+// What a LightDynamic takes (CLightDynamicGOC::AcceptScriptMsg): its timeline's Start, Stop,
+// Reset, PlayForward, PlayBackward and TogglePlaybackDirection, and (de)activation.
+uint8_t LightAct(uint32_t action) {
+  switch (action) {
+  case 0x01bedeb9:
+    return PortRoomEnv::kLightStart;
+  case 0x2ebaa1ae:
+    return PortRoomEnv::kLightStop;
+  case 0x360ef3eb:
+    return PortRoomEnv::kLightReset;
+  case 0x2bebd3d6:
+    return PortRoomEnv::kLightForward;
+  case 0x65a5300e:
+    return PortRoomEnv::kLightBackward;
+  case 0x91651688:
+    return PortRoomEnv::kLightReverse;
+  case kActionComponentActivate:
+    return PortRoomGeo::kShow;
   case kActionComponentDeactivate:
     return PortRoomGeo::kHide;
   default:
@@ -1512,6 +1578,19 @@ SceneryScripts MatchScripts(const Room& room, const Area& area) {
       transitionEntities.insert(c.entity);
     }
   }
+  // Point and spot lights, whose links also play their timelines (LightAct).
+  std::set<int> lightEntities;
+  for (const Component& c : comps) {
+    if (c.type != kLightDynamic || c.entity < 0) {
+      continue;
+    }
+    const auto f = room.Flat(c);
+    const auto type = f.find(kPropLightType);
+    const uint32_t kind = type != f.end() && type->second.size >= 4 ? ReadLE32(room.Bytes(type->second)) : 0;
+    if (kind == kLightPoint || kind == kLightSpot) {
+      lightEntities.insert(c.entity);
+    }
+  }
   auto fluidSender = [&](const Connection& c, int& state) -> uint32_t {
     const Component& sender = comps[c.sender];
     if (sender.type == kProxyPlayer && (c.event == kEventPlayerFluidIn || c.event == kEventPlayerFluidOut)) {
@@ -1637,7 +1716,14 @@ SceneryScripts MatchScripts(const Room& room, const Area& area) {
     };
     std::vector<int> seen{e.entity};
     const bool transition = transitionEntities.count(e.entity) != 0;
-    const auto act = [&](uint32_t action) { return transition ? TransitionAct(action) : LinkAct(action); };
+    const bool light = lightEntities.count(e.entity) != 0;
+    const auto act = [&](uint32_t action) {
+      if (transition) {
+        return TransitionAct(action);
+      }
+      const uint8_t lightAct = light ? LightAct(action) : 0;
+      return lightAct != 0 ? lightAct : LinkAct(action);
+    };
     // `delay`: what the timers passed through so far wait.
     std::function<void(int, uint32_t, int, int, float)> walk = [&](int entity, uint32_t action, int depth, int via,
                                                                    float delay) {
@@ -1662,6 +1748,10 @@ SceneryScripts MatchScripts(const Room& room, const Area& area) {
           } else {
             miss(sender, *c, c->action, depth);
           }
+          continue;
+        }
+        // A light that switches itself off as a backward play reaches its start (PointLightData::offAtStart).
+        if (light && depth == 0 && sender.entity == e.entity && c->event == kEventLightReachedStart) {
           continue;
         }
         // Remastered's own objects, and keyframes, are followed by the script (below).
@@ -1727,15 +1817,18 @@ SceneryScripts MatchScripts(const Room& room, const Area& area) {
   // through whatever drives them: the camera volumes that count which side of a wall the
   // camera is on, the counters they count with and the relays in between.
   // The same objects switch the suns (the hangar's intro shots and its escape's camera).
-  std::set<int> geometry;  // entities with a ModCon, an added actor or a directional light
+  std::set<int> geometry;  // entities with a ModCon, an added actor or a sun, point or spot light
   for (const Component& c : comps) {
     if (c.entity >= 0 && (c.type == kModCon || (c.type == kActorMP1 && room.Flat(c).count(kPropActorAdded) != 0))) {
       geometry.insert(c.entity);
     } else if (c.entity >= 0 && c.type == kLightDynamic) {
       const auto f = room.Flat(c);
       const auto type = f.find(kPropLightType);
-      if (type != f.end() && type->second.size >= 4 && ReadLE32(room.Bytes(type->second)) == kLightDirectional) {
-        geometry.insert(c.entity);
+      if (type != f.end() && type->second.size >= 4) {
+        const uint32_t kind = ReadLE32(room.Bytes(type->second));
+        if (kind == kLightDirectional || kind == kLightPoint || kind == kLightSpot) {
+          geometry.insert(c.entity);
+        }
       }
     }
   }
@@ -1979,6 +2072,32 @@ struct SunData {
   uint32_t group = PortRoomGeo::kNoGroup; // the script group that shows and hides it
 };
 
+// A point or spot LightDynamic (see PortRoomEnv::RoomLights), as SLdrLightDynamic::Load and
+// NLightLoaders::build_light read it (kb func/light-dynamic.md).
+struct PointLightData {
+  int32_t layer = -1;
+  bool on = false;
+  bool spot = false;
+  uint8_t falloff = 3;         // 1 linear, 2 squared, 3 smooth cubic
+  float pos[3] = {};           // retail world
+  float toLight[3] = {};       // spots: unit, against the beam
+  float color[3] = {};         // linear colour times intensity
+  float nearFar[2] = {0.25f, 1.f};  // times the entity's scale x and y
+  float cone[2] = {0.f, 45.f}; // inner, outer full angles in degrees
+  uint32_t group = PortRoomGeo::kNoGroup;
+  std::vector<PortRoomGeo::Link> links;  // show/hide and the timeline's actions (LightAct)
+  // The animated path: timeline flags, its falloff, whether its end deactivates it (its
+  // finished event -> ICMP/ICTV on itself), the entity's scale x and y (for near and far),
+  // and the splines' bytes (PortRoomEnv::kLightSplines; empty: absent).
+  bool animated = false, playing = false, loop = false, offAtStart = false;
+  uint8_t animFalloff = 3;
+  float length = 0.f;
+  float scale[2] = {1.f, 1.f};
+  float intensity = 0.f; // the static colour and intensity, for a timeline that lacks a spline
+  float rgb[3] = {};
+  std::vector<uint8_t> splines[PortRoomEnv::kLightSplines];
+};
+
 struct Placement {
   Vec3 pos{};  // GameCube world coordinates, once the world shift is added
 };
@@ -2044,6 +2163,8 @@ private:
   void ReadFogRegions(const RoomData& r, const SceneryScripts& scripts, const Mat34& xf,
                       std::vector<FogRegionData>& out, std::vector<FogTransitionData>& transitions) const;
   void ReadSuns(const RoomData& r, const SceneryScripts& scripts, const Mat34& xf, std::vector<SunData>& out) const;
+  void ReadPointLights(const RoomData& r, const SceneryScripts& scripts, const Mat34& xf,
+                       std::vector<PointLightData>& out) const;
   bool Grid(const RoomPak& rp, const Vec3& shift, const std::vector<Vec3>& check, std::vector<uint8_t>& out,
             std::string& note) const;
   // The room's static geometry (its ModCon components), as "<MREA id>.roomgeo".
@@ -2693,6 +2814,167 @@ void Writer::ReadSuns(const RoomData& r, const SceneryScripts& scripts, const Ma
   }
 }
 
+void Writer::ReadPointLights(const RoomData& r, const SceneryScripts& scripts, const Mat34& xf,
+                             std::vector<PointLightData>& out) const {
+  for (const Component* c : r.room.Of(kLightDynamic)) {
+    const auto f = r.room.Flat(*c);
+    const auto type = f.find(kPropLightType);
+    const uint32_t kind = type != f.end() && type->second.size >= 4 ? ReadLE32(r.room.Bytes(type->second)) : 0;
+    if (kind != kLightPoint && kind != kLightSpot) {
+      continue;
+    }
+    Vec3 pos, euler, scale;
+    if (!r.room.Xform(*c, pos, euler, scale)) {
+      continue;
+    }
+    PointLightData l;
+    l.spot = kind == kLightSpot;
+    const Vec3 w = Apply(xf, MulR2G(pos));
+    for (int i = 0; i < 3; ++i) {
+      l.pos[i] = float(w[size_t(i)]);
+    }
+    if (l.spot) {
+      // A spot shines along its local +Z (CLightSceneNodeProxy::UpdateLightFromTransform), turned
+      // Rz * Ry * Rx as the suns' +Y.
+      constexpr double kDegToRad = 3.14159265358979323846 / 180;
+      const double x = euler[0] * kDegToRad, y = euler[1] * kDegToRad, z = euler[2] * kDegToRad;
+      const double cx = std::cos(x), sx = std::sin(x), cy = std::cos(y), sy = std::sin(y), cz = std::cos(z),
+                   sz = std::sin(z);
+      const Vec3 fwd = MulR2G({cz * sy * cx + sz * sx, sz * sy * cx - cz * sx, cy * cx});
+      Vec3 d{};
+      for (size_t i = 0; i < 3; ++i) {
+        d[i] = xf[i][0] * fwd[0] + xf[i][1] * fwd[1] + xf[i][2] * fwd[2];
+      }
+      const double len = std::sqrt(d[0] * d[0] + d[1] * d[1] + d[2] * d[2]);
+      if (!(len > 1e-6)) {
+        continue;
+      }
+      for (int i = 0; i < 3; ++i) {
+        l.toLight[i] = float(-d[size_t(i)] / len);
+      }
+    }
+    float color[3] = {1, 1, 1};
+    Span sp;
+    if (r.room.Nested(*c, {kPropLightColor[0], kPropLightColor[1]}, sp) && sp.size >= 12) {
+      for (int i = 0; i < 3; ++i) {
+        color[i] = ReadLEFloat(r.room.Bytes(sp) + 4 * i);
+      }
+    }
+    float intensity = 3.14159265f;
+    if (r.room.Nested(*c, {kPropLightIntensity[0], kPropLightIntensity[1]}, sp) && sp.size >= 4) {
+      intensity = ReadLEFloat(r.room.Bytes(sp));
+    }
+    for (int i = 0; i < 3; ++i) {
+      l.color[i] = std::isfinite(color[i] * intensity) ? std::max(0.f, color[i] * intensity) : 0.f;
+      l.rgb[i] = std::isfinite(color[i]) ? std::max(0.f, color[i]) : 0.f;
+    }
+    l.intensity = std::isfinite(intensity) ? intensity : 0.f;
+    if (r.room.Nested(*c, {kPropLightDistance, kPropLightDistanceKind}, sp) && sp.size >= 4) {
+      const uint32_t falloff = ReadLE32(r.room.Bytes(sp));
+      l.falloff = falloff == kLightFalloffSquared ? 2 : falloff == kLightFalloffLinear ? 1 : 3;
+    }
+    if (r.room.Nested(*c, {kPropLightDistance, kPropLightDistanceNear}, sp) && sp.size >= 4) {
+      l.nearFar[0] = ReadLEFloat(r.room.Bytes(sp));
+    }
+    if (r.room.Nested(*c, {kPropLightDistance, kPropLightDistanceFar}, sp) && sp.size >= 4) {
+      l.nearFar[1] = ReadLEFloat(r.room.Bytes(sp));
+    }
+    // build_light scales the range by the entity's scale: near by x, far by y.
+    l.nearFar[0] *= float(std::max(scale[0], 0.0));
+    l.nearFar[1] *= float(std::max(scale[1], 0.0));
+    if (r.room.Nested(*c, {kPropLightCone, kPropLightConeInner}, sp) && sp.size >= 4) {
+      l.cone[0] = ReadLEFloat(r.room.Bytes(sp));
+    }
+    if (r.room.Nested(*c, {kPropLightCone, kPropLightConeOuter}, sp) && sp.size >= 4) {
+      l.cone[1] = ReadLEFloat(r.room.Bytes(sp));
+    }
+    l.scale[0] = float(std::max(scale[0], 0.0));
+    l.scale[1] = float(std::max(scale[1], 0.0));
+    const auto byte = [&](uint32_t a, uint32_t b) {
+      return r.room.Nested(*c, {a, b}, sp) && sp.size >= 1 && r.room.Bytes(sp)[0] != 0;
+    };
+    l.animated = byte(kPropLightAttributes, kPropLightAnimated);
+    if (l.animated) {
+      l.playing = byte(kPropLightAttributes, kPropLightPlaying);
+      l.loop = byte(kPropLightAttributes, kPropLightLoop);
+      if (r.room.Nested(*c, {kPropLightAttributes, kPropLightLength}, sp) && sp.size >= 4) {
+        const float length = ReadLEFloat(r.room.Bytes(sp));
+        l.length = std::isfinite(length) ? std::clamp(length, 0.f, 3600.f) : 0.f;
+      }
+      if (r.room.Nested(*c, {kPropLightDistanceDynamic, kPropLightDistanceDynamicKind}, sp) && sp.size >= 4) {
+        const uint32_t falloff = ReadLE32(r.room.Bytes(sp));
+        l.animFalloff = falloff == kLightFalloffSquared ? 2 : falloff == kLightFalloffLinear ? 1 : 3;
+      }
+      // One spline, checked; the gradient's four follow one another.
+      const auto take = [&](uint32_t a, uint32_t b, std::vector<uint8_t>& to) {
+        PortMayaSpline check;
+        if (r.room.Nested(*c, {a, b}, sp) && check.Load(r.room.Bytes(sp), sp.size)) {
+          to.assign(r.room.Bytes(sp), r.room.Bytes(sp) + sp.size);
+        }
+      };
+      take(kPropLightIntensitySpline[0], kPropLightIntensitySpline[1], l.splines[PortRoomEnv::kLightSplineIntensity]);
+      take(kPropLightDistanceDynamic, kPropLightDistanceDynamicNear, l.splines[PortRoomEnv::kLightSplineNear]);
+      take(kPropLightDistanceDynamic, kPropLightDistanceDynamicFar, l.splines[PortRoomEnv::kLightSplineFar]);
+      take(kPropLightConeDynamic, kPropLightConeDynamicInner, l.splines[PortRoomEnv::kLightSplineInner]);
+      take(kPropLightConeDynamic, kPropLightConeDynamicOuter, l.splines[PortRoomEnv::kLightSplineOuter]);
+      take(kPropLightColorDynamic, kPropLightColorDynamicSpline, l.splines[PortRoomEnv::kLightSplineColor]);
+      if (r.room.Nested(*c, {kPropLightColorDynamic, kPropLightColorDynamicGradient}, sp) && sp.size >= 4 &&
+          ReadLE32(r.room.Bytes(sp)) == 4) {
+        const uint8_t* d = r.room.Bytes(sp) + 4;
+        size_t left = sp.size - 4;
+        for (int i = 0; i < 4; ++i) {
+          PortMayaSpline check;
+          size_t used = 0;
+          if (!check.Load(d, left, &used)) {
+            break;
+          }
+          l.splines[PortRoomEnv::kLightSplineGradient + i].assign(d, d + used);
+          d += used;
+          left -= used;
+        }
+      }
+      for (const Connection& conn : ReadConnections(r.room)) {
+        const int target = r.room.ByGuid(conn.target);
+        if (r.room.Components()[conn.sender].entity == c->entity && target >= 0 &&
+            r.room.Components()[size_t(target)].entity == c->entity && conn.event == kEventLightReachedStart &&
+            (conn.action == kActionComponentDeactivate || conn.action == kActionEntityDeactivate)) {
+          l.offAtStart = true;
+        }
+      }
+    }
+    if (const auto linked = scripts.links.find(c->entity); linked != scripts.links.end()) {
+      for (PortRoomGeo::Link link : linked->second) {
+        if (link.action != PortRoomGeo::kShow && link.action != PortRoomGeo::kHide &&
+            link.action != PortRoomGeo::kToggle &&
+            (link.action < PortRoomEnv::kLightStart || link.action > PortRoomEnv::kLightReverse)) {
+          continue;
+        }
+        link.sender &= 0x3ffffff;
+        l.links.push_back(link);
+      }
+    }
+    const auto shown = f.find(kPropLightShown);
+    l.on = r.room.Active(*c) && (shown == f.end() || shown->second.size < 1 || r.room.Bytes(shown->second)[0] != 0);
+    const auto layer = scripts.layer.find(c->entity);
+    l.layer = layer != scripts.layer.end() ? int32_t(layer->second) : -1;
+    const auto group = scripts.group.find(c->entity);
+    if (group != scripts.group.end()) {
+      l.group = group->second;
+    }
+    char line[320];
+    std::snprintf(line, sizeof line,
+                  "  %s: %s (%.2f, %.2f, %.2f) colour (%.2f, %.2f, %.2f) range %.2f..%.2f kind %d cone %g/%g "
+                  "layer %d%s%s, %zu link(s)%s",
+                  r.name.c_str(), l.spot ? "spot" : "point", l.pos[0], l.pos[1], l.pos[2], l.color[0], l.color[1],
+                  l.color[2], l.nearFar[0], l.nearFar[1], int(l.falloff), l.cone[0], l.cone[1], int(l.layer),
+                  l.on ? "" : " (off)",
+                  l.group != PortRoomGeo::kNoGroup ? (" group " + std::to_string(l.group)).c_str() : "",
+                  l.links.size(), l.animated ? (l.playing ? ", animated, playing" : ", animated") : "");
+    Log(line);
+    out.push_back(l);
+  }
+}
+
 void Writer::ReadFogRegions(const RoomData& r, const SceneryScripts& scripts, const Mat34& xf,
                             std::vector<FogRegionData>& out, std::vector<FogTransitionData>& transitions) const {
   const std::vector<const Component*> regions = r.room.Of(kVolumetricFogRegion);
@@ -3191,9 +3473,9 @@ bool Writer::Grid(const RoomPak& rp, const Vec3& shift, const std::vector<Vec3>&
     }
     m[i][3] = -shifted[size_t(i)] / 2 - double(origin[i]);
   }
-  // The game reads a room's file in one go when the area loads, and the largest
-  // rooms have millions of points; ambient light varies slowly, so those are
-  // kept at half the resolution, each point the average of its lit ones.
+  // Android only (see kMaxGridPoints): the largest rooms have millions of points and
+  // ambient light varies slowly, so those are kept at half the resolution, each point
+  // the average of its lit ones.
   while (points > kMaxGridPoints) {
     const int64_t half[3] = {(size[0] + 1) / 2, (size[1] + 1) / 2, (size[2] + 1) / 2};
     const size_t fewer = size_t(half[0]) * size_t(half[1]) * size_t(half[2]);
@@ -4527,7 +4809,7 @@ std::string Writer::WriteRoom(const RoomData& r, const std::map<std::string, Pla
   }
 
   std::vector<uint8_t> out = {'M', 'P', 'E', 'V'};
-  AppendLE32(out, 18);
+  AppendLE32(out, 19);
   float tone[5];
   std::copy(tonemap, tonemap + 5, tone);
   Tonemap(r, tone);
@@ -4741,6 +5023,57 @@ std::string Writer::WriteRoom(const RoomData& r, const std::map<std::string, Pla
     }
   } else {
     AppendLE32(out, 0);
+  }
+  std::vector<PointLightData> lights;
+  ReadPointLights(r, scripts, m.a, lights);
+  AppendLE32(out, uint32_t(lights.size()));
+  for (const PointLightData& l : lights) {
+    AppendLE32(out, uint32_t(l.layer));
+    out.push_back(l.on ? 1 : 0);
+    out.push_back(l.spot ? 1 : 0);
+    out.push_back(l.falloff);
+    out.push_back(0);
+    for (float v : l.pos) {
+      AppendLEFloat(out, v);
+    }
+    for (float v : l.toLight) {
+      AppendLEFloat(out, v);
+    }
+    for (float v : l.color) {
+      AppendLEFloat(out, v);
+    }
+    for (float v : l.nearFar) {
+      AppendLEFloat(out, v);
+    }
+    for (float v : l.cone) {
+      AppendLEFloat(out, v);
+    }
+    AppendLE32(out, l.group);
+    AppendLE32(out, uint32_t(l.links.size()));
+    for (const PortRoomGeo::Link& link : l.links) {
+      AppendLE32(out, link.sender);
+      out.push_back(link.state);
+      out.push_back(link.action);
+      out.insert(out.end(), 2, 0);
+    }
+    out.push_back(l.animated ? 1 : 0);
+    out.push_back(l.playing ? 1 : 0);
+    out.push_back(l.loop ? 1 : 0);
+    out.push_back(l.offAtStart ? 1 : 0);
+    out.push_back(l.animFalloff);
+    out.insert(out.end(), 3, 0);
+    AppendLEFloat(out, l.length);
+    AppendLEFloat(out, l.scale[0]);
+    AppendLEFloat(out, l.scale[1]);
+    AppendLEFloat(out, l.intensity);
+    for (const float c : l.rgb) {
+      AppendLEFloat(out, c);
+    }
+    for (const std::vector<uint8_t>& spline : l.splines) {
+      AppendLE32(out, uint32_t(spline.size()));
+      out.insert(out.end(), spline.begin(), spline.end());
+      out.insert(out.end(), (4 - spline.size() % 4) % 4, 0);
+    }
   }
   if (!fogs.empty() || !regions.empty()) {
     Log("  " + r.name + ": " + std::to_string(fogs.size()) + " fog hint(s), " + std::to_string(regions.size()) +

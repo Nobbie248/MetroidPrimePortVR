@@ -22,6 +22,18 @@ enum EStateFlags {
   // Port: unused by retail data. Converted mod materials set it to be shaded
   // with Aurora's PBR path (maps 0-3 = base, ORM, normal, emissive).
   kStateFlag_PortPBR = (1 << 14),
+  // Port: unused by retail data. A converted HUD picture whose Remastered shader also adds
+  // its base map, unscaled by the widget colour (3853595c: rgb = T*v1 + T*ICNC, ICNC white).
+  // Drawn once, with the widget's own blend, and TEV stage 0 as T + T*c (clamped at 1, as the
+  // shader output is into the HUD's UNORM target after tone mapping).
+  kStateFlag_PortHudGlow = (1 << 15),
+  // Port: unused by retail data. A converted HUD picture whose Remastered shader squares the
+  // filtered alpha it samples (ca1106b0 with unk1&1, 3853595c, 2d606234).
+  kStateFlag_PortHudSquare = (1 << 16),
+  // Port: unused by retail data. A converted HUD picture drawn with Remastered's
+  // UI_Interference (ad2c208c); bits 18..20 index PortRemastered::kHudInterferenceRows.
+  kStateFlag_PortHudInterference = (1 << 17),
+  kStateFlag_PortHudInterferenceShift = 18,
 #endif
   kStateFlag_TextureSlotMask = static_cast< uint >(~kStateFlag_LightmapUvArray),
 };
@@ -55,6 +67,9 @@ public:
   // 0 off, 1 on, 2 mirror, 3 window; -1 takes it from MP_PBR_PROBE on first use.
   static int sPortPBRProbeMode;
   static uint sPortPBRDraws;
+  // Port: the converted Remastered HUD's DYIN (x = 1 - the HUD's fade-in alpha, y = random;
+  // CSamusHud::Draw sets it while the HUD fades in, zero otherwise).
+  static float sPortHudDyin[2];
   // The PBR draws outside the probe's own capture that reflected the live probe rather than a
   // room environment's cube; while none do, the capture is skipped.
   static uint sPortPBRProbeDraws;

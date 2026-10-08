@@ -945,9 +945,12 @@ static void push_gx_draw(GXPrimitive prim, GXVtxFmt fmt, u32 vtxCount, gfx::Rang
 
   DrawImmediateData immediates{
       .vtxStart = vertRange.offset, .currentPnMtx = state.currentPnMtx, .serial = state.drawSerial};
-  // The arrays, unless the vertices carry their elements already (deindexVertices)
+  // The arrays, unless the vertices carry their elements already (deindexVertices), and
+  // TEX7's when it holds a skinned draw's bind pose, read with POS's index (bind_pos_active;
+  // de-indexed vertices have no POS index left to read it with).
+  const bool bindPos = bind_pos_active();
   for (int i = GX_VA_POS; i <= GX_VA_TEX7 && !state.deindexVertices; ++i) {
-    if (state.vtxDesc[i] != GX_INDEX8 && state.vtxDesc[i] != GX_INDEX16) {
+    if (state.vtxDesc[i] != GX_INDEX8 && state.vtxDesc[i] != GX_INDEX16 && !(bindPos && i == GX_VA_TEX7)) {
       continue;
     }
     auto& array = state.arrays[i];
@@ -1827,6 +1830,69 @@ static void handle_draw(u8 cmd, ByteReader& reader) noexcept {
   draw_prim(cmd, prim, fmt, reader.read<u16>(), reader);
 }
 
+// Port: PrimedGun and upstream both append subcommand IDs to GXAurora.h. A duplicate still
+// compiles (handle_aurora's if-chain takes the first match) but hands the other command's
+// payload to the wrong handler, which then misreads the FIFO: fail the build instead.
+static constexpr bool aurora_subcommand_ids_unique() noexcept {
+  constexpr u16 ids[] = {
+      GX_AURORA_LOAD_VIEWPORT_RENDER,     GX_AURORA_LOAD_SCISSOR_RENDER,      GX_AURORA_LOAD_PROJECTION_FULL,
+      GX_AURORA_DEBUG_GROUP_PUSH,         GX_AURORA_DEBUG_GROUP_POP,          GX_AURORA_DEBUG_MARKER_INSERT,
+      GX_AURORA_SET_DRAW_SYNC,            GX_AURORA_LOAD_TEXOBJ,              GX_AURORA_LOAD_TLUT,
+      GX_AURORA_DESTROY_TEXOBJ,           GX_AURORA_DESTROY_TLUT,             GX_AURORA_DESTROY_COPY_TEX,
+      GX_AURORA_LOAD_COPY_SRC,            GX_AURORA_LOAD_COPY_DST,            GX_AURORA_LOAD_COPY_DEST,
+      GX_AURORA_REQUEST_DEPTH_SNAPSHOT,   GX_AURORA_BEGIN_OFFSCREEN,          GX_AURORA_END_OFFSCREEN,
+      GX_AURORA_DRAW_SIZED,               GX_AURORA_DRAW_INDEXED,             GX_AURORA_LOAD_ARRAY_BASE_INDEX,
+      GX_AURORA_SET_PBR,                  GX_AURORA_COPY_PROBE_FACE,          GX_AURORA_SET_PBR_PROBE,
+      GX_AURORA_SET_PBR_MATERIAL,         GX_AURORA_CREATE_PBR_CUBE,          GX_AURORA_DESTROY_PBR_CUBE,
+      GX_AURORA_SET_PBR_CUBE,             GX_AURORA_SET_PBR_AMBIENT,          GX_AURORA_CREATE_PBR_VOLUME,
+      GX_AURORA_DESTROY_PBR_VOLUME,       GX_AURORA_SET_PBR_VOLUME,           GX_AURORA_CREATE_PBR_LIGHTMAP,
+      GX_AURORA_DESTROY_PBR_LIGHTMAP,     GX_AURORA_SET_PBR_LIGHTMAP,         GX_AURORA_SET_PBR_LIGHTMAP_ATTR,
+      GX_AURORA_SET_PBR_TONE,             GX_AURORA_SET_PBR_BRDF_LUT,         GX_AURORA_SET_SDF,
+      GX_AURORA_SET_HUD_SAMPLE,           GX_AURORA_SET_DRAW_TAG,             GX_AURORA_SET_PBR_LIGHT_SKIP,
+      GX_AURORA_SET_PBR_LIGHT_SCALE,      GX_AURORA_PORT_POST_PROCESS,        GX_AURORA_SET_PBR_LIGHT_HDR,
+      GX_AURORA_SET_PBR_BAKED_LIGHT_MODULATION, GX_AURORA_SET_PBR_BACKLIGHT,  GX_AURORA_SET_PBR_SHIELD,
+      GX_AURORA_PORT_VOLUMETRIC_FOG,      GX_AURORA_PORT_VOLUMETRIC_FOG_END,  GX_AURORA_PORT_DEPTH_PREPASS,
+      GX_AURORA_PORT_DRAW_SERIAL,         GX_AURORA_PORT_DRAW_ID_MODE,        GX_AURORA_RESIDENT_RETAIN,
+      GX_AURORA_RESIDENT_RELEASE,         GX_AURORA_RESIDENT_CALL_DL,         GX_AURORA_PORT_SHADOW_CASTER,
+      GX_AURORA_PORT_SHADOW_FRAME,        GX_AURORA_PORT_SHADOW_RENDER,       GX_AURORA_PORT_ROOM_LIGHTS,
+      GX_AURORA_PORT_PARTICLE_FOG,        GX2_SET_POLYGON_OFFSET,
+      // PrimedGun's
+      GX_AURORA_STEREO_DRAW_ROUTE,        GX_AURORA_STEREO_HEAD_LOCKED_PLANE, GX_AURORA_STEREO_SCREEN_TEX_MTX,
+      GX_AURORA_MAP_BATCH,                GX_AURORA_CALL_CACHED_DL,           GX_AURORA_FREE_GEOMETRY_SET,
+  };
+  constexpr size_t count = sizeof(ids) / sizeof(ids[0]);
+  for (size_t i = 0; i < count; ++i) {
+    // GX_AURORA_LOAD_ARRAYBASE takes the attribute in its low four bits.
+    if (ids[i] >= GX_AURORA_LOAD_ARRAYBASE && ids[i] <= (GX_AURORA_LOAD_ARRAYBASE | 0x0f)) {
+      return false;
+    }
+    for (size_t j = i + 1; j < count; ++j) {
+      if (ids[i] == ids[j]) {
+        return false;
+      }
+    }
+  }
+  return true;
+}
+static_assert(aurora_subcommand_ids_unique(), "GXAurora.h: two Aurora subcommands share an ID");
+
+// PrimedGun: our own subcommands stay in their block (GXAurora.h PRIMEDGUN_AURORA_SUBCMD_FIRST..LAST),
+// which upstream's numbering never reaches, so its next IDs cannot land on ours again.
+static constexpr bool primedgun_aurora_subcommands_in_block() noexcept {
+  constexpr u16 ids[] = {
+      GX_AURORA_STEREO_DRAW_ROUTE, GX_AURORA_STEREO_HEAD_LOCKED_PLANE, GX_AURORA_STEREO_SCREEN_TEX_MTX,
+      GX_AURORA_MAP_BATCH,         GX_AURORA_CALL_CACHED_DL,           GX_AURORA_FREE_GEOMETRY_SET,
+  };
+  for (const u16 id : ids) {
+    if (id < PRIMEDGUN_AURORA_SUBCMD_FIRST || id > PRIMEDGUN_AURORA_SUBCMD_LAST) {
+      return false;
+    }
+  }
+  return true;
+}
+static_assert(primedgun_aurora_subcommands_in_block(),
+              "GXAurora.h: PrimedGun's subcommands belong in PRIMEDGUN_AURORA_SUBCMD_FIRST..LAST (0xF000-0xF0FF)");
+
 void handle_aurora(ByteReader& reader) noexcept {
   ZoneScoped;
   const u16 subCmd = reader.read<u16>();
@@ -1907,7 +1973,7 @@ void handle_aurora(ByteReader& reader) noexcept {
     auto& array = g_gxState.arrays[attrIdx];
     const auto newData = reinterpret_cast<void*>(arrayAddr);
     if (array.data != newData || array.size != arraySize || array.le != le) {
-      if (array.le != le) {
+      if (array.le != le || (attrIdx == GX_VA_TEX7 && (array.data == nullptr) != (newData == nullptr))) {
         // Endianness is baked into the shader
         g_gxState.dirty |= DirtyPipeline;
       }
@@ -1997,7 +2063,7 @@ void handle_aurora(ByteReader& reader) noexcept {
     g_gxState.texCopyDstWidth = reader.read<u32>();
     g_gxState.texCopyDstHeight = reader.read<u32>();
     g_gxState.texCopyFmt = static_cast<GXTexFmt>(reader.read<u32>());
-    reader.skip(1); // mipmap is not implemented, but remains part of the command payload
+    g_gxState.texCopyMips = reader.read<u8>() != 0;
     g_gxState.texCopyDstWide = true;
   } else if (subCmd == GX_AURORA_LOAD_COPY_DEST) {
     g_gxState.texCopyDest = reinterpret_cast<const void*>(reader.read<u64>());
@@ -2104,6 +2170,19 @@ void handle_aurora(ByteReader& reader) noexcept {
     if (g_gxState.sdf != sdf) {
       g_gxState.sdf = sdf;
       g_gxState.dirty |= DirtyPipeline;
+    }
+  } else if (subCmd == GX_AURORA_SET_HUD_SAMPLE) {
+    const u8 mode = reader.read<u8>();
+    const f32 x = reader.read<f32>();
+    const f32 y = reader.read<f32>();
+    if (g_gxState.hudSample != mode) {
+      g_gxState.hudSample = mode;
+      g_gxState.dirty |= DirtyPipeline;
+    }
+    const Vec4<float> dyin{x, y, 0.f, 0.f};
+    if (g_gxState.hudDyin != dyin) {
+      g_gxState.hudDyin = dyin;
+      g_gxState.dirty |= DirtyUniform;
     }
   } else if (subCmd == GX_AURORA_PORT_DEPTH_PREPASS) {
     const u8 pass = reader.read<u8>();
@@ -2309,12 +2388,14 @@ void handle_aurora(ByteReader& reader) noexcept {
     std::memcpy(&params, words, sizeof(params));
     if (gfx::volfog::record(params)) {
       // The draws after it fog themselves through the froxels it fills.
-      // w: where the world's depth range starts; nearer is the viewmodel, which isn't fogged.
+      // w: where the world's depth range starts; nearer is the viewmodel (vf_depth).
       const Vec4<float> fogParams{params.depth[0], params.fog[0], params.colorA[3], params.depth[2]};
       std::array<Vec4<float>, 3> tone;
       for (size_t i = 0; i < tone.size(); ++i) {
         tone[i] = {params.tone[i][0], params.tone[i][1], params.tone[i][2], params.tone[i][3]};
       }
+      // The viewmodel's depth reading (vf_depth) needs 1 - near / far; tone[0].w is unused.
+      tone[0] = {params.tone[0][0], params.tone[0][1], params.tone[0][2], 1.f - params.depth[0] / params.depth[1]};
       if (!g_gxState.volFog) {
         g_gxState.volFog = true;
         g_gxState.dirty |= DirtyPipeline;
@@ -2330,6 +2411,12 @@ void handle_aurora(ByteReader& reader) noexcept {
   } else if (subCmd == GX_AURORA_PORT_VOLUMETRIC_FOG_END) {
     if (g_gxState.volFog) {
       g_gxState.volFog = false;
+      g_gxState.dirty |= DirtyPipeline;
+    }
+  } else if (subCmd == GX_AURORA_PORT_PARTICLE_FOG) {
+    const bool on = reader.read<u8>() != 0;
+    if (g_gxState.particleFog != on) {
+      g_gxState.particleFog = on;
       g_gxState.dirty |= DirtyPipeline;
     }
   } else if (subCmd == GX_AURORA_PORT_SHADOW_CASTER) {
@@ -2371,6 +2458,26 @@ void handle_aurora(ByteReader& reader) noexcept {
         g_gxState.dirty |= DirtyUniform;
       }
     }
+  } else if (subCmd == GX_AURORA_PORT_ROOM_LIGHTS) {
+    const u32 count = reader.read<u32>();
+    std::vector<f32> records(static_cast<size_t>(count) * 16);
+    for (f32& v : records) {
+      v = reader.read<f32>();
+    }
+    Vec4<float> value{};
+    if (count != 0) {
+      const auto range = gfx::push_storage(reinterpret_cast<const uint8_t*>(records.data()), records.size() * sizeof(f32));
+      if (!gfx::overflowed(range)) {
+        const u32 base = range.offset / sizeof(u32);
+        std::memcpy(&value.x(), &base, sizeof(base));
+        value.y() = static_cast<f32>(count);
+      }
+    }
+    // x holds a u32 offset as float bits: compare bits, since denormals may compare equal under FTZ/DAZ.
+    if (std::memcmp(&g_gxState.pbrRoomLights, &value, sizeof(value)) != 0) {
+      g_gxState.pbrRoomLights = value;
+      g_gxState.dirty |= DirtyUniform;
+    }
   } else if (subCmd == GX_AURORA_PORT_SHADOW_RENDER) {
     gfx::shadow::record();
   } else if (subCmd == GX_AURORA_SET_PBR_LIGHT_SKIP) {
@@ -2389,16 +2496,19 @@ void handle_aurora(ByteReader& reader) noexcept {
       g_gxState.dirty |= DirtyUniform;
     }
   } else if (subCmd == GX_AURORA_SET_PBR_BACKLIGHT) {
-    f32 v[9];
+    f32 v[11];
     for (f32& f : v) {
       f = reader.read<f32>();
     }
     const std::array<Vec4<float>, 3> value{
         Vec4<float>{v[0], v[1], v[2], v[3]},
         Vec4<float>{v[4], v[5], v[6], v[7]},
-        Vec4<float>{v[8], 0.f, 0.f, 0.f},
+        Vec4<float>{v[8], v[9], v[10], 0.f},
     };
     if (g_gxState.pbrBacklightLights != value) {
+      if ((g_gxState.pbrBacklightLights[2].z() > 0.f) != (value[2].z() > 0.f)) {
+        g_gxState.dirty |= DirtyPipeline;
+      }
       g_gxState.pbrBacklightLights = value;
       g_gxState.dirty |= DirtyUniform;
     }
@@ -2488,6 +2598,11 @@ void clear_draw_cache() noexcept {
   sDrawCache.stereoEpoch = 0;
   sDrawCache.fogRange = {};
   sDrawCache.hasFogRange = false;
+  // GX_AURORA_PORT_ROOM_LIGHTS points into this frame's storage buffer.
+  if (g_gxState.pbrRoomLights.y() != 0.f) {
+    g_gxState.pbrRoomLights = {};
+    g_gxState.dirty |= DirtyUniform;
+  }
   // Vertex de-indexing changes between frames only, with the pipelines
   const bool deindex = sDeindexRequested.load(std::memory_order_relaxed);
   if (deindex != g_gxState.deindexVertices) {

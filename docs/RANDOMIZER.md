@@ -1,9 +1,58 @@
-# Item randomizer (proof of concept)
+# Item randomizer
 
-The port can rewrite item pickups at load time from a seed file and record what
-it did. This is the runtime half of a randomizer: item *placement* is generated
-offline (the existing Python randomizers own the logic), and the port applies it
-and reports checks back. Nothing here changes behaviour when no seed is present.
+## Built-in randomizer
+
+F1 > **Randomizer** makes and plays logic-checked seeds without Archipelago
+installed. Pick the options (goal, item pool, elevators and door colours,
+logic and tricks; saved as the `rando_settings=` line of the settings file),
+type a seed text or leave it empty for a random one, and press **Generate &
+Play**. The page lists saved seeds with Play, a spoiler view, "Write
+spoiler file" and Delete (the seed, its progress and its save card; not the
+seed being played). The console has the same as `rando gen [seedtext]`,
+`rando play <name>`, `rando delete <name>` and `rando list`.
+
+Each seed has its own save card, which the game switches only at the title
+screen and file select. So while a game is loaded, Play is off for other
+seeds and Generate only saves the new seed: quit to the title screen to
+switch.
+
+- **Generator** (`platform/port_rando_gen.cpp`): the Metroid Prime apworld's
+  item pool (`ItemPool.py`) and options, filled with an assumed fill against
+  the port's own copy of the apworld logic (`PortApLogic`, the same rules the
+  tracker uses). Each seed is then walked again sphere by sphere: every one of
+  the 100 locations must be reachable and the final inventory must finish the
+  game, or the next attempt is tried. The same seed text and options always
+  give the same seed (own PRNG, no `std` distributions). Elevator
+  randomization, or a shuffled Scan Visor without pre-scanned elevators,
+  starts at Save Station 1, as the apworld does, so sphere 0 has a location.
+- **Start, beam, doors.** Starting room (normal, safe, buckle up) with the
+  apworld's loadouts and prefills (`StartRoomData.py`), random starting beam,
+  door colours, blast shields (replace existing, mix it up, with frequency and
+  beam combos) and locked doors, with the Power Beam and Morph Ball Bomb door
+  options. Differences from the apworld, where it would make a dead seed:
+  a normal start that needs Save Station 1 keeps its prefill even with
+  shields or tricks; replace existing keeps the Missile shields on the
+  regions mix it up leaves alone for the start (Save Station 1's Morph Ball
+  and Bombs sit behind Main Plaza); and an early item with no free sphere-0
+  location is placed like the rest instead of displacing the prefill. The
+  Sunchamber → Sun Tower Access rule the tracker pack lacks is added in
+  `tools/gen_ap_logic.py`.
+- **Playing** reuses the Archipelago client unchanged: a seed is served by an
+  in-process server (`platform/port_ap_solo.cpp`, server `solo:<name>`, slot
+  `Samus`), so the item models, scan text, temple hints, elevator and door
+  patches, tracker and per-seed save cards all come from slot data as in a
+  multiworld.
+- **Files** (`platform/port_rando_seed.cpp`): `<user dir>/randomizer_seeds/
+  <name>.json` holds the options, slot data, start items, placements and the
+  spoiler; `<name>.state.json` beside it the locations checked, in order
+  (items are numbered by it). A different seed under a taken name is saved as
+  `<name>-2`, `-3`, ....
+
+## Seed files from other tools
+
+The port can also rewrite item pickups at load time from an externally made
+seed file and record what it did. Nothing here changes behaviour when no seed
+is present.
 
 ## How it works
 
@@ -155,9 +204,8 @@ M item models`, `randomizer: dump mode (MP_RANDO_DUMP)`) and is otherwise silent
 
 ## Not done yet
 
-- **Logic.** Placement logic belongs in an offline generator (randomprime /
-  Archipelago's Metroid Prime world); the port only applies the result. Nothing
-  in the port guarantees a seed is beatable.
+- **Logic.** The seed-file path below has none; it applies what an offline
+  tool placed. The built-in randomizer above is logic-checked.
 - **Model coverage.** Models come from a dump, so an item the dump never saw
   keeps its retail model. There is no built-in table yet.
 - **Coverage.** `CScriptPickup` is handled; `CScriptPickupGenerator` drops and

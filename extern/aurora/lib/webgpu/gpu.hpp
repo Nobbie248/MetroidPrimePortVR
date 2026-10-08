@@ -43,6 +43,8 @@ extern wgpu::Device g_device;
 extern wgpu::Queue g_queue;
 extern wgpu::Surface g_surface;
 extern wgpu::BackendType g_backendType;
+// AuroraConfig::vulkanLibraryDir's library failed to start, so the system's was used.
+extern bool g_vulkanLibraryFailed;
 extern GraphicsConfig g_graphicsConfig;
 extern TextureWithSampler g_frameBuffer;
 extern TextureWithSampler g_frameBufferResolved;

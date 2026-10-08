@@ -1,5 +1,6 @@
 #include "MetroidPrime/Player/CPlayerGun.hpp"
 #include "port_debug.h"
+#include "port_room_env.h"
 #ifdef TARGET_PC
 #include "vr/vr_view.h"
 #endif
@@ -588,6 +589,11 @@ void CPlayerGun::PortSnapshotPresentedPose(const CStateManager& mgr) const {
 
 void CPlayerGun::Render(const CStateManager& mgr, const CVector3f& pos,
                         const CModelFlags& flags) const {
+#ifdef TARGET_PC
+  const CVector3f probePos = mgr.GetPlayer()->GetTranslation();
+  const float probeXyz[3] = {probePos.GetX(), probePos.GetY(), probePos.GetZ()};
+  const PortRoomEnv::ProbeOverrideScope probeScope(probeXyz);
+#endif
   const CTransform4f worldView = CGraphics::GetViewMatrix();
   if (mgr.GetCameraManager()->IsInFPCamera() &&
       mgr.GetPlayer()->GetCameraState() == CPlayer::kCS_FirstPerson &&
@@ -1216,6 +1222,9 @@ void CPlayerGun::ResetCharged(float dt, CStateManager& mgr) {
 void CPlayerGun::ProcessNormalState(int releasedStates, int pressedStates, CStateManager& mgr,
                                     float dt) {
   if ((releasedStates & 0x1) != 0) {
+#ifdef TARGET_PC
+    mPortRapidCharge = false;
+#endif
     ResetNormal(mgr);
     return;
   }
@@ -1223,8 +1232,18 @@ void CPlayerGun::ProcessNormalState(int releasedStates, int pressedStates, CStat
   if ((pressedStates & 0x1) != 0 && x348_chargeCooldownTimer == 0.f &&
       x832_28_readyForShot == true) {
     UpdateNormalShotCycle(dt, mgr);
+#ifdef TARGET_PC
+    PortStartRapidCharge();
+#endif
     return;
   }
+#ifdef TARGET_PC
+  // Remastered without the Charge Beam: the same quick shots while held, then
+  // nothing until release (CPlayerGunMP1 charge state 0xb).
+  if ((x2ec_lastFireButtonStates & 0x1) != 0 && mPortRapidCharge &&
+      !PortRapidChargeShot(dt, mgr))
+    mPortRapidCharge = false;
+#endif
   if ((pressedStates & 0x2) != 0) {
     FireSecondary(dt, mgr);
   }

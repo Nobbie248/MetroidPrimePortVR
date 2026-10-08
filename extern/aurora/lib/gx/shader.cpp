@@ -12,9 +12,10 @@
 
 #include <absl/container/flat_hash_map.h>
 #include <absl/container/flat_hash_set.h>
+#include <algorithm>
+#include <atomic>
 #include <cctype>
 #include <cmath>
-#include <atomic>
 #include <cstdlib>
 #include <filesystem>
 #include <fstream>
@@ -36,13 +37,28 @@ constexpr Module Log{"aurora::gfx::gx"};
 
 // Adreno 730 (Vulkan, driver V@0615.98) drops every GX draw whose fragment shader reads a
 // varying when load_word branches on arrayLength, so the world renders black (issue #7).
-// A clamp works there; elsewhere the upstream branch stays until the clamp is tested on
-// the Adreno drivers that guard was written for.
+// An Adreno 710 shows the same black world on some drivers. A clamp works there; it only
+// differs from the branch on out-of-range reads, so Auto takes it for every Adreno 7xx.
+// The bug needs the game's draw state (a standalone self-test of the same shader passes),
+// so there is no probe for it.
 bool clamp_storage_loads() noexcept {
   static const bool clamp = [] {
+    // MP_STORAGE_CLAMP=1/0 forces it on/off; unset = Vulkan on an Adreno 7xx.
+    if (const char* force = std::getenv("MP_STORAGE_CLAMP"); force != nullptr && *force != '\0') {
+      return *force == '1';
+    }
+    if (webgpu::g_backendType != wgpu::BackendType::Vulkan) {
+      return false;
+    }
+    // Device names look like "Adreno (TM) 730": the model is the first number after "Adreno".
     const std::string_view device{webgpu::g_adapterInfo.device};
-    return webgpu::g_backendType == wgpu::BackendType::Vulkan && device.find("Adreno") != std::string_view::npos &&
-           device.find("730") != std::string_view::npos;
+    const size_t adreno = device.find("Adreno");
+    if (adreno == std::string_view::npos) {
+      return false;
+    }
+    const size_t model = device.find_first_of("0123456789", adreno);
+    return model != std::string_view::npos && device[model] == '7' && model + 2 < device.size() &&
+           device[model + 1] >= '0' && device[model + 1] <= '9' && device[model + 2] >= '0' && device[model + 2] <= '9';
   }();
   return clamp;
 }
@@ -832,11 +848,13 @@ enum class NbtSlice : u8 {
   N,
   B,
   T,
+  B1, // GX_NRM_NBT5 only: the second tangent frame
+  T1,
 };
 
 auto attr_load_nbt_slice(const ShaderConfig& config, NbtSlice slice, std::string_view vidx) -> std::string {
   const auto& mapping = config.attrs[GX_VA_NRM];
-  if (mapping.attrType == GX_NONE || mapping.cnt != 9) {
+  if (mapping.attrType == GX_NONE || (mapping.cnt != 9 && mapping.cnt != 15)) {
     Log.fatal("attr_load_nbt_slice: GX_TG_BINRM/TANGENT requires GX_NRM_NBT or GX_NRM_NBT3");
   }
   const auto sliceIdx = static_cast<u32>(slice);
@@ -971,7 +989,7 @@ auto lighting_func(const ShaderConfig& config, const ColorChannelConfig& cc, u8 
 // one, multiplies the diffuse albedo (not the specular) as a linear value, and its alpha
 // the output's: that is what Remastered's shader does with it.
 auto pbr_func(const ShaderConfig& config, const ShaderInfo& info, std::string& vtxOutAttrs,
-              std::string& vtxXfrAttrs, size_t& vtxOutIdx) -> std::string {
+              std::string& vtxXfrAttrs, size_t& vtxOutIdx, std::string_view vidx) -> std::string {
   const auto& cc = config.colorChannels[GX_COLOR0];
   if (!info.sampledColorChannels.test(0)) {
     return {};
@@ -984,7 +1002,7 @@ auto pbr_func(const ShaderConfig& config, const ShaderInfo& info, std::string& v
                         config.tevStages[0].texMapId != GX_TEXMAP_NULL &&
                         config.tevStages[0].texCoordId != GX_TEXCOORD_NULL &&
                         config.colorChannels[GX_COLOR1].lightingEnabled;
-  std::array<int, 7> mapStage{-1, -1, -1, -1, -1, -1, -1};
+  std::array<int, 8> mapStage{-1, -1, -1, -1, -1, -1, -1, -1};
   for (int i = shadowed ? 1 : 0; i < config.tevStageCount; ++i) {
     const auto& stage = config.tevStages[i];
     const u32 map = underlying(stage.texMapId);
@@ -1007,8 +1025,10 @@ auto pbr_func(const ShaderConfig& config, const ShaderInfo& info, std::string& v
   }
   // Glass (kind 8) also samples map 7, a copy of what is behind it on screen. The
   // shadow's stage samples map 7 too, so a shadowed surface goes without.
+  // 3c66aaef (layered + MNMP) binds its macro normal as map 7, which is not a scene copy.
+  const bool layeredMacro = mapStage[4] != -1 && mapStage[7] != -1 && (config.pbrKind == 0 || config.pbrKind == 24);
   bool screen = false;
-  for (int i = 0; i < config.tevStageCount && !shadowed; ++i) {
+  for (int i = 0; i < config.tevStageCount && !shadowed && !layeredMacro; ++i) {
     const auto& stage = config.tevStages[i];
     if (stage.texMapId == GX_TEXMAP7 && uses_texture_sample(stage) && stage.texCoordId != GX_TEXCOORD_NULL) {
       screen = true;
@@ -1020,6 +1040,41 @@ auto pbr_func(const ShaderConfig& config, const ShaderInfo& info, std::string& v
   vtxOutAttrs += fmt::format("\n    @location({}) pbr_pos: vec3f,", vtxOutIdx++);
   vtxOutAttrs += fmt::format("\n    @location({}) pbr_nrm: vec3f,", vtxOutIdx++);
   vtxXfrAttrs += "\n    out.pbr_pos = mv_pos;\n    out.pbr_nrm = mv_nrm;";
+  // The backlight's height fade of a skinned draw, from the bind pose (see bind_pos_active):
+  // saturate(bind y * scale + offset), or -1 where the draw has none.
+  vtxOutAttrs += fmt::format("\n    @location({}) pbr_bty: f32,", vtxOutIdx++);
+  vtxXfrAttrs += "\n    out.pbr_bty = pbr_bind_y;";
+  // A model with vertex tangents (the NBT normal array: N, B, T) shades its normal maps with
+  // Remastered's frame: T and the handedness w (B = w * cross(N, T), so w is the sign of
+  // dot(cross(N, T), B)). Without them the frame comes from the screen derivatives below.
+  // GX_NRM_NBT5 adds a second frame (B1, T1) for the layered shaders A978D507 and D363D694,
+  // whose second normal map has a tangent stream of its own (TANGENT_1).
+  const bool tangents2 = config.attrs[GX_VA_NRM].attrType != GX_NONE && config.attrs[GX_VA_NRM].cnt == 15;
+  const bool tangents = tangents2 || (config.attrs[GX_VA_NRM].attrType != GX_NONE && config.attrs[GX_VA_NRM].cnt == 9);
+  // Remastered's vertex shaders (static and skinned) multiply the handedness by the sign of
+  // the model-view determinant, so a mirrored model keeps its bitangent (0 for a flat matrix).
+  if (tangents) {
+    vtxXfrAttrs += "\n    let pbr_mv = ubuf.postex_mtx[in_pnmtxidx];"
+                   "\n    let pbr_mvsign = sign(dot(pbr_mv[0].xyz, cross(pbr_mv[1].xyz, pbr_mv[2].xyz)));";
+  }
+  if (tangents2) {
+    vtxOutAttrs += fmt::format("\n    @location({}) pbr_tan2: vec4f,", vtxOutIdx++);
+    vtxXfrAttrs += fmt::format(
+        "\n    let pbr_vb2 = {};"
+        "\n    let pbr_vt2 = {};"
+        "\n    let pbr_vtv2 = vec4f(pbr_vt2, 0.0) * ubuf.postex_mtx[in_pnmtxidx];"
+        "\n    out.pbr_tan2 = vec4f(pbr_vtv2, pbr_mvsign * select(-1.0, 1.0, dot(cross(in_nrm, pbr_vt2), pbr_vb2) >= 0.0));",
+        attr_load_nbt_slice(config, NbtSlice::B1, vidx), attr_load_nbt_slice(config, NbtSlice::T1, vidx));
+  }
+  if (tangents) {
+    vtxOutAttrs += fmt::format("\n    @location({}) pbr_tan: vec4f,", vtxOutIdx++);
+    vtxXfrAttrs += fmt::format(
+        "\n    let pbr_vb = {};"
+        "\n    let pbr_vt = {};"
+        "\n    let pbr_vtv = vec4f(pbr_vt, 0.0) * ubuf.postex_mtx[in_pnmtxidx];"
+        "\n    out.pbr_tan = vec4f(pbr_vtv, pbr_mvsign * select(-1.0, 1.0, dot(cross(in_nrm, pbr_vt), pbr_vb) >= 0.0));",
+        attr_load_nbt_slice(config, NbtSlice::B, vidx), attr_load_nbt_slice(config, NbtSlice::T, vidx));
+  }
   // A vertex colour is the surface's tint where the material says so (mode 4), whatever
   // the channel does with it: the game points an unlit channel at its material register,
   // which would lose it. A retail model's colours are not a tint.
@@ -1050,8 +1105,16 @@ auto pbr_func(const ShaderConfig& config, const ShaderInfo& info, std::string& v
   // Kind 10, lit glass drawn premultiplied (One, InvSrcAlpha): the opacity scales only the
   // diffuse light, so the reflection and the glow are not dimmed with it.
   const std::string diffTint =
-      config.pbrKind == 10 ? fmt::format("{} * ({}{})", tint, layered ? "1.0" : "prev.a", tintAlpha) : tint;
+      (config.pbrKind == 10 || config.pbrKind == 34) ? fmt::format("{} * ({}{})", tint, layered ? "1.0" : "prev.a", tintAlpha) : tint;
+  // Remastered's diffuse vertex colour (MFVC) is decoded in its vertex shader as
+  // 2 |c|^2.2 (alpha raw), so a white vertex doubles the diffuse: 882014ee, f22feb5b,
+  // the layered 7248969b/a978d507, 11b30369 and every kShaderTints shader. Only the premultiplied
+  // glass 941068bf/bcc73459 keep the colour raw (mode bit 524288).
+  const std::string vtint =
+      "select(vec4f(2.0 * pow(abs(pbr_vraw.rgb), vec3f(2.2)), pbr_vraw.a), pbr_vraw, pbr_rawv)";
   std::string normalXy = mapStage[2] == -1 ? std::string() : fmt::format("sampled{}.rg", mapStage[2]);
+  std::string normalXy2; // a layered shader's second normal map
+
   std::string layer = fmt::format(R"""(
       // The stored normal. A PBR6 back copy (F0 factor 0, LITS) is stored turned round like
       // every back copy; Remastered keeps the surface's own normal there, and so does this.
@@ -1062,15 +1125,65 @@ auto pbr_func(const ShaderConfig& config, const ShaderInfo& info, std::string& v
       // 8 = Remastered's ColorUnlit: its vertex shader linearises the colour and doubles
       // it, and the pixel shader's gain is in the backlight's place.
       // 16 = a sky (with 1, unlit): the backlight's place holds the gain on its colour.
-      let pbr_sky = ubuf.pbr_backlight.w > 15.5;
-      let pbr_mw = ubuf.pbr_backlight.w - select(0.0, 16.0, pbr_sky);
+      // 256 = no reflection of the surroundings (a Remastered material with no REFL: its
+      // shader samples no cube). 128 = the vertex colour tints the albedo before F0 too
+      // (Remastered's kShaderTints).
+      // 512 = Remastered's 1-bit cutout: discard where base.a^2 < 0.25, opaque otherwise,
+      // in place of the GX alpha compare.
+      // 1024 = no specular from the lights (Remastered's pure Lambert VFX_Model_Base, 29d9fdfb).
+      // 2048 = the opacity is the base map's alpha as it is: no vertex alpha, nothing squared.
+      // 4096 = the baked light's modulation (BLCM) multiplies the lights' diffuse too, not
+      // just the baked ambient (that shader's baked-light perms: BLCM x (lobe + lights)).
+      // 32768 = the vertex shader's procedural wind (Remastered's USE_PROCEDURAL_WIND_ANIMATION);
+      // the fragment ignores it.
+      // 65536 = the opacity is the vertex alpha alone (495899e7: o0.w = v5.w * DIFC.a, DIFC.a = 1).
+      // 262144 = flat ambient only: no baked lobes, grid volume or lightmap, and no BLCM (4bc890c1
+      // LambertFx, whose perms sample none of them and seed the light sum with the flat constant).
+      // 524288 = the vertex colour is used raw (premultiplied glass 941068bf / bcc73459, whose
+      // vertex shader has no log2/exp2 decode).
+      let pbr_rawv = ubuf.pbr_backlight.w > 524287.5;
+      let pbr_mwv5 = ubuf.pbr_backlight.w - select(0.0, 524288.0, pbr_rawv);
+      let pbr_flat = pbr_mwv5 > 262143.5;
+      let pbr_mwf = pbr_mwv5 - select(0.0, 262144.0, pbr_flat);
+      // 131072 = a bare unlit surface (the Surface shaders 67135a0b / 6fc4d540): Remastered
+      // multiplies it by no exposure of its own, so the frame's tonemap exposes it; the backlight
+      // rgb holds the part of that exposure GlowScale (tone row 0 w) leaves.
+      let pbr_uex = pbr_mwf > 131071.5;
+      let pbr_mwu = pbr_mwf - select(0.0, 131072.0, pbr_uex);
+      let pbr_vao = pbr_mwu > 65535.5;
+      let pbr_mwv = pbr_mwu - select(0.0, 65536.0, pbr_vao);
+      let pbr_wnd = pbr_mwv > 32767.5;
+      let pbr_mww = pbr_mwv - select(0.0, 32768.0, pbr_wnd);
+      // 16384 = a macro normal map (MNMP, map 6) whiteout-blended over the normal in TANGENT_1's
+      // frame (a3c367be, 72b34e42, b9e899f3).
+      let pbr_macro = pbr_mww > 16383.5;
+      let pbr_mwz = pbr_mww - select(0.0, 16384.0, pbr_macro);
+      // 8192 = map 1 is an indirect offset map (Remastered's INDI, 8ce05ed0), not metal/roughness:
+      // the base map is sampled at uv + (INDI.xy - 0.5) * INDS (INDS in the backlight's x), and
+      // the surface has no AO or metal.
+      let pbr_ind = pbr_mwz > 8191.5;
+      let pbr_mwi = pbr_mwz - select(0.0, 8192.0, pbr_ind);
+      let pbr_blit = pbr_mwi > 4095.5;
+      let pbr_mwa = pbr_mwi - select(0.0, 4096.0, pbr_blit);
+      let pbr_raw = pbr_mwa > 2047.5;
+      let pbr_mwb = pbr_mwa - select(0.0, 2048.0, pbr_raw);
+      let pbr_nols = pbr_mwb > 1023.5;
+      let pbr_mwc = pbr_mwb - select(0.0, 1024.0, pbr_nols);
+      let pbr_cut = pbr_mwc > 511.5;
+      let pbr_mw1 = pbr_mwc - select(0.0, 512.0, pbr_cut);
+      let pbr_noenv = pbr_mw1 > 255.5;
+      let pbr_mwr = pbr_mw1 - select(0.0, 256.0, pbr_noenv);
+      let pbr_f0t = pbr_mwr > 127.5;
+      let pbr_mw0 = pbr_mwr - select(0.0, 128.0, pbr_f0t);
+      let pbr_sky = pbr_mw0 > 15.5;
+      let pbr_mw = pbr_mw0 - select(0.0, 16.0, pbr_sky);
       let pbr_cu = pbr_mw > 7.5;
       let pbr_flags = pbr_mw - select(0.0, 8.0, pbr_cu);
-      var pbr_vc = select(vec4f(1.0), pbr_vraw, pbr_flags > 3.5);
+      var pbr_vc = select(vec4f(1.0), {}, pbr_flags > 3.5);
       if (pbr_cu) {{
           pbr_vc = vec4f(2.0 * pow(abs(pbr_vraw.rgb), vec3f(2.2)) * ubuf.pbr_backlight.rgb, pbr_vraw.a);
       }})""",
-                                  float(config.pbrKind), vclr);
+                                  float(config.pbrKind), vclr, vtint);
   // A cut-out pixel (grass, leaves) that the alpha compare drops is dropped here instead of
   // after the shading. The compare sees prev.a times the vertex alpha unless a height blend,
   // ColorUnlit or a glow mode changes it (pbr_alpha below), and a layered surface's alpha is
@@ -1079,12 +1192,31 @@ auto pbr_func(const ShaderConfig& config, const ShaderInfo& info, std::string& v
     const auto discard = alpha_compare_discard(config);
     if (discard.constant == -1) {
       layer += fmt::format(R"""(
-      if (ubuf.pbr_emissive.w <= 0.0 && !pbr_cu && pbr_flags - select(0.0, 4.0, pbr_flags > 3.5) < 1.5) {{
+      if (!pbr_cut && !pbr_raw && ubuf.pbr_emissive.w <= 0.0 && !pbr_cu && pbr_flags - select(0.0, 4.0, pbr_flags > 3.5) < 1.5) {{
           let alphaCompare = u32(round(clamp(prev.a{}, 0.0, 1.0) * 255.0));
           if ({}) {{ discard; }}
       }})""",
                            tintAlpha, discard.expr);
     }
+  }
+  if (mapStage[4] == -1 && config.pbrKind == 24) {
+    // The decal cutouts (kind 24: e538b757, 42fe2ed0): t = clamp((A - 0.5 + c) / 2c), cut where t²(3 - 2t) < 0.25,
+    // with c = CCH0.x = 0.5 on all of them, so t = A. A is the alpha map's red (42fe2ed0's TCH0, map 3), else
+    // the base alpha squared; no vertex alpha.
+    layer += fmt::format(R"""(
+      let pbr_dca = clamp({}, 0.0, 1.0);
+      if (pbr_cut && pbr_dca * pbr_dca * (3.0 - 2.0 * pbr_dca) < 0.25) {{
+          discard;
+      }})""",
+                         mapStage[3] != -1 ? fmt::format("sampled{}.r", mapStage[3]) : "prev.a * prev.a"s);
+  } else if (mapStage[4] == -1) {
+    // Remastered's cutout (mode 512): the filtered base alpha squared, times the raw vertex
+    // alpha on tinted shaders (pbr_vc.a is 1 otherwise), against 0.25. DIFC.a is 1 on every
+    // material that has it.
+    layer += R"""(
+      if (pbr_cut && prev.a * prev.a * pbr_vc.a < 0.25) {
+          discard;
+      })""";
   }
   if (costTest == 1 || costTest == 7) {
     // The base map, shaded by the facing only, and nothing else. Test 7 keeps the other
@@ -1117,19 +1249,39 @@ auto pbr_func(const ShaderConfig& config, const ShaderInfo& info, std::string& v
       let pbr_duv2 = -dpdy(tex{0}_uv);
       let pbr_dp2perp = cross(pbr_dp2, pbr_ngs);
       let pbr_dp1perp = cross(pbr_ngs, pbr_dp1);
-      let pbr_t = pbr_dp2perp * pbr_duv1.x + pbr_dp1perp * pbr_duv2.x;
-      let pbr_b = pbr_dp2perp * pbr_duv1.y + pbr_dp1perp * pbr_duv2.y;
-      let pbr_tlen = max(dot(pbr_t, pbr_t), dot(pbr_b, pbr_b));)""",
+      let pbr_t0 = pbr_dp2perp * pbr_duv1.x + pbr_dp1perp * pbr_duv2.x;
+      let pbr_b0 = pbr_dp2perp * pbr_duv1.y + pbr_dp1perp * pbr_duv2.y;
+      let pbr_tlen = max(dot(pbr_t0, pbr_t0), dot(pbr_b0, pbr_b0));)""",
                          underlying(config.tevStages[mapStage[mapStage[2] != -1 ? 2 : 0]].texCoordId));
+    if (tangents) {
+      // Remastered's vertex frame: T normalised (not made orthogonal to N), B = cross(N, T) * w,
+      // given the derivative frame's length (every consumer scales by 1 / sqrt(pbr_tlen)) and
+      // its orientation: B against V (n = t * x - b * y).
+      layer += R"""(
+      let pbr_tu = normalize(in.pbr_tan.xyz);
+      let pbr_tsc = sqrt(pbr_tlen);
+      let pbr_t = pbr_tu * pbr_tsc;
+      let pbr_b = -cross(pbr_ngs, pbr_tu) * (in.pbr_tan.w * pbr_tsc);)""";
+      if (tangents2) {
+        layer += R"""(
+      let pbr_tu2 = normalize(in.pbr_tan2.xyz);
+      let pbr_t2 = pbr_tu2 * pbr_tsc;
+      let pbr_b2 = -cross(pbr_ngs, pbr_tu2) * (in.pbr_tan2.w * pbr_tsc);)""";
+      }
+    } else {
+      layer += R"""(
+      let pbr_t = pbr_t0;
+      let pbr_b = pbr_b0;)""";
+    }
   }
-  std::string kinds = "\n      var pbr_kglow = vec3f(0.0);";
+  std::string kinds = "\n      var pbr_kglow = vec3f(0.0);\n      var pbr_kns = 1.0;\n      var pbr_knoise = 0.0;";
   if (layered) {
     // Kind 1 lays the second layer on what faces up: the weight is the first layer's own
     // normal along world up, lifted by the vertex alpha.
     std::string first = "\n              var pbr_n1 = pbr_ng;";
     if (mapStage[2] != -1) {
       first += fmt::format(R"""(
-              let pbr_ts1 = sampled{}.rg * 2.0 - 1.0;
+              let pbr_ts1 = sampled{}.rg * 1.9921875 - 1.0;
               if (pbr_tlen > 1e-24) {{
                   let pbr_s1 = inverseSqrt(pbr_tlen);
                   pbr_n1 = normalize(pbr_t * (pbr_s1 * pbr_ts1.x) - pbr_b * (pbr_s1 * pbr_ts1.y) +
@@ -1139,22 +1291,24 @@ auto pbr_func(const ShaderConfig& config, const ShaderInfo& info, std::string& v
     }
     const auto& inner = config.tevStages[mapStage[4]];
     // Kind 4 sees map 4 inside the surface: where the view ray is once it has gone the
-    // base map's alpha deep. The sample is taken whatever the kind, as one in a branch has
-    // no derivatives.
+    // base map's alpha deep, in one unclamped step. Remastered's basis is T and
+    // normalize(cross(N, T)) without the handedness (V runs against it, hence the minus).
+    // The sample is taken whatever the kind, as one in a branch has no derivatives.
+    const std::string_view parallaxBasis =
+        tangents ? "vec2f(dot(pbr_tu, in.pbr_pos), -dot(normalize(cross(pbr_ngs, pbr_tu)), in.pbr_pos))"
+                 : "vec2f(dot(pbr_t * inverseSqrt(max(dot(pbr_t, pbr_t), 1e-30)), in.pbr_pos),\n"
+                   "                           dot(pbr_b * inverseSqrt(max(dot(pbr_b, pbr_b), 1e-30)), in.pbr_pos))";
     layer += fmt::format(R"""(
       var pbr_poff = vec2f(0.0);
-      if (pbr_kind > 3.5 && pbr_kind < 4.5 && pbr_tlen > 1e-24) {{
-          let pbr_pz = min(dot(pbr_ng, in.pbr_pos), -0.05 * length(in.pbr_pos));
-          pbr_poff = vec2f(dot(pbr_t * inverseSqrt(max(dot(pbr_t, pbr_t), 1e-30)), in.pbr_pos),
-                           dot(pbr_b * inverseSqrt(max(dot(pbr_b, pbr_b), 1e-30)), in.pbr_pos)) *
-                     ({0}.a * ubuf.pbr_param.w / pbr_pz);
+      if (pbr_kind > 3.5 && pbr_kind < 4.5{6}) {{
+          pbr_poff = {1} * ({0}.a * ubuf.pbr_param.w / dot(pbr_ng, in.pbr_pos));
       }}
-      let pbr_inner = pow(max(textureSampleBias(tex{4}, tex{4}_samp, tex{5}_uv + pbr_poff, ubuf.tex{4}_size_bias.z).rgb,
-                              vec3f(0.0)), vec3f(2.2));
+      let pbr_inner = max(textureSampleBias(tex{4}, tex{4}_samp, tex{5}_uv + pbr_poff, ubuf.tex{4}_size_bias.z).rgb,
+                          vec3f(0.0));
       var pbr_ls = 0.0;
       if (ubuf.pbr_layer.x > 0.0) {{
           var pbr_lw = pbr_vraw.a * 2.0 - 1.0;
-          if (pbr_kind > 0.5 && pbr_kind < 1.5) {{{3}
+          if ((pbr_kind > 0.5 && pbr_kind < 1.5) || (pbr_kind > 25.5 && pbr_kind < 26.5)) {{{3}
               let pbr_va2 = max(pbr_vraw.a * 2.0, 1e-4);
               pbr_lw = max(0.0, (dot(pbr_n1, ubuf.pbr_up.xyz) + pbr_va2 - 1.0) / pbr_va2) * 2.0 - 1.0;
           }}
@@ -1163,14 +1317,142 @@ auto pbr_func(const ShaderConfig& config, const ShaderInfo& info, std::string& v
           let pbr_lt = ubuf.pbr_layer.x;
           let pbr_lx = clamp((pbr_lh + pbr_lw * pbr_lt + pbr_lw + pbr_lt) * 0.5 / pbr_lt, 0.0, 1.0);
           pbr_ls = pbr_lx * pbr_lx * (3.0 - 2.0 * pbr_lx);
+      }}
+      // Kind 0 (the BCRL shaders: 7248969b, a978d507, d363d694, df0677ff, ea49e9e1...): the opacity is
+      // the blended alpha squared times DIFC.a (1 on all of them), not the vertex alpha, which is the weight.
+      let pbr_lma = mix({0}.a, sampled{2}.a, pbr_ls);
+      let pbr_lalpha = pbr_lma * pbr_lma;)""",
+                         base, parallaxBasis, mapStage[4], first, underlying(inner.texMapId), underlying(inner.texCoordId),
+                         tangents ? "" : " && pbr_tlen > 1e-24");
+    // Kind 20 (E9DF2188): map 3 is a detail map (the kind has no glow). The albedo is the blend times the
+    // vertex colour (2 |c|^2.2, applied below) times 2 times the detail as stored.
+    if (mapStage[3] != -1) {
+      kinds += fmt::format(R"""(
+      if (pbr_kind > 19.5 && pbr_kind < 20.5) {{
+          pbr_base = pbr_base * max(sampled{}.rgb, vec3f(0.0)) * 2.0;
       }})""",
-                         base, 0, mapStage[4], first, underlying(inner.texMapId), underlying(inner.texCoordId));
-    // Kind 2: map 4 is a detail map, grey where it leaves the base alone. Kind 4: the
+                           mapStage[3]);
+    }
+    // Kind 21, Remastered's Phazon3 (CC96C27D, the Phazon Mines' stone), permutation 034_0. Constants are
+    // GXSetPBRShield's rows: CCH0..CCH3 in rows 0-3 and DIFC in row 7; pbr_param.x is the time. Map 0 is BCLR
+    // (its alpha a weight), map 1 METL, map 2 NMAP, map 4 TCH0 (a colour ramp) and map 5 TCH1 (a mask read at
+    // the base UV times CCH0.w). The ramp's column is a rim term of the normal map's z (1 - nz^(1/2.2))^2.2
+    // plus an overlay of BCLR.r and BCLR.a^2.2, its row the pulse sin(t CCH2.x + mask CCH2.y) / 2 + 1/2. Where
+    // the vertex alpha (2 va + a^2.2 - 1, squared) says, the albedo is that colour; the vertex blue (with the
+    // AO cavity) masks the CCH3 glow. The vertex colour is raw. The glow is added at the inverse of the exposure
+    // (see liquid below).
+    if (config.pbrKind == 21 && mapStage[2] != -1 && mapStage[4] != -1 && mapStage[5] != -1) {
+      kinds += fmt::format(R"""(
+      let pbr_zc0 = ubuf.pbr_shield[0];
+      let pbr_zc1 = ubuf.pbr_shield[1];
+      let pbr_zc2 = ubuf.pbr_shield[2];
+      let pbr_zdf = ubuf.pbr_shield[7];
+      let pbr_zxy = sampled{0}.rg * 1.9921875 - 1.0;
+      let pbr_znz = sqrt(1.0 - clamp(dot(pbr_zxy, pbr_zxy), 0.0, 1.0));
+      let pbr_zuv = tex{2}_uv * pbr_zc0.w;
+      let pbr_zm = textureSampleGrad(tex{1}, tex{1}_samp, pbr_zuv, dpdx(pbr_zuv), dpdy(pbr_zuv)).x;
+      let pbr_zph = sin(ubuf.pbr_param.x * pbr_zc2.x + pbr_zm * pbr_zc2.y);
+      let pbr_zr = {3}.r;
+      let pbr_za = pow(abs({3}.a), 2.2);
+      let pbr_zg = select(2.0 * pbr_zr * (1.0 - pbr_za), 1.0 - 2.0 * pbr_za * (1.0 - pbr_zr), pbr_zr > 0.5);
+      let pbr_zu = (pow(abs(1.0 - pow(pbr_znz, 0.454545438)), 2.2) + pbr_zg + pbr_zc1.x) * pbr_zc1.y;
+      let pbr_zgrad = max(textureSampleLevel(tex{4}, tex{4}_samp, vec2f(pbr_zu, pbr_zph * 0.5 + 0.5), 0.0).rgb,
+                          vec3f(0.0));
+      let pbr_zt = clamp(2.0 * pbr_vraw.a + pbr_za - 1.0, 0.0, 1.0);
+      let pbr_zt2 = pbr_zt * pbr_zt;
+      let pbr_zs = clamp(pbr_vraw.b - 1.0 + clamp((pbr_zc1.z - {5}.r + 1.0) * pbr_zc1.w, 0.0, 1.0), 0.0, 1.0);
+      let pbr_zs2 = pbr_zs * pbr_zs;
+      pbr_base = mix(max({3}.rgb, vec3f(0.0)), pbr_zgrad * (1.0 - pbr_zc0.y), pbr_zt2) * pbr_zdf.rgb;)""",
+                           mapStage[2], underlying(config.tevStages[mapStage[5]].texMapId),
+                           underlying(config.tevStages[mapStage[0]].texCoordId), base,
+                           underlying(config.tevStages[mapStage[4]].texMapId), sampled(1, "vec4f(1.0, 0.6, 0.0, 1.0)"));
+    }
+    // Kind 22, Remastered's 9e52aa74 (the Phazon Mines' stone and the crater's flesh), permutation 034_0. The
+    // maps and constants are kind 21's, with these differences: the mask (map 5) is read at the base UV; the
+    // pulse is sin(mask + t) and the mask also joins the vertex alpha (2 va + mask - 1, not squared) for the
+    // ramp's weight; the ramp's column is offset and scaled by CCH0.z/.w; a second ramp read at (a^2.2 + CCH2.z +
+    // CCH2.x) CCH2.y on row 0 gives the alpha that, with the vertex green, lights the CCH3 cavity glow (no
+    // phase); the ramp glow is 4 t va.r CCH0.x CCH0.y grad. There is no DIFC, and no exposure factor on the glow.
+    if (config.pbrKind == 22 && mapStage[2] != -1 && mapStage[4] != -1 && mapStage[5] != -1) {
+      kinds += fmt::format(R"""(
+      let pbr_zc0 = ubuf.pbr_shield[0];
+      let pbr_zc1 = ubuf.pbr_shield[1];
+      let pbr_zc2 = ubuf.pbr_shield[2];
+      let pbr_zxy = sampled{0}.rg * 1.9921875 - 1.0;
+      let pbr_znz = sqrt(1.0 - clamp(dot(pbr_zxy, pbr_zxy), 0.0, 1.0));
+      let pbr_zm = textureSampleGrad(tex{1}, tex{1}_samp, tex{2}_uv, dpdx(tex{2}_uv), dpdy(tex{2}_uv)).x;
+      let pbr_zph = sin(pbr_zm + ubuf.pbr_param.x);
+      let pbr_zr = {3}.r;
+      let pbr_za = pow(abs({3}.a), 2.2);
+      let pbr_zg = select(2.0 * pbr_zr * (1.0 - pbr_za), 1.0 - 2.0 * pbr_za * (1.0 - pbr_zr), pbr_zr > 0.5);
+      let pbr_zu = (pow(abs(1.0 - pow(pbr_znz, 0.454545438)), 2.2) + pbr_zg + pbr_zc0.z) * pbr_zc0.w;
+      let pbr_zgrad = max(textureSampleLevel(tex{4}, tex{4}_samp, vec2f(pbr_zu, pbr_zph * 0.5 + 0.5), 0.0).rgb,
+                          vec3f(0.0));
+      let pbr_zca = textureSampleLevel(tex{4}, tex{4}_samp, vec2f((pbr_za + pbr_zc2.z + pbr_zc2.x) * pbr_zc2.y, 0.0), 0.0).a;
+      let pbr_zt = clamp(2.0 * pbr_vraw.a + pbr_zm - 1.0, 0.0, 1.0);
+      let pbr_zcav = clamp(pbr_vraw.g - 1.0 + pbr_zca, 0.0, 1.0) +
+                     clamp(pbr_vraw.b - 1.0 + clamp((pbr_zc1.x - {5}.r + 1.0) * pbr_zc1.y, 0.0, 1.0), 0.0, 1.0);
+      pbr_base = mix(max({3}.rgb, vec3f(0.0)), pbr_zgrad * (1.0 - pbr_zc0.y), pbr_zt);)""",
+                           mapStage[2], underlying(config.tevStages[mapStage[5]].texMapId),
+                           underlying(config.tevStages[mapStage[0]].texCoordId), base,
+                           underlying(config.tevStages[mapStage[4]].texMapId), sampled(1, "vec4f(1.0, 0.6, 0.0, 1.0)"));
+    }
+    // Kind 32, Remastered's PhazonPool (07acff46, the blisters), permutation 018_0. Constants are GXSetPBRShield's
+    // rows: CCH0 (fresnel power, gain, noise scale along the view, emission gain), CCH1 (noise speed, depth along
+    // BCLR.a), ICMC in row 6 and DIFC in row 7; pbr_param.x is the sim clock. Map 4 is TCH0, a 64^3 noise volume the
+    // importer stacked into a 512x512 atlas (slice z at tile (z % 8, z / 8)), read here as a repeating trilinear
+    // 3D texture on its own texcoord set; map 5 is TCH1, the emission ramp. The noise is read at the UV offset
+    // along the view in the tangent frame (T, normalize(cross(N, T)), no handedness) by BCLR.a x CCH0.z over
+    // N.pos, and at z = fract(t CCH1.x + BCLR.a CCH1.y). It scales the normal map's tilt (max(1.25 n, 0.1)) and
+    // lowers the roughness; the ramp is read at (n + f, f) for the fresnel f = (N.V)^CCH0.x CCH0.y of the
+    // geometric normal, and its colour times CCH0.w is the glow (times the exposure, as every glow here).
+    if (config.pbrKind == 32 && mapStage[2] != -1 && mapStage[4] != -1 && mapStage[5] != -1) {
+      kinds += fmt::format(R"""(
+      let pbr_pc0 = ubuf.pbr_shield[0];
+      let pbr_pc1 = ubuf.pbr_shield[1];
+      let pbr_pdf = ubuf.pbr_shield[7];
+      let pbr_ps = {0}.a * pbr_pc0.z;
+      let pbr_pnp = dot(pbr_ng, in.pbr_pos);
+      let pbr_pq = pbr_ps / select(-1e-6, pbr_pnp, abs(pbr_pnp) > 1e-6);
+      let pbr_pbv = {3};
+      let pbr_pz = fract(ubuf.pbr_param.x * pbr_pc1.x + {0}.a * pbr_pc1.y);
+      let pbr_puv = (tex{1}_uv + pbr_pbv * pbr_pq) * 64.0 - 0.5;
+      let pbr_pf = fract(pbr_puv);
+      let pbr_pci = vec2i(floor(pbr_puv));
+      let pbr_pzz = pbr_pz * 64.0 - 0.5;
+      let pbr_pzf = fract(pbr_pzz);
+      let pbr_pzi = i32(floor(pbr_pzz));
+      var pbr_pn = 0.0;
+      for (var pbr_pk = 0; pbr_pk < 2; pbr_pk++) {{
+          let pbr_pl = (pbr_pzi + pbr_pk) & 63;
+          let pbr_po = vec2i((pbr_pl & 7) * 64, (pbr_pl >> 3) * 64);
+          let pbr_px0 = pbr_pci.x & 63;
+          let pbr_px1 = (pbr_pci.x + 1) & 63;
+          let pbr_py0 = pbr_pci.y & 63;
+          let pbr_py1 = (pbr_pci.y + 1) & 63;
+          let pbr_pa = mix(textureLoad(tex{2}, pbr_po + vec2i(pbr_px0, pbr_py0), 0).x,
+                           textureLoad(tex{2}, pbr_po + vec2i(pbr_px1, pbr_py0), 0).x, pbr_pf.x);
+          let pbr_pb = mix(textureLoad(tex{2}, pbr_po + vec2i(pbr_px0, pbr_py1), 0).x,
+                           textureLoad(tex{2}, pbr_po + vec2i(pbr_px1, pbr_py1), 0).x, pbr_pf.x);
+          pbr_pn += mix(pbr_pa, pbr_pb, pbr_pf.y) * select(1.0 - pbr_pzf, pbr_pzf, pbr_pk == 1);
+      }}
+      pbr_knoise = pbr_pn;
+      pbr_kns = max(1.25 * pbr_pn, 0.1);
+      let pbr_pfr = exp2(max(pbr_pc0.x, 0.001) * log2(clamp(dot(pbr_ng, normalize(-in.pbr_pos)), 0.0, 1.0))) * pbr_pc0.y;
+      let pbr_pramp = textureSampleLevel(tex{4}, tex{4}_samp, vec2f(clamp(pbr_pn + pbr_pfr, 0.0, 1.0), clamp(pbr_pfr, 0.0, 1.0)), 0.0).rgb;
+      pbr_base = pbr_base * pbr_pdf.rgb;)""",
+                           base, underlying(config.tevStages[mapStage[4]].texCoordId),
+                           underlying(config.tevStages[mapStage[4]].texMapId),
+                           parallaxBasis,
+                           underlying(config.tevStages[mapStage[5]].texMapId));
+    }
+    // Kind 2: map 4 is a detail map that leaves the base alone where the sampler returns 0.5 (the texture's
+    // own format decides which byte that is). Kind 4: the
     // inside shows where the surface is seen edge on (a fresnel that also takes it to the
     // vertex colour) and where the base map's alpha says it is clear, and glows there.
     kinds += fmt::format(R"""(
       if (pbr_kind > 1.5 && pbr_kind < 2.5) {{
-          pbr_base = pbr_base * pow(max(sampled{1}.rgb, vec3f(0.0)), vec3f(2.2)) * 2.0;
+          pbr_base = pbr_base * max(sampled{1}.rgb, vec3f(0.0)) * 2.0;
       }}
       if (pbr_kind > 3.5 && pbr_kind < 4.5) {{
           let pbr_kf = pow(clamp(dot(pbr_ng, normalize(-in.pbr_pos)), 0.0, 1.0), max(ubuf.pbr_param.x, 1e-4)) *
@@ -1208,7 +1490,7 @@ auto pbr_func(const ShaderConfig& config, const ShaderInfo& info, std::string& v
           let pbr_mm = normalize(pbr_t * (pbr_ms * pbr_mt.x) - pbr_b * (pbr_ms * pbr_mt.y) +
                                  pbr_ng * sqrt(max(0.0, 1.0 - dot(pbr_mt, pbr_mt))));
           let pbr_mc = textureSampleLevel(tex{1}, tex{1}_samp, 0.5 + 0.5 * pbr_mm.xy, 0.0).rgb;
-          pbr_base = pow(max(pbr_mc, vec3f(0.0)), vec3f(2.2)) * ubuf.pbr_layer.z * max(ubuf.pbr_emissive.rgb, vec3f(0.0));
+          pbr_base = max(pbr_mc, vec3f(0.0)) * ubuf.pbr_layer.z * max(ubuf.pbr_emissive.rgb, vec3f(0.0));
       }})""",
                            mapStage[2], underlying(inner.texMapId));
     }
@@ -1236,12 +1518,11 @@ auto pbr_func(const ShaderConfig& config, const ShaderInfo& info, std::string& v
                              textureSampleGrad(tex{0}, tex{0}_samp, tex{1}_uv + pbr_fb, pbr_fuv1, pbr_fuv2).b);
           let pbr_fw = max(pbr_fs + pbr_vraw.rgb * 2.0 + ubuf.pbr_param.w - 1.0, vec3f(0.0));
           let pbr_fsum = pbr_fw.x + pbr_fw.y + pbr_fw.z;
-          let pbr_framp = textureSampleLevel(tex{2}, tex{2}_samp,
-                                             clamp(vec2f(pbr_fsum / max(pbr_fsum + ubuf.pbr_param.z, 1.0),
-                                                         pbr_vraw.a + ubuf.pbr_layer.z),
-                                                   vec2f(0.02), vec2f(0.98)), 0.0);
+          let pbr_framp = textureSample(tex{2}, tex{2}_samp,
+                                        vec2f(pbr_fsum / max(pbr_fsum + ubuf.pbr_param.z, 1.0),
+                                              pbr_vraw.a + ubuf.pbr_layer.z));
           pbr_base = vec3f(0.0);
-          pbr_kglow = pow(max(pbr_framp.rgb, vec3f(0.0)), vec3f(2.2)) * max(ubuf.pbr_emissive.rgb, vec3f(0.0));
+          pbr_kglow = max(pbr_framp.rgb, vec3f(0.0)) * max(ubuf.pbr_emissive.rgb, vec3f(0.0));
           pbr_kalpha = pbr_framp.a;
       }})""",
                            underlying(inner.texMapId), underlying(inner.texCoordId), ramp);
@@ -1251,8 +1532,9 @@ auto pbr_func(const ShaderConfig& config, const ShaderInfo& info, std::string& v
     // third, pbr_param.x the time). Their sum less twice the vertex colour's, offset by
     // pbr_param.w, picks the glow from map 5, a ramp whose row is the vertex alpha; it is
     // scaled by its own alpha and pbr_layer.z. The surface under it stays lit. Both maps are
-    // sRGB in Remastered, so the hardware linearised the noise as well as the ramp; the
-    // vertex colour is a plain UNORM attribute and stays as it is.
+    // sRGB in Remastered, and so are the converted textures (written sRGB when their source
+    // format is), so the sampler linearises the noise as well as the ramp; the vertex colour is
+    // a plain UNORM attribute and stays as it is.
     if (mapStage[5] != -1) {
       kinds += fmt::format(R"""(
       if (pbr_kind > 8.5 && pbr_kind < 9.5) {{
@@ -1263,12 +1545,12 @@ auto pbr_func(const ShaderConfig& config, const ShaderInfo& info, std::string& v
           let pbr_gn = vec3f(textureSampleGrad(tex{0}, tex{0}_samp, tex{1}_uv + pbr_gr, pbr_fuv1, pbr_fuv2).r,
                              textureSampleGrad(tex{0}, tex{0}_samp, tex{1}_uv + pbr_gg, pbr_fuv1, pbr_fuv2).g,
                              textureSampleGrad(tex{0}, tex{0}_samp, tex{1}_uv + pbr_gb, pbr_fuv1, pbr_fuv2).b);
-          let pbr_gl = pow(max(pbr_gn, vec3f(0.0)), vec3f(2.2));
+          let pbr_gl = max(pbr_gn, vec3f(0.0));
           let pbr_gs = pbr_gl.x + pbr_gl.y + pbr_gl.z;
           let pbr_gu = pbr_gs - 2.0 * (pbr_vraw.r + pbr_vraw.g + pbr_vraw.b) + 3.0 + ubuf.pbr_param.w;
           let pbr_gramp = textureSampleLevel(tex{2}, tex{2}_samp,
                                              clamp(vec2f(pbr_gu, 1.0 - pbr_vraw.a), vec2f(0.02), vec2f(0.98)), 0.0);
-          pbr_kglow = pow(max(pbr_gramp.rgb, vec3f(0.0)), vec3f(2.2)) * (pbr_gramp.a * ubuf.pbr_layer.z);
+          pbr_kglow = max(pbr_gramp.rgb, vec3f(0.0)) * (pbr_gramp.a * ubuf.pbr_layer.z);
       }})""",
                            underlying(inner.texMapId), underlying(inner.texCoordId),
                            underlying(config.tevStages[mapStage[5]].texMapId));
@@ -1282,7 +1564,7 @@ auto pbr_func(const ShaderConfig& config, const ShaderInfo& info, std::string& v
     // Glass_DX11 reads its cube at level 1 of a smooth surface.
     orm = fmt::format("select({}, vec4f(1.0, 0.1, 0.0, 1.0), pbr_kind > 10.5 && pbr_kind < 11.5)", orm);
     if (mapStage[6] != -1 && mapStage[2] != -1) {
-      normalXy = fmt::format("mix({}, sampled{}.rg, pbr_ls)", normalXy, mapStage[6]);
+      normalXy2 = fmt::format("sampled{}.rg", mapStage[6]);
     }
     // The vertex alpha is the layers' weight there and no opacity.
     tintAlpha.clear();
@@ -1329,7 +1611,7 @@ auto pbr_func(const ShaderConfig& config, const ShaderInfo& info, std::string& v
                                              clamp(vec2f(pbr_qxy.x + pbr_qd * (3.0 - 2.0 * pbr_qt) * pbr_qt * pbr_qt, pbr_qheat),
                                                    vec2f(0.02), vec2f(0.98)), 0.0).rgb;
           pbr_base = vec3f(0.0);
-          pbr_kglow = pow(max(pbr_qramp, vec3f(0.0)), vec3f(2.2)) * ubuf.pbr_layer.z;
+          pbr_kglow = max(pbr_qramp, vec3f(0.0)) * ubuf.pbr_layer.z;
       }})""",
                          mapOf(0), mapOf(4), mapOf(5), mapStage[6], uv);
     // Kind 5, water: the normal is two copies of map 2 moving across each other
@@ -1351,22 +1633,74 @@ auto pbr_func(const ShaderConfig& config, const ShaderInfo& info, std::string& v
     }
   }
   const std::string baseRgb =
-      layered ? fmt::format("mix(pow(max({0}.rgb, vec3f(0.0)), vec3f(2.2)), pow(max(sampled{1}.rgb, vec3f(0.0)), "
-                            "vec3f(2.2)), pbr_ls)",
-                            base, mapStage[4])
-              : fmt::format("pow(max({}.rgb, vec3f(0.0)), vec3f(2.2))", base);
+      layered ? fmt::format("mix(max({0}.rgb, vec3f(0.0)), max(sampled{1}.rgb, vec3f(0.0)), pbr_ls)", base,
+                            mapStage[4])
+              : fmt::format("max({}.rgb, vec3f(0.0))", base);
   std::string normal;
   if (mapStage[2] != -1) {
     // glTF normal maps are +Y up with V running down the image, so the bitangent is the
-    // negated dP/dV. Kind 4 scales the map's tilt.
-    normal = fmt::format(R"""(
-      let pbr_ts = ({0} * 2.0 - 1.0) * select(1.0, ubuf.pbr_param.z, pbr_kind > 3.5 && pbr_kind < 4.5);
-      let pbr_tn = vec3f(pbr_ts, sqrt(max(0.0, 1.0 - dot(pbr_ts, pbr_ts))));
+    // negated dP/dV. Kind 4 scales the map's tilt. Remastered decodes x 255/128 - 1, so that
+    // byte 128 is flat.
+    // The layered shaders (7248969B, A978D507) decode each layer's normal in full and mix
+    // the vectors, which keeps more tilt at mid weights. Kind 1 (9EFE0D2E) and kind 20
+    // (E9DF2188) mix the maps' xy and rebuild z.
+    std::string tn = "vec3f(pbr_ts, sqrt(max(0.0, 1.0 - dot(pbr_ts, pbr_ts))))";
+    if (!normalXy2.empty()) {
+      tn = fmt::format(
+          "select(normalize(mix({}, vec3f(pbr_ts2, sqrt(max(0.0, 1.0 - dot(pbr_ts2, pbr_ts2)))), pbr_ls)), "
+          "vec3f(pbr_tsm, sqrt(max(0.0, 1.0 - dot(pbr_tsm, pbr_tsm)))), (pbr_kind > 0.5 && pbr_kind < 1.5) || pbr_kind > 19.5)",
+          tn);
+      normal = fmt::format("\n      let pbr_ts2 = {} * 1.9921875 - 1.0;", normalXy2);
+    }
+    normal += fmt::format(R"""(
+      let pbr_ts = ({0} * 1.9921875 - 1.0) * select(select(1.0, ubuf.pbr_param.z, pbr_kind > 3.5 && pbr_kind < 4.5), ubuf.pbr_shield[0].z, pbr_kind > 27.5 && pbr_kind < 28.5) * select(1.0, pbr_kns, pbr_kind > 31.5 && pbr_kind < 32.5);
+      {2}let pbr_tn = {1};
       if (pbr_tlen > 1e-24) {{
         let pbr_s = inverseSqrt(pbr_tlen);
-        pbr_n = normalize(pbr_t * (pbr_s * pbr_tn.x) - pbr_b * (pbr_s * pbr_tn.y) + pbr_ng * pbr_tn.z);
+        let pbr_nu = pbr_t * (pbr_s * pbr_tn.x) - pbr_b * (pbr_s * pbr_tn.y) + pbr_ng * pbr_tn.z;
+        // 07acff46 (kind 32) lights the mapped normal as it is, never normalised (kb material/07acff46.md).
+        pbr_n = select(normalize(pbr_nu), pbr_nu, pbr_kind > 31.5 && pbr_kind < 32.5);
       }})""",
-                         normalXy);
+                          normalXy, tn,
+                          normalXy2.empty() ? "" : "let pbr_tsm = mix(pbr_ts, pbr_ts2, pbr_ls);\n      ");
+    if (tangents2 && !normalXy2.empty() && !layeredMacro) {
+      // A978D507 / D363D694 (LayerBaseNormal_2TangentStream): each layer's normal is built in
+      // its own tangent frame (TANGENT_0 for map 1, TANGENT_1 for map 2) and the two are mixed.
+      normal += R"""(
+      if (pbr_tlen > 1e-24 && !((pbr_kind > 0.5 && pbr_kind < 1.5) || pbr_kind > 19.5)) {
+        let pbr_s2 = inverseSqrt(pbr_tlen);
+        let pbr_nl1 = normalize(pbr_t * (pbr_s2 * pbr_ts.x) - pbr_b * (pbr_s2 * pbr_ts.y) +
+                                pbr_ng * sqrt(max(0.0, 1.0 - dot(pbr_ts, pbr_ts))));
+        let pbr_nl2 = normalize(pbr_t2 * (pbr_s2 * pbr_ts2.x) - pbr_b2 * (pbr_s2 * pbr_ts2.y) +
+                                pbr_ng * sqrt(max(0.0, 1.0 - dot(pbr_ts2, pbr_ts2))));
+        pbr_n = normalize(mix(pbr_nl1, pbr_nl2, pbr_ls));
+      })""";
+    }
+    // 231F8383 (kind 8) lerps the map's normal in by the vertex colour's blue:
+    // normalize(Ng + (N - Ng) x v4.z) (kb material/231f8383.md).
+    normal += R"""(
+      if (pbr_kind > 7.5 && pbr_kind < 8.5) {
+        pbr_n = normalize(pbr_ng + (pbr_n - pbr_ng) * pbr_vraw.b);
+      })""";
+  }
+  const int macroStage = layered ? (layeredMacro ? mapStage[7] : -1) : mapStage[6];
+  if (macroStage != -1) {
+    // Remastered's macro normal (MNMP): the detail normal M (map 1, TANGENT_0's frame) goes into
+    // TANGENT_1's frame, the macro map's xy is added there and z is scaled by its z:
+    // x = m.x + T2.M, y = m.y + B2.M, z = N.M sqrt(1 - |m|^2), B2 = cross(N, T2) w (our
+    // bitangent is the negated one).
+    normal += fmt::format(R"""(
+      if (pbr_macro && pbr_tlen > 1e-24) {{
+        let pbr_ks = inverseSqrt(pbr_tlen);
+        let pbr_km = clamp(sampled{}.rg * 1.9921875 - 1.0, vec2f(-1.0), vec2f(1.0));
+        let pbr_kt = {} * pbr_ks;
+        let pbr_kb = -{} * pbr_ks;
+        let pbr_kx = pbr_km.x + dot(pbr_kt, pbr_n);
+        let pbr_ky = pbr_km.y + dot(pbr_kb, pbr_n);
+        let pbr_kz = dot(pbr_ng, pbr_n) * sqrt(max(0.0, 1.0 - dot(pbr_km, pbr_km)));
+        pbr_n = normalize(pbr_ng * pbr_kz + pbr_kt * pbr_kx + pbr_kb * pbr_ky);
+      }})""",
+                          macroStage, tangents2 ? "pbr_t2" : "pbr_t", tangents2 ? "pbr_b2" : "pbr_b");
   }
   normal += liquid;
   // And what is seen of it: its own colour in the room's light where it is looked into,
@@ -1393,17 +1727,18 @@ auto pbr_func(const ShaderConfig& config, const ShaderInfo& info, std::string& v
     // (map 7) is seen through it, bent by map 5's noise (pbr_param.x) and tinted
     // (pbr_emissive). pbr_param.z is how fast the clear part loses its opacity, y the
     // reflection's weight, pbr_layer_height the glow's colour and in w the reflection's
-    // level. It is drawn premultiplied, so what shows through is added after the tone curve.
+    // level. It is drawn with straight alpha (class 1), as Remastered's output rgb holds the
+    // scene term too, so what shows through is added after the tone curve and blended by alpha.
     const auto& inner4 = config.tevStages[mapStage[4]];
     std::string through;
-    if (screen) {
+    if (screen && config.pbrKind != 31) {
       vtxOutAttrs += fmt::format("\n    @location({}) pbr_scr: vec4f,", vtxOutIdx++);
       vtxXfrAttrs += "\n    out.pbr_scr = out.pos;";
       through = fmt::format(R"""(
           let pbr_gn = ({0} - 0.5) * ubuf.pbr_param.x * vec2f(1.0, -1.0);
           let pbr_guv = in.pbr_scr.xy / in.pbr_scr.w * vec2f(0.5, -0.5) + 0.5 + pbr_gn;
           let pbr_gs = textureSampleLevel(tex7, tex7_samp, clamp(pbr_guv, vec2f(0.0), vec2f(1.0)), 0.0).rgb;
-          pbr_pass = pow(max(pbr_gs, vec3f(0.0)), vec3f(2.2)) * max(ubuf.pbr_emissive.rgb, vec3f(0.0)) * pbr_gt;)""",
+          pbr_pass = srgb_dec(pbr_gs) * max(ubuf.pbr_emissive.rgb, vec3f(0.0)) * pbr_gt;)""",
                             mapStage[5] == -1 ? "vec2f(0.5)"s : fmt::format("sampled{}.rg", mapStage[5]));
     }
     liquid += fmt::format(R"""(
@@ -1411,8 +1746,20 @@ auto pbr_func(const ShaderConfig& config, const ShaderInfo& info, std::string& v
           let pbr_gm = sampled{0};
           let pbr_gt = clamp(pbr_gm.r * pbr_vraw.b + pbr_vraw.r, 0.0, 1.0);
           pbr_alpha = clamp(pbr_gm.a * pow(max(1.0 - pbr_gt, 1e-6), ubuf.pbr_param.z) * pbr_vraw.a, 0.0, 1.0);
+          // The reflection is the bare cube at lod m.z x REFP.x (no occlusion), and the BRDF
+          // row is m.z too (TCH0 blue is the roughness, not the MR map's).
+          let pbr_gq = pbr_gm.b * pbr_c0 + pbr_c1;
+          let pbr_ga = min(pbr_gq.x * pbr_gq.x, exp2(-9.28 * saturate(pbr_nv))) * pbr_gq.x + pbr_gq.y;
+          var pbr_gab = vec2f(-1.04, 1.04) * pbr_ga + pbr_gq.zw;
+          if (ubuf.pbr_light_scale.z > 0.0) {{
+              pbr_gab = textureSampleLevel(pbr_brdf_lut, pbr_cube_samp, vec2f(saturate(pbr_nv), pbr_gm.b), 0.0).rg;
+          }}
+          var pbr_gcube = pbr_envspec;
+          if (pbr_hdr > 0.0 && ubuf.pbr_probe[0].w > 0.0) {{
+              pbr_gcube = textureSampleLevel(pbr_cube, pbr_cube_samp, pbr_pd, pbr_gm.b * pbr_lod).rgb * pbr_hdr;
+          }}
           pbr_lo = clamp(pbr_gm.g + pbr_vraw.g, 0.0, 1.0) * max(ubuf.pbr_layer_height.xyz, vec3f(0.0)) +
-                   pbr_envspec * (pbr_ab.x * pbr_alpha * ubuf.pbr_param.y + pbr_ab.y) * ubuf.pbr_layer_height.w;
+                   pbr_gcube * (pbr_gab.x * pbr_alpha * ubuf.pbr_param.y + pbr_gab.y) * ubuf.pbr_layer_height.w;
           pbr_glow = vec3f(0.0);{1}
       }})""",
                           mapStage[4], through);
@@ -1430,7 +1777,7 @@ auto pbr_func(const ShaderConfig& config, const ShaderInfo& info, std::string& v
           let pbr_hd = pbr_hn * (ubuf.pbr_param.z * min(1.0 / max(length(in.pbr_pos), 1e-3), 1.0)) * vec2f(1.0, -1.0);
           let pbr_huv = in.pbr_scr.xy / in.pbr_scr.w * vec2f(0.5, -0.5) + 0.5 + pbr_hd;
           let pbr_hg = textureSampleLevel(tex7, tex7_samp, clamp(pbr_huv, vec2f(0.0), vec2f(1.0)), 0.0).rgb;
-          pbr_pass = pow(max(pbr_hg, vec3f(0.0)), vec3f(2.2)) *
+          pbr_pass = srgb_dec(pbr_hg) *
                      max(vec3f(1.0) + ubuf.pbr_emissive.rgb * (ubuf.pbr_param.w - 1.0 + pbr_vraw.a), vec3f(0.0));)""",
                          underlying(inner4.texMapId), underlying(inner4.texCoordId));
     }
@@ -1438,7 +1785,7 @@ auto pbr_func(const ShaderConfig& config, const ShaderInfo& info, std::string& v
       if (pbr_kind > 10.5 && pbr_kind < 11.5) {{
           pbr_alpha = 1.0;
           pbr_lo = pbr_envspec * (pbr_ab.x * pbr_vraw.a * ubuf.pbr_layer_height.z + pbr_ab.y) +
-                   pow(max({0}.rgb, vec3f(0.0)), vec3f(2.2)) * ubuf.pbr_layer_height.x +
+                   max({0}.rgb, vec3f(0.0)) * ubuf.pbr_layer_height.x +
                    2.0 * pow(max(pbr_vraw.rgb, vec3f(0.0)), vec3f(2.2)) * ubuf.pbr_layer_height.y;
           pbr_glow = vec3f(0.0);{1}
       }})""",
@@ -1452,11 +1799,32 @@ auto pbr_func(const ShaderConfig& config, const ShaderInfo& info, std::string& v
           let pbr_mrim = clamp(1.0 - pow(abs(pbr_n.z), max(ubuf.pbr_param.x, 1e-3)) - ubuf.pbr_param.w, 0.0, 1.0);
           pbr_glow += pbr_mrim * pbr_vraw.rgb * ubuf.pbr_param.y;
       })""";
+    // Kind 21's glow, at the inverse of the exposure: the pulsing CCH3 glow in the AO cavities (blue mask) and the
+    // ramp's colour where the vertex alpha says, scaled by the vertex red.
+    if (config.pbrKind == 21 && mapStage[2] != -1 && mapStage[4] != -1 && mapStage[5] != -1) {
+      liquid += R"""(
+      pbr_glow += (pbr_zph + 2.0) * ubuf.pbr_shield[3].rgb * (ubuf.pbr_shield[0].z * pbr_zs2) +
+                  pbr_zgrad * (pbr_zt2 * pbr_vraw.r * ubuf.pbr_shield[0].x * ubuf.pbr_shield[0].y);)""";
+    }
+    // Kind 32's glow: the ramp colour times CCH0.w, times the exposure (the generic scaling below), plus ICMC, which
+    // has none (so it is divided by the scaling here where that applies).
+    if (config.pbrKind == 32 && mapStage[2] != -1 && mapStage[4] != -1 && mapStage[5] != -1) {
+      liquid += R"""(
+      pbr_glow += pbr_pramp * pbr_pc0.w;
+      pbr_glow += ubuf.pbr_shield[6].rgb /
+                  select(1.0, ubuf.pbr_tone[0].w, ubuf.pbr_tone[1].x > 0.0 && ubuf.pbr_tone[0].w > 0.0);)""";
+    }
+    // Kind 22's glow: Remastered adds it with no exposure factor, so the room-exposure scale below is undone for it.
+    if (config.pbrKind == 22 && mapStage[2] != -1 && mapStage[4] != -1 && mapStage[5] != -1) {
+      liquid += R"""(
+      pbr_glow += pbr_zcav * ubuf.pbr_shield[3].rgb +
+                  pbr_zgrad * (4.0 * pbr_zt * pbr_vraw.r * ubuf.pbr_shield[0].x * ubuf.pbr_shield[0].y);)""";
+    }
     // Kind 14, Remastered's BoundaryShield_Ship1_DX11 (the Frigate's force fields), permutation
     // 002_0. Its constants are GXSetPBRShield's rows: CCH0..CCH6, then DIFC. Map 0 is BCLR, map 4
     // TCH0 (the field's pattern) and map 5 TCH1 (a noise), each at its own UV set. pbr_param.x is
-    // the time. Unlit and alpha-blended: the glow takes the room's exposure itself (it is
-    // added to the tone curve's input), and the screen behind (map 7), bent by the noise,
+    // the time. Unlit and alpha-blended: the glow is written at the exposure's inverse (the generic
+    // scaling re-applies it), and the screen behind (map 7), bent by the noise,
     // comes through pbr_pass.
     if (screen && mapStage[5] != -1) {
       liquid += fmt::format(R"""(
@@ -1500,39 +1868,118 @@ auto pbr_func(const ShaderConfig& config, const ShaderInfo& info, std::string& v
           let pbr_g1c = clamp(pbr_sg, 0.0, 1.0);
           let pbr_pulse = 0.5 + 0.5 * sin(pbr_t * pbr_c3.w);
           let pbr_colg = 0.5 * pbr_c0.rgb + (pbr_sg * pbr_c0.rgb - 0.5 * pbr_c0.rgb) * pbr_g1c;
-          let pbr_kf = 1.0 - pbr_c5.x * (1.0 - pbr_sk);
+          let pbr_kf = 1.0 - pbr_df.x * (1.0 - pbr_sk);
           let pbr_sal = clamp(pbr_sb.x * pbr_sb.w + 2.0 * pbr_c5.x * pbr_df.w - 1.0, 0.0, 1.0);
-          let pbr_sw = 0.5 * max(min(pbr_g1c, pbr_c4.w), pbr_c4.z) + max(pbr_kf, pbr_c4.z);
+          let pbr_sw = pbr_c6.z * max(min(pbr_g1c, pbr_c4.w), pbr_c4.z) + max(pbr_kf, pbr_c4.z);
           let pbr_sw2 = mix(pbr_sw, pbr_c4.w, pbr_s2.y);
           let pbr_sl = pbr_kf * pbr_c0.rgb * pbr_c5.y + pbr_pulse * pbr_s2.z * pbr_c2.rgb * pbr_c2.w +
                        pbr_s2.y * pbr_c0.rgb * pbr_c1.w +
                        (2.0 - pbr_df.x) * pbr_g1c * pbr_colg * (1.0 + 9.0 * pbr_s2.y) * pbr_c0.w + pbr_c1.x * pbr_c2.rgb;
+          // Remastered writes the glow times c3.z (the tone curve's inverse exposure), so it nets
+          // to the glow itself on screen. The generic scaling below applies the exposure, so the
+          // inverse goes in here.
           var pbr_sx = 1.0;
           if (ubuf.pbr_tone[1].x > 0.0 && ubuf.pbr_tone[0].w > 0.0) {{
-              pbr_sx = ubuf.pbr_tone[0].w;
+              pbr_sx = 1.0 / ubuf.pbr_tone[0].w;
           }}
-          let pbr_sd = min(1.0 / max(length(in.pbr_pos), 1e-3), 1.0);
+          let pbr_sd = min(abs(1.0 / min(in.pbr_pos.z, -1e-3)), 1.0);
           let pbr_suv = in.pbr_scr.xy / in.pbr_scr.w * vec2f(0.5, -0.5) + 0.5 +
                         pbr_vraw.a * pbr_sd * vec2f(pbr_sq.x * pbr_c4.y + pbr_sr.x * pbr_c6.y,
-                                                    -(pbr_sq.y * pbr_c4.y - pbr_sr.y * pbr_c6.y) + 0.75);
+                                                    -(pbr_sq.y * pbr_c4.y - pbr_sr.y * pbr_c6.y)) +
+                        vec2f(0.0, 0.75 * pbr_sd);
           let pbr_sfb = textureSampleLevel(tex7, tex7_samp, clamp(pbr_suv, vec2f(0.0), vec2f(1.0)), 0.0).rgb;
           pbr_alpha = pbr_sal * pbr_c4.w;
           pbr_lo = vec3f(0.0);
           pbr_glow = pbr_sl * ((10.0 - 9.0 * pbr_sal) * pbr_sx * pbr_sw2);
-          pbr_pass = pow(max(pbr_sfb, vec3f(0.0)), vec3f(2.2)) * pbr_c4.x * pbr_vraw.rgb;
+          pbr_pass = srgb_dec(pbr_sfb) * pbr_c4.x * pbr_vraw.rgb;
       }})""",
                             underlying(config.tevStages[mapStage[4]].texMapId),
                             underlying(config.tevStages[mapStage[4]].texCoordId),
                             underlying(config.tevStages[mapStage[5]].texMapId),
                             underlying(config.tevStages[mapStage[5]].texCoordId), base);
     }
+    // Kind 29, Remastered's HoloGlass (3991DA00, the intro's hologram glass and the Mines' energy
+    // glass). Map 0 is BCLR (alpha = roughness, raw), map 4 TCH0 and map 6 TCH2 are indirect
+    // offsets, map 5 TCH1 a colour, each at its own UV set; map 7 is the screen copy (mipped as
+    // kind 23's). Constants are GXSetPBRShield's rows CCH0..CCH3 and DIFC (row 7); row 4 x is the
+    // object's phase and row 6 w says whether the material has a cube of its own. Unlit and alpha
+    // blended: the sum is all glow (no exposure factor) times DIFC, and the room behind it,
+    // bent by TCH2, comes through pbr_pass.
+    if (screen && mapStage[0] != -1 && mapStage[5] != -1 && mapStage[6] != -1) {
+      liquid += fmt::format(R"""(
+      if (pbr_kind > 28.5 && pbr_kind < 29.5) {{
+          let pbr_h0 = ubuf.pbr_shield[0];
+          let pbr_h2 = ubuf.pbr_shield[2];
+          let pbr_h3 = ubuf.pbr_shield[3];
+          let pbr_ph = ubuf.pbr_shield[4].x;
+          let pbr_df = ubuf.pbr_shield[7];
+          let pbr_t = ubuf.pbr_param.x;
+          let pbr_uvb = tex{1}_uv;
+          let pbr_uva = tex{3}_uv;
+          let pbr_uvc = tex{5}_uv;
+          let pbr_uve = tex{7}_uv;
+          let pbr_i1 = textureSampleGrad(tex{2}, tex{2}_samp, pbr_uva, dpdx(pbr_uva), dpdy(pbr_uva)).xy;
+          let pbr_sec = textureSampleGrad(tex{4}, tex{4}_samp, pbr_uvc, dpdx(pbr_uvc), dpdy(pbr_uvc));
+          let pbr_i2 = textureSampleGrad(tex{6}, tex{6}_samp,
+                                         pbr_uve + vec2f(pbr_t * 0.25 * pbr_h3.y + pbr_ph, pbr_t * pbr_h3.y + pbr_ph),
+                                         dpdx(pbr_uve), dpdy(pbr_uve)).xy;
+          let pbr_r = {0}.a;
+          let pbr_uvb2 = pbr_uvb + (pbr_i1 - 0.5) * pbr_h0.x + (pbr_h0.z * pbr_t * 0.5 + pbr_ph);
+          let pbr_bc = textureSampleGrad(tex{8}, tex{8}_samp, pbr_uvb2, dpdx(pbr_uvb), dpdy(pbr_uvb)).rgb;
+          let pbr_v5 = vec4f(2.0 * pow(abs(pbr_vraw.rgb), vec3f(2.2)), pbr_vraw.a);
+          let pbr_vx = min(abs(1.0 / min(in.pbr_pos.z, -1e-3)), 1.0);
+          let pbr_suv = in.pbr_scr.xy / in.pbr_scr.w * vec2f(0.5, -0.5) + 0.5 +
+                        (pbr_i2 - 0.5) * (pbr_h3.x * pbr_vx) * vec2f(1.0, -1.0);
+          let pbr_sdim = vec2f(textureDimensions(tex7));
+          let pbr_smips = ceil(log2(max(pbr_sdim.x, pbr_sdim.y))) + 1.0;
+          let pbr_slod = max(0.0, pbr_smips * pbr_h3.w * (1.0 - pbr_sec.a) - 1.0);
+          let pbr_sscene = srgb_dec(textureSampleLevel(tex7, tex7_samp, clamp(pbr_suv, vec2f(0.0), vec2f(1.0)), pbr_slod).rgb);
+          let pbr_snv = saturate(-dot(normalize(in.pbr_pos), pbr_n));
+          let pbr_sq = pbr_r * pbr_c0 + pbr_c1;
+          let pbr_sa = min(pbr_sq.x * pbr_sq.x, exp2(-9.28 * pbr_snv)) * pbr_sq.x + pbr_sq.y;
+          var pbr_sab = vec2f(-1.04, 1.04) * pbr_sa + pbr_sq.zw;
+          if (ubuf.pbr_light_scale.z > 0.0) {{
+              pbr_sab = textureSampleLevel(pbr_brdf_lut, pbr_cube_samp, vec2f(pbr_snv, pbr_r), 0.0).rg;
+          }}
+          var pbr_scube = vec3f(0.0);
+          if (ubuf.pbr_shield[6].w > 0.0) {{
+              let pbr_sqc = textureSampleLevel(pbr_cube, pbr_cube_samp, pbr_pd, pbr_r * pbr_lod).rgb;
+              pbr_scube = select(srgb_dec(pbr_sqc), pbr_sqc * pbr_hdr, pbr_hdr > 0.0);
+          }}
+          pbr_alpha = clamp(pbr_v5.a * pbr_df.a, 0.0, 1.0);
+          pbr_lo = vec3f(0.0);
+          pbr_glow = (pbr_scube * (pbr_sab.x * (pbr_v5.a * pbr_h0.y) + pbr_sab.y) + pbr_v5.rgb * pbr_h2.y +
+                      pbr_bc * pbr_h0.w + pbr_sec.rgb * pbr_h2.w) * pbr_df.rgb * pbr_df.a;
+          pbr_pass = pbr_sscene * pbr_h3.z * pbr_df.rgb * pbr_df.a;
+          if (ubuf.pbr_shield[5].x > 0.5) {{
+              // 2f95a061: the bent room is tinted by CCH1, and what is behind keeps (o1) of itself
+              // (SRC1_COLOR): DIFC.a x (1 - CCH1 x (1 - vertex alpha)) per channel. Drawn opaque, the
+              // room (map 7 at the fragment, unbent) comes through pbr_pass.
+              let pbr_h1 = ubuf.pbr_shield[1];
+              let pbr_sdst = srgb_dec(textureSampleLevel(tex7, tex7_samp,
+                                      clamp(in.pbr_scr.xy / in.pbr_scr.w * vec2f(0.5, -0.5) + 0.5, vec2f(0.0), vec2f(1.0)), 0.0).rgb);
+              pbr_alpha = 1.0;
+              pbr_pass = pbr_sscene * pbr_h3.z * pbr_h1.rgb * pbr_df.rgb * pbr_df.a +
+                         pbr_sdst * (pbr_df.a * (vec3f(1.0) - pbr_h1.rgb * (1.0 - pbr_v5.a)));
+          }}
+      }})""",
+                          base,
+                          underlying(config.tevStages[mapStage[0]].texCoordId),
+                          underlying(config.tevStages[mapStage[4]].texMapId),
+                          underlying(config.tevStages[mapStage[4]].texCoordId),
+                          underlying(config.tevStages[mapStage[5]].texMapId),
+                          underlying(config.tevStages[mapStage[5]].texCoordId),
+                          underlying(config.tevStages[mapStage[6]].texMapId),
+                          underlying(config.tevStages[mapStage[6]].texCoordId),
+                          underlying(config.tevStages[mapStage[0]].texMapId));
+    }
     // Kind 15, Remastered's PickUp (3E95A9FE, the item pickups' rings and beams), permutation 000_0.
     // Its constants are GXSetPBRShield's rows: CCH0..CCH3, rows 4 and 5 (world x and y as a dot
     // of the view-space position with xyz, plus w; the game fills them) and DIFC in row 7. Map 0
     // is BCLR, a three-channel mask, map 2 the normal map and map 4 TCH0, a gradient read at the
     // world position and scrolled along V by CCH0.z a second. Unlit and alpha blended: all of it
-    // is glow, the room's exposure on all but the gradient's own term (Cg), which is added at the
-    // exposure's inverse. The vertex shader's travelling sine bump is not drawn.
+    // is glow, at the screen level of the glow x DIFC plus the gradient's own term (Cg), which
+    // is exposure x Cg. The vertex shader's travelling sine bump is not drawn.
     if (mapStage[2] != -1 && mapStage[4] != -1) {
       liquid += fmt::format(R"""(
       if (pbr_kind > 14.5 && pbr_kind < 15.5) {{
@@ -1554,20 +2001,92 @@ auto pbr_func(const ShaderConfig& config, const ShaderInfo& info, std::string& v
           let pbr_pw = vec2f(dot(ubuf.pbr_shield[4].xyz, in.pbr_pos) + ubuf.pbr_shield[4].w,
                              dot(ubuf.pbr_shield[5].xyz, in.pbr_pos) + ubuf.pbr_shield[5].w);
           let pbr_puv = vec2f(pbr_pw.x * pbr_c1.x, pbr_pw.y * pbr_c1.x - ubuf.pbr_param.x * pbr_c0.z);
-          let pbr_pg = pow(max(textureSampleGrad(tex{1}, tex{1}_samp, pbr_puv, dpdx(pbr_puv), dpdy(pbr_puv)).rgb,
-                               vec3f(0.0)), vec3f(2.2));
+          let pbr_pg = max(textureSampleGrad(tex{1}, tex{1}_samp, pbr_puv, dpdx(pbr_puv), dpdy(pbr_puv)).rgb,
+                           vec3f(0.0));
           let pbr_pcg = pbr_pf1 * pbr_pg * pbr_c1.w;
           let pbr_ph = {2}.rgb;
           let pbr_pgl = (pbr_ph.x * pbr_vraw.rgb * pbr_c1.y + pbr_ph.y * pbr_pcg.x * pbr_c2.rgb * pbr_c2.w) * pbr_pfb;
-          // Room exposure is applied once, by the generic scaling after this block. The
-          // vertex colour is the model's own cyan tint (R~0.1, G~0.65, B~0.93).
+          // The generic scaling after this block applies the room's exposure: Remastered's sum
+          // nets to itself on screen (times DIFC) and Cg to exposure x Cg, so only Cg keeps it.
+          // The vertex colour is the model's own cyan tint (R~0.1, G~0.65, B~0.93).
+          var pbr_ix = 1.0;
+          if (ubuf.pbr_tone[1].x > 0.0 && ubuf.pbr_tone[0].w > 0.0) {{
+              pbr_ix = 1.0 / ubuf.pbr_tone[0].w;
+          }}
           pbr_alpha = clamp(pbr_df.w * pbr_c3.w, 0.0, 1.0);
           pbr_lo = vec3f(0.0);
-          pbr_glow = (pbr_pcg + pbr_pgl + pbr_ph.z * pbr_vraw.rgb) * pbr_df.rgb + pbr_pcg;
+          pbr_glow = (pbr_pcg + pbr_pgl + pbr_ph.z * pbr_vraw.rgb) * pbr_df.rgb * pbr_ix + pbr_pcg;
           pbr_pass = vec3f(0.0);
       }})""",
                           mapStage[2], underlying(config.tevStages[mapStage[4]].texMapId), base);
     }
+  }
+  // Kind 23, Remastered's Distortion2 (24670BF0, the ice walls and flesh glass), permutations 018 and
+  // 002 (lightmapped). Map 0 is BCLR, map 2 NMAP, map 7 the screen copy with its mips. CCH0
+  // is in pbr_param: x the normal map's distortion, y the geometry normal's, z the fresnel
+  // power, w its scale. r = BCLR.a^2 is the roughness and the blur of the copy and the cube. The
+  // surface is the room behind it, bent by the maps, times BCLR x the vertex colour (v3, alpha raw),
+  // plus the room cube's reflection (F0 0.04, no metal, no AO, no direct light). On a lightmap the
+  // diffuse part is the baked level L0 x BLCM for what the vertex alpha leaves of the glass.
+  // Opaque (alpha 1); the room comes through pbr_pass, after the tone curve.
+  if (config.pbrKind == 34 && screen && !layered) {
+    // Kind 34 reads the screen copy at the fragment (the end of the PBR block).
+    vtxOutAttrs += fmt::format("\n    @location({}) pbr_scr: vec4f,", vtxOutIdx++);
+    vtxXfrAttrs += "\n    out.pbr_scr = out.pos;";
+  }
+  if ((config.pbrKind == 23 || config.pbrKind == 30) && screen && mapStage[2] != -1) {
+    if (!layered) { // the layered block above has declared it otherwise
+      vtxOutAttrs += fmt::format("\n    @location({}) pbr_scr: vec4f,", vtxOutIdx++);
+      vtxXfrAttrs += "\n    out.pbr_scr = out.pos;";
+    }
+    liquid += fmt::format(R"""(
+      if ((pbr_kind > 22.5 && pbr_kind < 23.5) || (pbr_kind > 29.5 && pbr_kind < 30.5)) {{
+          let pbr_xr = {0}.a * {0}.a;
+          let pbr_xv3 = vec4f(2.0 * pow(abs(pbr_vraw.rgb), vec3f(2.2)), pbr_vraw.a);
+          let pbr_xnm = sampled{1}.rg;
+          let pbr_xvd = normalize(in.pbr_pos);
+          let pbr_xf = pow(saturate(dot(pbr_ng, -pbr_xvd)), max(ubuf.pbr_param.z, 0.001)) * ubuf.pbr_param.w;
+          let pbr_xs = min(abs(1.0 / min(in.pbr_pos.z, -1e-3)), 1.0) * 10.0;
+          let pbr_xd = vec2f((pbr_xnm.x * 0.99609375 - 0.5) * ubuf.pbr_param.x + pbr_ng.x * (1.0 - pbr_xf) * ubuf.pbr_param.y,
+                             (pbr_xnm.y * 0.99609375 - 0.5) * ubuf.pbr_param.x + pbr_ng.y * (pbr_xf - 1.0) * ubuf.pbr_param.y) * pbr_xs;
+          let pbr_xdim = vec2f(textureDimensions(tex7));
+          // The engine's copy has ceil(log2(max side)) + 1 mips.
+          let pbr_xmips = ceil(log2(max(pbr_xdim.x, pbr_xdim.y))) + 1.0;
+          let pbr_xlod = max(0.0, pbr_xr * (0.5 * pbr_xmips - 2.0) + 1.0);
+          let pbr_xuv = in.pbr_scr.xy / in.pbr_scr.w * vec2f(0.5, -0.5) + 0.5 + pbr_xd * vec2f(1.0, -1.0);
+          let pbr_xscene = srgb_dec(textureSampleLevel(tex7, tex7_samp, clamp(pbr_xuv, vec2f(0.0), vec2f(1.0)), pbr_xlod).rgb);
+          let pbr_xnv = saturate(-dot(pbr_xvd, pbr_n));
+          let pbr_xrough = max(pbr_xr, 0.02);
+          let pbr_xq = pbr_xrough * pbr_c0 + pbr_c1;
+          let pbr_xa = min(pbr_xq.x * pbr_xq.x, exp2(-9.28 * pbr_xnv)) * pbr_xq.x + pbr_xq.y;
+          var pbr_xab = vec2f(-1.04, 1.04) * pbr_xa + pbr_xq.zw;
+          if (ubuf.pbr_light_scale.z > 0.0) {{
+              pbr_xab = textureSampleLevel(pbr_brdf_lut, pbr_cube_samp, vec2f(pbr_xnv, pbr_xrough), 0.0).rg;
+          }}
+          var pbr_xenv = pbr_envspec;
+          if (pbr_hdr > 0.0 && ubuf.pbr_probe[0].w > 0.0 && ubuf.pbr_probe[2].w > 0.0) {{
+              let pbr_xc = textureSampleLevel(pbr_cube, pbr_cube_samp, pbr_pd, pbr_xr * pbr_lod).rgb * pbr_hdr;
+              var pbr_xl = 1.0;
+              if (ubuf.pbr_lmap_rect.z != 0.0) {{
+                  pbr_xl = max(pbr_l0v.r, max(pbr_l0v.g, pbr_l0v.b)) * dot(pbr_blcm, vec3f(0.2126, 0.7152, 0.0722));
+              }} else if (pbr_kind > 29.5 && pbr_bmeanok) {{
+                  // cc8afd0f's probe perms (BLPD 008-011, grid 014-017): the same occlusion from the mean.
+                  pbr_xl = max(pbr_bmean.r, max(pbr_bmean.g, pbr_bmean.b)) * dot(pbr_blcm, vec3f(0.2126, 0.7152, 0.0722));
+              }}
+              pbr_xenv = pbr_xc * mix(ubuf.pbr_probe[1].w, 1.0, saturate(pbr_xl * ubuf.pbr_probe[2].w));
+          }}
+          let pbr_xbase = {0}.rgb * pbr_xv3.rgb;
+          pbr_alpha = 1.0;
+          pbr_glow = vec3f(0.0);
+          pbr_lo = pbr_xenv * (pbr_xab.x * 0.04 + pbr_xab.y);
+          if (ubuf.pbr_lmap_rect.z != 0.0) {{
+              pbr_lo += pbr_xbase * pbr_l0v * pbr_blcm * ((1.0 - pbr_xv3.w) / pbr_pi);
+          }} else if (pbr_kind > 29.5 && pbr_bmeanok) {{
+              pbr_lo += pbr_xbase * pbr_bmean * pbr_blcm * ((1.0 - pbr_xv3.w) / pbr_pi);
+          }}
+          pbr_pass = select(pbr_xbase, vec3f(1.0), pbr_kind > 29.5) * pbr_xv3.w * pbr_xscene;
+      }})""",
+                        base, mapStage[2]);
   }
   // Kinds 16 and 17, Remastered's unlit holograms 86CD1703 and 6344950D (permutation 002_0,
   // additive): rgb = DIFT x DIFC + ICNC + ICMC (+ the material's own REFL cube at the reflection
@@ -1579,10 +2098,10 @@ auto pbr_func(const ShaderConfig& config, const ShaderInfo& info, std::string& v
     if (pbr_kind > 15.5 && pbr_kind < 17.5) {{
         let pbr_yi = ubuf.pbr_shield[6];
         let pbr_yd = ubuf.pbr_shield[7];
-        var pbr_yc = pow(max({0}.rgb, vec3f(0.0)), vec3f(2.2)) * pbr_yd.rgb + pbr_yi.rgb;
+        var pbr_yc = max({0}.rgb, vec3f(0.0)) * pbr_yd.rgb + pbr_yi.rgb;
         if (pbr_kind > 16.5 && pbr_yi.w > 0.0) {{
             let pbr_yq = textureSampleLevel(pbr_cube, pbr_cube_samp, pbr_pd, 0.0).rgb;
-            pbr_yc += select(pow(max(pbr_yq, vec3f(0.0)), vec3f(2.2)), pbr_yq * pbr_hdr, pbr_hdr > 0.0) * pbr_yi.w;
+            pbr_yc += select(srgb_dec(pbr_yq), pbr_yq * pbr_hdr, pbr_hdr > 0.0) * pbr_yi.w;
         }}
         pbr_alpha = clamp({0}.a * {0}.a * pbr_yd.w, 0.0, 1.0);
         pbr_lo = vec3f(0.0);
@@ -1616,7 +2135,7 @@ auto pbr_func(const ShaderConfig& config, const ShaderInfo& info, std::string& v
         let pbr_yj = 0.01 * pbr_yc0.z * pbr_yc0.w * sin(6.2831853 * pbr_yt * pbr_yc1.x);
         let pbr_ya = pbr_yb.a * select(0.75, 1.0, pbr_yj > 0.0);
         let pbr_ym = pbr_yv.y > 0.01;
-        let pbr_yri = pow(max(pbr_yb.rgb, vec3f(0.0)), vec3f(2.2)) * pbr_yd.rgb;
+        let pbr_yri = max(pbr_yb.rgb, vec3f(0.0)) * pbr_yd.rgb;
         let pbr_yg = pbr_yri * select(pbr_yv.x, 1.0, pbr_ym) * pbr_yc0.z + vec3f(pbr_yj);
         let pbr_yp = pow(max(abs(pbr_ng.z), 1e-6), pbr_yc3.z);
         let pbr_yrm = pbr_yc3.w + (1.0 - pbr_yc3.w) * (1.0 - pbr_yp * (1.0 - pbr_yv.y));
@@ -1641,15 +2160,103 @@ auto pbr_func(const ShaderConfig& config, const ShaderInfo& info, std::string& v
     liquid += fmt::format(R"""(
     if (pbr_kind > 18.5 && pbr_kind < 19.5) {{
         let pbr_zl = (pbr_ambd + pbr_lnl) * pbr_ao;
-        let pbr_zs = pow(max(textureSampleLevel(tex{0}, tex{0}_samp, 0.5 + 0.5 * pbr_n.xy, 0.0).rgb, vec3f(0.0)), vec3f(2.2));
-        let pbr_zv = pow(max(sampled{1}.rgb, vec3f(0.0)), vec3f(2.2));
-        let pbr_zx = select(1.0, ubuf.pbr_tone[0].w, ubuf.pbr_tone[1].x > 0.0 && ubuf.pbr_tone[0].w > 0.0);
+        let pbr_zs = max(textureSampleLevel(tex{0}, tex{0}_samp, 0.5 + 0.5 * pbr_n.xy, 0.0).rgb, vec3f(0.0));
+        let pbr_zv = max(sampled{1}.rgb, vec3f(0.0));
         pbr_lo = pbr_zv * pbr_zs * dot(pbr_zl, vec3f(0.2126, 0.7152, 0.0722)) + pbr_base * pbr_zl * ubuf.pbr_shield[7].rgb;
-        pbr_glow = ubuf.pbr_shield[6].rgb * pbr_zx;
+        pbr_glow = ubuf.pbr_shield[6].rgb;
         pbr_alpha = clamp({2}.a * {2}.a * ubuf.pbr_shield[7].w * ubuf.pbr_shield[6].w, 0.0, 1.0);
         pbr_pass = vec3f(0.0);
     }})""",
                         underlying(config.tevStages[mapStage[4]].texMapId), mapStage[5], base);
+  }
+  // Kind 25, Remastered's dda64c97 (the Eyon's eyeball_gloss, permutation 042_0): kind 19's matcap, but read at
+  // the normal map's N' (pbr_n), and bfb300b6's lighting kept: rgb = REFV x REFS(0.5 + 0.5 N'.xy) x luminance(L)
+  // + ICNC + ICMC + AO x BCLR x (1 - metal) x DIFC x L / pi (c1[0].w) + the lights' GGX specular (unmasked, no reflection of the
+  // surroundings). L = ambient + the lights' N.L (not times AO). Alpha = BCLR.a^2 x DIFC.a, as kind 19.
+  if (mapStage[4] != -1 && mapStage[5] != -1) {
+    liquid += fmt::format(R"""(
+    if (pbr_kind > 24.5 && pbr_kind < 25.5) {{
+        let pbr_gl = pbr_ambd + pbr_lnl;
+        let pbr_gs = max(textureSampleLevel(tex{0}, tex{0}_samp, 0.5 + 0.5 * pbr_n.xy, 0.0).rgb, vec3f(0.0));
+        let pbr_gv = max(sampled{1}.rgb, vec3f(0.0));
+        pbr_lo = pbr_gv * pbr_gs * dot(pbr_gl, vec3f(0.2126, 0.7152, 0.0722)) +
+                 pbr_base * (1.0 - pbr_metal) * pbr_ao * pbr_gl * ubuf.pbr_shield[7].rgb * 0.31830988 + pbr_lspec;
+        pbr_glow = ubuf.pbr_shield[6].rgb;
+        pbr_alpha = clamp({2}.a * {2}.a * ubuf.pbr_shield[7].w * ubuf.pbr_shield[6].w, 0.0, 1.0);
+        pbr_pass = vec3f(0.0);
+    }})""",
+                        underlying(config.tevStages[mapStage[4]].texMapId), mapStage[5], base);
+  }
+  // Kind 28, Remastered's 088e025e (Model_IceSpreader, permutation 002_0). Shield rows: 0 = CCH0 (z normal strength,
+  // w frost parallax), 1 = CCH1 (x frost gain, y rim gain, z rim power), 2 = CCH2 rgb (cube tint) and CCH5.x in w
+  // (cube gain), 3 = CCH3 rgb (rim colour). Map 3 is the frost TCH0. L is the baked probe's mean (BLPD) times BLCM:
+  //   rgb = AO x BCLR x (1 - metal) x L / pi
+  //       + occ x cube x CCH5.x x CCH2 x (F0 x ab.x + ab.y)   occ = AO x mix(min, 1, sat(max(mean) x luma(BLCM) x 1/max))
+  //       + TCH0(uv + BCLR.a x CCH0.w x (T.V, B.V) / (N0.V)) x BCLR.a^2 x vertex alpha x CCH1.x
+  //       + (1 - sat(N'.V))^CCH1.z x CCH1.y x CCH3 x (1 / exposure)
+  // with B = normalize(cross(N0, T)) and no handedness, as the parallax is written there. Alpha = BCLR.a (not squared).
+  if (mapStage[2] != -1 && mapStage[3] != -1) {
+    const auto& frost = config.tevStages[mapStage[3]];
+    liquid += fmt::format(R"""(
+    if (pbr_kind > 27.5 && pbr_kind < 28.5) {{
+        let pbr_ic = ubuf.pbr_shield[1];
+        let pbr_it = {2};
+        let pbr_ib = normalize(cross(pbr_ngs, pbr_it));
+        let pbr_iv = in.pbr_pos;
+        let pbr_ip = {1}.a * ubuf.pbr_shield[0].w / dot(pbr_ngs, pbr_iv);
+        let pbr_iuv = tex{3}_uv + pbr_ip * vec2f(dot(pbr_it, pbr_iv), dot(pbr_ib, pbr_iv));
+        let pbr_ifr = textureSampleBias(tex{0}, tex{0}_samp, pbr_iuv, ubuf.tex{0}_size_bias.z).rgb;
+        var pbr_il = pbr_amb;
+        if (ubuf.pbr_ambient[0].w > 0.0) {{
+            pbr_il = select(dot(pbr_amb, vec3f(0.2126, 0.7152, 0.0722)), 1.0, ubuf.pbr_ambient[0].w > 1.5) *
+                     max(ubuf.pbr_ambient[0].rgb + ubuf.pbr_ambient[1].rgb / (ubuf.pbr_ambient[2].rgb + 1.0), vec3f(0.0));
+        }}
+        let pbr_iocc = pbr_ao * mix(ubuf.pbr_probe[1].w, 1.0,
+                                    clamp(max(pbr_il.r, max(pbr_il.g, pbr_il.b)) * dot(pbr_blcm, vec3f(0.2126, 0.7152, 0.0722)) *
+                                          ubuf.pbr_probe[2].w, 0.0, 1.0));
+        let pbr_if0 = mix(vec3f(0.04), pbr_base, pbr_metal);
+        let pbr_ix = select(1.0, 1.0 / ubuf.pbr_tone[0].w, ubuf.pbr_tone[1].x > 0.0 && ubuf.pbr_tone[0].w > 0.0);
+        pbr_lo = pbr_ao * pbr_base * (1.0 - pbr_metal) * pbr_il * pbr_blcm * 0.31830988 +
+                 pbr_iocc * pbr_cubel * (ubuf.pbr_shield[2].w * ubuf.pbr_shield[2].rgb) * (pbr_if0 * pbr_ab.x + pbr_ab.y);
+        pbr_glow = pbr_ifr * ({1}.a * {1}.a * pbr_vraw.a * pbr_ic.x) +
+                   pbr_ix * pow(1.0 - clamp(dot(pbr_n, pbr_v), 0.0, 1.0), pbr_ic.z) * pbr_ic.y * ubuf.pbr_shield[3].rgb;
+        pbr_alpha = clamp({1}.a, 0.0, 1.0);
+        pbr_pass = vec3f(0.0);
+    }})""",
+                        underlying(frost.texMapId), base,
+                        tangents ? "normalize(in.pbr_tan.xyz)"s : "normalize(pbr_t0)"s, underlying(frost.texCoordId));
+  }
+  // Kind 31, Remastered's fb2bc671 (static) and df3e3423 (skinned, ICAN emissive), the ChozoGhost's X-ray material (every
+  // fragment permutation shares this core; their ambient is zeroed by c1[0].z). With fade = mix(CCH0.z, CCH0.w, sat((-z -
+  // CCH1.x) / (CCH1.y - CCH1.x))) by view depth and fr = 1 - max(0, N'.z)^CCH0.x (N' the normal map's, in view space):
+  // alpha = (CCH1.z != 0 ? fade x fr : fade) x ICNC.a. rim = fr + BCLR.a; fb2bc671: rim unless CCH1.w != 0 (then 0);
+  // df3e3423: CCH1.w != 0 ? rim x ICAN x CCH0.y : ICAN x CCH0.y + rim. rgb = max(0, (that + ICMC) x ICNC) x exposure
+  // + the lights' GGX specular (roughness 0.1, F = 1, no diffuse: pbr_lspec / pi). shield rows: 0 CCH0, 1 CCH1, 2 ICNC, 3 ICMC
+  // (w = 1 for df3e3423).
+  // Kind 33, 65e90e82: the same with DIFC for ICNC (row 2), ICAN always, TCH0 (map 1) in rgb - 2 x TCH0 and, with CCH1.z != 0,
+  // alpha = fade x fr + mean(TCH0) (then x DIFC.a); fade alone otherwise.
+  if (config.pbrKind == 31 || config.pbrKind == 33) {
+    const bool map65 = config.pbrKind == 33;
+    liquid += fmt::format(R"""(
+    if (pbr_kind > 30.5) {{
+        let pbr_c0 = ubuf.pbr_shield[0];
+        let pbr_c1 = ubuf.pbr_shield[1];
+        let pbr_fz = clamp((-in.pbr_pos.z - pbr_c1.x) / (pbr_c1.y - pbr_c1.x), 0.0, 1.0);
+        let pbr_fade = mix(pbr_c0.z, pbr_c0.w, pbr_fz);
+        let pbr_fr = 1.0 - pow(max(pbr_n.z, 0.0), pbr_c0.x);
+        let pbr_rim = pbr_fr + {0}.a;
+        let pbr_ican = max({1}.rgb, vec3f(0.0)) * pbr_c0.y;
+        let pbr_sw = pbr_c1.w != 0.0;
+        let pbr_val = select(select(vec3f(pbr_rim), vec3f(0.0), pbr_sw),
+                             select(pbr_ican + vec3f(pbr_rim), pbr_ican * pbr_rim, pbr_sw),
+                             ubuf.pbr_shield[3].w > 0.5);
+        pbr_lo = pbr_lspec / pbr_pi;
+        pbr_glow = max((pbr_val + ubuf.pbr_shield[3].rgb) * ubuf.pbr_shield[2].rgb{2}, vec3f(0.0));
+        pbr_alpha = clamp(select(pbr_fade, {3}, pbr_c1.z != 0.0) * ubuf.pbr_shield[2].w, 0.0, 1.0);
+        pbr_pass = vec3f(0.0);
+    }})""", base, mapStage[3] == -1 ? "vec4f(0.0)"s : sampled(3, "vec4f(0.0)"),
+                           map65 ? " - 2.0 * " + sampled(1, "vec4f(0.0)") + ".rgb" : ""s,
+                           map65 ? "pbr_fade * pbr_fr + (" + sampled(1, "vec4f(0.0)") + ".r + " + sampled(1, "vec4f(0.0)") + ".g + " + sampled(1, "vec4f(0.0)") + ".b) * 0.333333343" : "pbr_fade * pbr_fr"s);
   }
   std::string attn;
   if (cc.attnFn == GX_AF_SPOT) {
@@ -1663,22 +2270,37 @@ auto pbr_func(const ShaderConfig& config, const ShaderInfo& info, std::string& v
   }
   const std::string amb = lit ? (cc.ambSrc == GX_SRC_REG ? "ubuf.cc0_amb.rgb"s : "vec3f(0.2)"s)
                               : (cc.matSrc == GX_SRC_REG ? "ubuf.cc0_mat.rgb"s : "vec3f(1.0)"s);
+  // Kind 27, Remastered's 17e458cd (a decal with an alpha map): g = clamp(2 va (1 + TCH0.x) - 1), c = CCH0.x
+  // (pbr_layer.x), t = clamp((g - 0.5 + c) / 2c), alpha = t²(3 - 2t). BCLR.a is not used; no discard.
+  std::string decalAlpha;
+  if (config.pbrKind == 27 && mapStage[3] != -1) {
+    decalAlpha = fmt::format(R"""(
+      if (pbr_kind > 26.5 && pbr_kind < 27.5) {{
+          let pbr_dg = clamp(2.0 * pbr_vraw.a * (1.0 + sampled{}.x) - 1.0, 0.0, 1.0);
+          let pbr_dt = clamp((pbr_dg - 0.5 + ubuf.pbr_layer.x) / (2.0 * ubuf.pbr_layer.x), 0.0, 1.0);
+          pbr_alpha = pbr_dt * pbr_dt * (3.0 - 2.0 * pbr_dt);
+      }})""",
+                             mapStage[3]);
+  }
   std::string source = fmt::format(R"""(
     // PBR (GX_AURORA_SET_PBR)
     {{
       let pbr_pi = 3.14159265;{10}
       var pbr_base = {11};{13}
       let pbr_orm = {1}.rgb;
-      let pbr_ao = pbr_orm.r;
-      let pbr_rough = clamp(pbr_orm.g, 0.02, 1.0);
-      let pbr_metal = clamp(pbr_orm.b, 0.0, 1.0);
-      let pbr_emissive = pow(max({2}.rgb, vec3f(0.0)), vec3f(2.2)) * ubuf.pbr_emissive.rgb;
+      let pbr_ao = select(pbr_orm.r, 1.0, pbr_ind);
+      let pbr_rough = select(select(clamp(select(pbr_orm.g, 0.6, pbr_ind), 0.02, 1.0), 0.1, pbr_kind > 30.5 && pbr_kind < 33.5),
+                             max(pbr_orm.g - pbr_knoise, 0.02), pbr_kind > 31.5 && pbr_kind < 32.5);
+      let pbr_metal = clamp(select(pbr_orm.b, 0.0, pbr_ind), 0.0, 1.0);
+      let pbr_emissive = max({2}.rgb, vec3f(0.0)) * ubuf.pbr_emissive.rgb;
       var pbr_n = pbr_ng;{3}
       let pbr_v = normalize(-in.pbr_pos);
       let pbr_nv = max(dot(pbr_n, pbr_v), 1e-4);
-      let pbr_f0 = mix(vec3f(0.04), pbr_base, pbr_metal) * ubuf.pbr_light_scale.y;
-      let pbr_diff = pbr_base * (1.0 - pbr_metal){8} * ubuf.pbr_light_scale.x *
-          select(1.0, clamp(pbr_vraw.a * ubuf.pbr_layer_height.y, 0.0, 1.0), pbr_kind > 12.5 && pbr_kind < 13.5);
+      let pbr_f0 = select(mix(vec3f(0.04), pbr_base * select(vec3f(1.0), pbr_vc.rgb, pbr_f0t), pbr_metal) *
+          ubuf.pbr_light_scale.y, vec3f(1.0), pbr_kind > 30.5 && pbr_kind < 33.5);
+      let pbr_diff = select(pbr_base * (1.0 - pbr_metal){8} * ubuf.pbr_light_scale.x *
+          select(1.0, clamp(pbr_vraw.a * ubuf.pbr_layer_height.y, 0.0, 1.0), pbr_kind > 12.5 && pbr_kind < 13.5),
+          vec3f(0.0), pbr_kind > 30.5 && pbr_kind < 33.5);
       let pbr_a2 = pow(pbr_rough, 4.0);
       let pbr_k = pbr_rough * pbr_rough * 0.5;
       // A normal-mapped reflection can point into the surface; lift it back to the horizon
@@ -1688,7 +2310,12 @@ auto pbr_func(const ShaderConfig& config, const ShaderInfo& info, std::string& v
       var pbr_lo = vec3f(0.0);
       var pbr_env = vec3f(0.0);
       var pbr_lsum = vec3f(0.0);
+      // The lights' diffuse alone: a lightmapped surface takes it times the baked-light modulation.
+      var pbr_ldiff = vec3f(0.0);
+      var pbr_l0v = vec3f(0.0);
       var pbr_lnl = vec3f(0.0);
+      // The lights' specular alone (kind 25 adds it unmasked to the matcap).
+      var pbr_lspec = vec3f(0.0);
       // pbr-sun-vis
       // pbr-lights-begin
       for (var i = 0u; i < {4}u; i++) {{
@@ -1729,7 +2356,9 @@ auto pbr_func(const ShaderConfig& config, const ShaderInfo& info, std::string& v
               rad = hdr_c.rgb * hdr_fa{16};
           }}
           // pbr-sun-light
-          pbr_lo += (pbr_diff * pbr_ao + spec * pbr_pi) * rad * nl;
+          pbr_lo += (pbr_diff * pbr_ao + select(spec * pbr_pi, vec3f(0.0), pbr_nols)) * rad * nl;
+          pbr_ldiff += pbr_diff * pbr_ao * rad * nl;
+          pbr_lspec += select(spec * pbr_pi, vec3f(0.0), pbr_nols) * rad * nl;
           // Stand-in environment: the surroundings as a soft hemisphere lit by this light,
           // seen along the reflection vector.
           let env_w = 0.5 + 0.5 * dot(pbr_refl, ldir);
@@ -1738,6 +2367,47 @@ auto pbr_func(const ShaderConfig& config, const ShaderInfo& info, std::string& v
           pbr_lnl += rad * nl;
       }}
       // pbr-lights-end
+      // The room's Remastered point and spot lights (GX_AURORA_PORT_ROOM_LIGHTS), on every surface,
+      // lightmapped or not: Lambert times a distance falloff and, for a spot, its cone.
+      for (var ri = 0u; ri < u32(ubuf.pbr_room_lights.y); ri++) {{
+          let rb = bitcast<u32>(ubuf.pbr_room_lights.x) + ri * 16u;
+          let r0 = bitcast<vec4f>(vec4u(abuf[rb], abuf[rb + 1u], abuf[rb + 2u], abuf[rb + 3u]));
+          let r1 = bitcast<vec4f>(vec4u(abuf[rb + 4u], abuf[rb + 5u], abuf[rb + 6u], abuf[rb + 7u]));
+          let r2 = bitcast<vec4f>(vec4u(abuf[rb + 8u], abuf[rb + 9u], abuf[rb + 10u], abuf[rb + 11u]));
+          let r3 = bitcast<vec4f>(vec4u(abuf[rb + 12u], abuf[rb + 13u], abuf[rb + 14u], abuf[rb + 15u]));
+          var ldir = r0.xyz - in.pbr_pos;
+          let dist = length(ldir);
+          ldir = ldir / max(dist, 1e-4);
+          let rt = clamp(dist * r0.w + r1.w, 0.0, 1.0);
+          var fa = 1.0;
+          if (r3.y > 2.5) {{
+              fa = 1.0 - rt * rt * (3.0 - 2.0 * rt);
+          }} else if (r3.y > 1.5) {{
+              fa = (1.0 - rt) * (1.0 - rt);
+          }} else if (r3.y > 0.5) {{
+              fa = 1.0 - rt;
+          }}
+          if (r3.z > 0.5) {{
+              fa *= clamp(dot(ldir, r2.xyz) * r2.w + r3.x, 0.0, 1.0);
+          }}
+          if (fa <= 0.0) {{ continue; }}
+          let rad = r1.rgb * fa;
+          let nl = max(dot(pbr_n, ldir), 0.0);
+          let h = normalize(ldir + pbr_v);
+          let nh = max(dot(pbr_n, h), 0.0);
+          let vh = max(dot(pbr_v, h), 0.0);
+          let dd = nh * nh * (pbr_a2 - 1.0) + 1.0;
+          let d = pbr_a2 / max(pbr_pi * dd * dd, 1e-6 * pbr_a2);
+          let vis = 0.25 / (max(pbr_nv * (1.0 - pbr_k) + pbr_k, 1e-4) * max(nl * (1.0 - pbr_k) + pbr_k, 1e-4));
+          let f = pbr_f0 + (1.0 - pbr_f0) * pow(1.0 - vh, 5.0);
+          pbr_lo += (pbr_diff * pbr_ao + select(d * vis * f * pbr_pi, vec3f(0.0), pbr_nols)) * rad * nl;
+          pbr_ldiff += pbr_diff * pbr_ao * rad * nl;
+          pbr_lspec += select(d * vis * f * pbr_pi, vec3f(0.0), pbr_nols) * rad * nl;
+          let env_w = 0.5 + 0.5 * dot(pbr_refl, ldir);
+          pbr_env += rad * (env_w * env_w);
+          pbr_lsum += rad;
+          pbr_lnl += rad * nl;
+      }}
       // pbr-sun
       // Ambient: diffuse plus the split-sum environment BRDF (Karis' analytic fit) applied
       // to the reflection probe, a cube map whose mips are picked by roughness. The
@@ -1761,12 +2431,16 @@ auto pbr_func(const ShaderConfig& config, const ShaderInfo& info, std::string& v
       let pbr_lod = select({7}.0, ubuf.pbr_cube.y, pbr_hdr > 0.0);
       // The LOD takes the roughness unfloored, as Remastered's does (only the BRDF floors it).
       let pbr_cubed = textureSampleLevel(pbr_cube, pbr_cube_samp, pbr_pd, saturate(pbr_orm.g) * pbr_lod).rgb;
-      let pbr_cubel = select(pow(max(pbr_cubed, vec3f(0.0)), vec3f(2.2)), pbr_cubed * pbr_hdr, pbr_hdr > 0.0);
+      let pbr_cubel = select(srgb_dec(pbr_cubed), pbr_cubed * pbr_hdr, pbr_hdr > 0.0);
       var pbr_envspec = mix(pbr_amb + pbr_env * 0.35, pbr_cubel, min(ubuf.pbr_probe[0].w, 1.0));
       // The room cube also shapes the ambient: its blurriest useful mip (z) along the
       // normal says how much of the room's light comes from that side, and w scales that
       // to 1 for the cube's average. The game's ambient keeps the level and the colour.
       var pbr_ambd = pbr_amb;
+      // The baked mean without the modulation (the BLPD record's mean, or the grid's mean
+      // texture): the glass kinds (30) light with this alone, no lobes.
+      var pbr_bmean = vec3f(0.0);
+      var pbr_bmeanok = false;
       if (pbr_hdr > 0.0 && ubuf.pbr_cube.w > 0.0) {{
           let pbr_nd = ubuf.pbr_probe[0].xyz * pbr_n.x + ubuf.pbr_probe[1].xyz * pbr_n.y +
                        ubuf.pbr_probe[2].xyz * pbr_n.z;
@@ -1784,6 +2458,9 @@ auto pbr_func(const ShaderConfig& config, const ShaderInfo& info, std::string& v
           // w is 1 when the game's ambient sets the level, 2 when the baked light is the level.
           pbr_ambd = select(dot(pbr_amb, vec3f(0.2126, 0.7152, 0.0722)), 1.0, ubuf.pbr_ambient[0].w > 1.5) * max(ubuf.pbr_ambient[0].rgb + ubuf.pbr_ambient[1].rgb * pow(pbr_aq, ubuf.pbr_ambient[2].rgb),
                          vec3f(0.0)) * pbr_blcm;
+          pbr_bmean = select(dot(pbr_amb, vec3f(0.2126, 0.7152, 0.0722)), 1.0, ubuf.pbr_ambient[0].w > 1.5) *
+                      max(ubuf.pbr_ambient[0].rgb + ubuf.pbr_ambient[1].rgb / (ubuf.pbr_ambient[2].rgb + 1.0), vec3f(0.0));
+          pbr_bmeanok = true;
       }}
       // An ambient volume (GX_AURORA_SET_PBR_VOLUME) is the same lobes, read at this pixel
       // from the room's grid, a little off the surface so that a wall is lit by the air in
@@ -1791,19 +2468,17 @@ auto pbr_func(const ShaderConfig& config, const ShaderInfo& info, std::string& v
       var pbr_vdiag = vec3f(0.0);
       if (ubuf.pbr_volume[3].w > 0.0) {{
           let pbr_vp = vec4f(in.pbr_pos + pbr_n * ubuf.pbr_volume[4].w, 1.0);
-          let pbr_vuv = vec3f(dot(ubuf.pbr_volume[0], pbr_vp), dot(ubuf.pbr_volume[1], pbr_vp),
-                              dot(ubuf.pbr_volume[2], pbr_vp));
+          let pbr_vuv0 = vec3f(dot(ubuf.pbr_volume[0], pbr_vp), dot(ubuf.pbr_volume[1], pbr_vp),
+                               dot(ubuf.pbr_volume[2], pbr_vp));
           // Remastered samples with a black border (CLAMP_TO_BORDER), so outside the grid it
-          // reads 0; this weight turns the clamp-to-edge sample into that.
-          let pbr_vsize = vec3f(textureDimensions(pbr_vol_mean));
-          let pbr_vt = pbr_vuv * pbr_vsize;
-          let pbr_vw = clamp(min(pbr_vt + 0.5, pbr_vsize + 0.5 - pbr_vt), vec3f(0.0), vec3f(1.0));
-          let pbr_vborder = pbr_vw.x * pbr_vw.y * pbr_vw.z;
-          let pbr_vmean = textureSampleLevel(pbr_vol_mean, pbr_cube_samp, pbr_vuv, 0.0).rgb * pbr_vborder;
-          let pbr_vlobe = textureSampleLevel(pbr_vol_lobe, pbr_cube_samp, pbr_vuv, 0.0).rgb * pbr_vborder;
-          let pbr_vr = textureSampleLevel(pbr_vol_r, pbr_cube_samp, pbr_vuv, 0.0) * pbr_vborder;
-          let pbr_vg = textureSampleLevel(pbr_vol_g, pbr_cube_samp, pbr_vuv, 0.0) * pbr_vborder;
-          let pbr_vb = textureSampleLevel(pbr_vol_b, pbr_cube_samp, pbr_vuv, 0.0) * pbr_vborder;
+          // reads 0. The volume carries one zero texel around it; vuv is mapped into that.
+          let pbr_vsize = vec3f(textureDimensions(pbr_vol_mean)) - 2.0;
+          let pbr_vuv = (pbr_vuv0 * pbr_vsize + 1.0) / (pbr_vsize + 2.0);
+          let pbr_vmean = textureSampleLevel(pbr_vol_mean, pbr_cube_samp, pbr_vuv, 0.0).rgb;
+          let pbr_vlobe = textureSampleLevel(pbr_vol_lobe, pbr_cube_samp, pbr_vuv, 0.0).rgb;
+          let pbr_vr = textureSampleLevel(pbr_vol_r, pbr_cube_samp, pbr_vuv, 0.0);
+          let pbr_vg = textureSampleLevel(pbr_vol_g, pbr_cube_samp, pbr_vuv, 0.0);
+          let pbr_vb = textureSampleLevel(pbr_vol_b, pbr_cube_samp, pbr_vuv, 0.0);
           let pbr_vn = vec3f(dot(ubuf.pbr_volume[3].xyz, pbr_n), dot(ubuf.pbr_volume[4].xyz, pbr_n),
                              dot(ubuf.pbr_volume[5].xyz, pbr_n));
           let pbr_vq = clamp(vec3f(dot(pbr_vn, pbr_vr.xyz * 2.0 - 1.0), dot(pbr_vn, pbr_vg.xyz * 2.0 - 1.0),
@@ -1817,6 +2492,8 @@ auto pbr_func(const ShaderConfig& config, const ShaderInfo& info, std::string& v
                               dot(ubuf.pbr_volume[5].xyz, pbr_refl));
           let pbr_vrq = clamp(vec3f(dot(pbr_vrn, pbr_vr.xyz * 2.0 - 1.0), dot(pbr_vrn, pbr_vg.xyz * 2.0 - 1.0),
                                     dot(pbr_vrn, pbr_vb.xyz * 2.0 - 1.0)) * 0.5 + 0.5, vec3f(0.0), vec3f(1.0));
+          pbr_bmean = pbr_vmean * ubuf.pbr_volume[3].w;
+          pbr_bmeanok = true;
           pbr_envspec = max(pbr_vmean - pbr_vlobe + 2.0 * pbr_vlobe * (1.0 + pbr_vs) * pow(pbr_vrq, 1.0 + 2.0 * pbr_vs),
                             vec3f(0.0)) * ubuf.pbr_volume[3].w;
           // With a room cube and Remastered's reflection occlusion (w of probe rows 1 and 2,
@@ -1830,23 +2507,34 @@ auto pbr_func(const ShaderConfig& config, const ShaderInfo& info, std::string& v
           }}
           // Diagnostics (w of row 5): 1 the texture coordinates, 2 the light alone, 3 the
           // normal.
-          pbr_vdiag = select(pbr_ambd, pbr_vuv, ubuf.pbr_volume[5].w < 1.5);
+          pbr_vdiag = select(pbr_ambd, pbr_vuv0, ubuf.pbr_volume[5].w < 1.5);
           if (ubuf.pbr_volume[5].w > 2.5) {{
               pbr_vdiag = pbr_n * 0.5 + 0.5;
           }}
       }}
+      // The same modulation on the lights where the baked ambient is a lobe or a grid volume
+      // (not a lightmap, which does it below): BLCM x (ambient + lights), mode 4096.
+      if (pbr_blit && ubuf.pbr_lmap_rect.z == 0.0 && (ubuf.pbr_ambient[0].w > 0.0 || ubuf.pbr_volume[3].w > 0.0)) {{
+          pbr_lo += pbr_ldiff * (pbr_blcm - 1.0);
+      }}
+      // CharacterBacklight (ae819893) without probe data (no baked ambient, no volume) is
+      // Remastered's perm 078: flat ambient, no environment reflection, white backlights.
+      let pbr_bkl = ubuf.pbr_backlight.xyz;
+      let pbr_bnoprobe = pbr_bkl.z > 0.5 && ubuf.pbr_ambient[0].w <= 0.0 && ubuf.pbr_volume[3].w <= 0.0;
       // pbr-lightmap
-      // Kind 13 scales the probe's reflection by pbr_layer_height.z (CCH1.z).
-      pbr_lo += (pbr_ambd * pbr_diff + pbr_envspec * select(1.0, ubuf.pbr_layer_height.z, pbr_kind > 12.5 && pbr_kind < 13.5) *
+      if (pbr_flat) {{
+          pbr_ambd = pbr_amb;
+      }}
+      // Kind 13 scales the probe's reflection by pbr_layer_height.z (CCH1.z); mode 256 has none.
+      pbr_lo += (pbr_ambd * pbr_diff + pbr_envspec * select(select(1.0, ubuf.pbr_layer_height.z, pbr_kind > 12.5 && pbr_kind < 13.5), 0.0, pbr_noenv || pbr_bnoprobe) *
                                            (pbr_f0 * pbr_ab.x + pbr_ab.y)) * pbr_ao;
       // Remastered's CharacterBacklight (GX_AURORA_SET_PBR_BACKLIGHT; the material's
       // strengths and falloff in the backlight's place): a light from world up and one from
       // behind, each coloured like the baked ambient on its side brought up to a luminance of
       // 1, so that it does not go dark with the room. Both fade towards the bottom of the
       // model's bounds; ambient occlusion counts twice, as it does there.
-      let pbr_bkl = ubuf.pbr_backlight.xyz;
       if (!pbr_cu && !pbr_sky && pbr_bkl.z > 0.5 && ubuf.pbr_bklight[2].x + ubuf.pbr_bklight[1].w > 0.0) {{
-          let pbr_bt = clamp(dot(ubuf.pbr_bklight[0], vec4f(in.pbr_pos, 1.0)), 0.0, 1.0);
+          let pbr_bt = select(clamp(dot(ubuf.pbr_bklight[0], vec4f(in.pbr_pos, 1.0)), 0.0, 1.0), in.pbr_bty, in.pbr_bty >= 0.0);
           let pbr_bf = select(pow(pbr_bt, pbr_bkl.z - 1.0), 1.0, pbr_bkl.z < 1.5);
           var pbr_btc = pbr_amb;
           var pbr_bbc = pbr_amb;
@@ -1864,8 +2552,8 @@ auto pbr_func(const ShaderConfig& config, const ShaderInfo& info, std::string& v
           }}
           let pbr_btl = dot(pbr_btc, vec3f(0.2126, 0.7152, 0.0722));
           let pbr_bbl = dot(pbr_bbc, vec3f(0.2126, 0.7152, 0.0722));
-          pbr_btc = select(vec3f(1.0), pbr_btc * max(1.0 / pbr_btl, 1.0), pbr_btl > 0.05);
-          pbr_bbc = select(vec3f(1.0), pbr_bbc * max(1.0 / pbr_bbl, 1.0), pbr_bbl > 0.05);
+          pbr_btc = select(vec3f(1.0), pbr_btc * max(1.0 / pbr_btl, 1.0), pbr_btl > 0.05 && !pbr_bnoprobe);
+          pbr_bbc = select(vec3f(1.0), pbr_bbc * max(1.0 / pbr_bbl, 1.0), pbr_bbl > 0.05 && !pbr_bnoprobe);
           let pbr_bla = normalize(ubuf.pbr_up.xyz);
           let pbr_blb = vec3f(0.57735, 0.57735, -0.57735);
           let pbr_bnla = clamp(dot(pbr_n, pbr_bla), 0.0, 1.0);
@@ -1897,14 +2585,21 @@ auto pbr_func(const ShaderConfig& config, const ShaderInfo& info, std::string& v
       var pbr_pass = vec3f(0.0);
       if (ubuf.pbr_emissive.w > 0.0) {{
           // A height blend (snow and ice laid over rock): the base map's alpha lifts the
-          // vertex alpha, and a smoothstep as wide as the threshold cuts the edge.
-          let pbr_hx = clamp(({0}.a + 1.0){9} * 2.0 - 1.0, 0.0, 1.0);
+          // vertex alpha, and a smoothstep as wide as the threshold cuts the edge. The
+          // alpha is squared (ca10c453: fma(fma(a*a, vw, vw), 2, -1)).
+          let pbr_hx = clamp(({0}.a * {0}.a + 1.0){9} * 2.0 - 1.0, 0.0, 1.0);
           let pbr_hs = clamp((pbr_hx - 0.5 + ubuf.pbr_emissive.w) / (2.0 * ubuf.pbr_emissive.w), 0.0, 1.0);
           pbr_alpha = pbr_hs * pbr_hs * (3.0 - 2.0 * pbr_hs);
+      }}{17}
+      if (pbr_raw) {{
+          pbr_alpha = {12};
       }}
       if (pbr_cu) {{
           // ColorUnlit's alpha: the base map's times the vertex's.
           pbr_alpha = {0}.a * pbr_vraw.a;
+      }}
+      if (pbr_cut) {{
+          pbr_alpha = 1.0;
       }}
       // 1 = unlit, 2 = the base map's alpha masks the glow, 4 = tinted by the vertex colour
       // (pbr_vc), 8 = ColorUnlit, 16 = sky (above); the sum of those.
@@ -1915,10 +2610,13 @@ auto pbr_func(const ShaderConfig& config, const ShaderInfo& info, std::string& v
           pbr_glow = pbr_emissive * {0}.a;
           pbr_alpha = 1.0{9};
       }}
+      if (pbr_vao) {{
+          pbr_alpha = pbr_vraw.a;
+      }}
       if ((pbr_mode > 0.5 && pbr_mode < 1.5) || pbr_mode > 2.5) {{
           // Unlit (screens, holograms): the surface's own colour and its glow.
           pbr_lo = pbr_diff * pbr_ao;
-          if (pbr_sky) {{
+          if (pbr_sky || pbr_uex) {{
               pbr_lo *= max(ubuf.pbr_backlight.rgb, vec3f(0.0));
           }}
       }}
@@ -1933,15 +2631,17 @@ auto pbr_func(const ShaderConfig& config, const ShaderInfo& info, std::string& v
       }}
       // Emitted light is at the room's static exposure, not the frame's (w of tone row 0).
       if (ubuf.pbr_tone[1].x > 0.0 && ubuf.pbr_tone[0].w > 0.0) {{
-          pbr_glow *= ubuf.pbr_tone[0].w;
+          if (!(pbr_kind > 21.5 && pbr_kind < 22.5)) {{
+              pbr_glow *= ubuf.pbr_tone[0].w;
+          }}
           if ((pbr_mode > 0.5 && pbr_mode < 1.5) || pbr_mode > 2.5) {{
               pbr_lo *= ubuf.pbr_tone[0].w;
           }}
       }}{14}
       let pbr_out = max(pbr_lo + pbr_glow, vec3f(0.0));
-      // Highlights roll off into white instead of clipping: unchanged up to 0.6, and the
-      // rest of the range (a room cube's lamps are many times brighter than 1) approaches 1.
-      var pbr_tm = min(pbr_out, vec3f(0.6)) + 0.4 * (1.0 - exp(-max(pbr_out - 0.6, vec3f(0.0)) / 0.4));
+      // Without a room's tone data Remastered draws through its static default
+      // (STonemapParams::BuildLinear(3.0)): exposure 1 and a straight line, clipped at 1.
+      var pbr_tm = clamp(pbr_out, vec3f(0.0), vec3f(1.0));
       if (ubuf.pbr_tone[1].x > 0.0) {{
           // Or a tone curve (GX_AURORA_SET_PBR_TONE): a cubic toe, a line and a shoulder
           // that approaches 1.
@@ -1960,18 +2660,19 @@ auto pbr_func(const ShaderConfig& config, const ShaderInfo& info, std::string& v
       }} else if (ubuf.pbr_light_scale.w < -0.5) {{
           pbr_alpha *= -ubuf.pbr_light_scale.w - 1.0;
       }}
-      prev = vec4f(pow(clamp(pbr_tm + pbr_pass, vec3f(0.0), vec3f(1.0)), vec3f(1.0 / 2.2)), pbr_alpha);
+      // Encoded as Remastered's sRGB swapchain does it: the exact piecewise sRGB curve.
+      prev = vec4f(srgb_enc(pbr_tm + pbr_pass), pbr_alpha);
       // A debug view (GXSetPBRDebugView): one input of the shading in place of the result.
       if (ubuf.pbr_layer.w > 0.5) {{
           let pbr_dv = ubuf.pbr_layer.w;
-          var pbr_dc = pow(clamp(pbr_base, vec3f(0.0), vec3f(1.0)), vec3f(1.0 / 2.2));
+          var pbr_dc = srgb_enc(pbr_base);
           if (pbr_dv > 1.5) {{ pbr_dc = pbr_n * 0.5 + 0.5; }}
           if (pbr_dv > 2.5) {{ pbr_dc = vec3f(pbr_rough); }}
           if (pbr_dv > 3.5) {{ pbr_dc = vec3f(pbr_metal); }}
           if (pbr_dv > 4.5) {{ pbr_dc = vec3f(pbr_ao); }}
-          if (pbr_dv > 5.5) {{ pbr_dc = pow(clamp(pbr_ambd, vec3f(0.0), vec3f(1.0)), vec3f(1.0 / 2.2)); }}
-          if (pbr_dv > 6.5) {{ pbr_dc = pow(clamp(pbr_envspec, vec3f(0.0), vec3f(1.0)), vec3f(1.0 / 2.2)); }}
-          if (pbr_dv > 7.5) {{ pbr_dc = pow(clamp(pbr_glow, vec3f(0.0), vec3f(1.0)), vec3f(1.0 / 2.2)); }}
+          if (pbr_dv > 5.5) {{ pbr_dc = srgb_enc(pbr_ambd); }}
+          if (pbr_dv > 6.5) {{ pbr_dc = srgb_enc(pbr_envspec); }}
+          if (pbr_dv > 7.5) {{ pbr_dc = srgb_enc(pbr_glow); }}
           if (pbr_dv > 8.5) {{
               // The lit level in stops around middle grey: blue 4 under, green at, red 4 over.
               let pbr_dt = clamp(log2(max(dot(pbr_out, vec3f(0.2126, 0.7152, 0.0722)), 1e-6) / 0.18) / 8.0 + 0.5,
@@ -2006,7 +2707,7 @@ auto pbr_func(const ShaderConfig& config, const ShaderInfo& info, std::string& v
                          ubuf.pbr_probe[2].xyz * pbr_v.z);
           }}
           let pbr_diag = textureSampleLevel(pbr_cube, pbr_cube_samp, pbr_dd, 0.0).rgb;
-          prev = vec4f(select(pbr_diag, pow(clamp(pbr_diag * pbr_hdr, vec3f(0.0), vec3f(1.0)), vec3f(1.0 / 2.2)),
+          prev = vec4f(select(pbr_diag, srgb_enc(pbr_diag * pbr_hdr),
                               pbr_hdr > 0.0), prev.a);
       }}
     }})""",
@@ -2014,7 +2715,7 @@ auto pbr_func(const ShaderConfig& config, const ShaderInfo& info, std::string& v
                      // A sky's ICAN is its base map (the converter writes a black emissive map where
                      // it copies the base), and its glow ICAN x ICNC is most of what it shows. The
                      // map's last mip, its mean, tells that black map from one with dark texels.
-                     mapStage[3] == -1
+                     mapStage[3] == -1 || config.pbrKind == 20 || config.pbrKind == 24 || config.pbrKind == 27
                          ? "vec4f(0.0)"s
                          : fmt::format("select({0}, {1}, pbr_sky && dot(textureSampleLevel(tex3, tex3_samp, "
                                        "vec2f(0.5), 16.0).rgb, vec3f(1.0)) < 0.004)",
@@ -2022,7 +2723,26 @@ auto pbr_func(const ShaderConfig& config, const ShaderInfo& info, std::string& v
                      normal, GX::MaxLights, attn, amb,
                      gfx::probe::MipCount - 1, diffTint, tintAlpha, layer, baseRgb, layered ? "1.0" : "prev.a", kinds, liquid,
                      shadowed ? "(ubuf.lightState0 | ubuf.lightState1)" : "ubuf.lightState0",
-                     shadowed ? " * select(vec3f(1.0), sampled0.rgb, (ubuf.lightState0 & (1u << i)) == 0u)" : "");
+                     shadowed ? " * select(vec3f(1.0), sampled0.rgb, (ubuf.lightState0 & (1u << i)) == 0u)" : "",
+                     (layered ? "\n      if (pbr_kind < 0.5 && ubuf.pbr_emissive.w <= 0.0) {\n          pbr_alpha = pbr_lalpha;\n      }"
+                                "\n      if (pbr_kind > 25.5 && pbr_kind < 26.5) {\n          pbr_alpha = pbr_lma;\n      }"s
+                              : ""s) + decalAlpha);
+  if (config.pbrKind == 34 && screen) {
+    const size_t at = source.find("      // A model fading (w of the light scale)");
+    assert(at != std::string::npos);
+    source.insert(at, R"""(
+      if (pbr_kind > 33.5 && pbr_kind < 34.5) {
+          // Kind 34, Remastered's 788360de (coloured translucency, blend One / Src1Color): o0 is the lit
+          // colour (diffuse scaled by A, kind 10's diffTint) and o1 = exposure x (1 - T (1 - A)), with
+          // T = BCLR.rgb x DIFC.rgb and A = BCLR.a² x DIFC.w. Emulated through the screen copy (map 7),
+          // as 2f95a061 is: the scene target holds sRGB-encoded values, so a GPU blend would not be exact.
+          // Drawn opaque (alpha 1) with the scene behind this fragment kept by o1 in linear light.
+          let pbr_sdst = srgb_dec(textureSampleLevel(tex7, tex7_samp,
+                                  clamp(in.pbr_scr.xy / in.pbr_scr.w * vec2f(0.5, -0.5) + 0.5, vec2f(0.0), vec2f(1.0)), 0.0).rgb);
+          pbr_pass += pbr_sdst * (vec3f(1.0) - pbr_base * (1.0 - pbr_alpha));
+          pbr_alpha = 1.0;
+      })""");
+  }
   if (!lit || costTest == 2) {
     // The uniform block has no lights then.
     const size_t begin = source.find("// pbr-lights-begin");
@@ -2040,6 +2760,7 @@ auto pbr_func(const ShaderConfig& config, const ShaderInfo& info, std::string& v
   cut("// pbr-lightmap", lightmapUsed && costTest != 3 ? R"""(if (ubuf.pbr_lmap_rect.z != 0.0) {
           let pbr_luv = ubuf.pbr_lmap_rect.xy + in.pbr_lmuv * ubuf.pbr_lmap_rect.z;
           let pbr_l0 = textureSampleLevel(pbr_lmap, pbr_cube_samp, pbr_luv, 0, 0.0).rgb;
+          pbr_l0v = pbr_l0;
           let pbr_l1x = textureSampleLevel(pbr_lmap, pbr_cube_samp, pbr_luv, 1, 0.0).rgb;
           let pbr_l1y = textureSampleLevel(pbr_lmap, pbr_cube_samp, pbr_luv, 2, 0.0).rgb;
           let pbr_l1z = textureSampleLevel(pbr_lmap, pbr_cube_samp, pbr_luv, 3, 0.0).rgb;
@@ -2047,9 +2768,20 @@ auto pbr_func(const ShaderConfig& config, const ShaderInfo& info, std::string& v
                              dot(ubuf.pbr_lmap_axes[2].xyz, pbr_n));
           pbr_ambd = max(pbr_l0 * (1.0 + pbr_l1x * pbr_ln.x + pbr_l1y * pbr_ln.y + pbr_l1z * pbr_ln.z),
                          vec3f(0.0)) * ubuf.pbr_lmap_rect.w * pbr_blcm;
-          // Remastered occludes the probe's reflection by the raw level: none where L0 is 0, all
-          // from 1 up (its shader's mix(0, probe intensity, saturate(max(L0)))).
-          pbr_envspec *= clamp(max(pbr_l0.r, max(pbr_l0.g, pbr_l0.b)), 0.0, 1.0);
+          // The modulation scales the lights' diffuse too: BLCM * (lightmap + sun + clustered
+          // lights), the specular left as it is (bfb300b6 perm 018, kb material/bfb300b6.md).
+          pbr_lo += pbr_ldiff * (pbr_blcm - 1.0);
+          // Remastered occludes the probe's reflection by the lightmap's level in place of the
+          // grid's (bfb300b6 perm 018): mix(REFP min, intensity, saturate(max(L0) x the
+          // modulation's luminance / REFP max)). It replaces the volume's occlusion, not adds to
+          // it. Without those parameters the raw level stands in, from 0 to 1.
+          let pbr_lmax = max(pbr_l0.r, max(pbr_l0.g, pbr_l0.b));
+          if (pbr_hdr > 0.0 && ubuf.pbr_probe[0].w > 0.0 && ubuf.pbr_probe[2].w > 0.0) {
+              pbr_envspec = pbr_cubel * mix(ubuf.pbr_probe[1].w, 1.0,
+                  clamp(pbr_lmax * dot(pbr_blcm, vec3f(0.2126, 0.7152, 0.0722)) * ubuf.pbr_probe[2].w, 0.0, 1.0));
+          } else {
+              pbr_envspec *= clamp(pbr_lmax, 0.0, 1.0);
+          }
           if (ubuf.pbr_volume[5].w > 1.5 && ubuf.pbr_volume[5].w < 2.5) {
               pbr_vdiag = pbr_ambd;
           }
@@ -2084,6 +2816,8 @@ namespace {
 //    constant registers, and the views share no work), so it is the exception.
 //  - EyeClipImmediate: MultiviewClip's uniform in a per-eye pass: no multiview extension
 //    or array textures, the eye from the immediates (bit 31 of imm.serial) instead of the view.
+// The functions declared ahead of vs_main that read the uniform (the volumetric fog's vf_*)
+// read the renamed one: the mono uniform, or the first eye copy.
 std::string to_multiview_source(std::string source, uint32_t uniformSize, MultiviewMode mode, bool mapBatch) {
   const bool byImmediate = mode == EyeClipImmediate;
   const bool clip = mode == MultiviewClip || byImmediate;
@@ -2096,24 +2830,27 @@ std::string to_multiview_source(std::string source, uint32_t uniformSize, Multiv
     }
     source.replace(pos, from.size(), to);
   };
-  // GX texture samples go through helpers that add the layer (textures named tex0..tex7).
-  for (size_t pos = 0; !byImmediate && (pos = source.find("textureSample", pos)) != std::string::npos;) {
-    size_t end = pos + std::string_view{"textureSample"}.size();
-    for (const std::string_view suffix : {"Bias"sv, "Grad"sv, "Level"sv}) {
-      if (source.compare(end, suffix.size(), suffix) == 0) {
-        end += suffix.size();
-        break;
+  // GX texture reads go through helpers that add the layer (textures named tex0..tex7):
+  // textureSample* -> mvSample*, and textureLoad (upstream's PhazonPool noise, kind 32) -> mvLoad.
+  for (const std::string_view call : {"textureSample"sv, "textureLoad"sv}) {
+    for (size_t pos = 0; !byImmediate && (pos = source.find(call, pos)) != std::string::npos;) {
+      size_t end = pos + call.size();
+      for (const std::string_view suffix : {"Bias"sv, "Grad"sv, "Level"sv}) {
+        if (source.compare(end, suffix.size(), suffix) == 0) {
+          end += suffix.size();
+          break;
+        }
       }
-    }
-    const bool gxTexture = source.compare(end, 4, "(tex") == 0 && end + 4 < source.size() &&
-                           source[end + 4] >= '0' && source[end + 4] <= '7' &&
-                           (end + 5 >= source.size() || !(std::isalnum(static_cast<unsigned char>(source[end + 5])) ||
-                                                          source[end + 5] == '_'));
-    if (gxTexture) {
-      source.replace(pos, std::string_view{"texture"}.size(), "mv"); // textureSample* -> mvSample*
-      pos += 2;
-    } else {
-      pos = end;
+      const bool gxTexture = source.compare(end, 4, "(tex") == 0 && end + 4 < source.size() &&
+                             source[end + 4] >= '0' && source[end + 4] <= '7' &&
+                             (end + 5 >= source.size() || !(std::isalnum(static_cast<unsigned char>(source[end + 5])) ||
+                                                            source[end + 5] == '_'));
+      if (gxTexture) {
+        source.replace(pos, std::string_view{"texture"}.size(), "mv"); // textureSample* -> mvSample*
+        pos += 2;
+      } else {
+        pos = end;
+      }
     }
   }
   // Only the GX textures (tex0..tex7) become arrays: the BRDF table and the other 2D bindings stay.
@@ -2180,6 +2917,28 @@ std::string to_multiview_source(std::string source, uint32_t uniformSize, Multiv
                                     (fragmentReadsLights ? "\n    let ubuf = &ubuf_eyes[mv_view_in & (imm.serial >> 31u)].u;"
                                                          : "\n    let ubuf = &ubuf_eyes[0].u;"));
   }
+  // PrimedGun: the module-scope functions ahead of vs_main read the uniform by its name as well:
+  // the volumetric fog's vf_at, vf_depth, vf_tone, vf_untone and vf_apply (uniformPre). The
+  // `let ubuf` above exists only inside vs_main and fs_main, so they read the renamed uniform.
+  // What they read (volfog, volfog_tone) is the same for both eyes: the mono uniform, or the
+  // first eye copy. Everything else ahead of vs_main is a declaration that reads no `ubuf.`
+  // (the renamed uniform, ubuf_mv or ubuf_eyes, among them).
+  if (const size_t helpersEnd = source.find("\n@vertex\nfn vs_main("); helpersEnd == std::string::npos) {
+    complete = false;
+  } else {
+    constexpr std::string_view from = "ubuf.";
+    const std::string_view to = clip ? "ubuf_mv.u."sv : "ubuf_eyes[0].u."sv;
+    std::string helpers = source.substr(0, helpersEnd);
+    for (size_t pos = 0; (pos = helpers.find(from, pos)) != std::string::npos;) {
+      if (pos > 0 && (std::isalnum(static_cast<unsigned char>(helpers[pos - 1])) || helpers[pos - 1] == '_')) {
+        pos += from.size(); // the end of a longer name
+        continue;
+      }
+      helpers.replace(pos, from.size(), to);
+      pos += to.size();
+    }
+    source.replace(0, helpersEnd, helpers);
+  }
   if (!complete) {
     Log.error("Multiview shader rewrite missed an anchor; the generated shader changed shape");
   }
@@ -2204,6 +2963,10 @@ fn mvSampleGrad(t: texture_2d_array<f32>, s: sampler, uv: vec2f, ddx: vec2f, ddy
 
 fn mvSampleLevel(t: texture_2d_array<f32>, s: sampler, uv: vec2f, level: f32) -> vec4f {
     return textureSampleLevel(t, s, uv, mv_layer(t), level);
+}
+
+fn mvLoad(t: texture_2d_array<f32>, coords: vec2i, level: i32) -> vec4f {
+    return textureLoad(t, coords, mv_layer(t), level);
 }
 )""";
   return fmt::format(R"""({0}{1}
@@ -2362,6 +3125,25 @@ std::string build_shader_source(const ShaderConfig& config) noexcept {
       vtxXfrAttrsPre += fmt::format("\n    let {} = {};", vtx_attr(config, attr), attr_load(config, attr, vidxAttr));
     }
   }
+  if (config.pbr != 0) {
+    // Only while the vertex still carries POS as an index. CPU de-indexing (GXState::deindexVertices,
+    // the VR default) inlines the position itself (attrType GX_DIRECT) and native vertex input has no
+    // vbuf record, so such a draw takes the fade from its view-space height (pbr_bind_y -1).
+    const auto posType = config.attrs[GX_VA_POS].attrType;
+    if (config.pbrBindPos && (posType == GX_INDEX8 || posType == GX_INDEX16) && !config.nativeVertices) {
+      const auto& pm = config.attrs[GX_VA_POS];
+      // TEX7's array holds the bind-pose positions (12 bytes each), indexed like POS.
+      const auto index = fmt::format(fmt::runtime(pm.attrType == GX_INDEX8 ? "raw_fetch_u8_1(&vbuf, imm.vtx_start + {} * {}u + {}u)"
+                                                              : "raw_fetch_u16_1(&vbuf, imm.vtx_start + {} * {}u + {}u, false)"),
+                                     vidxAttr, config.vtxStride, pm.offset);
+      vtxXfrAttrsPre += fmt::format(
+          "\n    let pbr_bind_y = clamp(raw_fetch_f32_1(&abuf, {} + {} * 12u + 4u, {}) * ubuf.pbr_bklight[2].z"
+          " + ubuf.pbr_bklight[2].y, 0.0, 1.0);",
+          imm_array_start(GX_VA_TEX7), index, config.pbrBindLe ? "true" : "false");
+    } else {
+      vtxXfrAttrsPre += "\n    let pbr_bind_y = -1.0;";
+    }
+  }
   bool needsBinrm = false;
   bool needsTangent = false;
   for (int i = 0; i < info.sampledTexCoords.size(); ++i) {
@@ -2381,28 +3163,82 @@ std::string build_shader_source(const ShaderConfig& config) noexcept {
                                   attr_load_nbt_slice(config, NbtSlice::T, vidxAttr));
   }
 
+  // Remastered's procedural foliage sway (WindAnimData c4[0..3], in pbr_shield[0..3]): the
+  // model's position moves by the inverse of the model->world 3x3 (rows in pbr_shield[4..6],
+  // the world translation in their w) applied to a per-axis sine, scaled by the vertex
+  // colour's alpha. The impulse terms (c4[4..11]) are zero without a source.
+  // The sway as WGSL: wind_pos from the model-space position and the vertex colour (its alpha is the weight).
+  const bool hasWind = config.pbr && config.pbrKind == 0 && config.attrs[GX_VA_CLR0].attrType != GX_NONE;
+  const auto windCode = [&](const std::string& pos, const std::string& clr) {
+    return fmt::format(
+        "\n    var wind_pos = {0};"
+        "\n    if ((u32(ubuf.pbr_backlight.w) & 32768u) != 0u) {{"
+        "\n      let w_p = {0};"
+        "\n      let w_a = {1}.a;"
+        "\n      let w_c0 = ubuf.pbr_shield[0];"
+        "\n      let w_c1 = ubuf.pbr_shield[1];"
+        "\n      let w_c2 = ubuf.pbr_shield[2];"
+        "\n      let w_c3 = ubuf.pbr_shield[3];"
+        "\n      let w_s = vec3f("
+        "\n        sin(w_c1.w + ubuf.pbr_shield[4].w + w_p.y * w_c2.y + w_p.z * w_c2.z),"
+        "\n        sin(w_c1.w + ubuf.pbr_shield[5].w + w_p.x * w_c2.x + w_p.z * w_c2.z),"
+        "\n        sin(w_c1.w + ubuf.pbr_shield[6].w + w_p.x * w_c2.x + w_p.y * w_c2.y));"
+        "\n      let w_d = ((w_s * w_c0.w + w_c0.xyz) * w_c3.xyz) * w_a;"
+        "\n      wind_pos = w_p + vec3f(dot(w_d, ubuf.pbr_shield[4].xyz), dot(w_d, ubuf.pbr_shield[5].xyz),"
+        "\n                             dot(w_d, ubuf.pbr_shield[6].xyz)) * w_c1.xyz;"
+        "\n    }}",
+        pos, clr);
+  };
+
+  // The pickup's (kind 15, Remastered's PickUp 3E95A9FE, perm 000_1) travelling bump: the skinned model-space
+  // position moves along its unit normal by sin(CCH3.y t - CCH3.x p.y) CCH3.z a, a = the vertex colour's alpha
+  // (raw), times vp_c1[0].x (an engine constant, 1 here). CCH3 is pbr_shield[3], t is pbr_param.x.
+  const bool hasBump = config.pbr && config.pbrKind == 15 && config.attrs[GX_VA_CLR0].attrType != GX_NONE &&
+                       config.attrs[GX_VA_NRM].attrType != GX_NONE;
+  const auto bumpCode = [&](const std::string& pos, const std::string& clr, const std::string& nrm) {
+    return fmt::format(
+        "\n    let bump_n = {2};"
+        "\n    let bump_k = sin(ubuf.pbr_shield[3].y * ubuf.pbr_param.x - ubuf.pbr_shield[3].x * {0}.y) *"
+        "\n                 ubuf.pbr_shield[3].z * {1}.a;"
+        "\n    let bump_pos = {0} + select(bump_n, normalize(bump_n), dot(bump_n, bump_n) > 1e-10) * bump_k;",
+        pos, clr, nrm);
+  };
+
   // ShaderConfig::shadow: vs_shadow places the vertex in the sun's shadow map (gfx/shadow.cpp's caster pass).
   std::string shadowVs;
   // Not in a stereo variant (ShaderConfig::multiview): the shadow map pass draws with the mono
   // pipeline, and the stereo rewrite renames the uniform vs_shadow reads.
   if (config.shadow && config.lineMode == 0 && config.multiview == MultiviewNone) {
-    shadowVs = "\n\n@vertex\nfn vs_shadow(@builtin(vertex_index) vidx: u32) -> @builtin(position) vec4f {";
+    // PrimedGun: with native vertex input (ShaderConfig::nativeVertices) attr_load reads vs_main's
+    // vertex inputs, so vs_shadow declares them too; the caster's pipeline is built with the same
+    // vertex buffer layout (create_pipeline). lineMode is 0 here, so vtxInAttrs holds only those
+    // inputs, and nothing without native input (the entry point reads as upstream's).
+    shadowVs = fmt::format(
+        "\n\n@vertex\nfn vs_shadow(@builtin(vertex_index) vidx: u32{}) -> @builtin(position) vec4f {{", vtxInAttrs);
     if (config.attrs[GX_VA_PNMTXIDX].attrType == GX_NONE) {
       shadowVs += "\n    let in_pnmtxidx = imm.current_pnmtx;";
     } else {
       shadowVs += fmt::format("\n    let {} = {};", vtx_attr(config, GX_VA_PNMTXIDX),
                               attr_load(config, GX_VA_PNMTXIDX, vidxAttr));
     }
-    shadowVs += fmt::format("\n    let {} = {};"
-                            "\n    let mv_pos = vec4f({}, 1.0) * ubuf.postex_mtx[in_pnmtxidx];"
+    // Remastered's depth/shadow perm (000_1) carries the same sway, so the caster moves with the foliage.
+    std::string shadowPos = vtx_attr(config, GX_VA_POS);
+    std::string shadowWind;
+    if (hasWind) {
+      shadowWind = fmt::format("\n    let {} = {};", vtx_attr(config, GX_VA_CLR0), attr_load(config, GX_VA_CLR0, vidxAttr)) +
+                   windCode(shadowPos, vtx_attr(config, GX_VA_CLR0));
+      shadowPos = "wind_pos";
+    }
+    shadowVs += fmt::format("\n    let {} = {};", vtx_attr(config, GX_VA_POS), attr_load(config, GX_VA_POS, vidxAttr));
+    shadowVs += shadowWind;
+    shadowVs += fmt::format("\n    let mv_pos = vec4f({}, 1.0) * ubuf.postex_mtx[in_pnmtxidx];"
                             "\n    var pos = vec4f(mv_pos, 1.0) * ubuf.shadow_caster;"
                             // Pancaked: a caster further toward the sun than the map reaches (a roof high
                             // over the floor) sits on its near plane rather than being clipped. The map is
                             // orthographic, so that moves nothing across it.
                             "\n    pos.z = max(pos.z, 0.0);"
                             "\n    return pos;\n}}",
-                            vtx_attr(config, GX_VA_POS), attr_load(config, GX_VA_POS, vidxAttr),
-                            vtx_attr(config, GX_VA_POS));
+                            shadowPos);
   }
   if (config.mapBatch) {
     // The ordered map stream interleaves fills and line quads. Expand endpoints
@@ -2425,10 +3261,19 @@ std::string build_shader_source(const ShaderConfig& config) noexcept {
         "\n    out.pos = vec4f(clip_base.xy + offset_ndc * clip_base.w, clip_base.zw);"
         "\n    out.map_fill = select(0u, 1u, in_tex0_uv.y < 0.0);";
   } else if (config.lineMode == 0) {
+    std::string windPos = vtx_attr(config, GX_VA_POS);
+    if (hasWind) {
+      vtxXfrAttrsPre += windCode(windPos, vtx_attr(config, GX_VA_CLR0));
+      windPos = "wind_pos";
+    }
+    if (hasBump) {
+      vtxXfrAttrsPre += bumpCode(windPos, vtx_attr(config, GX_VA_CLR0), vtx_attr(config, GX_VA_NRM));
+      windPos = "bump_pos";
+    }
     vtxXfrAttrsPre += fmt::format(
         "\n    let mv_pos = vec4f({}, 1.0) * ubuf.postex_mtx[in_pnmtxidx];"
         "\n    out.pos = vec4f(mv_pos, 1.0) * ubuf.proj;",
-        vtx_attr(config, GX_VA_POS));
+        windPos);
   } else if (config.lineMode == 3) {
     // GX_POINTS: expand single vertex to axis-aligned screen-space square
     vtxXfrAttrsPre +=
@@ -2760,6 +3605,21 @@ std::string build_shader_source(const ShaderConfig& config) noexcept {
   if (info.usedIndStages.any()) {
     fragmentFnPre += "\n    var t_TexCoord = vec2f(0.0);";
   }
+  // PBR mode bit 8192 (8ce05ed0): the first stage reading map 0 samples at uv + (INDI.xy - 0.5) * INDS,
+  // INDI being map 1 on its own texcoord. The bit is read at run time from the material.
+  int indBase = -1, indMr = -1;
+  if (config.pbr) {
+    const bool indShadowed = config.tevStageCount > 2 && config.tevStages[0].channelId == GX_COLOR1A1;
+    for (int i = indShadowed ? 1 : 0; i < config.tevStageCount; ++i) {
+      const auto& stage = config.tevStages[i];
+      const u32 map = underlying(stage.texMapId);
+      if (map < 2 && uses_texture_sample(stage) && stage.texCoordId != GX_TEXCOORD_NULL &&
+          stage.indTexMtxId == GX_ITM_OFF) {
+        int& slot = map == 0 ? indBase : indMr;
+        slot = slot == -1 ? i : slot;
+      }
+    }
+  }
   for (int i = 0; i < config.tevStageCount; ++i) {
     const auto& stage = config.tevStages[i];
     const bool needsIndirectCoord = stage.indTexMtxId != GX_ITM_OFF;
@@ -2932,6 +3792,17 @@ std::string build_shader_source(const ShaderConfig& config) noexcept {
       // No indirect texturing
       uvIn = fmt::format("tex{0}_uv", underlying(stage.texCoordId));
     }
+    if (i == indBase && indMr != -1) {
+      const auto& ms = config.tevStages[indMr];
+      fragmentFnPre += fmt::format(
+          "\n    var ind_off = vec2f(0.0);"
+          "\n    if ((u32(ubuf.pbr_backlight.w) & 8192u) != 0u) {{"
+          "\n        let ind_s = textureSampleBias(tex{0}, tex{0}_samp, tex{1}_uv, ubuf.tex{0}_size_bias.z);"
+          "\n        ind_off = (ind_s.xy - vec2f(0.5)) * ubuf.pbr_backlight.x;"
+          "\n    }}",
+          underlying(ms.texMapId), underlying(ms.texCoordId));
+      uvIn = fmt::format("({} + ind_off)", uvIn);
+    }
     fragmentFnPre +=
         fmt::format("\n    var sampled{0} = textureSampleBias(tex{1}, tex{1}_samp, {2}, ubuf.tex{1}_size_bias.z);", i,
                     underlying(stage.texMapId), uvIn);
@@ -2944,6 +3815,41 @@ std::string build_shader_source(const ShaderConfig& config) noexcept {
                                    "\n            clamp((sdf_d - {1:.6f}) / sdf_w + 0.5, 0.0, 1.0));"
                                    "\n    }}",
                                    i, float(config.sdf) / 255.f);
+    }
+    if (config.hudSample == 1) {
+      // GX_AURORA_SET_HUD_SAMPLE: Remastered's UI shaders square the filtered alpha.
+      fragmentFnPre += fmt::format("\n    sampled{0}.a = sampled{0}.a * sampled{0}.a;", i);
+    } else if (config.hudSample >= 2) {
+      // Remastered's UI_Interference (ad2c208c): DYIN.x scales a per-row jitter of the three
+      // channels' vertical sample position, DYIN.y seeds the rows' hash; DYIN.x == 0 is the
+      // plain picture. The picture is hudRows tall (CCH5.x).
+      static constexpr float kRows[5] = {414.476f, 195.048f, 100.f, 64.f, 128.f};
+      const float rows = kRows[std::min<int>(config.hudSample - 2, 4)];
+      fragmentFnPre += fmt::format(
+          "\n    {{"
+          "\n        let hi_uv = {1};"
+          "\n        let hi_amp = ubuf.hud_dyin.x / {2:.6f};"
+          "\n        var hi_s = 1.0;"
+          "\n        if (hi_uv.x < 0.1) {{ hi_s = 0.0; }}"
+          "\n        else if (hi_uv.x < 0.2) {{ hi_s = 0.1; }}"
+          "\n        else if (hi_uv.x < 0.3) {{ hi_s = 0.2; }}"
+          "\n        else if (hi_uv.x < 0.6) {{ hi_s = 0.3; }}"
+          "\n        else if (hi_uv.x < 0.65) {{ hi_s = 0.6; }}"
+          "\n        else if (hi_uv.x < 0.8) {{ hi_s = 0.65; }}"
+          "\n        else if (hi_uv.x < 0.9) {{ hi_s = 0.8; }}"
+          "\n        let hi_seed = hi_s + ubuf.hud_dyin.y;"
+          "\n        let hi_row = floor(hi_uv.y * {2:.6f});"
+          "\n        let hi_h0 = fract(sin(hi_row * 78.233 + hi_seed * 12.9898) * 43758.5469);"
+          "\n        let hi_h1 = fract(sin(hi_row * 78.233 + (hi_seed + 1.0) * 12.9898) * 43758.5469);"
+          "\n        let hi_h2 = fract(sin(hi_row * 78.233 + (hi_seed + 2.0) * 12.9898) * 43758.5469);"
+          "\n        let hi_r = textureSampleBias(tex{3}, tex{3}_samp, vec2f(hi_uv.x, hi_uv.y + hi_amp * -40.3 * (hi_h0 - 0.5)), ubuf.tex{3}_size_bias.z);"
+          "\n        let hi_g = textureSampleBias(tex{3}, tex{3}_samp, vec2f(hi_uv.x, hi_uv.y + hi_amp * -80.0 * (hi_h1 - 0.5)), ubuf.tex{3}_size_bias.z);"
+          "\n        let hi_b = textureSampleBias(tex{3}, tex{3}_samp, vec2f(hi_uv.x, hi_uv.y + hi_amp * 40.1 * (hi_h2 - 0.5)), ubuf.tex{3}_size_bias.z);"
+          "\n        if (ubuf.hud_dyin.x != 0.0) {{"
+          "\n            sampled{0} = vec4f(hi_r.r, hi_g.g, hi_b.b, (hi_r.a + hi_g.a + hi_b.a) / 3.0);"
+          "\n        }}"
+          "\n    }}",
+          i, uvIn, rows, underlying(stage.texMapId));
     }
   }
   // Remastered's volumetric fog on the draws after its full-screen pass (between
@@ -2969,10 +3875,10 @@ std::string build_shader_source(const ShaderConfig& config) noexcept {
     vtxOutAttrs += fmt::format("\n    @location({}) vf: vec4f,", vtxOutIdx++);
     if (config.volFog == VolFogOpaque) {
       vtxXfrAttrs += "\n    out.vf = vec4f(out.pos.xy, out.pos.w, -mv_pos.z);";
-      volFogSample = fmt::format("vf_visible(vf_at(vec4f(in.vf.xy, 0.0, in.vf.z), in.vf.w), {})", fragDepth);
+      volFogSample = fmt::format("vf_at(vec4f(in.vf.xy, 0.0, in.vf.z), vf_depth(in.vf.w, {}))", fragDepth);
     } else {
       vtxXfrAttrs += "\n    out.vf = vf_at(out.pos, -mv_pos.z);";
-      volFogSample = fmt::format("vf_visible(in.vf, {})", fragDepth);
+      volFogSample = "in.vf";
     }
     texBindings += fmt::format("\n@group(2) @binding({})\n"
                                "var vf_froxels: texture_3d<f32>;\n"
@@ -2988,9 +3894,16 @@ fn vf_at(clip: vec4f, viewz: f32) -> vec4f {
     return textureSampleLevel(vf_froxels, vf_samp, vec3f(ndc.x * 0.5 + 0.5, 0.5 - ndc.y * 0.5, slice), 0.0);
 }
 
-// Nearer than the world's depth range is the viewmodel, which is not fogged.
-fn vf_visible(fog: vec4f, z: f32) -> vec4f {
-    return select(fog, vec4f(0.0, 0.0, 0.0, 1.0), z < ubuf.volfog.w);
+// The per-pixel (opaque) fog is the full-screen pass, which reads the depth buffer. Nearer than
+// the world's depth range is the viewmodel; Remastered draws it in the range 0.0097656..0.0386719
+// (construct_depth_range_from_flags 0xb40e20, flag bit 8) and the pass reads that as a full-range
+// depth, so it takes the first froxel slices. volfog_tone[0].w is 1 - near / far.
+fn vf_depth(viewz: f32, z: f32) -> f32 {
+    if (z < ubuf.volfog.w) {
+        let d = mix(0.0097656, 0.0386719, z / ubuf.volfog.w);
+        return ubuf.volfog.x / (1.0 - d * ubuf.volfog_tone[0].w);
+    }
+    return viewz;
 }
 
 fn vf_tone(x: f32) -> f32 {
@@ -3023,8 +3936,19 @@ fn vf_untone(y: f32) -> f32 {
     return u / (1.0 - u) / ubuf.volfog_tone[2].y + ubuf.volfog_tone[1].w;
 }
 
+// The EFB holds colour as Remastered's sRGB swapchain does: the exact piecewise sRGB curve.
+fn vf_srgb_enc(c: vec3f) -> vec3f {
+  let l = clamp(c, vec3f(0.0), vec3f(1.0));
+  return select(1.055 * pow(l, vec3f(1.0 / 2.4)) - 0.055, 12.92 * l, l <= vec3f(0.0031308));
+}
+
+fn vf_srgb_dec(c: vec3f) -> vec3f {
+  let e = clamp(c, vec3f(0.0), vec3f(1.0));
+  return select(pow((e + 0.055) / 1.055, vec3f(2.4)), e / 12.92, e <= vec3f(0.04045));
+}
+
 fn vf_exposed(c: vec3f) -> vec3f {
-    let y = pow(clamp(c, vec3f(0.0), vec3f(1.0)), vec3f(2.2));
+    let y = vf_srgb_dec(c);
     return min(vec3f(vf_untone(y.r), vf_untone(y.g), vf_untone(y.b)), vec3f(4.0));
 }
 
@@ -3037,7 +3961,7 @@ fn vf_apply(c: vec4f, fog: vec4f, w: f32) -> vec4f {
     }
     let x = vf_exposed(c.rgb) * fog.a + light;
     let drawn = vec3f(vf_tone(x.r), vf_tone(x.g), vf_tone(x.b));
-    return vec4f(pow(clamp(drawn, vec3f(0.0), vec3f(1.0)), vec3f(1.0 / 2.2)), c.a);
+    return vec4f(vf_srgb_enc(drawn), c.a);
 })""";
   }
   if (config.pbr) {
@@ -3060,7 +3984,8 @@ fn vf_apply(c: vec4f, fog: vec4f, w: f32) -> vec4f {
     uniBufAttrs += "\n    pbr_shield: array<vec4f, 8>,";
     uniBufAttrs += "\n    pbr_lmap_rect: vec4f,";
     uniBufAttrs += "\n    pbr_lmap_axes: array<vec4f, 3>,";
-    auto pbr = pbr_func(config, info, vtxOutAttrs, vtxXfrAttrs, vtxOutIdx);
+    uniBufAttrs += "\n    pbr_room_lights: vec4f,";
+    auto pbr = pbr_func(config, info, vtxOutAttrs, vtxXfrAttrs, vtxOutIdx, vidxAttr);
     // An unlit surface (baked room light: pbr_func drops its light loop) has no room light to
     // shadow, but takes the sun's own colour.
     if (!pbr.empty() && info.shadowReceive) {
@@ -3108,7 +4033,8 @@ fn vf_apply(c: vec4f, fog: vec4f, w: f32) -> vec4f {
           let vis = 0.25 / (max(pbr_nv * (1.0 - pbr_k) + pbr_k, 1e-4) * max(nl * (1.0 - pbr_k) + pbr_k, 1e-4));
           let f = pbr_f0 + (1.0 - pbr_f0) * pow(1.0 - vh, 5.0);
           let rad = ubuf.shadow_color.rgb;
-          pbr_lo += (pbr_diff * pbr_ao + d * vis * f * pbr_pi) * rad * (nl * sun_vis);
+          pbr_lo += (pbr_diff * pbr_ao + select(d * vis * f * pbr_pi, vec3f(0.0), pbr_nols)) * rad * (nl * sun_vis);
+          pbr_ldiff += pbr_diff * pbr_ao * rad * (nl * sun_vis);
           let env_w = 0.5 + 0.5 * dot(pbr_refl, ldir);
           pbr_env += rad * (env_w * env_w);
           pbr_lsum += rad;
@@ -3152,6 +4078,9 @@ fn vf_apply(c: vec4f, fog: vec4f, w: f32) -> vec4f {
             fmt::format("\n@group(2) @binding({})\nvar pbr_lmap: texture_2d_array<f32>;", kLightmapBinding);
       }
     }
+  }
+  if (info.usesHudDyin) {
+    uniBufAttrs += "\n    hud_dyin: vec4f,";
   }
   if (info.usesPTTexMtx.any()) {
     uniBufAttrs += fmt::format("\n    postmtx: array<mat3x4f, {}>,", MaxPTTexMtx);
@@ -3286,7 +4215,7 @@ fn load_word(p: ptr<storage, array<u32>>, word_idx: u32) -> u32 {{
   // This guard is not expected to handle routine out-of-bounds accesses.
   // It appears to discourage some Adreno drivers/optimizers from storage buffer
   // optimizations that can cause visual artifacts, including vertex explosions
-  // in Dusklight. (Swapped for a clamp on Adreno 730 below.)
+  // in Dusklight. (Swapped for a clamp on Adreno 7xx below.)
   if (word_idx < arrayLength(p)) {{
     return p[word_idx];
   }}
@@ -3592,6 +4521,19 @@ fn tev_overflow_vec3f(in: vec3f) -> vec3f {{
 fn tev_overflow_vec4f(in: vec4f) -> vec4f {{
   let byte_space = in * 255.0;
   return (byte_space - floor(byte_space / 256.0) * 256.0) / 255.0;
+}}
+
+// The EFB (and the probes captured from it) holds colour as Remastered's sRGB swapchain
+// does: the exact piecewise sRGB curve.
+fn srgb_dec(e: vec3f) -> vec3f {{
+  let c = max(e, vec3f(0.0));
+  return select(pow((c + 0.055) / 1.055, vec3f(2.4)), c / 12.92, c <= vec3f(0.04045));
+}}
+
+// Its inverse, clamped to the range the swapchain stores.
+fn srgb_enc(l: vec3f) -> vec3f {{
+  let c = clamp(l, vec3f(0.0), vec3f(1.0));
+  return select(1.055 * pow(c, vec3f(1.0 / 2.4)) - 0.055, 12.92 * c, c <= vec3f(0.0031308));
 }}
 
 {8}

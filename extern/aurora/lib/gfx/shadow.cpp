@@ -4,6 +4,7 @@
 #include "../logging.hpp"
 #include "../webgpu/gpu.hpp"
 #include "../webgpu/gpu_prof.hpp"
+#include "geometry_buffer.hpp"
 #include "pipeline_cache.hpp"
 #include "recording.hpp"
 #include "resources.hpp"
@@ -172,7 +173,12 @@ void encode(const EncoderTaskContext&, const wgpu::CommandEncoder& cmd, const vo
   };
   const auto pass = cmd.BeginRenderPass(&passDescriptor);
   const auto& resources = detail::resources();
-  pass.SetBindGroup(0, resources.staticBindGroup);
+  // PrimedGun: a caster from the geometry cache (DrawData::cachedGeometry) reads that cache's buffer
+  // as group 0, with 32-bit indices absolute into it, and with native vertex input
+  // (DrawData::nativeVertices) as vertex buffer 0 as well, bound as gx::render binds them. Group 0
+  // and the vertex buffer are set again only when they change: every caster shares the pipeline layout.
+  int geometry = -1; // group 0: the frame's vertex buffer (0), the geometry cache's (1)
+  bool nativeBound = false;
   for (const auto& draw : casters) {
     wgpu::RenderPipeline pipeline;
     if (!get_pipeline(draw.pipeline, pipeline)) {
@@ -181,7 +187,17 @@ void encode(const EncoderTaskContext&, const wgpu::CommandEncoder& cmd, const vo
     pass.SetPipeline(pipeline);
     pass.SetImmediates(0, &draw.immediateData, sizeof(draw.immediateData));
     pass.SetBindGroup(1, resources.uniformBindGroup, 1, &draw.uniformRange.offset);
-    pass.SetIndexBuffer(resources.indexBuffer, wgpu::IndexFormat::Uint16, draw.idxRange.offset, draw.idxRange.size);
+    if (const int wanted = draw.cachedGeometry ? 1 : 0; wanted != geometry) {
+      pass.SetBindGroup(0, draw.cachedGeometry ? detail::geometry_bind_group() : resources.staticBindGroup);
+      geometry = wanted;
+    }
+    if (draw.nativeVertices && !nativeBound) {
+      pass.SetVertexBuffer(0, detail::geometry_buffer());
+      nativeBound = true;
+    }
+    pass.SetIndexBuffer(resources.indexBuffer,
+                        draw.cachedGeometry ? wgpu::IndexFormat::Uint32 : wgpu::IndexFormat::Uint16,
+                        draw.idxRange.offset, draw.idxRange.size);
     if (draw.indexCount == 0) {
       pass.Draw(draw.vtxCount, draw.instanceCount);
     } else {

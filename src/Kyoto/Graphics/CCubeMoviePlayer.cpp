@@ -154,6 +154,12 @@ static void MyTHPYuv2RgbTextureSetup(void* y, void* u, void* v, ushort width, us
   GXInitTexObjLOD(&vTex, GX_NEAR, GX_NEAR, 0.f, 0.f, 0.f, FALSE, FALSE, GX_ANISO_1);
   GXLoadTexObj(&vTex, GX_TEXMAP2);
 
+  // Each draw makes new objects for a new frame: destroyed now, the draw still samples them, but
+  // aurora doesn't keep every frame's textures on the GPU until its idle sweep (600 frames).
+  GXDestroyTexObj(&yTex);
+  GXDestroyTexObj(&uTex);
+  GXDestroyTexObj(&vTex);
+
   CTexture::InvalidateTexmap(GX_TEXMAP0);
   CTexture::InvalidateTexmap(GX_TEXMAP1);
   CTexture::InvalidateTexmap(GX_TEXMAP2);

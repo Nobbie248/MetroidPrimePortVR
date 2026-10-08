@@ -190,10 +190,21 @@ fn untone(y: f32) -> f32 {
   return u / (1.0 - u) / p.tone[2].y + p.tone[1].w;
 }
 
+// The EFB holds colour as Remastered's sRGB swapchain does: the exact piecewise sRGB curve.
+fn srgb_enc(c: vec3f) -> vec3f {
+  let l = clamp(c, vec3f(0.0), vec3f(1.0));
+  return select(1.055 * pow(l, vec3f(1.0 / 2.4)) - 0.055, 12.92 * l, l <= vec3f(0.0031308));
+}
+
+fn srgb_dec(c: vec3f) -> vec3f {
+  let e = clamp(c, vec3f(0.0), vec3f(1.0));
+  return select(pow((e + 0.055) / 1.055, vec3f(2.4)), e / 12.92, e <= vec3f(0.04045));
+}
+
 const MaxExposed = 4.0;
 
 fn exposed(c: vec3f) -> vec3f {
-  let y = pow(clamp(c, vec3f(0.0), vec3f(1.0)), vec3f(2.2));
+  let y = srgb_dec(c);
   return min(vec3f(untone(y.r), untone(y.g), untone(y.b)), vec3f(MaxExposed));
 }
 
@@ -203,12 +214,12 @@ fn fs_apply(in: VertexOutput) -> @location(0) vec4f {
   let f = textureLoad(src, min(vec2i(floor(in.pos.xy)), size - vec2i(1)), 0);
   let depthSize = vec2i(textureDimensions(depthTex));
   let at = min(vec2i(in.uv * vec2f(depthSize)), depthSize - vec2i(1));
-  // Reversed Z; nearer than the world's depth range is the viewmodel, which is not fogged.
+  // Reversed Z. Nearer than the world's depth range is the viewmodel: Remastered draws it in
+  // 0.0097656..0.0386719 of the depth buffer and this pass reads that as a full-range depth.
   let z = 1.0 - textureLoad(depthTex, at, 0);
-  if (z < p.depth.z) {
-    return f;
-  }
-  let d = clamp((z - p.depth.z) / max(p.depth.w - p.depth.z, 1e-6), 0.0, 1.0);
+  let gun = z < p.depth.z;
+  let d = select(clamp((z - p.depth.z) / max(p.depth.w - p.depth.z, 1e-6), 0.0, 1.0),
+                 mix(0.0097656, 0.0386719, z / p.depth.z), gun);
   let near = p.depth.x;
   let far = p.depth.y;
   let zlin = near * far / (far - d * (far - near));
@@ -223,7 +234,7 @@ fn fs_apply(in: VertexOutput) -> @location(0) vec4f {
   }
   let x = exposed(f.rgb) * fog.a + light;
   let drawn = vec3f(tone(x.r), tone(x.g), tone(x.b));
-  return vec4f(pow(clamp(drawn, vec3f(0.0), vec3f(1.0)), vec3f(1.0 / 2.2)), f.a);
+  return vec4f(srgb_enc(drawn), f.a);
 }
 )";
 

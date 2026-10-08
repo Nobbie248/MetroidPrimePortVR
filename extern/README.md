@@ -8,6 +8,7 @@ be fetched. Keep their license files and source notices when updating them.
 | --- | --- | --- |
 | `aurora` | <https://github.com/encounter/aurora> | Local port fork `d39404c803d28657c94159a8f44addffdd85a781`, based on port snapshot `32c926ca0f59994249ba4dae5d606a66f8bbd87f` |
 | `astcenc` | <https://github.com/ARM-software/astc-encoder> | Release `5.7.0` (`baff485b0ff36d2f95d28961605106502c653966`), Apache-2.0 |
+| `adrenotools` | <https://github.com/bylaws/libadrenotools> | `8fae8ce254dfc1344527e05301e43f37dea2df80`, with `lib/linkernsbypass` at `aa3975893d83ef1bc84c321ec60c65fbf1287887`, BSD-2-Clause |
 | `musyx` | <https://github.com/AxioDL/musyx> | Local SDL3 port fork `dc8bed3d6b253113a9f0c7bed57378f91b8dc788`, based on port snapshot `ab6d648668f2c6871eef2c079e8edccf51d7f8ec` |
 
 These commit IDs record provenance; they are not download requirements. Existing
@@ -32,3 +33,8 @@ builds the vendored source and does not run `git submodule update`.
 `LICENSE.txt`. `extern/astcenc/CMakeLists.txt` is ours: a static library, SSE2 on
 x86-64, NEON on arm64, plain C++ elsewhere, with no GCC-only flags on MSVC. It
 writes the Remastered importer's ASTC textures (`platform/port_remastered_image.cpp`).
+
+`adrenotools` is unmodified apart from the dropped `.git` folders. It is
+built only for Android arm64 (`add_subdirectory(... EXCLUDE_FROM_ALL)` in the root
+`CMakeLists.txt`): `platform/port_gpu_driver.cpp` uses it to load custom Vulkan
+drivers such as Mesa Turnip, and Gradle packages its four hook libraries.

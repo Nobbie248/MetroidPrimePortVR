@@ -625,7 +625,8 @@ void cp_vat_a(u8 addr, u32 value) noexcept {
   vf.attrs[GX_VA_POS].frac = static_cast<u8>(reg_get(value, 5, 4));
   const auto nrm_cnt = reg_get(value, 1, 9);
   const auto nrm_nbt3 = reg_get(value, 1, 31);
-  vf.attrs[GX_VA_NRM].cnt = nrm_nbt3 ? GX_NRM_NBT3 : nrm_cnt ? GX_NRM_NBT : GX_NRM_XYZ;
+  vf.attrs[GX_VA_NRM].cnt =
+      nrm_nbt3 ? (nrm_cnt ? GX_NRM_NBT3 : GX_NRM_NBT5) : nrm_cnt ? GX_NRM_NBT : GX_NRM_XYZ;
   vf.attrs[GX_VA_NRM].type = static_cast<GXCompType>(reg_get(value, 3, 10));
   if (vf.attrs[GX_VA_NRM].type == GX_U8 || vf.attrs[GX_VA_NRM].type == GX_S8) {
     vf.attrs[GX_VA_NRM].frac = 6;

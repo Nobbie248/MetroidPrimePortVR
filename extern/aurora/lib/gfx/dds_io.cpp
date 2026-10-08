@@ -108,16 +108,24 @@ std::optional<wgpu::TextureFormat> resolve_dx10_format(uint32_t dxgiFormat) noex
   switch (dxgiFormat) {
   case 28:
     return wgpu::TextureFormat::RGBA8Unorm;
+  case 29:
+    return wgpu::TextureFormat::RGBA8UnormSrgb;
   case 87:
     return wgpu::TextureFormat::BGRA8Unorm;
   case 71:
     return wgpu::TextureFormat::BC1RGBAUnorm;
+  case 72:
+    return wgpu::TextureFormat::BC1RGBAUnormSrgb;
   case 77:
     return wgpu::TextureFormat::BC3RGBAUnorm;
+  case 78:
+    return wgpu::TextureFormat::BC3RGBAUnormSrgb;
   case 83:
     return wgpu::TextureFormat::BC5RGUnorm;
   case 98:
     return wgpu::TextureFormat::BC7RGBAUnorm;
+  case 99:
+    return wgpu::TextureFormat::BC7RGBAUnormSrgb;
   case 134:
     return wgpu::TextureFormat::ASTC4x4Unorm;
   case 135:

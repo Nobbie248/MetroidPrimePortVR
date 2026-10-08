@@ -94,6 +94,10 @@ static inline void SETVAT(u32* va, u32* vb, u32* vc, GXAttr attr, GXCompCnt cnt,
     if (cnt == GX_NRM_NBT3) {
       SET_REG_FIELD(0, *va, 1, 9, 1);
       SET_REG_FIELD(0, *va, 1, 31, 1);
+    } else if (cnt == GX_NRM_NBT5) {
+      // port: bit 31 without bit 9 (hardware never sets that pair) means NBT5
+      SET_REG_FIELD(0, *va, 1, 9, 0);
+      SET_REG_FIELD(0, *va, 1, 31, 1);
     } else {
       SET_REG_FIELD(0, *va, 1, 9, cnt);
       SET_REG_FIELD(0, *va, 1, 31, 0);

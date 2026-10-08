@@ -117,6 +117,8 @@ struct RenderPass {
   GXTexFmt resolveFormat = GX_TF_RGBA8;
   ClipRect resolveRect;
   Range resolveUniformRange;
+  Range resolveMipsUniformRange;
+  bool resolveMips = false; // resolveTarget has a mip chain to fill after the copy
   int probeFace = -1; // resolveTarget is this face of the PBR probe
   Range probeUniformRange;
   wgpu::Texture snapshotColorDst;

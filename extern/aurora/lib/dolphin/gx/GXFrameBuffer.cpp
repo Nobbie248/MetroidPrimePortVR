@@ -42,12 +42,21 @@ void copy_tex(const void* dest, GXBool clear) noexcept {
   const auto rect = map_logical_scissor(g_gxState.texCopySrc);
   const auto [dstWidth, dstHeight] = scale_copy_dst(g_gxState.texCopyDstWidth, g_gxState.texCopyDstHeight);
   const auto texCopyFmt = g_gxState.texCopyFmt;
+  // A mip chain only for plain colour copies (converted formats keep one level).
+  const bool copyMips = g_gxState.texCopyMips && !gfx::tex_copy_conv::needs_conversion(texCopyFmt);
+  uint32_t mipCount = 1;
+  if (copyMips) {
+    for (u32 edge = std::max(dstWidth, dstHeight); edge > 1; edge >>= 1) {
+      ++mipCount;
+    }
+  }
 
   const GXState::CopyTextureKey key{
       .dest = dest,
       .width = dstWidth,
       .height = dstHeight,
       .format = texCopyFmt,
+      .mips = mipCount > 1,
   };
   static u64 s_copySerial = 0;
   auto it = g_gxState.copyTextureCache.find(key);
@@ -64,7 +73,7 @@ void copy_tex(const void* dest, GXBool clear) noexcept {
           texCopyFmt == GX_TF_RGB565 || g_gxState.pixelFmt == GX_PF_RGB8_Z24 || g_gxState.pixelFmt == GX_PF_RGB565_Z16
               ? GX_TF_RGB565
               : GX_TF_RGBA8;
-      handle = gfx::new_render_texture(dstWidth, dstHeight, fmt, "Resolved Texture");
+      handle = gfx::new_render_texture(dstWidth, dstHeight, fmt, "Resolved Texture", mipCount);
     }
     it = g_gxState.copyTextureCache.emplace(key, GXState::CopyTextureRef{.handle = handle, .revision = 0}).first;
     static const bool logNew = std::getenv("MP_LOG_COPY_TEX") != nullptr;
@@ -95,7 +104,7 @@ void copy_tex(const void* dest, GXBool clear) noexcept {
   // Cost test 11 measures what the copies' pass breaks cost; a copy that clears still has to.
   if (clear || GXGetPBRCostTest() != 11) {
     gfx::resolve_pass_into(handle.handle, rect, clearColor, clearAlpha, clearDepth, g_gxState.clearColor,
-                           clear_depth_value(), texCopyFmt);
+                           clear_depth_value(), texCopyFmt, -1, mipCount > 1);
   }
   ++handle.revision;
   handle.lastCopy = ++s_copySerial;

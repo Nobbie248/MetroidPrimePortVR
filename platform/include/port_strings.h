@@ -99,4 +99,29 @@ inline std::vector<uint8_t> ReadAll(std::ifstream& in) {
   return data;
 }
 
+// text as a JSON string literal, quotes included. Bytes past ASCII pass
+// through (UTF-8 stays UTF-8); control characters are escaped.
+inline std::string JsonQuote(const std::string& text) {
+  std::string out = "\"";
+  for (const char c : text) {
+    switch (c) {
+    case '"': out += "\\\""; break;
+    case '\\': out += "\\\\"; break;
+    case '\n': out += "\\n"; break;
+    case '\r': out += "\\r"; break;
+    case '\t': out += "\\t"; break;
+    default:
+      if (static_cast<unsigned char>(c) < 0x20) {
+        char escape[8];
+        std::snprintf(escape, sizeof(escape), "\\u%04x", static_cast<unsigned>(static_cast<unsigned char>(c)));
+        out += escape;
+      } else {
+        out.push_back(c);
+      }
+    }
+  }
+  out.push_back('"');
+  return out;
+}
+
 }  // namespace port

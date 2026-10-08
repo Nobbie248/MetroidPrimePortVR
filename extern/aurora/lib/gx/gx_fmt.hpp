@@ -815,6 +815,8 @@ inline std::string format_as(const GXCompCnt& cnt) {
     return "GX_POS_XYZ|GX_NRM_NBT|GX_CLR_RGBA|GX_TEX_ST";
   case GX_NRM_NBT3:
     return "GX_NRM_NBT3";
+  case GX_NRM_NBT5:
+    return "GX_NRM_NBT5";
   default:
     return fmt::format("GXCompCnt({})", underlying(cnt));
   }

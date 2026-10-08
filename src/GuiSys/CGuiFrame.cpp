@@ -9,6 +9,8 @@
 #include "GuiSys/CGuiSys.hpp"
 #include "GuiSys/CGuiWidget.hpp"
 #include "Kyoto/Graphics/CGraphics.hpp"
+#include "Kyoto/Graphics/CCubeMaterial.hpp"
+#include "Kyoto/Graphics/CCubeModel.hpp"
 #include "Kyoto/Graphics/CModel.hpp"
 #include "Kyoto/Input/CFinalInput.hpp"
 #include "rstl/algorithm.hpp"
@@ -587,3 +589,29 @@ void CGuiFrame::SetFrameCamera(CGuiCamera* camera) { x14_camera = camera; }
 CGuiWidget* CGuiFrame::FindWidget(const char* name) const { return FindWidget(rstl::string_l(name)); }
 
 CGuiLight* CGuiFrame::GetFrameLight(int idx) { return x3c_lights[idx]; }
+
+#ifdef TARGET_PC
+bool CGuiFrame::PortHasHudInterference() const {
+  for (CGuiWidget* widget : x2c_widgets) {
+    if (widget->GetWidgetTypeID() != FourCC('MODL')) {
+      continue;
+    }
+    const rstl::optional_object< TCachedToken< CModel > >& token =
+        static_cast< const CGuiModel* >(widget)->GetModel();
+    if (!token.valid() || (*token).GetObject() == nullptr) {
+      continue;
+    }
+    const CCubeModel* cube = (*token).GetObject()->GetCubeModel();
+    if (cube == nullptr) {
+      continue;
+    }
+    const uint count = cube->PortMaterialCount();
+    for (uint i = 0; i < count; ++i) {
+      if (cube->GetMaterialByIndex(static_cast< int >(i)).IsFlagSet(kStateFlag_PortHudInterference)) {
+        return true;
+      }
+    }
+  }
+  return false;
+}
+#endif

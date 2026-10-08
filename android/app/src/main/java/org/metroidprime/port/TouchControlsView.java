@@ -16,6 +16,7 @@ import org.libsdl.app.SDLActivity;
 import java.util.Arrays;
 import java.util.HashMap;
 import java.util.HashSet;
+import java.util.Iterator;
 import java.util.Locale;
 import java.util.Map;
 import java.util.Set;
@@ -55,6 +56,9 @@ final class TouchControlsView extends View {
     // Twin stick's Beam button: held, it turns the D-pad into the beam picker (the
     // port's pad preset does the same with Y). It sends no GameCube button.
     private static final int BEAM_SHIFT = -2;
+    // The Turbo button: held, the game behaves as if Fire were mashed. Like
+    // BEAM_SHIFT it sends no GameCube button itself.
+    private static final int TURBO_FIRE = -3;
     // Axis-held controls are tracked with ids above this, to share one press map.
     private static final int AXIS_ID_BASE = 100;
 
@@ -119,6 +123,10 @@ final class TouchControlsView extends View {
     };
     // What each GameCube face button does, drawn small under its letter.
     private static final String[] GAMECUBE_FUNCTIONS = {"Fire", "Jump", "Morph", "Missile"};
+    // The optional Turbo button (F1 "Turbo fire button"), above the cluster on the
+    // right. Not in the face arrays: those index the editor ids and are always drawn.
+    private static final ControlButton GAMECUBE_TURBO =
+        ControlButton.round("Turbo", TURBO_FIRE, 0.05f, -0.27f, 0.045f, GC_GREEN);
 
     // The D-pad is one cross, as on the GameCube pad: its centre as fractions of
     // the view, its arms in view heights so it stays square.
@@ -151,6 +159,9 @@ final class TouchControlsView extends View {
         ControlButton.round("Morph", BTN_WEST, -TWIN_DIAMOND, 0f, 0.055f, GC_GREY),
         ControlButton.round("Beam", BEAM_SHIFT, 0f, -TWIN_DIAMOND, 0.055f, GC_GREY),
     };
+    // Turbo, above Beam.
+    private static final ControlButton TWIN_TURBO =
+        ControlButton.round("Turbo", TURBO_FIRE, 0f, -0.21f, 0.045f, GC_GREEN);
 
     private static final PillButton[] GAMECUBE_PILLS = {
         new PillButton("L Lock", AXIS_TRIGGER_L, -1, 0.020f, 0.030f, 0.150f, 0.190f, GC_GREY),
@@ -259,17 +270,21 @@ final class TouchControlsView extends View {
     private static final int C_RB = 24;
     private static final int C_TZ = 25;
     private static final int C_TR = 26;
-    private static final int CONTROLS = 27;
+    // The Turbo button, once for the default/classic layouts and once for twin.
+    private static final int C_TURBO = 27;
+    private static final int C_TTURBO = 28;
+    private static final int CONTROLS = 29;
     // The ids the saved layout uses; never rename one.
     private static final String[] CONTROL_IDS = {
         "lstick", "cstick", "dpad", "a", "b", "x", "y", "l", "r", "z", "visor", "beam", "start",
         "menu", "map", "eye", "rstick", "jump", "fire", "morph", "missile", "lt", "lb", "rt", "rb",
-        "tz", "tr",
+        "tz", "tr", "turbo", "tturbo",
     };
     private static final String[] CONTROL_NAMES = {
         "Left stick", "C-stick", "D-pad", "A", "B", "X", "Y", "L", "R", "Z", "Visor", "Beam",
         "Start", "Menu", "Map", "Hide", "Right stick", "Jump", "Fire", "Morph", "Missile",
         "LT Lock", "LB Jump", "RT Fire", "RB Missile", "Map (Z)", "R",
+        "Turbo", "Turbo",
     };
     private static final float MIN_SCALE = 0.5f;
     private static final float MAX_SCALE = 2.5f;
@@ -317,6 +332,17 @@ final class TouchControlsView extends View {
     private boolean colored;
     // Each button's function (Fire, Jump...) drawn with its letter.
     private boolean labels = true;
+    // F1's "Floating left stick", re-read every draw: the left stick is hidden
+    // until a free touch on the left half, then centred at (floatX, floatY), where
+    // that finger came down (pulled in so the ring stays on screen).
+    private boolean floating;
+    private float floatX;
+    private float floatY;
+    // The held left stick is a floating one (stays so if the map opens meanwhile).
+    private boolean leftFloated;
+    // F1's "Turbo fire button", re-read every draw; the button when it is on.
+    private boolean turbo;
+    private ControlButton turboButton;
     // F1 settings too, in px: every control's gap to the side edges, and the
     // left stick's on top of it.
     private float sideMargin;
@@ -382,10 +408,13 @@ final class TouchControlsView extends View {
     private final Path shapePath = new Path();
     private final Path crossArmPath = new Path();
     private static native boolean nativeDebugOverlayVisible();
+    private static native boolean nativeTapUpdateToast(float x, float y);
     private static native boolean nativeTouchClassic();
     private static native boolean nativeTouchTwinStick();
     private static native boolean nativeTouchColors();
     private static native boolean nativeTouchLabels();
+    private static native boolean nativeTouchFloatingStick();
+    private static native boolean nativeTouchTurbo();
     // F1's side margin (every control) and the left stick's extra inset, in dp.
     private static native float nativeTouchSideMarginDp();
     private static native float nativeTouchStickInsetDp();
@@ -429,6 +458,8 @@ final class TouchControlsView extends View {
     private static native void nativeVirtualButton(int button, boolean down);
     // The twin layout's Beam button is held: the D-pad picks beams, not visors.
     private static native void nativeTouchBeamShift(boolean held);
+    // The Turbo button is held: the game acts as if Fire were mashed.
+    private static native void nativeTouchTurboFire(boolean held);
     private static native void nativeVirtualAxis(int axis, float value);
     private static native boolean nativeTakePhysicalInput();
     private int leftPointer = -1;
@@ -462,6 +493,10 @@ final class TouchControlsView extends View {
             }
             if (nativeTouchEditRequested()) {
                 editPending = true;
+            }
+            // F1 can switch Turbo off while the overlay hides this view's draws.
+            if (held.containsKey(TURBO_FIRE) && !nativeTouchTurbo()) {
+                releaseTurbo();
             }
             // The overlay can open without this view hearing of it (a pad, or
             // MENU while the first frames are slow enough that a one-off
@@ -533,6 +568,7 @@ final class TouchControlsView extends View {
         final boolean classic = nativeTouchClassic();
         colored = nativeTouchColors();
         labels = nativeTouchLabels();
+        floating = nativeTouchFloatingStick();
         sideMargin = dp(nativeTouchSideMarginDp());
         stickInset = dp(nativeTouchStickInsetDp());
         buttonInset = dp(nativeTouchButtonInsetDp());
@@ -540,6 +576,11 @@ final class TouchControlsView extends View {
         twin = !classic && nativeTouchTwinStick();
         face = twin ? TWIN_FACE : GAMECUBE_FACE;
         pills = twin ? TWIN_PILLS : GAMECUBE_PILLS;
+        turbo = nativeTouchTurbo();
+        turboButton = turbo ? (twin ? TWIN_TURBO : GAMECUBE_TURBO) : null;
+        if (!turbo) {
+            releaseTurbo();
+        }
         cStick = classic || twin;
         aim = !classic || nativeTouchAimEnabled();
         // The wheels are the default layout's only beam and visor control; classic and
@@ -557,8 +598,12 @@ final class TouchControlsView extends View {
             }
         }
         bottomButtonRect(0, true, width, height, hideBounds);
-        drawStick(canvas, leftStickX(width, height), leftStickY(width, height),
-                  leftStickRadius(height), leftPointer, 0);
+        if (leftPointer != -1 && leftFloated) {
+            drawStick(canvas, floatX, floatY, leftStickRadius(height), leftPointer, 0);
+        } else if (!floatingStick()) {
+            drawStick(canvas, leftStickX(width, height), leftStickY(width, height),
+                      leftStickRadius(height), leftPointer, 0);
+        }
         // The right stick is the C-stick, yellow on the GameCube pad, in the classic
         // layout; in twin stick it aims, plain like the left. Otherwise a drag
         // anywhere free aims.
@@ -575,6 +620,9 @@ final class TouchControlsView extends View {
         }
         for (ControlButton button : face) {
             drawButton(canvas, button, width, height);
+        }
+        if (turboButton != null) {
+            drawButton(canvas, turboButton, width, height);
         }
         if (wheels) {
             drawWheelButtons(canvas, width, height);
@@ -710,6 +758,17 @@ final class TouchControlsView extends View {
             }
         } else if (forwardToSdl(event, action, actionIndex, overlayVisible) || overlayVisible) {
             return true;
+        }
+
+        // A tap on the "newer release" toast opens its page and is not also a press.
+        if (action == MotionEvent.ACTION_DOWN || action == MotionEvent.ACTION_POINTER_DOWN) {
+            View parent = (View) getParent();
+            if (parent != null
+                    && nativeTapUpdateToast(
+                            (getLeft() + event.getX(actionIndex)) / Math.max(1, parent.getWidth() - 1),
+                            (getTop() + event.getY(actionIndex)) / Math.max(1, parent.getHeight() - 1))) {
+                return true;
+            }
         }
 
         if (autoHidden) {
@@ -925,6 +984,13 @@ final class TouchControlsView extends View {
                 return;
             }
         }
+        if (turboButton != null && hitButton(turboButton, x, y, width, height)) {
+            final TouchTarget target = TouchTarget.begin(BUTTON, TURBO_FIRE, x, y);
+            target.control = turboButton;
+            targets.put(pointerId, target);
+            pressControl(TURBO_FIRE);
+            return;
+        }
         // Hidden wheel buttons (wheels unusable) let the touch through.
         if (wheels && (nativeWheelOwned() & WHEEL_VALID_BIT) != 0) {
             final int wheel = wheelButtonAt(x, y, width, height);
@@ -958,9 +1024,17 @@ final class TouchControlsView extends View {
             targets.put(pointerId, TouchTarget.begin(MAP_TAP, 0, x, y));
             return;
         }
-        if (onLeftStick(x, y, width, height) && leftPointer == -1) {
+        final boolean floatHere = floatingStick() && x < width * 0.5f;
+        if ((floatHere || (!floatingStick() && onLeftStick(x, y, width, height))) &&
+            leftPointer == -1) {
+            if (floatHere) {
+                final float radius = leftStickRadius(height);
+                floatX = Math.max(radius, Math.min(width - radius, x));
+                floatY = Math.max(radius, Math.min(height - radius, y));
+            }
             TouchTarget target = new TouchTarget(LEFT_STICK, 0);
             leftPointer = pointerId;
+            leftFloated = floatHere;
             targets.put(pointerId, target);
             updateStick(target, x, y);
         } else if (nativeMapScreenOpen()) {
@@ -987,6 +1061,12 @@ final class TouchControlsView extends View {
             targets.put(pointerId, TouchTarget.begin(AIM, 0, x, y));
             nativeTouchAimDown(true);
         }
+    }
+
+    // The floating left stick, except on the map screen (whose free area pans)
+    // and in the layout editor, which place the fixed one.
+    private boolean floatingStick() {
+        return floating && !editing && !nativeMapScreenOpen();
     }
 
     // A press within half a stick radius outside the left stick's ring grabs it.
@@ -1208,8 +1288,11 @@ final class TouchControlsView extends View {
         final boolean left = target.type == LEFT_STICK;
         float width = getWidth();
         float height = getHeight();
-        float centreX = left ? leftStickX(width, height) : rightStickX(width, height);
-        float centreY = left ? leftStickY(width, height) : rightStickY(height);
+        // A floating stick keeps the centre it was grabbed at, even if the map
+        // opens while it is held.
+        final boolean floated = left && leftFloated;
+        float centreX = floated ? floatX : left ? leftStickX(width, height) : rightStickX(width, height);
+        float centreY = floated ? floatY : left ? leftStickY(width, height) : rightStickY(height);
         float radius = left ? leftStickRadius(height) : rightStickRadius(height);
         // SDL's gamepad axes are +X right and +Y *down* (Aurora inverts Y for the
         // GameCube stick, whose +Y is up), so screen coordinates apply as-is.
@@ -1332,6 +1415,8 @@ final class TouchControlsView extends View {
         if (count == 0) {
             if (id == BEAM_SHIFT) {
                 nativeTouchBeamShift(true);
+            } else if (id == TURBO_FIRE) {
+                nativeTouchTurboFire(true);
             } else if (id >= AXIS_ID_BASE) {
                 nativeVirtualAxis(id - AXIS_ID_BASE, 1f);
             } else {
@@ -1339,6 +1424,23 @@ final class TouchControlsView extends View {
             }
         }
         held.put(id, count + 1);
+    }
+
+    // Lets go of Turbo when its button is no longer drawn (F1 turned it off while
+    // a finger was on it), so it cannot stay on with nothing to release it.
+    private void releaseTurbo() {
+        if (!held.containsKey(TURBO_FIRE)) {
+            return;
+        }
+        final Iterator<TouchTarget> it = targets.values().iterator();
+        while (it.hasNext()) {
+            if (it.next().id == TURBO_FIRE) {
+                it.remove();
+            }
+        }
+        held.remove(TURBO_FIRE);
+        nativeTouchTurboFire(false);
+        invalidate();
     }
 
     private void releaseControl(int id) {
@@ -1354,6 +1456,8 @@ final class TouchControlsView extends View {
             held.remove(id);
             if (id == BEAM_SHIFT) {
                 nativeTouchBeamShift(false);
+            } else if (id == TURBO_FIRE) {
+                nativeTouchTurboFire(false);
             } else if (id >= AXIS_ID_BASE) {
                 // Triggers are axes, and SDL's joystick axes run -32768..32767
                 // with a trigger resting at the minimum: releasing with 0 left
@@ -1417,6 +1521,9 @@ final class TouchControlsView extends View {
     }
 
     private int controlOf(ControlButton button) {
+        if (button == turboButton) {
+            return twin ? C_TTURBO : C_TURBO;
+        }
         final int first = twin ? C_JUMP : C_A;
         for (int i = 0; i < face.length; ++i) {
             if (face[i] == button) {
@@ -1762,14 +1869,16 @@ final class TouchControlsView extends View {
             canvas.drawCircle(x, y, radius, strokePaint);
         }
         // The letter big (twin: the Xbox one), the function small under it.
-        final String letter = twin ? TWIN_LETTERS[controlOf(button) - C_JUMP] : button.label;
+        final boolean isTurbo = button == turboButton;
+        final String letter = isTurbo ? "T"
+                              : twin ? TWIN_LETTERS[controlOf(button) - C_JUMP] : button.label;
         final float letterSize = (twin ? dp(17) : dp(15)) * scale;
         if (!labels) {
             drawCenteredLabel(canvas, letter, x, y, letterSize);
             return;
         }
         final String function =
-            twin ? button.label : GAMECUBE_FUNCTIONS[controlOf(button) - C_A];
+            twin || isTurbo ? button.label : GAMECUBE_FUNCTIONS[controlOf(button) - C_A];
         // The function goes below the letter. A kidney is sized by its half width,
         // and a mostly level one (Y) has its text slanted along the band: upright,
         // "Missile" ran into the border of Y's tilted band.
@@ -2210,6 +2319,10 @@ final class TouchControlsView extends View {
                 return twin;
             case C_TR:
                 return false; // retired: twin's R pill, kept so saved ids don't shift
+            case C_TURBO:
+                return turbo && !twin;
+            case C_TTURBO:
+                return turbo && twin;
             case C_DPAD:
                 return !wheels;
             case C_Z:
@@ -2268,9 +2381,16 @@ final class TouchControlsView extends View {
             case C_JUMP:
             case C_FIRE:
             case C_MORPH:
-            case C_MISSILE: {
-                final ControlButton button = face[control >= C_JUMP ? control - C_JUMP
-                                                                    : control - C_A];
+            case C_MISSILE:
+            case C_TURBO:
+            case C_TTURBO: {
+                final ControlButton button =
+                    control == C_TURBO || control == C_TTURBO ? turboButton
+                    : face[control >= C_JUMP ? control - C_JUMP : control - C_A];
+                if (button == null) {
+                    out.setEmpty();
+                    return;
+                }
                 faceGeometry(button, width, height, true, faceGeo);
                 if (button.isKidney()) {
                     kidneyPath(facePath, faceGeo[0], faceGeo[1], faceGeo[2], faceGeo[3],

@@ -11,6 +11,7 @@
 #include "port_freecam.h"
 #include "port_hd_font.h"
 #include "port_livesplit.h"
+#include "port_rando_gen.h"
 #include "port_remastered_import.h"
 #include "port_remastered_ball_light.h"
 #include "port_remastered_text.h"
@@ -556,6 +557,7 @@ void CmdHelp() {
   Out("freecam [on|off|freeze on|off|player on|off|speed <n>|pos <x> <y> <z>|look <yaw> <pitch>]");
   Out("                           fly the view away from the player (HUD hidden; freeze holds the game still)");
   Out("aspect <4:3|16:9|window>   switch the rendering aspect, as the Options row does");
+  Out("original [on|off]   Original experience (retail settings over the saved ones)");
   Out("fov <45..90>               first-person vertical FOV, as the Options row does");
   Out("window [<w> <h>]           resize the window (leaves fullscreen); prints the size");
   Out("msaa <1|4>, aniso <1..16>  anti-aliasing and anisotropic filtering, applied next frame");
@@ -577,6 +579,7 @@ void CmdHelp() {
   Out("gci list | import <path> | export <dir or .raw> | dolphin import|export   memory card transfer");
   Out("ap [connect <server> <slot> [password] | disconnect | recent | resume <n> | say <text> | chat]   Archipelago, as the F1 Archipelago page does");
   Out("quit                       exit the game");
+  Out("title                      quit the game to the title screen");
   Out("ids: hex editor id (002900A1), u<index> unique id, or an exact debug name");
 }
 
@@ -1827,6 +1830,13 @@ void RunFrame() {
   } else if (name == "quit") {
     Finish();
     sQuit = true;
+  } else if (name == "title") {
+    CStateManager* const mgr = const_cast< CStateManager* >(PortDebug::StateManager());
+    if (mgr == nullptr) {
+      return Finish("not in a game");
+    }
+    mgr->QuitGame(); // restart mode kRM_Default: back through the pre-front end
+    Finish();
   } else if (name == "aspect") {
     const std::string mode = sCmd.args.size() > 1 ? Lower(sCmd.args[1]) : "";
     if (mode == "4:3") {
@@ -1838,6 +1848,15 @@ void RunFrame() {
     } else {
       return Finish("usage: aspect <4:3|16:9|window>");
     }
+    Finish();
+  } else if (name == "original") {
+    const std::string mode = sCmd.args.size() > 1 ? Lower(sCmd.args[1]) : "";
+    if (mode == "on" || mode == "off") {
+      PortDebug::SetOriginalExperience(mode == "on");
+    } else if (!mode.empty()) {
+      return Finish("usage: original [on|off]");
+    }
+    Out(PortDebug::OriginalExperience() ? "original experience on" : "original experience off");
     Finish();
   } else if (name == "fov") {
     const float fov =
@@ -1997,6 +2016,7 @@ void RunFrame() {
           PortRoomGeo::OffscreenCasters() ? "on" : "off");
     }
     OutLines(PortRoomEnv::SunInfo());
+    OutLines(PortRoomEnv::RoomLightInfo());
     Finish();
   } else if (name == "view") {
     CmdView();
@@ -2553,6 +2573,42 @@ void RunFrame() {
                     "say <text> | chat]");
     }
     Out("%s (%s)", PortAp::StatusText(), PortAp::ConfigFilePath().c_str());
+    Finish();
+  } else if (name == "rando") {
+    const std::string action = sCmd.args.size() > 1 ? Lower(sCmd.args[1]) : "";
+    std::string error;
+    if (action == "gen" && sCmd.args.size() <= 3) {
+      PortRandoGen::Seed seed;
+      if (!PortRandoGen::Generate(PortDebug::RandoSettings(), sCmd.args.size() == 3 ? sCmd.args[2] : "", seed,
+                                  error) ||
+          !PortRandoGen::Save(seed, error))
+        return Finish(error.c_str());
+      if (PortDebug::StateManager() != nullptr) {
+        Out("saved seed %s; quit to the title screen to play it", seed.name.c_str());
+      } else {
+        if (!PortAp::PlaySolo(seed.name, error))
+          return Finish(error.c_str());
+        Out("playing seed %s", seed.name.c_str());
+      }
+    } else if (action == "play" && sCmd.args.size() == 3) {
+      if (!PortAp::PlaySolo(sCmd.args[2], error))
+        return Finish(error.c_str());
+      Out("playing seed %s", sCmd.args[2].c_str());
+    } else if (action == "delete" && sCmd.args.size() == 3) {
+      if (!PortAp::DeleteSolo(sCmd.args[2], error))
+        return Finish(error.c_str());
+      Out("deleted seed %s", sCmd.args[2].c_str());
+    } else if (action == "list" && sCmd.args.size() == 2) {
+      std::error_code ec;
+      for (const auto& entry : std::filesystem::directory_iterator(PortRandoGen::SeedDirectory(), ec)) {
+        const std::string file = entry.path().filename().string();
+        if (file.size() > 5 && file.compare(file.size() - 5, 5, ".json") == 0 &&
+            !(file.size() > 11 && file.compare(file.size() - 11, 11, ".state.json") == 0))
+          Out("%s", file.substr(0, file.size() - 5).c_str());
+      }
+    } else {
+      return Finish("usage: rando [gen [seedtext] | play <name> | delete <name> | list]");
+    }
     Finish();
   } else if (name == "wait") {
     unsigned frames = 0;

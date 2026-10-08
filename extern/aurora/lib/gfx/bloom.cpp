@@ -1,10 +1,12 @@
 #include "bloom.hpp"
 
 #include "../logging.hpp"
+#include "../stereo_host.hpp"
 #include "../webgpu/gpu.hpp"
 #include "../webgpu/gpu_prof.hpp"
 #include "readback_slots.hpp"
 #include "recording.hpp"
+#include "stereo_shadow.hpp"
 
 #include <aurora/gfx.hpp>
 
@@ -16,17 +18,20 @@
 #include <vector>
 
 // Remastered's bloom, as its CRenderPass_Bloom and shaders do it:
-//  - a bright pass over the exposed colour X, at a quarter of the frame's size:
-//    X * min(max(L - threshold, 0), 8) / L times tint 4, L being X's luminance;
+//  - a bright pass over the exposed colour X, at a quarter of the frame's size, on four bilinear
+//    taps a source texel out diagonally (each tap filtered as light, then bright-passed, / 4):
+//    X * min(max(L - threshold, 0), 8) / max(L, 0.001) times tint 4, L being X's luminance;
 //  - four downsamples to 1/64 (the centre four times and four corners a texel out, / 8);
 //  - four upsamples back, each added to the next finer level, the coarsest first with
 //    tint 0 (four edge taps a texel out and four corners half one, the corners doubled, / 12);
 //  - the result b added to the frame as b / (1 + b).
-// The EFB holds the tone-mapped colour gamma encoded, so the bright pass undoes the room's
-// tone curve to get X back, and the frame is added to in linear terms.
-// The colour grade follows in the same composite, as Remastered's tonemap shader does it right
-// after its tone curve: a 33^3 LUT over the tone-mapped linear colour, sampled at
-// c * 32/33 + 0.5/33; two LUTs mixed while a grade fades into another.
+// The EFB holds the tone-mapped colour sRGB encoded, so the bright pass undoes the room's
+// tone curve to get X back (Remastered reads its HDR frame; this one is capped where the
+// curve has lost its level), and the frame is added to in linear terms.
+// The colour grade comes first in the same composite, as Remastered's tonemap shader does it
+// right after its tone curve: a 33^3 LUT over the tone-mapped linear colour, sampled at
+// c * 32/33 + 0.5/33; two LUTs mixed while a grade fades into another. The bloom is added to
+// the graded colour and clamped, as Remastered's composite runs after the tonemap pass.
 // Before either, the frame's average for auto exposure: Remastered takes the smallest mip of
 // its HDR frame; here a 16x16 grid of tiles, each the mean of 8x8 exposed samples, read back
 // a few frames later and divided by the exposure the frame was drawn at.
@@ -119,37 +124,65 @@ fn untone(y: f32) -> f32 {
   return u / (1.0 - u) / p.tone[2].y + p.tone[1].w;
 }
 
+// The EFB holds colour as Remastered's sRGB swapchain does: the exact piecewise sRGB curve.
+fn srgb_enc(c: vec3f) -> vec3f {
+  let l = clamp(c, vec3f(0.0), vec3f(1.0));
+  return select(1.055 * pow(l, vec3f(1.0 / 2.4)) - 0.055, 12.92 * l, l <= vec3f(0.0031308));
+}
+
+fn srgb_dec(c: vec3f) -> vec3f {
+  let e = clamp(c, vec3f(0.0), vec3f(1.0));
+  return select(pow((e + 0.055) / 1.055, vec3f(2.4)), e / 12.92, e <= vec3f(0.04045));
+}
+
 // A channel at white has lost its level: the shoulder's inverse runs off to hundreds there, which turned a
 // saturated orange hull into a red flood. Cap it where the curve draws about 0.97 of white (4.0 on these rooms).
 const MaxExposed = 4.0;
 
 fn exposed(c: vec3f) -> vec3f {
-  let y = pow(clamp(c, vec3f(0.0), vec3f(1.0)), vec3f(2.2));
+  let y = srgb_dec(c);
   return min(vec3f(untone(y.r), untone(y.g), untone(y.b)), vec3f(MaxExposed));
 }
 
+// One bilinear tap of Remastered's HDR frame at uv: the four texels it blends, each exposed (the
+// frame is filtered as light, not as the drawn colour), then the bright pass over the blend.
+// Remastered's 000d768 runs the bright pass on each filtered tap: X * min(max(s*L - t, 0), 8) /
+// max(s*L, 0.001) * s, L being X's luminance. The EFB texel is already exposed (s * X), so with
+// c = s * X that is c * min(max(lum(c) - t, 0), 8) / max(lum(c), 0.001).
+fn bright_tap(uv: vec2f, size: vec2i, dim: f32) -> vec3f {
+  let pos = uv * vec2f(size) - vec2f(0.5);
+  let base = floor(pos);
+  let f = pos - base;
+  let last = size - vec2i(1);
+  let j0 = clamp(vec2i(base), vec2i(0), last);
+  let j1 = clamp(vec2i(base) + vec2i(1), vec2i(0), last);
+  let d00 = textureLoad(src, vec2i(j0.x, j0.y), 0).rgb;
+  let d10 = textureLoad(src, vec2i(j1.x, j0.y), 0).rgb;
+  let d01 = textureLoad(src, vec2i(j0.x, j1.y), 0).rgb;
+  let d11 = textureLoad(src, vec2i(j1.x, j1.y), 0).rgb;
+  // A blend is no brighter than its brightest texel: all below the threshold's drawn value adds
+  // nothing (most of the frame in a dark room), and a texel's drawn value is monotonic in its level.
+  let hi = max(max(d00, d10), max(d01, d11));
+  if (max(max(hi.r, hi.g), hi.b) < dim) {
+    return vec3f(0.0);
+  }
+  let c = mix(mix(exposed(d00), exposed(d10), f.x), mix(exposed(d01), exposed(d11), f.x), f.y);
+  let l = dot(c, vec3f(0.2126, 0.7152, 0.0722));
+  return c * (min(max(l - p.tint.w, 0.0), 8.0) / max(l, 0.001));
+}
+
+// The bright pass and the reduction to 1/4 in one (Remastered's 000d768): four diagonal taps a
+// source texel out, each bright-passed, / 4, times the level's tint.
 @fragment
 fn fs_bright(in: VertexOutput) -> @location(0) vec4f {
   let size = vec2i(textureDimensions(src));
-  let base = vec2i(floor(in.pos.xy)) * 4;
-  // A texel adds nothing unless its level's luminance passes the threshold, and the luminance is at
-  // most its largest channel: below the threshold's drawn value (with room for untone's error) skip
-  // the inverse, most of the frame on a dark room.
-  let dim = pow(tone(max(p.tint.w, 0.0)), 1.0 / 2.2) * 0.999;
-  var sum = vec3f(0.0);
-  for (var y = 0; y < 4; y++) {
-    for (var x = 0; x < 4; x++) {
-      let at = min(base + vec2i(x, y), size - vec2i(1));
-      let drawn = textureLoad(src, at, 0).rgb;
-      if (max(max(drawn.r, drawn.g), drawn.b) < dim) {
-        continue;
-      }
-      let c = exposed(drawn);
-      let l = dot(c, vec3f(0.2126, 0.7152, 0.0722));
-      sum += c * (min(max(l - p.tint.w, 0.0), 8.0) / max(l, 0.001));
-    }
-  }
-  return vec4f(sum / 16.0 * p.tint.rgb, 1.0);
+  let t = p.texel.xy;
+  let dim = srgb_enc(vec3f(tone(max(p.tint.w, 0.0)))).x * 0.999;
+  var sum = bright_tap(in.uv + vec2f(-t.x, -t.y), size, dim);
+  sum += bright_tap(in.uv + vec2f(t.x, -t.y), size, dim);
+  sum += bright_tap(in.uv + vec2f(-t.x, t.y), size, dim);
+  sum += bright_tap(in.uv + vec2f(t.x, t.y), size, dim);
+  return vec4f(sum * 0.25 * p.tint.rgb, 1.0);
 }
 
 const AverageSize = 16.0;
@@ -209,17 +242,18 @@ fn fs_up(in: VertexOutput) -> @location(0) vec4f {
 fn fs_composite(in: VertexOutput) -> @location(0) vec4f {
   let size = vec2i(textureDimensions(src));
   let f = textureLoad(src, min(vec2i(floor(in.pos.xy)), size - vec2i(1)), 0);
-  var lin = pow(f.rgb, vec3f(2.2));
-  if (p.grade.w > 0.5) {
-    let b = max(textureSampleLevel(bloomTex, samp, in.uv, 0.0).rgb, vec3f(0.0));
-    lin += b / (1.0 + b);
-  }
-  lin = clamp(lin, vec3f(0.0), vec3f(1.0));
+  let lin = srgb_dec(f.rgb);
   let at = lin * (32.0 / 33.0) + vec3f(0.5 / 33.0);
   let a = select(lin, textureSampleLevel(lutA, samp, at, 0.0).rgb, p.grade.y > 0.5);
   let g = select(lin, textureSampleLevel(lutB, samp, at, 0.0).rgb, p.grade.z > 0.5);
-  let graded = mix(a, g, p.grade.x);
-  return vec4f(pow(clamp(graded, vec3f(0.0), vec3f(1.0)), vec3f(1.0 / 2.2)), f.a);
+  var graded = mix(a, g, p.grade.x);
+  // Remastered's bloom composite runs after the tonemap pass has graded the frame: the bloom's
+  // b / (1 + b) added to the graded colour, clamped.
+  if (p.grade.w > 0.5) {
+    let b = max(textureSampleLevel(bloomTex, samp, in.uv, 0.0).rgb, vec3f(0.0));
+    graded += b / (1.0 + b);
+  }
+  return vec4f(srgb_enc(graded), f.a);
 }
 )";
 
@@ -847,6 +881,26 @@ void record(const Params& params) {
   }
   Params task = params;
   task.bloom &= BloomOn | CostNoFrameCopy | CostNoDepthReload | CostKeepDepth;
+  // PrimedGun: an immersive frame's eye passes replay neither encoder tasks nor custom draws
+  // (encoding.cpp render_stereo_eye_pass_commands), so a bloom or grade would reach only the mono
+  // EFB, which the headset does not show, and the clear of the in-pass composite's pass would be
+  // mirrored into the eyes and wipe the world from them. Such a frame keeps only the exposure
+  // measurement, taken from the mono EFB (still drawn up to here), through the plain task below,
+  // whose next pass loads the colour in the mono and the eyes alike. With nothing to measure it
+  // records nothing, so the eye passes are not broken in two for no work. Nor does it measure when
+  // the frame's mono image is skipped (a standalone headset, or a desktop mirror showing the eyes):
+  // only the final pass skips its mono render, so the break would bring back a whole mono render of
+  // the world for one average, and the exposure stays where it was instead.
+  if (stereo_shadow::active()) {
+    task.bloom &= ~BloomOn;
+    task.gradeA = 0;
+    task.gradeB = 0;
+    // The same test encode measures on.
+    const bool measure = task.tone[0][3] > 0.f && task.tone[1][0] > 0.f;
+    if (!measure || stereo_host::headset_owns_display() || stereo_host::mirror_skips_mono()) {
+      return;
+    }
+  }
   // A frame that is composited draws it as the first thing in the pass that resumes the EFB: on a
   // tile-based GPU a pass of its own stores the frame only for that pass to load it again. That pass
   // clears depth instead of loading it when nothing after the bloom (the HUD) tests against the world's.

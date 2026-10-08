@@ -667,7 +667,7 @@ def start_run(a):
         "DISPLAY": f":{display}", "XDG_RUNTIME_DIR": f"/run/user/{os.getuid()}", "SDL_AUDIO_DRIVER": "dummy",
         "MESA_VK_WSI_DEBUG": "sw", "SDL_VIDEODRIVER": "x11",  # RADV on Xvfb has no DRI3
         "MP_USER_PATH": str(user), "MP_CACHE_PATH": str(CACHE), "MP_MODS": str(mods),
-        "MP_FAST_BOOT": "1", "MP_DISABLE_AI_AUDIO": "1", "MP_ASPECT": "16:9", "MP_CONSOLE": str(port),
+        "MP_FAST_BOOT": "1", "MP_DISABLE_AI_AUDIO": "1", "MP_UPDATE_CHECK": "0", "MP_ASPECT": "16:9", "MP_CONSOLE": str(port),
         "ASAN_OPTIONS": "detect_leaks=0:abort_on_error=1",
     })
     if a.room:

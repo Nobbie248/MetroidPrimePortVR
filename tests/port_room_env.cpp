@@ -574,12 +574,12 @@ void TestGrid() {
   Check(Near(a.direction[2][2], 1.f), "grid: blue's direction");
   const float halfway[3] = {9.f, 21.f, 31.f}; // grid (0.5, 0.5, 0.5)
   Check(PortRoomEnv::SampleGrid(file, file.grids[0], halfway, a) && Near(a.mean[0], 1.5f), "grid: between points");
-  const float byEmpty[3] = {10.f, 23.5f, 30.f}; // grid x 1.75: the empty point does not darken it
-  Check(PortRoomEnv::SampleGrid(file, file.grids[0], byEmpty, a) && Near(a.mean[0], 2.f), "grid: next to an empty point");
+  const float byEmpty[3] = {10.f, 23.5f, 30.f}; // grid x 1.75: the empty point counts as stored (0)
+  Check(PortRoomEnv::SampleGrid(file, file.grids[0], byEmpty, a) && Near(a.mean[0], 0.5f), "grid: next to an empty point");
   const float inEmpty[3] = {10.f, 24.f, 30.f};
-  Check(!PortRoomEnv::SampleGrid(file, file.grids[0], inEmpty, a), "grid: an empty point");
-  const float edge[3] = {10.f, 19.5f, 29.5f}; // a quarter cell outside two faces
-  Check(PortRoomEnv::SampleGrid(file, file.grids[0], edge, a) && Near(a.mean[0], 1.f), "grid: just outside");
+  Check(PortRoomEnv::SampleGrid(file, file.grids[0], inEmpty, a) && Near(a.mean[0], 0.f), "grid: an empty point");
+  const float edge[3] = {10.f, 19.5f, 29.5f}; // a quarter cell outside two faces: the border texels read 0
+  Check(PortRoomEnv::SampleGrid(file, file.grids[0], edge, a) && Near(a.mean[0], 0.5625f), "grid: just outside");
   const float outside[3] = {10.f, 18.f, 30.f};
   Check(!PortRoomEnv::SampleGrid(file, file.grids[0], outside, a), "grid: outside");
 }

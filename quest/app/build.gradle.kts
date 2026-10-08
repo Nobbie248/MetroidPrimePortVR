@@ -234,7 +234,14 @@ val syncPortAssets by tasks.registering(Sync::class) {
     from(File(portRoot, "textures")) {
         into("textures")
     }
-    from(File(portRoot, "assets/initial_pipeline_cache.db"))
+    // Not upstream's seed (assets/): its rows are the phone and desktop's mono configs,
+    // most of them with indexed attributes, which the headset (de-indexed vertices,
+    // multiview eye pipelines) never asks for, and it cost ~2249 background compiles at
+    // every start. A seed recorded on the Quest goes in quest/assets/ and ships when
+    // present; while that folder or file is missing, the APK has no seed.
+    from(File(portRoot, "quest/assets")) {
+        include("initial_pipeline_cache.db")
+    }
 }
 
 // PrimedGun's cannon texture slots, which the launcher unpacks and seeds into the

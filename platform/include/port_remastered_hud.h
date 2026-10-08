@@ -23,17 +23,24 @@
 // output is the player's own, made from their copies of both games.
 
 #include <array>
+#include <iterator>
 #include <cstddef>
 #include <cstdint>
 #include <map>
 #include <optional>
 #include <string>
+#include <tuple>
 #include <vector>
 
 #include "port_remastered_cmdl.h"
 #include "port_remastered_convert.h"
 
 namespace PortRemastered {
+
+// UI_Interference (ad2c208c)'s CCH5.x, the picture's height in rows, one per material the HUD
+// has; a converted material carries the index (kStateFlag_PortHudInterference) and the shader
+// (aurora's GX_AURORA_SET_HUD_SAMPLE mode 2 + index) has the same table.
+inline constexpr float kHudInterferenceRows[5] = {414.476f, 195.048f, 100.f, 64.f, 128.f};
 
 // A Remastered frame by its asset name, and the disc frame it stands in for.
 struct HudFrame {
@@ -85,12 +92,12 @@ private:
   // The port id of a Remastered picture (pak byte order) multiplied by `tint`,
   // written once; nothing for one that would not open.
   std::optional<uint32_t> Texture(const ModelUuid& id, HudCounts& counts, const std::string& owner,
-                                  const Tint& tint = {1.f, 1.f, 1.f, 1.f});
+                                  const Tint& tint = {1.f, 1.f, 1.f, 1.f}, bool squareAlpha = false);
 
   ConvertIO m_io;
   std::map<std::string, Tint> m_tints;
-  // By pak-order id and tint; 0 for one that would not open.
-  std::map<std::pair<ModelUuid, Tint>, uint32_t> m_textures;
+  // By pak-order id, tint and whether the alpha is squared; 0 for one that would not open.
+  std::map<std::tuple<ModelUuid, Tint, bool>, uint32_t> m_textures;
   std::vector<uint8_t> m_material;           // the disc material the models are drawn with
   uint32_t m_nextModel;
   uint32_t m_nextTexture;

@@ -169,6 +169,11 @@ GXBool GXPortVolumetricFog(const GXPortFogParams* fog) {
 
 void GXPortVolumetricFogEnd() { GX_WRITE_AURORA(GX_AURORA_PORT_VOLUMETRIC_FOG_END); }
 
+void GXPortSetParticleFog(GXBool on) {
+  GX_WRITE_AURORA(GX_AURORA_PORT_PARTICLE_FOG);
+  GX_WRITE_U8(on ? 1 : 0);
+}
+
 void GXPortSetShadowCaster(GXBool on) {
   GX_WRITE_AURORA(GX_AURORA_PORT_SHADOW_CASTER);
   GX_WRITE_U8(on ? 1 : 0);
@@ -197,6 +202,14 @@ void GXPortGetShadowInfo(f32 sunDir[3], f32 color[3], f32* radius, f32 center[3]
   *radius = sShadowFrame.radius;
   aurora::gfx::shadow::box_center(sShadowFrame.worldToView, sShadowFrame.radius, center);
   *casters = aurora::gfx::shadow::last_caster_count();
+}
+
+void GXPortSetRoomLights(const f32* records, u32 count) {
+  GX_WRITE_AURORA(GX_AURORA_PORT_ROOM_LIGHTS);
+  GX_WRITE_U32(count);
+  for (u32 i = 0; i < count * 16; ++i) {
+    GX_WRITE_F32(records[i]);
+  }
 }
 
 void GXPortSetShadowFrame(const f32 worldToView[3][4], const f32 sunDir[3], f32 radius, const f32 color[3]) {
@@ -289,6 +302,13 @@ void GXSetPBR(GXBool enable) {
 void GXSetSDF(u8 edge) {
   GX_WRITE_AURORA(GX_AURORA_SET_SDF);
   GX_WRITE_U8(edge);
+}
+
+void GXSetHudSample(u8 mode, f32 dyinX, f32 dyinY) {
+  GX_WRITE_AURORA(GX_AURORA_SET_HUD_SAMPLE);
+  GX_WRITE_U8(mode);
+  GX_WRITE_F32(dyinX);
+  GX_WRITE_F32(dyinY);
 }
 
 void GXPortSetDepthPrepass(u8 pass) {
@@ -607,14 +627,15 @@ void GXSetPBRBakedLightModulation(const f32 rgb[3]) {
   }
 }
 
-void GXSetPBRBacklight(const f32 plane[4], const f32 backDir[3], f32 back, f32 top) {
+void GXSetPBRBacklight(const f32 plane[4], const f32 backDir[3], f32 back, f32 top, f32 bindScale, f32 bindOffset) {
   struct Write {
-    f32 values[9];
+    f32 values[11];
   };
   static LastPBRWrite<Write> sLast;
   Write now{};
   if (plane != nullptr && backDir != nullptr) {
-    now = Write{{plane[0], plane[1], plane[2], plane[3], backDir[0], backDir[1], backDir[2], back, top}};
+    now = Write{{plane[0], plane[1], plane[2], plane[3], backDir[0], backDir[1], backDir[2], back, top, bindOffset,
+                 bindScale}};
   }
   if (sLast.repeats(now)) {
     return;

@@ -103,6 +103,17 @@ public:
   bool GetShouldDrawWorldFlag() const { return x40_25_visible; }
   void SetShouldDrawWorldFlag(bool shouldDraw) { x40_25_visible = shouldDraw; }
   uchar GetModelFlags() const { return x41_visorFlags; }
+  // CMDL flag 0x8 (the port's converted models): each normal entry is N, B, T (9 floats), kept in
+  // x41_visorFlags' bit 7. Drawn through GX_VTXFMT3 (DL opcode 0x93).
+  static constexpr uchar kNbtNormals = 0x80;
+  bool HasNbtNormals() const { return (x41_visorFlags & kNbtNormals) != 0; }
+  // x41_visorFlags' bit 6, on top of kNbtNormals: fifteen floats (N, B0, T0, B1, T1), the
+  // second frame being TANGENT_1 of the two-tangent layered shaders. Drawn through
+  // GX_VTXFMT4 (DL opcode 0x94).
+  static constexpr uchar kNbtNormals5 = 0x40;
+  bool HasNbtNormals5() const { return (x41_visorFlags & kNbtNormals5) != 0; }
+  // Vectors per normal entry: N, then B and T (NBT), then B1 and T1 (NBT5).
+  uint NormalVecs() const { return HasNbtNormals5() ? 5 : HasNbtNormals() ? 3 : 1; }
   int GetModelIndex() const { return x44_idx; } // TODO: name
 
   CCubeMaterial GetMaterialByIndex(const int idx) const;

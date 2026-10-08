@@ -213,6 +213,13 @@ extern "C" {
 //   u8 edge (distance of the outer edge x 255; 128 = the shape itself, 0 = off)
 #define GX_AURORA_SET_SDF 0x004F
 
+// Port: how the following draws sample a converted Remastered HUD picture (GXSetHudSample).
+// Payload:
+//   u8  mode (0 none; 1 the sampled alpha is squared, as Remastered's UI shaders do;
+//             2 + n the UI_Interference shader with a picture of kHudInterferenceRows[n] rows)
+//   f32 x, y (the shader's DYIN: x = 1 - the HUD's fade-in alpha, y = a random 0..1 per frame)
+#define GX_AURORA_SET_HUD_SAMPLE 0x0068
+
 // Names the following draws for diagnostics (see GXSetDrawTag); changes no state.
 // Payload:
 //   u32 asset id, u32 model index, u32 material
@@ -311,46 +318,65 @@ extern "C" {
 #define GX_AURORA_PORT_SHADOW_CASTER 0x005E
 #define GX_AURORA_PORT_SHADOW_FRAME 0x005F
 #define GX_AURORA_PORT_SHADOW_RENDER 0x0063
+// Port extension: the room's Remastered point and spot lights (GXPortSetRoomLights).
+// Payload: u32 count, then count records of 16 f32 (see GXPortSetRoomLights). Lasts until the
+// end of the frame.
+#define GX_AURORA_PORT_ROOM_LIGHTS 0x0069
+// Port extension: the draws that follow are particles (GXPortSetParticleFog). Payload: u8 on.
+#define GX_AURORA_PORT_PARTICLE_FOG 0x006A
 
 #define GX2_SET_POLYGON_OFFSET 0x1000
+
+/*
+ * PrimedGun: the OpenXR fork's subcommands live in a block of their own, 0xF000-0xF0FF. Upstream numbers its
+ * own up from 0x0001 (0x0010-0x001F are GX_AURORA_LOAD_ARRAYBASE's, the GX2_ ones start at 0x1000), and in two
+ * merges running (2026-10-07, 2026-10-08) its next IDs landed on ours while ours followed its last one. Number new
+ * PrimedGun subcommands up from the last one below, as plain hex literals so the configure-time scan sees them,
+ * and add each to both ids[] lists in lib/gx/command_processor.cpp (aurora_subcommand_ids_unique and
+ * primedgun_aurora_subcommands_in_block) as well as giving it a handler in handle_aurora.
+ * A duplicate fails the build (aurora_subcommand_ids_unique in lib/gx/command_processor.cpp, and the scan of
+ * this header in extern/aurora/CMakeLists.txt).
+ */
+#define PRIMEDGUN_AURORA_SUBCMD_FIRST 0xF000
+#define PRIMEDGUN_AURORA_SUBCMD_LAST 0xF0FF
 
 /**
  * Stereo replay draw route for the draws that follow (AuroraStereoDrawRoute in aurora/gfx.h).
  * Must be followed by one u8.
  */
-#define GX_AURORA_STEREO_DRAW_ROUTE 0x0068
+#define GX_AURORA_STEREO_DRAW_ROUTE 0xF000
 
 /**
  * The plane in front of the head that AURORA_STEREO_ROUTE_HEAD_LOCKED_2D lays orthographic draws on and takes EFB
  * copies through (AuroraSetStereoHeadLockedPlane). Must be followed by three f32.
  */
-#define GX_AURORA_STEREO_HEAD_LOCKED_PLANE 0x0069
+#define GX_AURORA_STEREO_HEAD_LOCKED_PLANE 0xF001
 
 /**
  * A texture matrix of the draws that follow projects positions onto the screen (AuroraSetStereoScreenTexMtx), so
  * the stereo replay derives it again per eye. Must be followed by two u8: the texture matrix slot (0-9, 0xFF for
  * none) and the position matrix slot (0-9) it projects through.
  */
-#define GX_AURORA_STEREO_SCREEN_TEX_MTX 0x006A
+#define GX_AURORA_STEREO_SCREEN_TEX_MTX 0xF002
 
 /**
  * Ordered map triangles: POS/NRM carry both line endpoints, CLR0 the colour,
  * TEX0 the signed logical line width and endpoint selector (negative for fills).
  * A u8 enables/disables this shader variant; fills retain GX culling, lines do not.
  */
-#define GX_AURORA_MAP_BATCH 0x006B
+#define GX_AURORA_MAP_BATCH 0xF003
 
 /**
  * A static world surface's display list, read where it lives by the FIFO processor instead of being copied
  * into the FIFO: u32 geometry set (nonzero, one per CCubeRenderer area list item), u64 address, u32 byte
  * size. The display list and the arrays it indexes stay valid until the set is freed.
  */
-#define GX_AURORA_CALL_CACHED_DL 0x006C
+#define GX_AURORA_CALL_CACHED_DL 0xF004
 /**
  * Frees a geometry set (u32): nothing of it is drawn afterwards, and the FIFO processor drops what it
  * kept for the set.
  */
-#define GX_AURORA_FREE_GEOMETRY_SET 0x006D
+#define GX_AURORA_FREE_GEOMETRY_SET 0xF005
 
 
 /*

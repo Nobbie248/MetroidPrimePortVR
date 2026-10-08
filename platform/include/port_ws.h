@@ -1,6 +1,7 @@
 #ifndef METROID_PRIME_PORT_PORT_WS_H
 #define METROID_PRIME_PORT_PORT_WS_H
 #include <atomic>
+#include <chrono>
 #include <cstdint>
 #include <deque>
 #include <string>
@@ -138,6 +139,11 @@ public:
   bool Connect(const std::string& host, uint16_t port, const std::string& path, int timeoutMs,
                bool secure = false, const TlsOptions& tls = TlsOptions());
   // Sends a close frame if open and releases the socket. Idempotent.
+  // A one-off HTTP GET (https when `secure`), see port_ws.cpp. Not for an open
+  // WebSocket: it drops any connection first.
+  bool HttpGet(const std::string& host, uint16_t port, const std::string& path, int timeoutMs, bool secure,
+               const std::string& extraHeaders, int& status, std::string& body, size_t maxBody,
+               const TlsOptions& tls = TlsOptions());
   void Close();
   bool IsOpen() const { return mSocket >= 0; }
   // Whether the server accepted permessage-deflate on this connection.
@@ -162,6 +168,8 @@ public:
   void SetCancelFlag(const std::atomic<bool>* cancel) { mCancel = cancel; }
 
 private:
+  bool OpenTransport(const std::string& host, uint16_t port, bool secure, const TlsOptions& tls,
+                     std::chrono::steady_clock::time_point deadline, bool infinite);
   bool SendRaw(const std::string& data);
   // Writes everything through TLS or the plain socket; false fills `error`.
   bool SendBytes(const std::string& data, int timeoutMs, std::string& error);

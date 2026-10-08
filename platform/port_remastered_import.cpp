@@ -1663,13 +1663,38 @@ void Run(std::string nspPath, std::string keysPath, int threads, fs::path stagin
         decoded.width = int(image.width);
         decoded.height = int(image.height);
         decoded.rgba = std::move(image.rgba);
+        decoded.srgb = image.srgb;
         return true;
       });
     };
-    io.cube = [&](const ModelUuid& id, uint32_t& edge, std::vector<uint8_t>& rgba, std::string& cubeError) {
+    io.volume = [&](const ModelUuid& id, Image& out, std::string& volumeError) {
+      std::vector<uint8_t> raw, slices;
+      uint32_t w = 0, h = 0, d = 0;
+      bool srgb = false;
+      if (!remastered.ReadTexture(id, raw, volumeError) ||
+          !DecodeTxtrVolume(raw.data(), raw.size(), w, h, d, srgb, slices, volumeError)) {
+        return false;
+      }
+      if (w != 64 || h != 64 || d != 64) {
+        volumeError = "a volume of " + std::to_string(w) + "x" + std::to_string(h) + "x" + std::to_string(d) +
+                      " is not the 64^3 the atlas holds";
+        return false;
+      }
+      out.width = out.height = 512;
+      out.srgb = srgb;
+      out.rgba.assign(size_t(512) * 512 * 4, 0);
+      for (uint32_t z = 0; z < 64; ++z) {
+        for (uint32_t y = 0; y < 64; ++y) {
+          std::memcpy(&out.rgba[((size_t(z / 8) * 64 + y) * 512 + size_t(z % 8) * 64) * 4],
+                      &slices[(size_t(z) * 64 + y) * 64 * 4], 64 * 4);
+        }
+      }
+      return true;
+    };
+    io.cube = [&](const ModelUuid& id, uint32_t& edge, std::vector<float>& rgba, std::string& cubeError) {
       std::vector<uint8_t> raw;
       return remastered.ReadTexture(id, raw, cubeError) &&
-             DecodeTxtrCubeRgba8(raw.data(), raw.size(), edge, rgba, cubeError);
+             DecodeTxtrCubeLinear(raw.data(), raw.size(), edge, rgba, cubeError);
     };
     // Workers can still meet the same texture at once (a TEV slot's, a solid
     // colour); each writes its own temporary file and the rename decides, the

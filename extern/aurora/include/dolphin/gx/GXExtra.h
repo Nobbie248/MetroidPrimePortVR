@@ -27,6 +27,9 @@ void GXSetPBR(GXBool enable);
 // Aurora extension: distance-field texturing for the following draws (see
 // GX_AURORA_SET_SDF). 0 turns it off.
 void GXSetSDF(u8 edge);
+// Port extension: how the following draws sample a converted Remastered HUD picture (see
+// GX_AURORA_SET_HUD_SAMPLE). Mode 0 turns it off.
+void GXSetHudSample(u8 mode, f32 dyinX, f32 dyinY);
 // Port extension: a depth pre-pass for surfaces that alpha-test. Pass 1 writes only depth,
 // and its pixel shader keeps nothing but what the alpha compare needs; pass 2 draws the same
 // surfaces again where the depth is equal, without writing it, so each pixel is shaded once
@@ -208,7 +211,7 @@ void GXSetPBRBakedLightModulation(const f32 rgb[3]);
 // pow(saturate(dot(plane, (view position, 1))), power): `plane` gives 0 at the low end of the
 // model's bounds along its own y and 1 at the high end (power 1: no fade). `back` and `top` scale the materials'
 // strengths (4 and 2 in Remastered). Null plane turns it off.
-void GXSetPBRBacklight(const f32 plane[4], const f32 backDir[3], f32 back, f32 top);
+void GXSetPBRBacklight(const f32 plane[4], const f32 backDir[3], f32 back, f32 top, f32 bindScale, f32 bindOffset);
 // Aurora extension: the constants of a kind 14 PBR material (Remastered's BoundaryShield force
 // field), as the shader reads them. Rows 0-6 are the material's CCH0..CCH6, row 7 is
 // DIFC (x, y, z, w). Stays in effect until changed; null is all zero.
@@ -273,6 +276,11 @@ GXBool GXPortVolumetricFog(const GXPortFogParams* params);
 // opaque ones per pixel as the full-screen pass, blended and additive ones per vertex (blended:
 // colour T + in-scatter, additive: colour T). Harmless when no fog was drawn.
 void GXPortVolumetricFogEnd(void);
+// Marks the draws up to the next call with false as particles' (inside the volumetric fog). As
+// Remastered's particle renderers, they fog themselves per vertex as colour T + in-scatter unless
+// their blend mode is additive or premultiplied (the static render state's "no fog" flag), when
+// they are not fogged at all and only add to the already fogged frame.
+void GXPortSetParticleFog(GXBool on);
 // Stores a 33x33x33 RGBA8 colour grade LUT (red fastest) under a non-zero id.
 void GXPortColorGradeLut(u32 id, const u8* rgba);
 // The average radiance (linear rgb) of the latest frame measured by GXPortPostProcess, and a
@@ -294,6 +302,12 @@ GXBool GXPortShadowBoxCasts(const f32 min[3], const f32 max[3]);
 // in world space, and how many draws the last map drawn had.
 void GXPortGetShadowInfo(f32 sunDir[3], f32 color[3], f32* radius, f32 center[3], u32* casters);
 GXBool GXPortRenderShadowMap(void);
+// The room's Remastered point and spot lights for the rest of the frame, added on every PBR draw
+// (lit, lightmapped or not) as the sun is. Each record is 16 f32: view-space position, A; colour
+// (linear, scaled), B; view-space axis toward the light, cone scale; cone bias, falloff (0 none,
+// 1 linear, 2 squared, 3 smooth), spot (0/1), 0. The distance falloff runs on
+// t = clamp(dist * A + B, 0, 1), the cone on clamp(dot(L, axis) * scale + bias, 0, 1).
+void GXPortSetRoomLights(const f32* records, u32 count);
 
 void GXColor4f32(float r, float g, float b, float a);
 

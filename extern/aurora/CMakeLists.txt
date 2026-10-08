@@ -57,6 +57,32 @@ include(cmake/aurora_os.cmake)
 if (AURORA_ENABLE_GX)
   include(cmake/aurora_gx.cmake)
   include(cmake/aurora_gd.cmake)
+  # PrimedGun: every FIFO subcommand in GXAurora.h needs an ID of its own. handle_aurora's if-chain
+  # takes the first match, so a duplicate compiles and then hands one command's payload to the other's
+  # handler, which misreads the FIFO (upstream 2bb921da; PrimedGun's merges of 2026-10-07 and
+  # 2026-10-08). This scan takes every GX_AURORA_*/GX2_* #define with a hex value, also the ones the
+  # static_assert in lib/gx/command_processor.cpp doesn't list yet, and re-runs whenever the header
+  # changes.
+  block ()
+    set(gx_aurora_h "${CMAKE_CURRENT_SOURCE_DIR}/include/dolphin/gx/GXAurora.h")
+    set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS "${gx_aurora_h}")
+    file(STRINGS "${gx_aurora_h}" gx_aurora_defines
+         REGEX "^#define[ \t]+(GX_AURORA|GX2)_[A-Z0-9_]+[ \t]+0x[0-9A-Fa-f]+")
+    foreach (line IN LISTS gx_aurora_defines)
+      string(REGEX MATCH "^#define[ \t]+([A-Z0-9_]+)[ \t]+(0x[0-9A-Fa-f]+)" match "${line}")
+      set(name "${CMAKE_MATCH_1}")
+      set(hex "${CMAKE_MATCH_2}")
+      math(EXPR id "${hex}")
+      # GX_AURORA_LOAD_ARRAYBASE (0x0010) carries a vertex attribute in its low four bits.
+      if (id GREATER 16 AND id LESS 32)
+        message(FATAL_ERROR "GXAurora.h: ${name} (${hex}) is inside GX_AURORA_LOAD_ARRAYBASE's 0x0010-0x001F")
+      endif ()
+      if (DEFINED seen_id_${id})
+        message(FATAL_ERROR "GXAurora.h: ${name} and ${seen_id_${id}} share FIFO subcommand ID ${hex}")
+      endif ()
+      set(seen_id_${id} "${name}")
+    endforeach ()
+  endblock ()
 endif ()
 include(cmake/aurora_pad.cmake)
 include(cmake/aurora_ms.cmake)

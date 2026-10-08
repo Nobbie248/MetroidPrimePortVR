@@ -134,8 +134,15 @@ version Flatpak reports; `tools/make_flatpak.sh` stops if the two differ.
 | Windows | `.github/workflows/windows.yml` | zipped `dist/` | manual trigger only for now; green when run, artifact uploaded, packaged startup checked |
 | Android | `tools/android_apk.sh :app:assembleRelease` | APK | builds, signed with this project's own key; runs on-device (POCO F8 Ultra, 60 FPS), touch/Continue-load still unverified |
 
-The Linux binary is the only one with a test suite attached: 43 `port`-labelled
+The Linux binary is the only one with a test suite attached: 54 `port`-labelled
 ctest targets, all run by both CI jobs.
+
+Every build ships `assets/initial_pipeline_cache.db`: the pipeline configs of a tour
+of the front end and every room, so a first start compiles the game's shaders in the
+background instead of skipping draws as it meets them. It holds retail rows only. When
+aurora bumps a pipeline config version, aurora ignores the seed and the
+`port_pipeline_seed` test fails. To record it again, run
+`python3 tools/pipeline_seed.py tour`, then `merge` (see the script's `--help`).
 
 ## Runtime dependencies
 

@@ -573,25 +573,37 @@ void create_volume(uint32_t id, uint32_t sizeX, uint32_t sizeY, uint32_t sizeZ, 
   for (uint32_t i = 0; i < VolumeTextures; ++i) {
     const bool half = i < 2;
     const uint32_t texelSize = half ? 8 : 4;
+    // One zero texel around the grid: with clamp-to-edge it makes the sampler read what
+    // Remastered's CLAMP_TO_BORDER (black border) does, a fade to 0 over the half texel
+    // outside and 0 beyond. The shader maps uvw into the padded extent.
+    const uint32_t padX = sizeX + 2, padY = sizeY + 2, padZ = sizeZ + 2;
     const wgpu::TextureDescriptor textureDescriptor{
         .label = "PBR ambient volume",
         .usage = wgpu::TextureUsage::TextureBinding | wgpu::TextureUsage::CopyDst,
         .dimension = wgpu::TextureDimension::e3D,
-        .size = {sizeX, sizeY, sizeZ},
+        .size = {padX, padY, padZ},
         .format = half ? wgpu::TextureFormat::RGBA16Float : wgpu::TextureFormat::RGBA8Unorm,
         .mipLevelCount = 1,
         .sampleCount = 1,
     };
     volume.textures[i] = g_device.CreateTexture(&textureDescriptor);
     // A slice at a time, through the frame's uploads (see create_cube).
-    for (uint32_t z = 0; z < sizeZ; ++z) {
+    std::vector<uint8_t> slice(size_t(padX) * padY * texelSize, 0);
+    for (uint32_t z = 0; z < padZ; ++z) {
+      std::fill(slice.begin(), slice.end(), uint8_t(0));
+      if (z >= 1 && z <= sizeZ) {
+        for (uint32_t y = 0; y < sizeY; ++y) {
+          std::memcpy(slice.data() + (size_t(y + 1) * padX + 1) * texelSize, in + size_t(y) * sizeX * texelSize,
+                      size_t(sizeX) * texelSize);
+        }
+        in += size_t(sizeX) * sizeY * texelSize;
+      }
       const wgpu::TexelCopyTextureInfo dst{
           .texture = volume.textures[i],
           .mipLevel = 0,
           .origin = {0, 0, z},
       };
-      queue_texture_upload_data(in, sizeX * texelSize, sizeY, dst, wgpu::Extent3D{sizeX, sizeY, 1});
-      in += size_t(sizeX) * sizeY * texelSize;
+      queue_texture_upload_data(slice.data(), padX * texelSize, padY, dst, wgpu::Extent3D{padX, padY, 1});
     }
     volume.views[i] = volume.textures[i].CreateView();
   }

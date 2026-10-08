@@ -63,6 +63,7 @@ wgpu::Device g_device;
 wgpu::Queue g_queue;
 wgpu::Surface g_surface;
 wgpu::BackendType g_backendType;
+bool g_vulkanLibraryFailed = false;
 GraphicsConfig g_graphicsConfig;
 TextureWithSampler g_frameBuffer;
 TextureWithSampler g_frameBufferResolved;
@@ -796,7 +797,34 @@ bool surface_window_changed() {
   return g_surfaceWindow != window::get_native_window_handle();
 }
 
+static bool initialize_once(AuroraBackend auroraBackend, bool allowCpu);
+
 bool initialize(AuroraBackend auroraBackend, bool allowCpu) {
+  if (initialize_once(auroraBackend, allowCpu)) {
+    return true;
+  }
+  // Start the next attempt (or backend) from nothing, as a first attempt would.
+  {
+    window::SurfaceLock surfaceLock;
+    release_surface_locked();
+  }
+  g_device = {};
+  g_adapter = {};
+  g_adapterInfo = {};
+  g_instance = {};
+  // A custom Vulkan driver that fails to start leaves the system's: retry with that before
+  // any other backend. The GLES fallback after such a failure aborted in Dawn on Adreno.
+  const char* vulkanLibraryDir = g_config.vulkanLibraryDir;
+  if (auroraBackend == BACKEND_VULKAN && vulkanLibraryDir != nullptr && vulkanLibraryDir[0] != '\0') {
+    Log.warn("Vulkan failed with the library in {}; retrying with the system's", vulkanLibraryDir);
+    g_config.vulkanLibraryDir = nullptr;
+    g_vulkanLibraryFailed = true;
+    return initialize(auroraBackend, allowCpu);
+  }
+  return false;
+}
+
+static bool initialize_once(AuroraBackend auroraBackend, bool allowCpu) {
   if (!g_instance) {
     Log.info("Creating WebGPU instance");
     const std::array requiredInstanceFeatures{
@@ -818,6 +846,11 @@ bool initialize(AuroraBackend auroraBackend, bool allowCpu) {
     dawnInstanceDescriptor.nextInChain = &instanceTogglesDescriptor;
     dawnInstanceDescriptor.backendValidationLevel = dawn::native::BackendValidationLevel::Disabled;
     dawnInstanceDescriptor.SetLoggingCallback(wgpu_log);
+    const char* vulkanLibraryDir = g_config.vulkanLibraryDir;
+    if (vulkanLibraryDir != nullptr && vulkanLibraryDir[0] != '\0') {
+      dawnInstanceDescriptor.additionalRuntimeSearchPathsCount = 1;
+      dawnInstanceDescriptor.additionalRuntimeSearchPaths = &vulkanLibraryDir;
+    }
 #ifdef TRACY_ENABLE
     dawnInstanceDescriptor.platform = tracy_dawn_platform();
 #endif

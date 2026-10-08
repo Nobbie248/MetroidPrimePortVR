@@ -142,10 +142,12 @@ const SMouseCode kMouseCodes[] = {
 
 // kShiftKey / kShiftPad are the beam shift's key slots and pad input, kept in
 // port_settings.ini rather than Aurora's mappings (their index is unused).
-enum class ECapture { kNone, kKeyButton, kKeyAxis, kPadButton, kPadAxis, kShiftKey, kShiftPad };
+enum class ECapture { kNone, kKeyButton, kKeyAxis, kPadButton, kPadAxis, kShiftKey, kShiftPad, kTurboKey, kTurboPad };
 
 // The beam shift's pad slot in PortDebug::ShiftBinding.
 constexpr int kShiftPadSlot = 2;
+// The turbo fire's, in PortDebug::TurboBinding (kTurboKey / kTurboPad).
+constexpr int kTurboPadSlot = 2;
 
 // One physical input: a key or mouse button (the negative PAD_KEY_MOUSE_*
 // codes), a controller button, or one direction of a controller axis. An
@@ -272,8 +274,9 @@ bool NewInput(SInput& out) {
   const bool* keys = SDL_GetKeyboardState(&count);
   bool found = false;
   const bool wantKeys = sCapture.target == ECapture::kKeyButton || sCapture.target == ECapture::kKeyAxis ||
-                        sCapture.target == ECapture::kShiftKey;
-  const bool wantPadButtons = sCapture.target == ECapture::kPadButton || sCapture.target == ECapture::kShiftPad;
+                        sCapture.target == ECapture::kShiftKey || sCapture.target == ECapture::kTurboKey;
+  const bool wantPadButtons = sCapture.target == ECapture::kPadButton || sCapture.target == ECapture::kShiftPad ||
+                              sCapture.target == ECapture::kTurboPad;
   for (int i = 0; i < count && i < SDL_SCANCODE_COUNT; ++i) {
     sCapture.heldKeys[i] = sCapture.heldKeys[i] && keys[i];
     // Esc is reported for every capture, since it cancels.
@@ -357,6 +360,8 @@ SInput NativeCodeInput(s32 code) {
 
 SInput ShiftPadInput() { return NativeCodeInput(PortDebug::ShiftBinding(kShiftPadSlot)); }
 
+SInput TurboPadInput() { return NativeCodeInput(PortDebug::TurboBinding(kTurboPadSlot)); }
+
 // Points one row's slot at an input (code -1 unbinds a key or button row).
 // Doesn't save.
 void BindRow(ECapture kind, int index, int slot, const SInput& input) {
@@ -417,6 +422,12 @@ void BindRow(ECapture kind, int index, int slot, const SInput& input) {
   case ECapture::kShiftPad:
     PortDebug::SetShiftBinding(kShiftPadSlot, NativeCode(input));
     break;
+  case ECapture::kTurboKey:
+    PortDebug::SetTurboBinding(slot, input.kind == SInput::kKey ? input.code : PAD_KEY_INVALID);
+    break;
+  case ECapture::kTurboPad:
+    PortDebug::SetTurboBinding(kTurboPadSlot, NativeCode(input));
+    break;
   case ECapture::kNone:
     break;
   }
@@ -468,6 +479,10 @@ SInput RowInput(ECapture kind, int index, int slot) {
     return {SInput::kKey, PortDebug::ShiftBinding(slot), AXIS_SIGN_POSITIVE};
   case ECapture::kShiftPad:
     return ShiftPadInput();
+  case ECapture::kTurboKey:
+    return {SInput::kKey, PortDebug::TurboBinding(slot), AXIS_SIGN_POSITIVE};
+  case ECapture::kTurboPad:
+    return TurboPadInput();
   case ECapture::kNone:
     break;
   }
@@ -601,7 +616,9 @@ void PollCapture() {
   sCapture.bound = input;
   // The beam shift may share an input with a pad button on purpose (L under
   // twin-stick, say), so it never asks; its row says what else the input does.
-  const bool shift = sCapture.target == ECapture::kShiftKey || sCapture.target == ECapture::kShiftPad;
+  // The turbo fire works the same way (it may sit on the fire input itself).
+  const bool shift = sCapture.target == ECapture::kShiftKey || sCapture.target == ECapture::kShiftPad ||
+                     sCapture.target == ECapture::kTurboKey || sCapture.target == ECapture::kTurboPad;
   if (!shift && FindConflict(sCapture.target, sCapture.index, input, sCapture.otherKind, sCapture.otherIndex,
                              sCapture.otherSlot)) {
     sCapture.conflict = true;
@@ -924,8 +941,18 @@ void ShiftTooltip() {
   }
 }
 
-// Says when the beam shift's input also drives a pad button: holding it then
-// presses both, which is fine for some (L under twin-stick) and not others.
+constexpr const char* kTurboLabel = "Turbo fire (hold)";
+
+void TurboTooltip() {
+  if (ImGui::IsItemHovered(ImGuiHoveredFlags_ForTooltip | ImGuiHoveredFlags_AllowWhenDisabled)) {
+    ImGui::SetTooltip("While held, fires as if A were tapped as fast as the game accepts.\n"
+                      "Unbound by default.");
+  }
+}
+
+// Says when the beam shift's (or turbo fire's) input also drives a pad button:
+// holding it then presses both, which is fine for some (L under twin-stick)
+// and not others.
 void ShiftOverlapNote(ECapture kind, int slot) {
   const SInput input = RowInput(kind, 0, slot);
   ECapture otherKind = ECapture::kNone;
@@ -1101,6 +1128,21 @@ bool ShiftHeld() {
   return pad.code != -1 && InputHeld(pad);
 }
 
+bool TurboHeld() {
+  // Retail has no turbo; the bindings stay listed for when it's turned off.
+  if (PortDebug::OriginalExperience()) {
+    return false;
+  }
+  for (int slot = 0; slot < PAD_KEY_SLOT_COUNT; ++slot) {
+    const SInput key = RowInput(ECapture::kTurboKey, 0, slot);
+    if (key.code != PAD_KEY_INVALID && InputHeld(key)) {
+      return true;
+    }
+  }
+  const SInput pad = TurboPadInput();
+  return pad.code != -1 && InputHeld(pad);
+}
+
 unsigned HeldAltPadButtons() {
   unsigned buttons = 0;
   for (const SControlPadButton& row : kControlPadButtons) {
@@ -1169,7 +1211,7 @@ static void BeginTab(SBindLayout& layout) {
 
   if (sCapture.target != ECapture::kNone && !sCapture.settling && !sCapture.conflict) {
     const bool keys = sCapture.target == ECapture::kKeyButton || sCapture.target == ECapture::kKeyAxis ||
-                      sCapture.target == ECapture::kShiftKey;
+                      sCapture.target == ECapture::kShiftKey || sCapture.target == ECapture::kTurboKey;
     const Uint64 elapsed = SDL_GetTicks() - sCapture.startMs;
     const unsigned left =
         static_cast< unsigned >((kCaptureTimeoutMs - std::min(elapsed, kCaptureTimeoutMs) + 999) / 1000);
@@ -1265,6 +1307,13 @@ void DrawKeyboardMouse() {
   ShiftTooltip();
   for (int slot = 0; slot < PAD_KEY_SLOT_COUNT; ++slot) {
     ShiftOverlapNote(ECapture::kShiftKey, slot);
+  }
+  ImGui::PushID(151);
+  KeyRow(ECapture::kTurboKey, 0, kTurboLabel, slotX, bindWidth);
+  ImGui::PopID();
+  TurboTooltip();
+  for (int slot = 0; slot < PAD_KEY_SLOT_COUNT; ++slot) {
+    ShiftOverlapNote(ECapture::kTurboKey, slot);
   }
 
   ImGui::SeparatorText("Mouse buttons");
@@ -1414,6 +1463,17 @@ void DrawController() {
     ImGui::EndDisabled();
     ImGui::PopID();
     ShiftOverlapNote(ECapture::kShiftPad, 0);
+    ImGui::PushID(401);
+    padRow(ECapture::kTurboPad, 0, kTurboLabel);
+    TurboTooltip();
+    ImGui::SameLine(0.f, style.ItemInnerSpacing.x);
+    ImGui::BeginDisabled(TurboPadInput().code == -1);
+    if (ImGui::Button("x")) {
+      BindRow(ECapture::kTurboPad, 0, 0, SInput{});
+    }
+    ImGui::EndDisabled();
+    ImGui::PopID();
+    ShiftOverlapNote(ECapture::kTurboPad, 0);
     if (PADDeadZones* zones = PADGetDeadZones(kControlPort)) {
       DrawDeadZones(*zones);
     }

@@ -571,6 +571,34 @@ void render(wgpu::CommandEncoder& cmd, FramePacket& frame, RenderPass& passInfo,
       };
       cmd.CopyTextureToTexture(&src, &dst, &size);
     }
+    if (passInfo.resolveMips && passInfo.resolveTarget->mipCount > 1) {
+      // Each level is a 2:1 bilinear blit (a box filter) of the one above.
+      const webgpu::gpu_prof::Zone zone{cmd, "EFB copy mips"};
+      const auto& target = passInfo.resolveTarget;
+      for (uint32_t m = 1; m < target->mipCount; ++m) {
+        const auto level = [&](uint32_t mip) {
+          const wgpu::TextureViewDescriptor desc{
+              .label = "EFB copy mip view",
+              .format = target->format,
+              .dimension = wgpu::TextureViewDimension::e2D,
+              .baseMipLevel = mip,
+              .mipLevelCount = 1,
+          };
+          auto view = target->texture.CreateView(&desc);
+          const wgpu::Extent3D size{std::max(target->size.width >> mip, 1u), std::max(target->size.height >> mip, 1u),
+                                    1};
+          return std::make_shared<TextureRef>(target->texture, view, view, size, target->format, 1, target->gxFormat);
+        };
+        const auto src = level(m - 1);
+        tex_copy_conv::blit(cmd, tex_copy_conv::ConvRequest{
+                                     .fmt = GX_TF_RGBA8,
+                                     .srcView = src->sampleTextureView,
+                                     .uniformRange = passInfo.resolveMipsUniformRange,
+                                     .dst = level(m),
+                                     .sampleFilter = tex_copy_conv::SampleFilter::Linear,
+                                 });
+      }
+    }
     if (passInfo.probeFace >= 0) {
       probe::encode_mips(cmd, passInfo.probeFace, passInfo.probeUniformRange);
     }

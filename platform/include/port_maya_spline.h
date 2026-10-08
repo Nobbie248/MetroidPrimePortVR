@@ -13,8 +13,9 @@
 class PortMayaSpline {
 public:
   // `d` is the raw spline: u32 keys, per key f32 t, f32 v, u8 in, u8 out (+8 bytes per FIXED
-  // side), then f32 min, f32 max, u8 pre, u8 post, s8 clamp mode.
-  bool Load(const uint8_t* d, size_t len) {
+  // side), then f32 min, f32 max, u8 pre, u8 post, s8 clamp mode. `used`, when given, gets
+  // how many bytes it took.
+  bool Load(const uint8_t* d, size_t len, size_t* used = nullptr) {
     if (len < 4) {
       return false;
     }
@@ -57,6 +58,9 @@ public:
     m_pre = d[o + 8];
     m_post = d[o + 9];
     m_clamp = int8_t(d[o + 10]);
+    if (used != nullptr) {
+      *used = o + 11;
+    }
     for (size_t i = 0; i + 1 < m_k.size(); ++i) {  // RepairInvalidKnots
       if (m_k[i + 1].t - m_k[i].t < 0.002f) {
         m_k[i].out = kStep;

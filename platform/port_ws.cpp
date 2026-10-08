@@ -21,6 +21,8 @@
 #endif
 #include <winsock2.h>
 #include <ws2tcpip.h>
+// Before OpenSSL, whose headers undo wincrypt's X509_NAME and friends.
+#include <wincrypt.h>
 #else
 #include <cerrno>
 #include <fcntl.h>
@@ -586,6 +588,30 @@ std::vector<std::string> DefaultCaDirs() {
   return {};
 #endif
 }
+
+#ifdef _WIN32
+// A static OpenSSL has no trust store on Windows (its default paths point into
+// the build machine), so the roots come from the system's ROOT store.
+size_t LoadWindowsRoots(X509_STORE* store) {
+  HCERTSTORE system = CertOpenSystemStoreW(0, L"ROOT");
+  if (system == nullptr)
+    return 0;
+  size_t loaded = 0;
+  PCCERT_CONTEXT cert = nullptr;
+  while ((cert = CertEnumCertificatesInStore(system, cert)) != nullptr) {
+    const unsigned char* der = cert->pbCertEncoded;
+    X509* x509 = d2i_X509(nullptr, &der, static_cast<long>(cert->cbCertEncoded));
+    if (x509 != nullptr) {
+      if (X509_STORE_add_cert(store, x509) == 1)
+        ++loaded;
+      X509_free(x509);
+    }
+  }
+  CertCloseStore(system, 0);
+  ERR_clear_error(); // duplicates are reported as errors
+  return loaded;
+}
+#endif
 
 // Adds every PEM certificate in the files of `dir` to `store` and returns how
 // many were added. Files are read whole and in any order, so their names do
@@ -1206,37 +1232,18 @@ Client::Client() = default;
 
 Client::~Client() { Close(); }
 
-bool Client::Connect(const std::string& host, uint16_t port, const std::string& path, int timeoutMs,
-                     bool secure, const TlsOptions& tls) {
-  DropConnection();
-  mReceiveBuffer.clear();
-  mDecoder.Reset();
-  mPendingFrames.clear();
-  mError.clear();
-  mTimeoutMs = timeoutMs;
-  auto fail = [this](const std::string& reason) {
+// Resolves and connects `host`, then runs the TLS handshake when `secure`.
+// On failure mError says why; the caller drops the connection.
+bool Client::OpenTransport(const std::string& host, uint16_t port, bool secure, const TlsOptions& tls,
+                           Clock::time_point deadline, bool infinite) {
+  auto TransportFail = [this](const std::string& reason) {
     mError = reason;
-    DropConnection();
-    mReceiveBuffer.clear();
-    mDecoder.Reset();
-    mPendingFrames.clear();
     return false;
   };
-
-  if (!EnsureWinsock())
-    return fail("WSAStartup failed");
-  if (host.empty() || host.find_first_of("\r\n\t /\\") != std::string::npos || port == 0 ||
-      path.empty() || path.front() != '/' || path.find_first_of("\r\n") != std::string::npos)
-    return fail("invalid WebSocket endpoint");
 #ifndef MP_HAVE_OPENSSL
-  // Never downgrade a wss:// server to plaintext.
-  if (secure)
-    return fail("wss:// is not supported: this build has no TLS (built without OpenSSL)");
+  (void)secure;
   (void)tls;
 #endif
-
-  const bool infinite = timeoutMs <= 0;
-  const Clock::time_point deadline = Clock::now() + std::chrono::milliseconds(std::max(timeoutMs, 0));
   addrinfo hints{};
   hints.ai_family = AF_UNSPEC;
   hints.ai_socktype = SOCK_STREAM;
@@ -1245,7 +1252,7 @@ bool Client::Connect(const std::string& host, uint16_t port, const std::string& 
   const std::string service = std::to_string(port);
   const int resolveResult = getaddrinfo(host.c_str(), service.c_str(), &hints, &addresses);
   if (resolveResult != 0)
-    return fail("getaddrinfo failed: " + std::to_string(resolveResult));
+    return TransportFail("getaddrinfo failed: " + std::to_string(resolveResult));
 
   std::string connectError = "connect failed";
   for (addrinfo* address = addresses; address != nullptr; address = address->ai_next) {
@@ -1303,7 +1310,7 @@ bool Client::Connect(const std::string& host, uint16_t port, const std::string& 
   }
   freeaddrinfo(addresses);
   if (mSocket < 0)
-    return fail(connectError);
+    return TransportFail(connectError);
 
 #ifdef MP_HAVE_OPENSSL
   if (secure) {
@@ -1314,14 +1321,14 @@ bool Client::Connect(const std::string& host, uint16_t port, const std::string& 
     ERR_clear_error();
     mSslContext = SSL_CTX_new(TLS_client_method());
     if (mSslContext == nullptr)
-      return fail("could not create TLS context: " + TlsQueueText());
+      return TransportFail("could not create TLS context: " + TlsQueueText());
     SSL_CTX_set_min_proto_version(mSslContext, TLS1_2_VERSION);
     SSL_CTX_set_verify(mSslContext, SSL_VERIFY_PEER, nullptr);
     const std::vector<std::string> caDirs =
         tls.caFile.empty() && tls.caDirs.empty() ? DefaultCaDirs() : tls.caDirs;
     if (!tls.caFile.empty()) {
       if (SSL_CTX_load_verify_locations(mSslContext, tls.caFile.c_str(), nullptr) != 1)
-        return fail("could not load TLS CA file " + tls.caFile + ": " + TlsQueueText());
+        return TransportFail("could not load TLS CA file " + tls.caFile + ": " + TlsQueueText());
     } else if (!caDirs.empty()) {
       // The first directory with a certificate in it wins. An empty trust
       // store would fail every server with an obscure verification error, so
@@ -1336,21 +1343,25 @@ bool Client::Connect(const std::string& host, uint16_t port, const std::string& 
         tried += (tried.empty() ? "" : ", ") + dir + " (" + note + ")";
       }
       if (loaded == 0)
-        return fail("no TLS root certificates: loaded 0 from " + tried);
+        return TransportFail("no TLS root certificates: loaded 0 from " + tried);
+#ifdef _WIN32
+    } else if (LoadWindowsRoots(SSL_CTX_get_cert_store(mSslContext)) == 0) {
+      return TransportFail("no TLS root certificates in the Windows ROOT store");
+#endif
     } else if (SSL_CTX_set_default_verify_paths(mSslContext) != 1) {
-      return fail("could not load the system TLS trust store: " + TlsQueueText());
+      return TransportFail("could not load the system TLS trust store: " + TlsQueueText());
     }
     mSsl = SSL_new(mSslContext);
     if (mSsl == nullptr)
-      return fail("could not create TLS session: " + TlsQueueText());
+      return TransportFail("could not create TLS session: " + TlsQueueText());
     if (SSL_set_fd(mSsl, mSocket) != 1)
-      return fail("could not attach TLS to the socket: " + TlsQueueText());
+      return TransportFail("could not attach TLS to the socket: " + TlsQueueText());
     // The certificate must name this host; a valid certificate for any other
     // name fails verification.
     if (SSL_set1_host(mSsl, host.c_str()) != 1)
-      return fail("could not set the TLS host name: " + TlsQueueText());
+      return TransportFail("could not set the TLS host name: " + TlsQueueText());
     if (!IsIpLiteral(host) && SSL_set_tlsext_host_name(mSsl, host.c_str()) != 1)
-      return fail("could not set the TLS server name: " + TlsQueueText());
+      return TransportFail("could not set the TLS server name: " + TlsQueueText());
 
     for (;;) {
       int result = 0;
@@ -1369,28 +1380,64 @@ bool Client::Connect(const std::string& host, uint16_t port, const std::string& 
         const long verifyResult = SSL_get_verify_result(mSsl);
         if (verifyResult != X509_V_OK) {
           ERR_clear_error();
-          return fail(std::string("TLS certificate verification failed: ") +
+          return TransportFail(std::string("TLS certificate verification failed: ") +
                       X509_verify_cert_error_string(verifyResult));
         }
         bool closed = false;
         const std::string detail = TlsFailureText(sslError, closed);
-        return fail(closed ? "server closed during TLS handshake" : "TLS handshake failed: " + detail);
+        return TransportFail(closed ? "server closed during TLS handshake" : "TLS handshake failed: " + detail);
       }
       const int remaining = RemainingMs(deadline, infinite);
       if (remaining < 0)
-        return fail("TLS handshake timed out");
+        return TransportFail("TLS handshake timed out");
       const int ready = WaitReady(mSocket, sslError == SSL_ERROR_WANT_READ, remaining, mCancel);
       if (ready == 0)
-        return fail("TLS handshake timed out");
+        return TransportFail("TLS handshake timed out");
       if (ready < 0) {
         const int socketError = SocketError();
         if (IsInterrupted(socketError))
           continue;
-        return fail("TLS handshake wait failed: " + SystemError(socketError));
+        return TransportFail("TLS handshake wait failed: " + SystemError(socketError));
       }
     }
   }
 #endif
+  return true;
+}
+
+bool Client::Connect(const std::string& host, uint16_t port, const std::string& path, int timeoutMs,
+                     bool secure, const TlsOptions& tls) {
+  DropConnection();
+  mReceiveBuffer.clear();
+  mDecoder.Reset();
+  mPendingFrames.clear();
+  mError.clear();
+  mTimeoutMs = timeoutMs;
+  auto fail = [this](const std::string& reason) {
+    mError = reason;
+    DropConnection();
+    mReceiveBuffer.clear();
+    mDecoder.Reset();
+    mPendingFrames.clear();
+    return false;
+  };
+
+  if (!EnsureWinsock())
+    return fail("WSAStartup failed");
+  if (host.empty() || host.find_first_of("\r\n\t /\\") != std::string::npos || port == 0 ||
+      path.empty() || path.front() != '/' || path.find_first_of("\r\n") != std::string::npos)
+    return fail("invalid WebSocket endpoint");
+#ifndef MP_HAVE_OPENSSL
+  // Never downgrade a wss:// server to plaintext.
+  if (secure)
+    return fail("wss:// is not supported: this build has no TLS (built without OpenSSL)");
+  (void)tls;
+#endif
+
+  const bool infinite = timeoutMs <= 0;
+  const Clock::time_point deadline = Clock::now() + std::chrono::milliseconds(std::max(timeoutMs, 0));
+  if (!OpenTransport(host, port, secure, tls, deadline, infinite))
+    return fail(mError);
 
   uint8_t randomKey[16];
   try {
@@ -1492,6 +1539,147 @@ bool Client::Connect(const std::string& host, uint16_t port, const std::string& 
     mDecoder.EnableDeflate(noContextTakeover);
   mCompressed = deflate;
   mError.clear();
+  return true;
+}
+
+// A whole HTTP/1.1 GET on its own connection, closed afterwards. The body is
+// returned for any status, de-chunked; content codings are not asked for.
+bool Client::HttpGet(const std::string& host, uint16_t port, const std::string& path, int timeoutMs, bool secure,
+                     const std::string& extraHeaders, int& status, std::string& body, size_t maxBody,
+                     const TlsOptions& tls) {
+  DropConnection();
+  mReceiveBuffer.clear();
+  mError.clear();
+  status = 0;
+  body.clear();
+  auto fail = [this](const std::string& reason) {
+    mError = reason;
+    DropConnection();
+    mReceiveBuffer.clear();
+    return false;
+  };
+  if (!EnsureWinsock())
+    return fail("WSAStartup failed");
+  if (host.empty() || host.find_first_of("\r\n\t /\\") != std::string::npos || port == 0 ||
+      path.empty() || path.front() != '/' || path.find_first_of("\r\n ") != std::string::npos)
+    return fail("invalid HTTP endpoint");
+#ifndef MP_HAVE_OPENSSL
+  if (secure)
+    return fail("https:// is not supported: this build has no TLS (built without OpenSSL)");
+#endif
+  const bool infinite = timeoutMs <= 0;
+  const Clock::time_point deadline = Clock::now() + std::chrono::milliseconds(std::max(timeoutMs, 0));
+  if (!OpenTransport(host, port, secure, tls, deadline, infinite))
+    return fail(mError);
+
+  std::string hostHeader = host;
+  if (host.find(':') != std::string::npos && host.front() != '[')
+    hostHeader = "[" + host + "]";
+  if (port != (secure ? 443 : 80))
+    hostHeader += ":" + std::to_string(port);
+  const std::string request = "GET " + path + " HTTP/1.1\r\nHost: " + hostHeader +
+                              "\r\nConnection: close\r\nAccept-Encoding: identity\r\n" + extraHeaders + "\r\n";
+  std::string ioError;
+  const int remainingForSend = RemainingMs(deadline, infinite);
+  if (remainingForSend < 0 || !SendBytes(request, remainingForSend, ioError))
+    return fail(remainingForSend < 0 ? "request timed out" : ioError);
+
+  // Read to the end: the server closes after the response.
+  std::string response;
+  for (;;) {
+    if (response.size() > maxBody + 64 * 1024)
+      return fail("HTTP response too large");
+    const int remaining = RemainingMs(deadline, infinite);
+    if (remaining < 0)
+      return fail("response timed out");
+    const int ready = WaitIo(remaining);
+    if (ready == 0)
+      return fail("response timed out");
+    if (ready < 0) {
+      const int socketError = SocketError();
+      if (IsInterrupted(socketError))
+        continue;
+      return fail("response read wait failed: " + SystemError(socketError));
+    }
+    std::string bytes;
+    bool closed = false;
+    std::string readError;
+    if (!ReadRaw(bytes, closed, readError)) {
+      if (!closed)
+        return fail("response read failed: " + readError);
+      break;
+    }
+    response.append(bytes);
+  }
+  DropConnection();
+
+  const size_t headerEnd = response.find("\r\n\r\n");
+  if (headerEnd == std::string::npos)
+    return fail("truncated HTTP response");
+  const std::string headers = response.substr(0, headerEnd);
+  if (headers.size() < 12 || headers.compare(0, 5, "HTTP/") != 0)
+    return fail("malformed HTTP status line");
+  const size_t codeAt = headers.find(' ');
+  if (codeAt == std::string::npos || codeAt + 4 > headers.size())
+    return fail("malformed HTTP status line");
+  for (size_t i = codeAt + 1; i < codeAt + 4; ++i) {
+    if (headers[i] < '0' || headers[i] > '9')
+      return fail("malformed HTTP status line");
+    status = status * 10 + (headers[i] - '0');
+  }
+  bool chunked = false;
+  size_t lineStart = headers.find("\r\n");
+  while (lineStart != std::string::npos && lineStart + 2 < headers.size()) {
+    lineStart += 2;
+    const size_t lineEnd = headers.find("\r\n", lineStart);
+    const std::string_view line(headers.data() + lineStart,
+                                (lineEnd == std::string::npos ? headers.size() : lineEnd) - lineStart);
+    const size_t colon = line.find(':');
+    if (colon != std::string_view::npos && Lower(std::string(Trim(line.substr(0, colon)))) == "transfer-encoding")
+      chunked = HasToken(std::string(line.substr(colon + 1)), "chunked");
+    lineStart = lineEnd;
+  }
+  std::string raw = response.substr(headerEnd + 4);
+  if (!chunked) {
+    body = std::move(raw);
+  } else {
+    size_t at = 0;
+    for (;;) {
+      const size_t sizeEnd = raw.find("\r\n", at);
+      if (sizeEnd == std::string::npos)
+        return fail("truncated chunked body");
+      size_t size = 0;
+      size_t digits = 0;
+      for (size_t i = at; i < sizeEnd; ++i, ++digits) {
+        const char c = raw[i];
+        int value = -1;
+        if (c >= '0' && c <= '9')
+          value = c - '0';
+        else if (c >= 'a' && c <= 'f')
+          value = c - 'a' + 10;
+        else if (c >= 'A' && c <= 'F')
+          value = c - 'A' + 10;
+        if (value < 0)
+          break; // a chunk extension
+        if (size > (maxBody >> 4))
+          return fail("HTTP response too large");
+        size = size * 16 + static_cast<size_t>(value);
+      }
+      if (digits == 0)
+        return fail("malformed chunk size");
+      at = sizeEnd + 2;
+      if (size == 0)
+        break;
+      if (raw.size() - at < size)
+        return fail("truncated chunked body");
+      body.append(raw, at, size);
+      at += size + 2;
+      if (body.size() > maxBody)
+        return fail("HTTP response too large");
+    }
+  }
+  if (body.size() > maxBody)
+    return fail("HTTP response too large");
   return true;
 }
 

@@ -263,9 +263,13 @@ fn tone(c: vec3f) -> vec3f {
     let sh = u.tone2.x * st / (1.0 + st) + u.tone2.w;
     tm = select(select(sh, line, o < vec3f(u.tone1.w)), toe, o < vec3f(u.tone1.z));
   } else {
-    tm = min(o, vec3f(0.6)) + 0.4 * (1.0 - exp(-max(o - 0.6, vec3f(0.0)) / 0.4));
+    // Without a room's tone data: Remastered's static default (STonemapParams::BuildLinear(3.0)),
+    // a straight line clipped at 1.
+    tm = o;
   }
-  return pow(clamp(tm, vec3f(0.0), vec3f(1.0)), vec3f(1.0 / 2.2));
+  // Encoded as Remastered's sRGB swapchain does it: the exact piecewise sRGB curve.
+  let l = clamp(tm, vec3f(0.0), vec3f(1.0));
+  return select(1.055 * pow(l, vec3f(1.0 / 2.4)) - 0.055, 12.92 * l, l <= vec3f(0.0031308));
 }
 
 fn fog_factor(fz: f32) -> f32 {
@@ -360,9 +364,10 @@ fn fs_main(in: VOut) -> @location(0) vec4f {
   if (a <= 0.0) { discard; }
   var alpha = clamp(a, 0.0, 1.0);
   if (BLEND == 4u) {
-    // Multiply: the target times rgb where alpha covers it; fog fades the factor to 1.
+    // Multiply: the target times rgb where alpha covers it. Unfogged, as every blend but
+    // alpha and opaque (SetupFogFromBlendMode 0x2887b0).
     let k = mix(vec3f(1.0), max(rgb, vec3f(0.0)), alpha);
-    return vec4f(mix(k, vec3f(1.0), fog_factor(in.pos.z)), alpha);
+    return vec4f(k, alpha);
   }
   var col = tone(rgb);
   // Remastered blends in HDR: a sparse web at intensity 35 and alpha 0.2 still adds 7 and blooms white.
@@ -372,12 +377,11 @@ fn fs_main(in: VOut) -> @location(0) vec4f {
     alpha = clamp(a * hdr, 0.0, 1.0);
     col = tone(rgb * (a / alpha));
   }
-  // Fog fades towards the fog colour, but an additive draw adds nothing in the distance and a
-  // premultiplied one adds the fog colour weighted by its alpha.
-  var fc = u.fogColor.rgb;
-  if (BLEND == 2u) { fc = vec3f(0.0); }
-  if (BLEND == 1u) { fc = fc * alpha; }
-  col = mix(col, fc, fog_factor(in.pos.z));
+  // Remastered sets a no-fog bit for every particle blend but alpha and opaque
+  // (SetupFogFromBlendMode), so additive and premultiplied draws are not fogged at all.
+  if (BLEND == 0u || BLEND == 3u) {
+    col = mix(col, u.fogColor.rgb, fog_factor(in.pos.z));
+  }
   return vec4f(col, alpha);
 }
 )";

@@ -70,6 +70,9 @@ public:
   // down without pitching them, all those above the view centre by one offset and all those below
   // by another, so pieces of one assembly (the helmet shell, its glass and lights) stay together.
   void SetSpreadSlideTree(const CGuiWidget* root);
+  // Port: whether a loaded model of this frame has a Remastered interference material
+  // (kStateFlag_PortHudInterference), i.e. the frame fades in through DYIN, not retail's static.
+  bool PortHasHudInterference() const;
 #endif
 
 private:

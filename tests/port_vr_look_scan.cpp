@@ -22,6 +22,21 @@ bool Near(float a, float b) { return std::fabs(a - b) < 0.0001f; }
 int main() {
   using namespace PortVr::LookScan;
 
+  // Rotating a target around the head must not shrink its icon as the body's
+  // forward depth approaches zero, or goes negative after a head turn.
+  const float iconScale = ScanIndicatorScale({0.f, 10.f, 0.f}, 640.f, 16.f, 32.f);
+  for (const Vec3 offset : {Vec3{-10.f, 0.f, 0.f}, Vec3{10.f, 0.f, 0.f},
+                            Vec3{6.f, 8.f, 0.f}, Vec3{0.f, -10.f, 0.f},
+                            Vec3{0.f, 0.f, 10.f}}) {
+    Check(Near(ScanIndicatorScale(offset, 640.f, 16.f, 32.f), iconScale),
+          "scan icon size is independent of bearing around the head");
+  }
+  Check(Near(iconScale, 0.5f), "near scan icons retain their maximum size clamp");
+  Check(Near(ScanIndicatorScale({0.f, 100.f, 0.f}, 640.f, 16.f, 32.f), 2.5f),
+        "distant scan icons retain their minimum size clamp");
+  Check(Near(ScanIndicatorScale({}, 640.f, 16.f, 32.f), 1.f),
+        "an icon at the head has a finite scale");
+
   // The gaze: from the origin along Prime's forward (+y).
   const Ray ray{{0.f, 0.f, 0.f}, {0.f, 1.f, 0.f}};
   Metrics m;

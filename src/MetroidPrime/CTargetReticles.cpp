@@ -36,6 +36,8 @@
 #ifdef TARGET_PC
 #include "port_debug.h"
 #include "vr/vr_view.h"
+#include "vr/vr_look_scan.h"
+#include "vr/vr_settings.h"
 #endif
 
 #include <float.h>
@@ -1205,16 +1207,24 @@ void CCompoundTargetReticle::DrawOrbitZoneGroup(const CMatrix3f& rot,
     }
 #endif
     CVector3f targetPos = xf4_targetPos;
+    CMatrix3f crosshairRotation = rot;
 #ifdef TARGET_PC
     // The idle crosshair sits on the tick's aim ray; keep it on the view's
     // centre while per-frame look turns the view ahead of the tick.
     CTransform4f look = CTransform4f::Identity();
-    if (mgr.GetCameraManager()->GetPresentedLookRotation(mgr, look)) {
+    if (PortVr::VrCannonTargetPoint(mgr, targetPos)) {
+      CVector3f eye = mgr.GetCameraManager()->GetCurrentCameraTransform(mgr).GetTranslation();
+      CVector3f gaze;
+      PortVr::VrHeadGaze(mgr.GetCameraManager()->GetCurrentCameraTransform(mgr), eye, gaze);
+      crosshairRotation = CTransform4f::LookAt(eye, targetPos, rot.GetColumn(kDZ)).BuildMatrix3f();
+      scale = CalculateClampedScale(targetPos, scale, tweak->x20c_reticuleClampMin,
+                                    tweak->x210_reticuleClampMax, mgr);
+    } else if (mgr.GetCameraManager()->GetPresentedLookRotation(mgr, look)) {
       const CVector3f eye = mgr.GetCameraManager()->GetCurrentCameraTransform(mgr).GetTranslation();
       targetPos = eye + look.Rotate(targetPos - eye);
     }
 #endif
-    gpRender->SetModelMatrix(CTransform4f(rot, targetPos) * CTransform4f::Scale(scale));
+    gpRender->SetModelMatrix(CTransform4f(crosshairRotation, targetPos) * CTransform4f::Scale(scale));
 
     model->Draw(CModelFlags::Additive(
                     tweak->x1c0_crosshairsColor.WithAlphaModulatedBy(x1e8_crosshairsScale))
@@ -1276,6 +1286,12 @@ CVector3f CCompoundTargetReticle::CalculatePositionWorld(const CActor& actor,
 
 CVector3f CCompoundTargetReticle::CalculateOrbitZoneReticlePosition(const CStateManager& mgr,
                                                                     bool lag) const {
+#ifdef TARGET_PC
+  CVector3f cannonPoint;
+  if (PortVr::VrCannonTargetPoint(mgr, cannonPoint)) {
+    return cannonPoint;
+  }
+#endif
   const CGameCamera& cam = mgr.GetCameraManager()->GetCurrentCamera(mgr);
   float halfExtY = CCast::LtoF(gpTweakPlayer->GetOrbitZoneHeight(0));
   float dist = 224.f / halfExtY;
@@ -1301,6 +1317,23 @@ float CCompoundTargetReticle::CalculateClampedScale(CVector3f pos, float scale, 
   const CGameCamera& cam = mgr.GetCameraManager()->GetCurrentCamera(mgr);
   CTransform4f camXf = mgr.GetCameraManager()->GetCurrentCameraTransform(mgr);
   CVector3f viewSpace = cam.GetTransform().TransposeMultiply(pos);
+#ifdef TARGET_PC
+  const auto settings = PortVr::GetVrSettings();
+  const bool scanVisor = mgr.GetPlayerState()->GetCurrentVisor() == CPlayerState::kPV_Scan;
+  if (PortVr::VrImmersive() && settings.CannonTargetingForVisor(scanVisor)) {
+    CVector3f head = camXf.GetTranslation();
+    CVector3f gaze;
+    PortVr::VrHeadGaze(camXf, head, gaze);
+    const CVector3f offset = pos - head;
+    const CMatrix4f& projection = cam.GetPerspectiveMatrix();
+    const float unitWidth = std::fabs(
+        projection.MultiplyOneOverW(CVector3f(1.f, 1.f, 0.f)).GetX() -
+        projection.MultiplyOneOverW(CVector3f(0.f, 1.f, 0.f)).GetX()) *
+        static_cast< float >(CGraphics::GetViewport().mWidth);
+    return PortVr::LookScan::ScanIndicatorScale(
+        {offset.GetX(), offset.GetY(), offset.GetZ()}, unitWidth, clampMin, clampMax, scale);
+  }
+#endif
   float projX1 = cam.GetPerspectiveMatrix().MultiplyOneOverW(viewSpace).GetX();
   float pixelScale =
       cam.GetPerspectiveMatrix().MultiplyOneOverW(viewSpace + CVector3f(scale, 0.f, 0.f)).GetX() -

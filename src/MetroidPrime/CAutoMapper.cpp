@@ -50,6 +50,10 @@
 #include "port_debug.h"
 #include "port_map_icons.h"
 
+#ifdef TARGET_PC
+#include "vr/vr_view.h"
+#endif
+
 static const char* const skFRME_MapScreen = "FRME_MapScreen";
 
 static inline const rstl::vector< CGameHintInfo::CGameHint >& GetGameHints() {
@@ -1088,8 +1092,15 @@ void CAutoMapper::Draw(const CStateManager& mgr, const CTransform4f& xf, float a
   float yScale =
       xa8_renderState0.x18_camDist / static_cast< float >(tan(M_PIF / 2.f - 0.5f * camAngleRad));
 
-  CTransform4f camXf =
-      xa8_renderState0.x8_camOrientation.BuildTransform4f(xa8_renderState0.x20_areaPoint);
+  CQuaternion mapOrientation = xa8_renderState0.x8_camOrientation;
+#ifdef TARGET_PC
+  // Sample headset yaw for every presented HUD frame, including frames
+  // between simulation ticks. Keep the map's authored viewing inclination.
+  if (IsInMapperState(kAMS_MiniMap) && PortVr::VrImmersive()) {
+    mapOrientation = GetMiniMapCameraOrientation(mgr);
+  }
+#endif
+  CTransform4f camXf = mapOrientation.BuildTransform4f(xa8_renderState0.x20_areaPoint);
 
   CTransform4f distScale(1.f / (yScale * aspect), 0.f, 0.f, 0.f, 0.f, 0.001f, 0.f, 0.f, 0.f, 0.f,
                          1.f / yScale, 0.f);
@@ -1906,6 +1917,16 @@ void CAutoMapper::LeaveMapScreenState() {
 CQuaternion CAutoMapper::GetMiniMapCameraOrientation(const CStateManager& stateMgr) {
   float miniCamXAngle = gpTweakAutoMapper->x2c_miniCamXAngle;
   const CGameCamera& cam = stateMgr.GetCameraManager()->GetCurrentCamera(stateMgr);
+#ifdef TARGET_PC
+  if (PortVr::VrImmersive()) {
+    const CMatrix3f head = PortVr::VrHeadViewRotation(
+        stateMgr.GetCameraManager()->GetCurrentCameraTransform(stateMgr));
+    // The level right axis retains yaw even when looking straight up/down.
+    const CVector3f right = head.GetColumn(kDX);
+    return CQuaternion::ZRotation(CMath::ClampRadians(atan2(right.GetY(), right.GetX()))) *
+           CQuaternion::XRotation(CRelAngle::FromDegrees(miniCamXAngle));
+  }
+#endif
   CEulerAngles angles = CEulerAngles::FromQuaternion(CQuaternion::FromMatrix(cam.GetTransform()));
   return CQuaternion::ZRotation(CMath::ClampRadians(angles.GetZ())) *
          CQuaternion::XRotation(CRelAngle::FromDegrees(miniCamXAngle));

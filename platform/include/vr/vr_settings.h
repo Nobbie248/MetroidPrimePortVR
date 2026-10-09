@@ -104,6 +104,7 @@ struct PortVrSettings {
     float index_grip_press_threshold = 0.5f;
     bool combat_jump_use_primary_button = false;
     bool gun_targeting_enabled = true;
+    bool cannon_targeting = true;
     float gun_targeting_distance = 60.0f;
     float gun_targeting_radius = 4.0f;
     bool visor_helmet_enabled = false;
@@ -172,6 +173,10 @@ struct PortVrSettings {
     int snap_turn_degrees = 45;
     int vr_state_slot = 1;
     int cannon_texture_slot = 0;
+
+    bool CannonTargetingForVisor(bool scanVisor) const noexcept {
+        return cannon_targeting && gun_targeting_enabled && !scanVisor;
+    }
 };
 
 inline constexpr float kVrRenderScaleMin = 0.25f;

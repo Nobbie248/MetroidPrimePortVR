@@ -56,6 +56,20 @@ struct Metrics {
 
 inline float Dot(const Vec3& a, const Vec3& b) noexcept { return a.x * b.x + a.y * b.y + a.z * b.z; }
 
+// A scan icon faces the viewer, so its size clamp uses radial distance, not
+// the body camera's forward depth (which reaches zero at the player's side).
+// unitPixelWidth is the camera's projected width of one unit at depth one.
+inline float ScanIndicatorScale(const Vec3& fromHead, float unitPixelWidth, float clampMin,
+                               float clampMax, float worldScale = 1.f) noexcept {
+    const float distance = std::sqrt(Dot(fromHead, fromHead));
+    if (!std::isfinite(distance) || distance <= 0.0001f ||
+        !std::isfinite(unitPixelWidth) || unitPixelWidth <= 0.f || worldScale <= 0.f) {
+        return worldScale;
+    }
+    const float pixelWidth = unitPixelWidth * worldScale / distance;
+    return worldScale * std::clamp(pixelWidth, clampMin, clampMax) / pixelWidth;
+}
+
 inline Vec3 Sub(const Vec3& a, const Vec3& b) noexcept { return {a.x - b.x, a.y - b.y, a.z - b.z}; }
 
 inline Vec3 Along(const Ray& ray, float distance) noexcept {

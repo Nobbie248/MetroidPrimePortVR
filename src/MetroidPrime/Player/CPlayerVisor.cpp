@@ -26,6 +26,7 @@
 #include <float.h>
 #ifdef TARGET_PC
 #include "aurora/gfx.h"
+#include "vr/vr_look_scan.h"
 #include "vr/vr_view.h"
 #include <dolphin/gx/GXAurora.h>
 #endif
@@ -763,6 +764,20 @@ bool CPlayerVisor::DrawScanObjectIndicators(const CStateManager& mgr) const {
   CMatrix3f cameraRotation = cameraXf.BuildMatrix3f();
 #endif
   CVector3f cameraPosition = cameraXf.GetTranslation();
+#ifdef TARGET_PC
+  const bool vrIndicators = PortVr::VrImmersive();
+  CVector3f headPosition = cameraPosition;
+  CVector3f headDirection;
+  float unitPixelWidth = 0.f;
+  if (vrIndicators) {
+    PortVr::VrHeadGaze(cameraXf, headPosition, headDirection);
+    const CMatrix4f& projection = camera.GetPerspectiveMatrix();
+    unitPixelWidth = std::fabs(
+        projection.MultiplyOneOverW(CVector3f(1.f, 1.f, 0.f)).GetX() -
+        projection.MultiplyOneOverW(CVector3f(0.f, 1.f, 0.f)).GetX()) *
+        static_cast< float >(CGraphics::GetViewport().mWidth);
+  }
+#endif
   for (int i = 0; i < x13c_scanTargets.size(); ++i) {
     const SScanObjectIndicatorInfo& target = x13c_scanTargets[i];
     if (target.x4_timer == 0.f)
@@ -780,10 +795,26 @@ bool CPlayerVisor::DrawScanObjectIndicators(const CStateManager& mgr) const {
                                    ? gpTweakGuiColors->GetScanIconCriticalDimColor()
                                    : gpTweakGuiColors->GetScanIconNoncriticalDimColor();
       CVector3f scanPosition = actor->GetScanObjectIndicatorPosition(mgr);
-      float scale = CCompoundTargetReticle::CalculateClampedScale(
-          scanPosition, 1.f, gpTweakTargeting->x21c_scanTargetClampMin,
-          gpTweakTargeting->x220_scanTargetClampMax, mgr);
-      CTransform4f xf(CMatrix3f::Scale(scale) * cameraRotation, scanPosition);
+      float scale;
+      CMatrix3f iconRotation = cameraRotation;
+#ifdef TARGET_PC
+      if (vrIndicators) {
+        const CVector3f fromHead = scanPosition - headPosition;
+        scale = PortVr::LookScan::ScanIndicatorScale(
+            {fromHead.GetX(), fromHead.GetY(), fromHead.GetZ()}, unitPixelWidth,
+            gpTweakTargeting->x21c_scanTargetClampMin, gpTweakTargeting->x220_scanTargetClampMax);
+        // Face this icon toward the viewer even at the edge of the view;
+        // sharing the head's rotation makes side icons appear edge-on.
+        iconRotation = CTransform4f::LookAt(headPosition, scanPosition,
+                                           cameraRotation.GetColumn(kDZ)).BuildMatrix3f();
+      } else
+#endif
+      {
+        scale = CCompoundTargetReticle::CalculateClampedScale(
+            scanPosition, 1.f, gpTweakTargeting->x21c_scanTargetClampMin,
+            gpTweakTargeting->x220_scanTargetClampMax, mgr);
+      }
+      CTransform4f xf(CMatrix3f::Scale(scale) * iconRotation, scanPosition);
       float distance = (scanPosition - cameraPosition).Magnitude();
       float scanRange = gpTweakPlayer->GetScanningRange();
       float farRange = gpTweakPlayer->GetScanMaxLockDistance() - scanRange;

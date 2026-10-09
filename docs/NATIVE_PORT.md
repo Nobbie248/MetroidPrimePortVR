@@ -815,6 +815,14 @@ unpacks to a temporary directory instead of mounting.
   precedence. SDL controllers are supported.
 - F1: debug overlay. F10: 60 FPS cap/unlimited presentation. F11: fullscreen.
   F12: screenshot.
+- **Cannon targeting** (headset CONFIG or F1 > VR, persisted as
+  `vr_cannon_targeting`, default on): selects combat lock-on and grapple targets
+  with the chosen cannon controller's calibrated aim instead of camera/head
+  direction. The idle reticle follows the cannon ray to its first world hit,
+  or the target distance limit. It uses the existing target distance/radius
+  controls and requires tracked cannon rotation. Off restores the existing
+  look-targeting settings. A cannon-selected lock keeps the body's facing.
+  The scan visor's targeting, icons and reticle keep their existing behavior.
 - Fullscreen (F1 > Video > Display, persisted as `fullscreen`): a borderless window over
   the whole screen on desktop, toggled with F11; on Android it hides the status
   and navigation bars (on by default there; a swipe from the edge shows them
@@ -967,7 +975,7 @@ unpacks to a temporary directory instead of mounting.
 - `MP_CINEMA_BARS=0|1` (Video > Display "Cutscene black bars", persisted as `cinema_bars`,
   default off): the scripted 16:9 cutscene letterbox. Off, cutscenes narrower than 16:9
   show the cinematic camera's full shot (Vert+); elevator rides and credits keep theirs.
-- `MP_HUD_WIDE=0|1` (Video > Display, persisted as `hud_wide`, default on): widescreen HUD. The
+- `MP_HUD_WIDE=0|1` (Video > Display, persisted as `hud_wide`, default off): widescreen HUD. The
   aspect-matched in-game HUD frames keep each element's shape but move it away
   from the screen centre, so edge elements (scan panels, energy bar, map) reach
   the true wide corners instead of being pulled inward. Under a perspective

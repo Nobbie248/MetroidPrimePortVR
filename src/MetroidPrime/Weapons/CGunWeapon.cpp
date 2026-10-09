@@ -13,6 +13,10 @@
 #include "MetroidPrime/Weapons/CEnergyProjectile.hpp"
 #include "MetroidPrime/Weapons/GunController/CGunController.hpp"
 
+#ifdef TARGET_PC
+#include "vr/vr_view.h"
+#endif
+
 #include "MetroidPrime/SFX/Weapons.h"
 
 #include "Weapons/CWeaponDescription.hpp"
@@ -415,7 +419,10 @@ void CGunWeapon::Fire(const bool underwater, const float dt,
 
   if (chargeState != CPlayerState::kCS_Normal) {
     x218_25_enableCharge = true;
-    mgr.CameraManager()->AddCameraShaker(CCameraShakeData::skSoftRecoil, false);
+#ifdef TARGET_PC
+    if (!PortVr::VrImmersive())
+#endif
+      mgr.CameraManager()->AddCameraShaker(CCameraShakeData::skSoftRecoil, false);
   }
 
   CAnimData& animData = *x10_solidModelData->AnimationData();

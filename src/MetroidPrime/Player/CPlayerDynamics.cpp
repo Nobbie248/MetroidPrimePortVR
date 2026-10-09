@@ -3,6 +3,7 @@
 #include "port_mouse.h"
 #ifdef TARGET_PC
 #include "vr/vr_pad.h"
+#include "vr/vr_view.h"
 #endif
 
 #include "MetroidPrime/Player/CGameState.hpp"
@@ -838,6 +839,18 @@ void CPlayer::UpdatePlayerControlDirection(float dt, CStateManager& mgr) {
 }
 
 void CPlayer::CalculatePlayerControlDirection(CStateManager& mgr) {
+#ifdef TARGET_PC
+  if (PortVr::VrImmersive() && x2f8_morphBallState == kMS_Morphed && !x9c4_30_controlDirOverride) {
+    CVector3f forward = mgr.GetCameraManager()->GetCurrentCamera(mgr).GetTransform().GetForward();
+    forward.SetZ(0.f);
+    if (forward.CanBeNormalized()) {
+      forward.Normalize();
+      x540_controlDir = forward;
+      x54c_controlDirFlat = forward;
+      return;
+    }
+  }
+#endif
   if (x9c4_30_controlDirOverride) {
     if (x9d8_controlDirOverrideDir.CanBeNormalized()) {
       x540_controlDir = x9d8_controlDirOverrideDir.AsNormalized();
@@ -1450,6 +1463,9 @@ int CPlayer::GetNextBallTransitionAnim(float dt, bool& loop, CStateManager& mgr)
 }
 
 void CPlayer::TransitionToMorphBallState(float dt, CStateManager& mgr) {
+#ifdef TARGET_PC
+  PortVr::VrBeginBallCamera(mgr.GetCameraManager()->GetCurrentCameraTransform(mgr));
+#endif
   x584_ballTransitionAnim = ChoseTransitionToAnimation(dt, mgr);
   x58c_transitionVel = GetVelocityWR().Magnitude();
   if (HasAnimation()) {
@@ -1503,6 +1519,11 @@ void CPlayer::TransitionToMorphBallState(float dt, CStateManager& mgr) {
 }
 
 void CPlayer::TransitionFromMorphBallState(float dt, CStateManager& mgr) {
+#ifdef TARGET_PC
+  if (PortVr::VrImmersive()) {
+    PortVr::VrBeginUnmorphCamera(mgr.GetCameraManager()->GetCurrentCameraTransform(mgr), GetEyePosition());
+  }
+#endif
   x584_ballTransitionAnim = 14;
   const CVector2f flatVelocity(GetVelocityWR().GetX(), GetVelocityWR().GetY());
   x58c_transitionVel = flatVelocity.Magnitude();
@@ -1593,6 +1614,13 @@ void CPlayer::TransitionFromMorphBallState(float dt, CStateManager& mgr) {
       }
     }
   }
+#ifdef TARGET_PC
+  // Keep the body/first-person base on the view's starting yaw, including
+  // when retail's movement or nearby-object hints chose a different exit yaw.
+  if (PortVr::VrImmersive()) {
+    SetTransform(PortVr::VrUnmorphCameraBase(GetTransform()));
+  }
+#endif
   ForceGunOrientation(GetTransform(), mgr);
   DrawGun(mgr);
   mgr.CameraManager()->BallCamera()->SetState(CBallCamera::kBCS_FromBall, mgr);

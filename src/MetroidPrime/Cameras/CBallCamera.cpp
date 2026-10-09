@@ -29,6 +29,10 @@
 
 #include "math.h"
 
+#ifdef TARGET_PC
+#include "vr/vr_view.h"
+#endif
+
 static CMaterialList kLineOfSightIncludeList = CMaterialList(kMT_Solid);
 static CMaterialList kLineOfSightExcludeList =
     CMaterialList(kMT_ProjectilePassthrough, kMT_Player, kMT_Character, kMT_CameraPassthrough);
@@ -1758,8 +1762,14 @@ void CBallCamera::UpdateUsingTransitions(float dt, CStateManager& mgr) {
       nearDoor = true;
     }
 
+    CVector3f entryDirection = mgr.GetPlayer()->GetMovementDirection();
+#ifdef TARGET_PC
+    if (PortVr::VrImmersive()) {
+      entryDirection = PortVr::VrBallCameraEntryDirection();
+    }
+#endif
     CVector3f toDesired =
-        FindDesiredPosition(distance, elevation, mgr.GetPlayer()->GetMovementDirection(), mgr,
+        FindDesiredPosition(distance, elevation, entryDirection, mgr,
                             nearDoor) -
         eyePos;
     CVector3f finalPos = eyePos + toDesired * player->GetMorphBallTransitionFactor();
@@ -1792,6 +1802,18 @@ void CBallCamera::UpdateUsingTransitions(float dt, CStateManager& mgr) {
     break;
   }
   case kBCS_FromBall: {
+#ifdef TARGET_PC
+    if (PortVr::VrImmersive()) {
+      CTransform4f view = PortVr::VrUnmorphCameraTransform(eyePos, player->GetMorphBallTransitionFactor());
+      CVector3f position = ClampElevationToWater(view.GetTranslation(), mgr);
+      position = MoveCollisionActor(position, dt, mgr);
+      view.SetTranslation(position);
+      SetTransform(view);
+      TeleportCamera(position, mgr);
+      mgr.CameraManager()->FirstPersonCamera()->Reset(view, mgr);
+      return;
+    }
+#endif
     if (close_enough(player->GetMorphBallTransitionFactor(), 1.f)) {
       SetTransform(player->GetTransform());
       SetTranslation(player->GetEyePosition());
@@ -2385,6 +2407,12 @@ void CBallCamera::SetState(EBallCameraState state, CStateManager& mgr) {
   switch (state) {
   case kBCS_ToBall: {
     CTransform4f xf = mgr.CameraManager()->GetFirstPersonCamera()->GetTransform();
+#ifdef TARGET_PC
+    if (PortVr::VrImmersive()) {
+      xf = CTransform4f::LookAt(xf.GetTranslation(), xf.GetTranslation() +
+                               PortVr::VrBallCameraEntryDirection());
+    }
+#endif
     SetTransform(xf);
     TeleportCamera(xf.GetTranslation(), mgr);
     InterpolateFOV(mgr.CameraManager()->GetFirstPersonCamera()->GetFov(),

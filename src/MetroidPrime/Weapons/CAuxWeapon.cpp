@@ -14,6 +14,10 @@
 #include "MetroidPrime/Weapons/CWaveBuster.hpp"
 #include "MetroidPrime/Weapons/CWeaponAssetInfo.hpp"
 
+#ifdef TARGET_PC
+#include "vr/vr_view.h"
+#endif
+
 const ushort CAuxWeapon::skSoundId[5] = {SFXsam_a_co1fire_00, SFXsam_a_icecofir_00,
                                          SFXsam_a_wavcofir_lp_00, SFXsam_a_placofir_lp_00,
                                          SFXsam_a_co1fire_00};
@@ -244,7 +248,10 @@ void CAuxWeapon::LaunchMissile(float dt, const bool underwater, bool charged, in
     static_cast< CEnergyProjectile* >(projectile)
         ->SetCameraShake(CCameraShakeData::HardVertShakeDistance(
             0.25f, 0.75f, 50.f, static_cast< CEnergyProjectile* >(projectile)->GetTranslation()));
-    mgr.CameraManager()->AddCameraShaker(CCameraShakeData::skHardRecoil, false);
+#ifdef TARGET_PC
+    if (!PortVr::VrImmersive())
+#endif
+      mgr.CameraManager()->AddCameraShaker(CCameraShakeData::skHardRecoil, false);
   } else {
     mgr.GetRumbleManager()->Rumble(mgr, kRFX_PlayerMissileFire, 0.5f, kRP_One);
   }
@@ -274,7 +281,10 @@ void CAuxWeapon::CreateFlameThrower(const CTransform4f& xf, CStateManager& mgr, 
   flame->Fire(xf, mgr, false);
   x24_muzzleFxGen = rs_new CElementGen(xc_flameMuzzle);
   x7c_comboSfx = NWeaponTypes::play_sfx(SFXsam_a_placofir_lp_00, false, true, 0x4a);
-  mgr.CameraManager()->AddCameraShaker(CCameraShakeData::skHardRecoil, false);
+#ifdef TARGET_PC
+  if (!PortVr::VrImmersive())
+#endif
+    mgr.CameraManager()->AddCameraShaker(CCameraShakeData::skHardRecoil, false);
   mgr.PlayerState()->SetFiringComboBeam(true);
   x74_firingBeamId = CPlayerState::kBI_Plasma;
 }
@@ -294,7 +304,10 @@ void CAuxWeapon::CreateWaveBusterBeam(uint attribs, TUniqueId target, const CTra
   mgr.AddObject(*beam);
   x24_muzzleFxGen = rs_new CElementGen(x18_busterMuzzle);
   x7c_comboSfx = NWeaponTypes::play_sfx(SFXsam_a_wavcofir_lp_00, false, true, 0x4a);
-  mgr.CameraManager()->AddCameraShaker(CCameraShakeData::skSoftRecoil, false);
+#ifdef TARGET_PC
+  if (!PortVr::VrImmersive())
+#endif
+    mgr.CameraManager()->AddCameraShaker(CCameraShakeData::skSoftRecoil, false);
   mgr.PlayerState()->SetFiringComboBeam(true);
   x74_firingBeamId = CPlayerState::kBI_Wave;
 }

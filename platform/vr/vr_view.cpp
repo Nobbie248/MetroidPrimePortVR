@@ -41,6 +41,10 @@ struct CannonState {
     CVector3f modelOffsetWorld;
 };
 CannonState s_cannon;
+float s_ballEntryYaw = 0.f;
+CVector3f s_ballEntryDirection(0.f, 1.f, 0.f);
+CTransform4f s_unmorphBase = CTransform4f::Identity();
+CVector3f s_unmorphOffset = CVector3f::Zero();
 
 bool ImmersiveNow() noexcept {
     if (!OpenXRIsRunning()) {
@@ -139,6 +143,15 @@ bool VrHeadGaze(const CTransform4f& cameraXf, CVector3f& origin, CVector3f& dire
     return true;
 }
 
+CTransform4f VrHeadViewTransform(const CTransform4f& cameraXf) noexcept {
+    CVector3f origin;
+    CVector3f direction;
+    if (!VrHeadGaze(cameraXf, origin, direction)) {
+        return cameraXf;
+    }
+    return CTransform4f(VrHeadViewRotation(cameraXf), origin);
+}
+
 CMatrix3f VrHeadViewRotation(const CTransform4f& cameraXf) noexcept {
     const CMatrix3f body = cameraXf.BuildMatrix3f();
     if (!ImmersiveNow()) {
@@ -180,6 +193,49 @@ bool VrCullingFrustum(const CTransform4f& cameraXf, float nearZ, CFrustumPlanes&
 }
 
 bool VrFlattenLookPitch() noexcept { return ImmersiveNow(); }
+
+void VrBeginBallCamera(const CTransform4f& firstPersonXf) noexcept {
+    s_ballEntryYaw = 0.f;
+    s_ballEntryDirection = firstPersonXf.GetForward();
+    if (!ImmersiveNow()) {
+        return;
+    }
+    const CVector3f headRight = VrHeadViewRotation(firstPersonXf).GetColumn(kDX);
+    const CVector3f bodyRight = firstPersonXf.GetRight();
+    const float yaw = std::atan2(headRight.GetY(), headRight.GetX()) -
+                      std::atan2(bodyRight.GetY(), bodyRight.GetX());
+    s_ballEntryYaw = yaw;
+    s_ballEntryDirection = CVector3f(-headRight.GetY(), headRight.GetX(), 0.f);
+}
+
+CVector3f VrBallCameraEntryDirection() noexcept { return s_ballEntryDirection; }
+
+CTransform4f VrBallCameraBaseTransform(const CTransform4f& camera, float weight) noexcept {
+    if (!ImmersiveNow()) {
+        return camera;
+    }
+    CTransform4f base = camera.GetRotation() *
+        AxisQuaternion(0.f, 0.f, 1.f, -s_ballEntryYaw * std::clamp(weight, 0.f, 1.f)).BuildTransform4f();
+    base.SetTranslation(camera.GetTranslation());
+    return base;
+}
+
+void VrBeginUnmorphCamera(const CTransform4f& camera, const CVector3f& eyePosition) noexcept {
+    s_unmorphBase = camera.GetRotation();
+    s_unmorphOffset = camera.GetTranslation() - eyePosition;
+}
+
+CTransform4f VrUnmorphCameraBase(const CTransform4f& camera) noexcept {
+    CTransform4f view = s_unmorphBase;
+    view.SetTranslation(camera.GetTranslation());
+    return view;
+}
+
+CTransform4f VrUnmorphCameraTransform(const CVector3f& eyePosition, float progress) noexcept {
+    CTransform4f view = s_unmorphBase;
+    view.SetTranslation(eyePosition + s_unmorphOffset * (1.f - std::clamp(progress, 0.f, 1.f)));
+    return view;
+}
 
 bool VrSurfaceCullingVolume(const CTransform4f& cameraXf,
                             PortSurfaceCulling::StereoVolume& volume) noexcept {
@@ -251,26 +307,22 @@ int VrBeamWheelHoverBeam() noexcept {
     return BeamWheel::GameBeamId(static_cast<BeamWheel::Beam>(pad.weapon_selected));
 }
 
-bool VrCannonTransform(const CStateManager& mgr, const CPlayer& player, const CTransform4f& cameraXf,
-                       CTransform4f& gunXf) noexcept {
-    (void)mgr;
-    s_cannon.tracked = false;
-    s_cannon.modelOffsetWorld = CVector3f::Zero();
-    const PortVrSettings settings = GetVrSettings();
+namespace {
+bool TrackedCannonPose(const CPlayer& player, const CTransform4f& cameraXf,
+                       const PortVrSettings& settings, CVector3f& worldPosition,
+                       CQuaternion& worldRotation, float& scale) noexcept {
     if (!settings.patch_cannon_rotation || !ImmersiveNow()) {
-        s_cannon.smoothValid = false;
         return false;
     }
     const OpenXRInputSnapshot snapshot = OpenXRGetInputSnapshot();
     const OpenXRControllerState& hand = snapshot.controllers[settings.use_right_hand ? 1 : 0];
     if (!snapshot.runtime_active || !hand.connected || !hand.aim_pose.valid) {
-        s_cannon.smoothValid = false;
         return false;
     }
 
     OpenXRFrameRequest request{};
     const bool haveRequest = OpenXRLatestFrameRequest(request);
-    const float scale = haveRequest && request.units_per_meter > 0.f ? request.units_per_meter : settings.world_scale;
+    scale = haveRequest && request.units_per_meter > 0.f ? request.units_per_meter : settings.world_scale;
     // The controller relative to the tracking base the eyes are placed from;
     // without a base, relative to the head.
     std::array<float, 3> base{};
@@ -290,14 +342,42 @@ bool VrCannonTransform(const CStateManager& mgr, const CPlayer& player, const CT
         CVector3f(settings.offset_x * scale, -settings.offset_z * scale, settings.offset_y * scale);
 
     const CQuaternion body = BodyYaw(cameraXf);
-    const CVector3f worldPosition = player.GetEyePosition() + body.Transform(relative);
+    worldPosition = player.GetEyePosition() + body.Transform(relative);
 
     // PrimedGun's rotation offsets are local yaw (about up), pitch (about
     // right) and roll (about the aim), applied in that order to the controller.
     const CQuaternion offsets = AxisQuaternion(0.f, 0.f, 1.f, settings.rot_offset_y * kDegreesToRadians) *
                                 AxisQuaternion(1.f, 0.f, 0.f, settings.rot_offset_x * kDegreesToRadians) *
                                 AxisQuaternion(0.f, 1.f, 0.f, -settings.rot_offset_z * kDegreesToRadians);
-    const CQuaternion worldRotation = (body * PrimeFromXr(hand.aim_pose.orientation) * offsets).BuildNormalized();
+    worldRotation = (body * PrimeFromXr(hand.aim_pose.orientation) * offsets).BuildNormalized();
+    return true;
+}
+} // namespace
+
+bool VrCannonAim(const CPlayer& player, const CTransform4f& cameraXf,
+                 CVector3f& origin, CVector3f& direction) noexcept {
+    CQuaternion rotation;
+    float scale;
+    if (!TrackedCannonPose(player, cameraXf, GetVrSettings(), origin, rotation, scale)) {
+        return false;
+    }
+    direction = rotation.Transform(CVector3f(0.f, 1.f, 0.f));
+    return true;
+}
+
+bool VrCannonTransform(const CStateManager& mgr, const CPlayer& player, const CTransform4f& cameraXf,
+                       CTransform4f& gunXf) noexcept {
+    (void)mgr;
+    s_cannon.tracked = false;
+    s_cannon.modelOffsetWorld = CVector3f::Zero();
+    const PortVrSettings settings = GetVrSettings();
+    CVector3f worldPosition;
+    CQuaternion worldRotation;
+    float scale;
+    if (!TrackedCannonPose(player, cameraXf, settings, worldPosition, worldRotation, scale)) {
+        s_cannon.smoothValid = false;
+        return false;
+    }
 
     const CVector3f jump = worldPosition - s_cannon.smoothPosition;
     if (!s_cannon.smoothValid || CVector3f::Dot(jump, jump) > kCannonSnapDistance * kCannonSnapDistance) {

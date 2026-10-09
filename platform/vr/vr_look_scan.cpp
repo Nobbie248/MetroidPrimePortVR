@@ -39,6 +39,7 @@
 #include "MetroidPrime/CGameArea.hpp"
 #include "MetroidPrime/CPhysicsActor.hpp"
 #include "MetroidPrime/CStateManager.hpp"
+#include "MetroidPrime/Cameras/CCameraManager.hpp"
 #include "MetroidPrime/CWorld.hpp"
 #include "MetroidPrime/Player/CPlayer.hpp"
 #include "MetroidPrime/Player/CPlayerState.hpp"
@@ -306,7 +307,8 @@ void UpdateLock(CStateManager& mgr, const CPlayer& player, const PortVrSettings&
             continue;
         }
         const CScriptGrapplePoint* point = TCastToConstPtr< CScriptGrapplePoint >(actor);
-        if (point != nullptr ? !settings.look_to_grapple : !settings.look_to_lock_on) {
+        if (!(settings.cannon_targeting && settings.gun_targeting_enabled) &&
+            (point != nullptr ? !settings.look_to_grapple : !settings.look_to_lock_on)) {
             continue;
         }
         // The game's own target rules (CPlayer::FindOrbitableObjects).
@@ -350,19 +352,23 @@ void VrLookTargetUpdate(CStateManager& mgr, const CPlayer& player) noexcept {
     }
     const PortVrSettings settings = GetVrSettings();
     const bool scanVisor = mgr.GetPlayerState()->GetCurrentVisor() == CPlayerState::kPV_Scan;
-    if (scanVisor ? !settings.patch_gun_ray_target : (!settings.look_to_lock_on && !settings.look_to_grapple)) {
+    const bool cannonTargeting = settings.CannonTargetingForVisor(scanVisor);
+    if (!cannonTargeting &&
+        (scanVisor ? !settings.patch_gun_ray_target : (!settings.look_to_lock_on && !settings.look_to_grapple))) {
         return;
     }
     CVector3f origin;
     CVector3f direction;
-    if (!VrHeadGaze(player.GetFirstPersonCameraTransform(mgr), origin, direction)) {
+    const CTransform4f camera = player.GetFirstPersonCameraTransform(mgr);
+    if (!(cannonTargeting ? VrCannonAim(player, camera, origin, direction)
+                         : VrHeadGaze(camera, origin, direction))) {
         return;
     }
     s_look.active = scanVisor;
     s_look.lockActive = !scanVisor;
-    s_look.lockOn = settings.look_to_lock_on;
-    s_look.grapple = settings.look_to_grapple;
-    s_look.noCameraTurn = settings.look_lock_no_camera_turn;
+    s_look.lockOn = cannonTargeting || settings.look_to_lock_on;
+    s_look.grapple = cannonTargeting || settings.look_to_grapple;
+    s_look.noCameraTurn = cannonTargeting || settings.look_lock_no_camera_turn;
     // Orbit disable sources (CPlayer::UpdateOrbitableObjects): nothing to target.
     if (player.CheckOrbitDisableSourceList()) {
         return;
@@ -373,6 +379,29 @@ void VrLookTargetUpdate(CStateManager& mgr, const CPlayer& player) noexcept {
     } else {
         UpdateLock(mgr, player, settings, ray, origin, previousLock);
     }
+}
+
+bool VrCannonTargetPoint(const CStateManager& mgr, CVector3f& point) noexcept {
+    const PortVrSettings settings = GetVrSettings();
+    const CPlayer& player = *mgr.GetPlayer();
+    const bool scanVisor = mgr.GetPlayerState()->GetCurrentVisor() == CPlayerState::kPV_Scan;
+    if (!settings.CannonTargetingForVisor(scanVisor) || !VrImmersive() ||
+        player.GetMorphballTransitionState() != CPlayer::kMS_Unmorphed) {
+        return false;
+    }
+    CVector3f origin;
+    CVector3f direction;
+    if (!VrCannonAim(player, mgr.GetCameraManager()->GetCurrentCameraTransform(mgr), origin, direction)) {
+        return false;
+    }
+    const float distance = LookScan::MaxAlong(settings.gun_targeting_distance);
+    TEntityList nearList;
+    mgr.BuildNearList(nearList, origin, direction, distance, kLineOfSightFilter, &player);
+    TUniqueId hitId = kInvalidUniqueId;
+    const CRayCastResult hit = mgr.RayWorldIntersection(hitId, origin, direction, distance,
+                                                       kLineOfSightFilter, nearList);
+    point = hit.IsValid() ? hit.GetPoint() : origin + direction * distance;
+    return true;
 }
 
 bool VrLookToScanTarget(const CStateManager& mgr, TUniqueId& id) noexcept {

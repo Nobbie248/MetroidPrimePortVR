@@ -6,6 +6,7 @@
 
 #include "vr/openxr_settings_panel.h"
 #include "vr/vr_menu.h"
+#include "vr/virtual_screen_anchor.h"
 
 #include <cmath>
 #include <cstdio>
@@ -372,25 +373,37 @@ void TestConfig() {
 
   // Page 2 ends with RESET CONFIG, two clicks; it leaves PrimedGun's settings alone.
   Click(s, v, pc, kNextX, kPageY, now, actions);
-  Check(s.port_page == 1 && ItemCount(s, pc) == 9, "config page 2");
+  Check(s.port_page == 1 && ItemCount(s, pc) == 10, "config page 2");
   // LOOK TO LOCK-ON, LOOK TO GRAPPLE and NO CAMERA TURN ON LOCK follow LOOK TO SCAN.
-  Check(BuildRows(s, v, pc)[4].label == std::string("LOOK TO LOCK-ON") &&
-            BuildRows(s, v, pc)[5].label == std::string("LOOK TO GRAPPLE") &&
-            BuildRows(s, v, pc)[6].label == std::string("NO CAMERA TURN ON LOCK"),
+  Check(BuildRows(s, v, pc)[4].label == std::string("CANNON TARGETING") &&
+            BuildRows(s, v, pc)[5].label == std::string("LOOK TO LOCK-ON") &&
+            BuildRows(s, v, pc)[6].label == std::string("LOOK TO GRAPPLE") &&
+            BuildRows(s, v, pc)[7].label == std::string("NO CAMERA TURN ON LOCK"),
         "look to lock-on and grapple rows");
   Check(!v.look_lock_no_camera_turn, "the camera turns on a lock by default");
+  Check(v.cannon_targeting, "cannon targeting defaults on");
+  Check(v.CannonTargetingForVisor(false) && !v.CannonTargetingForVisor(true),
+        "enabled cannon targeting applies to combat but never the scan visor");
+  v.cannon_targeting = false;
+  Check(!v.CannonTargetingForVisor(false) && !v.CannonTargetingForVisor(true),
+        "disabled cannon targeting changes neither visor");
+  Click(s, v, pc, kLabelX, RowY(kPortConfigTab, 4), now, actions);
+  Check(v.cannon_targeting && BuildRows(s, v, pc)[4].value == "ON", "cannon targeting toggles on");
+  Click(s, v, pc, kLabelX, RowY(kPortConfigTab, 4), now, actions);
+  Check(!v.cannon_targeting, "cannon targeting toggles off");
   Click(s, v, pc, kLabelX, RowY(kPortConfigTab, 4), now, actions);
   Click(s, v, pc, kLabelX, RowY(kPortConfigTab, 5), now, actions);
   Click(s, v, pc, kLabelX, RowY(kPortConfigTab, 6), now, actions);
+  Click(s, v, pc, kLabelX, RowY(kPortConfigTab, 7), now, actions);
   Check(!v.look_to_lock_on && !v.look_to_grapple && v.look_lock_no_camera_turn,
         "look to lock-on, grapple and camera turn switches");
   v.metroid_hud_size = 2.0f;
-  Click(s, v, pc, kLabelX, RowY(kPortConfigTab, 8), now, actions);
+  Click(s, v, pc, kLabelX, RowY(kPortConfigTab, 9), now, actions);
   Check(s.reset_confirm == kResetPortConfig && Near(v.render_scale, kVrRenderScaleMax), "reset config armed");
-  Click(s, v, pc, kLabelX, RowY(kPortConfigTab, 8), now, actions);
+  Click(s, v, pc, kLabelX, RowY(kPortConfigTab, 9), now, actions);
   Check(Near(v.render_scale, PortVrSettings{}.render_scale) && v.display_refresh_rate == 0.0f &&
             v.remove_cinematic_bars && v.look_to_lock_on && v.look_to_grapple && !v.look_lock_no_camera_turn &&
-            Near(v.metroid_hud_size, 2.0f),
+            v.cannon_targeting && Near(v.metroid_hud_size, 2.0f),
         "reset config");
 
   // The Quest: foveation waits for the next start without density maps.
@@ -517,6 +530,77 @@ void TestPlacement() {
   Check(Near(dot.position, {0.0f, 0.0f, -2.0f + kDotLift}), "dot in front of the panel");
 }
 
+void TestScreenAnchor() {
+  VirtualScreenAnchor anchor;
+  screen_math::Pose head{{1.f, 1.7f, 2.f}, {0.f, 0.f, 0.f, 1.f}};
+  anchor.Update(VRPresentationMode::VirtualScreen, VRGameMode::FrontEnd, nullptr, 2.f, 0);
+  Check(!anchor.Valid(), "screen waits for the first tracked head pose");
+  anchor.Update(VRPresentationMode::VirtualScreen, VRGameMode::FrontEnd, &head, 2.f, 0);
+  Check(anchor.Valid() && Near(anchor.Pose().position, {1.f, 1.7f, 0.f}),
+        "first screen is ahead of the head at head height");
+
+  const float halfSqrt = std::sqrt(0.5f);
+  head.orientation = {0.f, halfSqrt, 0.f, halfSqrt};
+  head.position = {3.f, 1.8f, 4.f};
+  anchor.Update(VRPresentationMode::VirtualScreen, VRGameMode::FrontEnd, &head, 2.f, 0);
+  Check(Near(anchor.Pose().position, {1.f, 1.7f, 0.f}),
+        "turning or moving the head does not drag an open screen");
+
+  anchor.Update(VRPresentationMode::Immersive, VRGameMode::InGame, &head, 2.f, 0);
+  Check(!anchor.Valid(), "gameplay releases the previous screen anchor");
+  anchor.Update(VRPresentationMode::VirtualScreen, VRGameMode::Paused, nullptr, 2.f, 0);
+  Check(anchor.Valid() && Near(anchor.Pose().position, {1.f, 1.8f, 4.f}),
+        "menu opening during a tracking blip uses the last headset facing");
+  Check(Near(screen_math::Rotate(anchor.Pose().orientation, {0.f, 0.f, -1.f}), {-1.f, 0.f, 0.f}),
+        "reopened menu faces the new headset yaw");
+
+  head.orientation = {0.f, -halfSqrt, 0.f, halfSqrt};
+  anchor.Update(VRPresentationMode::VirtualScreen, VRGameMode::Cinematic, &head, 2.f, 0);
+  Check(Near(anchor.Pose().position, {5.f, 1.8f, 4.f}),
+        "cinema opening after a menu captures a new facing without gameplay between");
+  head.orientation = {halfSqrt, 0.f, 0.f, halfSqrt};
+  anchor.Update(VRPresentationMode::VirtualScreen, VRGameMode::Cinematic, &head, 2.f, 0);
+  Check(Near(anchor.Pose().position, {5.f, 1.8f, 4.f}), "cinema stays anchored while looking around");
+
+  anchor.Reset();
+  anchor.Update(VRPresentationMode::VirtualScreen, VRGameMode::Cinematic, nullptr, 2.f, 0);
+  Check(!anchor.Valid(), "recenter discards poses from the old reference space");
+  head.orientation = {0.5f, 0.f, 0.f, std::sqrt(0.75f)};
+  anchor.Update(VRPresentationMode::VirtualScreen, VRGameMode::Cinematic, &head, 2.f, 0);
+  Check(Near(anchor.Pose().position, {3.f, 1.8f, 2.f}) &&
+            Near(screen_math::Rotate(anchor.Pose().orientation, {0.f, 1.f, 0.f}), {0.f, 1.f, 0.f}),
+        "screen remains upright when captured with head pitch");
+}
+
+void TestCinemaCooldown() {
+  VirtualScreenAnchor anchor;
+  screen_math::Pose head{{0.f, 1.7f, 0.f}, {0.f, 0.f, 0.f, 1.f}};
+  anchor.Update(VRPresentationMode::VirtualScreen, VRGameMode::Cinematic, &head, 2.f, 100'000'000);
+  const auto original = anchor.Pose().position;
+  const float halfSqrt = std::sqrt(0.5f);
+  head.orientation = {0.f, halfSqrt, 0.f, halfSqrt};
+  anchor.Update(VRPresentationMode::VirtualScreen, VRGameMode::Transition, &head, 2.f, 600'000'000);
+  Check(anchor.Valid() && Near(anchor.Pose().position, original),
+        "scene loading keeps the cinema screen's anchor during cooldown");
+  anchor.Update(VRPresentationMode::Immersive, VRGameMode::InGame, &head, 2.f, 900'000'000);
+  Check(!anchor.Valid(), "retained cinema anchor is not presented during immersive gameplay");
+  anchor.Update(VRPresentationMode::VirtualScreen, VRGameMode::Cinematic, &head, 2.f, 1'099'000'000);
+  Check(anchor.Valid() && Near(anchor.Pose().position, original),
+        "a cinema scene returning at 999 milliseconds retains its facing");
+
+  anchor.Update(VRPresentationMode::Immersive, VRGameMode::InGame, &head, 2.f, 1'200'000'000);
+  anchor.Update(VRPresentationMode::VirtualScreen, VRGameMode::Cinematic, &head, 2.f, 2'099'000'000);
+  Check(Near(anchor.Pose().position, {-2.f, 1.7f, 0.f}),
+        "after one full second outside cinema a new cutscene captures current facing");
+  head.orientation = {0.f, -halfSqrt, 0.f, halfSqrt};
+  anchor.Update(VRPresentationMode::VirtualScreen, VRGameMode::Cinematic, &head, 2.f, 10'000'000'000);
+  Check(Near(anchor.Pose().position, {-2.f, 1.7f, 0.f}),
+        "cooldown never relocates a continuously visible cutscene");
+  anchor.Update(VRPresentationMode::VirtualScreen, VRGameMode::Paused, &head, 2.f, 10'100'000'000);
+  Check(Near(anchor.Pose().position, {2.f, 1.7f, 0.f}),
+        "an intentional menu still opens in the latest facing during cinema cooldown");
+}
+
 void TestControls() {
   using settings_panel::Controls;
   using settings_panel::ToggleOptions;
@@ -629,6 +713,8 @@ int main() {
   TestConfig();
   TestDebug();
   TestPlacement();
+  TestScreenAnchor();
+  TestCinemaCooldown();
   TestControls();
   std::puts("vr menu tests passed");
   return 0;

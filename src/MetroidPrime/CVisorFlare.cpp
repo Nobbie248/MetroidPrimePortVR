@@ -23,6 +23,10 @@
 
 #include "math.h"
 
+#ifdef TARGET_PC
+#include "vr/vr_view.h"
+#endif
+
 CVisorFlare::CFlareDef::CFlareDef(const TToken< CTexture >& tex, float pos, float scale, uint color)
 : x0_tex(tex), x8_pos(pos), xc_scale(scale), x10_color(color) {
   x0_tex.Lock();
@@ -66,7 +70,11 @@ void CVisorFlare::Update(float dt, const CVector3f& pos, const CActor* act, CSta
        (x2c_thermalVisorMode != 1 && visor == CPlayerState::kPV_Thermal)) &&
       mgr.GetPlayer()->GetMorphballTransitionState() == CPlayer::kMS_Unmorphed) {
 
-    CVector3f camPos = mgr.GetCameraManager()->GetCurrentCamera(mgr).GetTranslation();
+    CTransform4f cameraXf = mgr.GetCameraManager()->GetCurrentCamera(mgr).GetTransform();
+#ifdef TARGET_PC
+    cameraXf = PortVr::VrHeadViewTransform(cameraXf);
+#endif
+    CVector3f camPos = cameraXf.GetTranslation();
     CVector3f camDiff = pos - camPos;
     float mag = camDiff.Magnitude();
     camDiff /= mag;
@@ -93,9 +101,8 @@ void CVisorFlare::Update(float dt, const CVector3f& pos, const CActor* act, CSta
     }
     x28_occlusionTime = rstl::min_val(x18_fadeTime, rstl::max_val(0.f, x28_occlusionTime));
 
-    const CGameCamera& curCam = mgr.GetCameraManager()->GetCurrentCamera(mgr);
-    CVector3f cameraForward = curCam.GetTransform().GetColumn(kDY);
-    CVector3f dir = pos - curCam.GetTranslation();
+    CVector3f cameraForward = cameraXf.GetColumn(kDY);
+    CVector3f dir = pos - camPos;
     x24_intensity = 1.f - x28_occlusionTime / x18_fadeTime;
 
     float dot = CVector3f::Dot(dir.AsNormalized(), cameraForward);
@@ -129,14 +136,21 @@ void CVisorFlare::Render(const CVector3f& inPos, const CStateManager& mgr) const
   CGraphics::DisableAllLights();
   gpRender->SetDepthReadWrite(false, false);
   const CGameCamera& cam = mgr.GetCameraManager()->GetCurrentCamera(mgr);
-  CVector3f camPos = cam.GetTranslation();
+  CTransform4f cameraXf = cam.GetTransform();
+#ifdef TARGET_PC
+  cameraXf = PortVr::VrHeadViewTransform(cameraXf);
+#endif
+  CVector3f camPos = cameraXf.GetTranslation();
   CVector3f inPosCopy = inPos;
 
   CTransform4f viewMatrix = CGraphics::GetViewMatrix();
+#ifdef TARGET_PC
+  viewMatrix = PortVr::VrHeadViewTransform(viewMatrix);
+#endif
   CVector3f invPos = viewMatrix.GetInverse() * inPosCopy;
   invPos = CVector3f(-invPos.GetX(), invPos.GetY(), -invPos.GetZ());
   const CVector3f invPos2 = viewMatrix * invPos;
-  CVector3f camFront = cam.GetTransform().GetForward();
+  CVector3f camFront = cameraXf.GetForward();
   CVector3f toFlare = inPosCopy - camPos;
   if (!close_enough(x24_intensity, 0.f)) {
     float angle = 0.f;

@@ -46,6 +46,9 @@ bool VrHeadGaze(const CTransform4f& cameraXf, CVector3f& origin, CVector3f& dire
 // icons, target reticles), which would otherwise face the body and show their
 // edge when the head turns, and would roll with a tilted head.
 CMatrix3f VrHeadViewRotation(const CTransform4f& cameraXf) noexcept;
+// Head orientation and position for CPU effects; the world render camera
+// remains unchanged so stereo replay does not apply head tracking twice.
+CTransform4f VrHeadViewTransform(const CTransform4f& cameraXf) noexcept;
 
 // Replaces `frustum` with the head-facing cone of the settings' culling angle
 // when immersive and culling is enabled; false leaves it alone.
@@ -59,6 +62,15 @@ bool VrSurfaceCullingVolume(const CTransform4f& cameraXf,
 // Immersive: the first-person camera keeps its yaw only (the headset supplies
 // the pitch), does not bob, and the arm cannon does not fidget.
 bool VrFlattenLookPitch() noexcept;
+// Latch headset yaw once on morph entry for the simulation camera and controls.
+void VrBeginBallCamera(const CTransform4f& firstPersonXf) noexcept;
+CVector3f VrBallCameraEntryDirection() noexcept;
+// Remove the latched yaw from the render base, since stereo adds head tracking.
+CTransform4f VrBallCameraBaseTransform(const CTransform4f& camera, float weight = 1.f) noexcept;
+// Unmorphing preserves the current render-base yaw and translates to eye height.
+void VrBeginUnmorphCamera(const CTransform4f& camera, const CVector3f& eyePosition) noexcept;
+CTransform4f VrUnmorphCameraBase(const CTransform4f& camera) noexcept;
+CTransform4f VrUnmorphCameraTransform(const CVector3f& eyePosition, float progress) noexcept;
 bool VrNoCameraBob() noexcept;
 bool VrNoArmCannonFidget() noexcept;
 // The headset is running and the settings remove the letterbox: the game's
@@ -90,6 +102,12 @@ bool VrCannonTransform(const CStateManager& mgr, const CPlayer& player, const CT
                        CTransform4f& gunXf) noexcept;
 // Whether the last VrCannonTransform placed the cannon.
 bool VrCannonTracked() noexcept;
+// The selected cannon controller's calibrated world-space aim, without
+// advancing model smoothing. False when the controller is not tracked.
+bool VrCannonAim(const CPlayer& player, const CTransform4f& cameraXf,
+                 CVector3f& origin, CVector3f& direction) noexcept;
+// Idle reticle on the cannon ray's first world hit, or its maximum reach.
+bool VrCannonTargetPoint(const CStateManager& mgr, CVector3f& point) noexcept;
 // The body turned at once (the snap turn): the next VrCannonTransform places
 // the cannon without easing from the old facing, as PrimedGun's snap turn
 // dropped its cannon smoothing.

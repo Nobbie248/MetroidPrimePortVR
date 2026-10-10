@@ -62,6 +62,19 @@ option(MP_BUILD_LAUNCHER "Build the PrimedGun Qt launcher (PrimedGun.exe)" OFF)
 # for the panel app in quest/.
 option(MP_BUILD_QUEST_LAUNCHER "Build the Quest launcher's JNI library" OFF)
 option(MP_ANDROID_NOD_STUB "Use a non-functional nod stub for Android build probes" OFF)
+# A system Abseil, fmt, SQLite, libpng or freetype ties the binary to the build
+# host's copies; Abseil's sonames change with every release, so a distro update
+# stops it starting (issue #27). Bundled, they are built from source and linked
+# in statically. SDL3, OpenSSL, zlib and zstd stay as they are: their sonames are
+# stable, and a static OpenSSL would look for CA certificates where the build
+# host's distro keeps them.
+if((CMAKE_SYSTEM_NAME STREQUAL "Linux" AND NOT ANDROID) OR APPLE)
+    set(_mp_bundled_default ON)
+else()
+    set(_mp_bundled_default OFF)
+endif()
+option(MP_BUNDLED_DEPS "Build Abseil, fmt, SQLite, libpng and freetype from source and link them statically, ignoring system copies" ${_mp_bundled_default})
+set(AURORA_BUNDLED_DEPS ${MP_BUNDLED_DEPS})
 
 # The decompiled game/engine sources and the port code around them are written
 # for a *signed* plain `char`: the PowerPC/MWCC original and every host the port
@@ -95,6 +108,13 @@ if(MP_ANDROID_NOD_STUB)
     add_library(mp_android_nod_stub STATIC platform/android_probe/nod_stub.c)
     target_include_directories(mp_android_nod_stub PUBLIC platform/android_probe/include)
     add_library(nod::nod ALIAS mp_android_nod_stub)
+endif()
+
+# Apple's libc++ still marks std::jthread/std::stop_token (used by aurora's
+# threads) experimental; the flag unlocks them and links libc++experimental.
+if(APPLE)
+    add_compile_options($<$<COMPILE_LANGUAGE:CXX,OBJCXX>:-fexperimental-library>)
+    add_link_options(-fexperimental-library)
 endif()
 
 # Aurora provides the GameCube/Wii compatibility layer (MIT): GX, OS, PAD, DVD,
@@ -210,6 +230,7 @@ set(MP_PORT_SOURCES
     platform/vr/vr_debug_tab.cpp
     platform/main.cpp
     platform/debug_ui.cpp
+    platform/port_input_settings.cpp
     platform/disc.cpp
     platform/shims.cpp
     platform/sdk_stubs.cpp
@@ -217,6 +238,10 @@ set(MP_PORT_SOURCES
     platform/port_textures.cpp
     platform/port_prompts.cpp
     platform/port_controls.cpp
+    platform/input/port_input_devices.cpp
+    platform/input/port_input_engine.cpp
+    platform/input/port_input_bindings.cpp
+    platform/input/port_input_remap_ui.cpp
     platform/port_randomizer.cpp
     platform/port_ap_metroidprime.cpp
     platform/port_ap_protocol.cpp
@@ -249,6 +274,8 @@ set(MP_PORT_SOURCES
     platform/port_data_folder.cpp
     platform/port_mods.cpp
     platform/port_mods_pak.cpp
+    platform/port_pal_languages.cpp
+    platform/port_pal_languages_import.cpp
     platform/port_actor_collision_bounds.cpp
     platform/port_importers.cpp
     platform/port_importers_lines.cpp
@@ -337,6 +364,9 @@ if(ANDROID)
 else()
     add_executable(metroid_prime_port ${MP_PORT_SOURCES})
 endif()
+# disc.cpp and port_pal_languages.cpp inflate compressed images and fonts. Aurora
+# provides ZLIB::ZLIB everywhere (its zlib-ng on Windows).
+target_link_libraries(metroid_prime_port PRIVATE ZLIB::ZLIB)
 if(MP_ENABLE_OPENXR)
     target_sources(metroid_prime_port PRIVATE
         platform/vr/openxr_runtime.cpp
@@ -452,12 +482,12 @@ mp_signed_char(metroid_prime_port)
 add_custom_target(port_build_info
     COMMAND ${CMAKE_COMMAND}
         "-DSOURCE_DIR=${CMAKE_CURRENT_SOURCE_DIR}"
-        "-DOUTPUT_HEADER=${CMAKE_CURRENT_BINARY_DIR}/generated/port_build_info.h"
+        "-DOUTPUT_SOURCE=${CMAKE_CURRENT_BINARY_DIR}/generated/port_build_info.cpp"
         -P "${CMAKE_CURRENT_SOURCE_DIR}/cmake/BuildRevision.cmake"
-    BYPRODUCTS "${CMAKE_CURRENT_BINARY_DIR}/generated/port_build_info.h"
+    BYPRODUCTS "${CMAKE_CURRENT_BINARY_DIR}/generated/port_build_info.cpp"
     VERBATIM)
 add_dependencies(metroid_prime_port port_build_info)
-target_include_directories(metroid_prime_port PRIVATE "${CMAKE_CURRENT_BINARY_DIR}/generated")
+target_sources(metroid_prime_port PRIVATE "${CMAKE_CURRENT_BINARY_DIR}/generated/port_build_info.cpp")
 if(MP_EMBED_RESOURCES)
     # The glyph textures and the pipeline cache seed live inside the executable, so
     # a packaged folder needs no loose copies, and a new executable dropped into an
@@ -513,8 +543,14 @@ elseif(CMAKE_LINK_GROUP_USING_RESCAN_SUPPORTED OR CMAKE_CXX_LINK_GROUP_USING_RES
         mp_game
         aurora::main
         "$<LINK_GROUP:RESCAN,aurora::core,aurora::gx>")
+elseif(APPLE)
+    # ld64 searches every archive again until nothing new resolves, so the
+    # cycle needs no group.
+    target_link_libraries(metroid_prime_port PRIVATE
+        mp_game
+        aurora::main aurora::core aurora::gx)
 else()
-    message(FATAL_ERROR "This port currently requires an ELF linker with RESCAN support or an MSVC-compatible COFF linker")
+    message(FATAL_ERROR "This port currently requires an ELF linker with RESCAN support, Apple ld or an MSVC-compatible COFF linker")
 endif()
 
 include(extern/aurora/cmake/AuroraCopyRuntimeDLLs.cmake)
@@ -583,8 +619,11 @@ endif()
 if(MP_BUILD_TESTS)
     enable_testing()
     add_test(NAME port_version COMMAND metroid_prime_port --version)
+    # PrimedGun: --version leads with the fork's release version (platform/main.cpp),
+    # so an empty one (launcher/CMakeLists.txt's set(PRIMEDGUN_LAUNCHER_VERSION ...)
+    # not read by cmake/BuildRevision.cmake) fails the test.
     set_tests_properties(port_version PROPERTIES TIMEOUT 15 LABELS port
-        PASS_REGULAR_EXPRESSION "Metroid Prime native port")
+        PASS_REGULAR_EXPRESSION "PrimedGun [0-9][^ ]* \\(Metroid Prime native port")
     add_executable(port_buffer_tests
         tests/port_buffers.cpp
         tests/port_forward_owner.cpp
@@ -656,6 +695,7 @@ if(MP_BUILD_TESTS)
     add_executable(port_disc_tests tests/port_disc.cpp platform/disc.cpp)
     target_include_directories(port_disc_tests PRIVATE platform/include extern/aurora/include)
     target_compile_definitions(port_disc_tests PRIVATE TARGET_PC)
+    target_link_libraries(port_disc_tests PRIVATE ZLIB::ZLIB)
     add_executable(port_mouse_tests tests/port_mouse.cpp)
     target_include_directories(port_mouse_tests PRIVATE platform/include)
     add_executable(port_map_batch_tests tests/port_map_batch.cpp)
@@ -716,6 +756,10 @@ if(MP_BUILD_TESTS)
     # The TLS end-to-end test runs tools/ap_fake_server.py from the source tree.
     target_compile_definitions(port_ws_tests PRIVATE
         "MP_SOURCE_DIR=\"${CMAKE_CURRENT_SOURCE_DIR}\"")
+    add_executable(port_pal_languages_tests tests/port_pal_languages.cpp platform/port_pal_languages.cpp
+        platform/port_mods_pak.cpp)
+    target_include_directories(port_pal_languages_tests PRIVATE platform/include)
+    target_link_libraries(port_pal_languages_tests PRIVATE ZLIB::ZLIB)
     add_executable(port_mods_tests tests/port_mods.cpp platform/port_mods_pak.cpp)
     target_include_directories(port_mods_tests PRIVATE platform/include)
     # The collision-box reader indexes PAK tables and inflates them; a test
@@ -782,6 +826,10 @@ if(MP_BUILD_TESTS)
     target_include_directories(port_env_tests PRIVATE platform/include)
     add_executable(port_hold_toggle_tests tests/port_hold_toggle.cpp)
     target_include_directories(port_hold_toggle_tests PRIVATE platform/include)
+    add_executable(port_input_engine_tests tests/port_input_engine.cpp platform/input/port_input_engine.cpp)
+    target_include_directories(port_input_engine_tests PRIVATE platform/include)
+    add_executable(port_input_bindings_tests tests/port_input_bindings.cpp platform/input/port_input_bindings.cpp platform/input/port_input_engine.cpp)
+    target_include_directories(port_input_bindings_tests PRIVATE platform/include)
     add_executable(port_tick_pair_tests tests/port_tick_pair.cpp)
     target_include_directories(port_tick_pair_tests PRIVATE platform/include)
     add_executable(port_input_map_tests tests/port_input_map.cpp)
@@ -789,6 +837,11 @@ if(MP_BUILD_TESTS)
     add_test(NAME port_input_map_tests COMMAND port_input_map_tests)
     set_tests_properties(port_input_map_tests PROPERTIES TIMEOUT 15 LABELS port)
     aurora_copy_runtime_dlls(port_input_map_tests)
+    add_executable(port_input_settings_tests tests/port_input_settings.cpp platform/port_input_settings.cpp)
+    target_include_directories(port_input_settings_tests PRIVATE platform/include)
+    add_test(NAME port_input_settings_tests COMMAND port_input_settings_tests)
+    set_tests_properties(port_input_settings_tests PROPERTIES TIMEOUT 15 LABELS port)
+    aurora_copy_runtime_dlls(port_input_settings_tests)
     add_executable(port_log_redact_tests tests/port_log_redact.cpp)
     target_include_directories(port_log_redact_tests PRIVATE platform/include)
     add_test(NAME port_log_redact_tests COMMAND port_log_redact_tests)
@@ -838,7 +891,7 @@ if(MP_BUILD_TESTS)
     target_link_libraries(port_launcher_tests PRIVATE primedgun_launcher_core)
     add_test(NAME port_launcher_tests COMMAND port_launcher_tests "${CMAKE_CURRENT_BINARY_DIR}/launcher-test-data")
     set_tests_properties(port_launcher_tests PROPERTIES TIMEOUT 15 LABELS port)
-    foreach(test IN ITEMS port_remastered_report_tests port_buffer_tests port_ai_tests port_randomizer_tests port_apclient_tests port_ap_solo_tests port_ap_logic_tests port_rando_gen_tests port_musyx_tests port_musyx_charge_loop_tests port_disc_tests port_mouse_tests port_touch_pad_tests port_json_tests port_ws_tests port_mods_tests port_actor_collision_bounds_tests port_room_env_tests port_room_geo_tests port_hd_font_tests port_hud_bars_tests port_remastered_astc_tests port_remastered_hud_tests port_remastered_movie_tests port_gallery_tests port_remastered_nso_tests port_remastered_text_tests port_remastered_uv_tests port_remastered_anuv_tests port_remastered_lits_tests port_remastered_blend_tests port_remastered_image_tests port_remastered_effect_tests port_remastered_effect_convert_tests port_remastered_effect_import_tests port_importers_tests port_custom_res_tests port_hold_toggle_tests port_env_tests port_tick_pair_tests port_livesplit_tests port_discord_tests port_update_check_tests port_savestate_tests port_timing_tests port_audio_math_tests port_vr_stereo_tests port_vr_look_scan_tests port_vr_visor_dpad_tests port_vr_beam_wheel_tests port_vr_menu_tests port_vr_snap_turn_tests port_vr_directional_move_tests)
+    foreach(test IN ITEMS port_remastered_report_tests port_buffer_tests port_ai_tests port_randomizer_tests port_apclient_tests port_ap_solo_tests port_ap_logic_tests port_rando_gen_tests port_musyx_tests port_musyx_charge_loop_tests port_disc_tests port_mouse_tests port_touch_pad_tests port_json_tests port_ws_tests port_mods_tests port_pal_languages_tests port_actor_collision_bounds_tests port_room_env_tests port_room_geo_tests port_hd_font_tests port_hud_bars_tests port_remastered_astc_tests port_remastered_hud_tests port_remastered_movie_tests port_gallery_tests port_remastered_nso_tests port_remastered_text_tests port_remastered_uv_tests port_remastered_anuv_tests port_remastered_lits_tests port_remastered_blend_tests port_remastered_image_tests port_remastered_effect_tests port_remastered_effect_convert_tests port_remastered_effect_import_tests port_importers_tests port_custom_res_tests port_hold_toggle_tests port_input_engine_tests port_input_bindings_tests port_env_tests port_tick_pair_tests port_livesplit_tests port_discord_tests port_update_check_tests port_savestate_tests port_timing_tests port_audio_math_tests port_vr_stereo_tests port_vr_look_scan_tests port_vr_visor_dpad_tests port_vr_beam_wheel_tests port_vr_menu_tests port_vr_snap_turn_tests port_vr_directional_move_tests)
         add_test(NAME ${test} COMMAND ${test})
         set_tests_properties(${test} PROPERTIES TIMEOUT 15 LABELS port)
         aurora_copy_runtime_dlls(${test})

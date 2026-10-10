@@ -51,8 +51,10 @@ void BuildAboutTab(TabContext& ctx, QTabWidget* tabs) {
       "Metroid Prime as a native VR game, built on the Metroid Prime decompilation's PC port.")));
   layout->addWidget(Paragraph(
       QObject::tr("Version: %1").arg(QStringLiteral(PRIMEDGUN_LAUNCHER_VERSION)), true));
-  layout->addWidget(
-      Paragraph(QObject::tr("Build: revision %1").arg(QStringLiteral(MP_BUILD_REVISION)), true));
+  // MP_BUILD_REVISION is a char array defined in the generated port_build_info.cpp
+  // (upstream 074e531a), not a literal, so QStringLiteral cannot take it.
+  layout->addWidget(Paragraph(
+      QObject::tr("Build: revision %1").arg(QString::fromLatin1(MP_BUILD_REVISION)), true));
   layout->addWidget(Paragraph(
       QObject::tr("Supported game: Metroid Prime NTSC-U Revision 0 (1.0), game ID GM8E01"), true));
   layout->addWidget(Paragraph(

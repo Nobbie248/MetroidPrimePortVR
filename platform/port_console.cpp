@@ -19,6 +19,7 @@
 #include "port_room_geo.h"
 #include "port_room_liquid.h"
 #include "port_console.h"
+#include "port_controls.h"
 #include "port_mods.h"
 #include "port_savestate.h"
 #include "port_tracker.h"
@@ -54,6 +55,8 @@
 #include "MetroidPrime/Player/CPlayer.hpp"
 #include "MetroidPrime/Player/CPlayerGun.hpp"
 #include "MetroidPrime/Player/CPlayerState.hpp"
+#include "MetroidPrime/ScriptObjects/CScriptPlayerHint.hpp"
+#include "MetroidPrime/ScriptObjects/CScriptSpecialFunction.hpp"
 #include "MetroidPrime/ScriptObjects/CScriptWater.hpp"
 #include "MetroidPrime/TCastTo.hpp"
 #include "WorldFormat/CAreaOctTree.hpp"
@@ -125,6 +128,16 @@ constexpr size_t kMaxLine = 64 * 1024;
 constexpr size_t kMaxQueued = 256;
 #endif
 
+#ifndef _WIN32
+// macOS has no MSG_NOSIGNAL; SO_NOSIGPIPE is set on the client socket instead.
+#ifdef MSG_NOSIGNAL
+constexpr int kSendFlags = MSG_NOSIGNAL;
+#else
+constexpr int kSendFlags = 0;
+#endif
+
+#endif
+
 void SendRaw(unsigned generation, const std::string& text) {
 #ifndef _WIN32
   std::lock_guard< std::mutex > lock(sClientMutex);
@@ -135,7 +148,7 @@ void SendRaw(unsigned generation, const std::string& text) {
   int budget = kSendBudgetMs;
   while (done < text.size()) {
     const ssize_t n =
-        send(sClient, text.data() + done, text.size() - done, MSG_NOSIGNAL | MSG_DONTWAIT);
+        send(sClient, text.data() + done, text.size() - done, kSendFlags | MSG_DONTWAIT);
     if (n > 0) {
       done += static_cast< size_t >(n);
       budget = kSendBudgetMs; // still reading, just slowly
@@ -170,6 +183,12 @@ void ListenThread(int listener) {
   std::string buffer;
   for (;;) {
     const int client = accept(listener, nullptr, nullptr);
+#ifdef SO_NOSIGPIPE
+    if (client >= 0) {
+      const int on = 1;
+      setsockopt(client, SOL_SOCKET, SO_NOSIGPIPE, &on, sizeof(on));
+    }
+#endif
     if (client < 0) {
       // Out of descriptors and the like do not clear up at once; do not spin.
       if (errno != EINTR) {
@@ -494,6 +513,8 @@ void CmdHelp() {
   Out("items                      the player's inventory");
   Out("visor <combat|xray|scan|thermal|0-3>, beam <power|ice|wave|plasma|0-3>  switch like the touch wheels");
   Out("heal                       refill health");
+  Out("kill <id>                  kill an actor as with a last Power Beam shot (bosses too)");
+  Out("hurt [n] | die             hit the player for n (default 10) with the HUD flash | empty the health");
   Out("god [on|off]               the player takes no damage (no argument: show)");
   Out("memo <text>                show text as a HUD message");
   Out("strg <id> [index]          a string table as the game loads it (mods included)");
@@ -558,6 +579,8 @@ void CmdHelp() {
   Out("                           fly the view away from the player (HUD hidden; freeze holds the game still)");
   Out("aspect <4:3|16:9|window>   switch the rendering aspect, as the Options row does");
   Out("original [on|off]   Original experience (retail settings over the saved ones)");
+  Out("keypreset classic|mouse   apply a keyboard preset (Controls > Remap), as its button");
+  Out("padpreset gamecube|remastered|modern|southpaw   apply a controller preset to pad 1");
   Out("fov <45..90>               first-person vertical FOV, as the Options row does");
   Out("window [<w> <h>]           resize the window (leaves fullscreen); prints the size");
   Out("msaa <1|4>, aniso <1..16>  anti-aliasing and anisotropic filtering, applied next frame");
@@ -781,6 +804,20 @@ void CmdObj(CStateManager& mgr) {
       Out("touch bounds (%.1f, %.1f, %.1f) .. (%.1f, %.1f, %.1f)", lo.GetX(), lo.GetY(), lo.GetZ(),
           hi.GetX(), hi.GetY(), hi.GetZ());
     }
+  }
+  if (const CPlayer* player = TCastToConstPtr< CPlayer >(ent)) {
+    const CVector3f dir = player->PortControlDirFlat();
+    Out("player hint u%d (%d queued), control dir override %d, control dir flat (%.2f, %.2f, %.2f)",
+        player->PortPlayerHint().Value(), player->PortPlayerHintCount(),
+        player->PortControlDirOverride() ? 1 : 0, dir.GetX(), dir.GetY(), dir.GetZ());
+  }
+  if (const CScriptSpecialFunction* func = TCastToConstPtr< CScriptSpecialFunction >(ent)) {
+    Out("special function %d, locator \"%s\"", static_cast< int >(func->PortFunction()),
+        func->PortLocatorName().data());
+  }
+  if (const CScriptPlayerHint* hint = TCastToConstPtr< CScriptPlayerHint >(ent)) {
+    Out("player hint flags 0x%x, priority %d, count %d", hint->GetOverrideFlags(), hint->GetPriority(),
+        hint->GetObjectCount());
   }
   if (const CPhysicsActor* physics = TCastToConstPtr< CPhysicsActor >(ent)) {
     const CVector3f vel = physics->GetVelocityWR();
@@ -1043,6 +1080,26 @@ void CmdLook(CStateManager& mgr) {
   Finish();
 }
 
+// Deals an actor its remaining health as Power Beam damage, past its
+// vulnerability, so it dies as from a last shot (bosses run their death scripts).
+void CmdKill(CStateManager& mgr) {
+  if (sCmd.args.size() < 2) {
+    return Finish("usage: kill <id>");
+  }
+  CActor* actor = TCastToPtr< CActor >(FindObject(mgr, sCmd.args[1]));
+  if (actor == nullptr) {
+    return Finish("no such actor");
+  }
+  const CHealthInfo* health = actor->GetHealthInfo(mgr);
+  if (health == nullptr) {
+    return Finish("that actor has no health");
+  }
+  const CVector3f dir = actor->GetTransform().GetForward();
+  mgr.ApplyLocalDamage(actor->GetTranslation(), dir, *actor, health->GetHP() + 1.f,
+                       CWeaponMode::Power());
+  Finish();
+}
+
 void CmdHeal(CStateManager& mgr) {
   CPlayerState& ps = *mgr.PlayerState();
   ps.HealthInfo()->SetHP(ps.CalculateHealth());
@@ -1092,6 +1149,20 @@ void CmdBeam(CStateManager& mgr) {
   }
   PortDebug::RequestBeam(beam);
   Out("beam %s requested", kBeams[beam]);
+  Finish();
+}
+
+// Hurts the player as an enemy hit would (HUD flash, damage sfx) and takes the health off;
+// `hurt 0` is a hit that costs nothing... `die` empties the health (death sequence).
+float sPendingHurt = 0.f;
+
+void CmdHurt(const std::string& arg) {
+  sPendingHurt = arg.empty() ? 10.f : static_cast<float>(atof(arg.c_str()));
+  Finish();
+}
+
+void CmdDie(CStateManager& mgr) {
+  mgr.PlayerState()->HealthInfo()->SetHP(0.f);
   Finish();
 }
 
@@ -1713,7 +1784,7 @@ bool IsTickCommand(const std::string& name) {
     }
   }
   static const char* const names[] = {"status", "areas", "objs", "obj", "send", "give",
-                                      "take", "items", "heal", "god", "memo", "strg", "language", "tp", "room", "fx", "face", "look", "warp",
+                                      "take", "items", "heal", "kill", "hurt", "die", "god", "memo", "strg", "language", "tp", "room", "fx", "face", "look", "warp",
                                       "tracker", "enter", "visor", "beam"};
   for (const char* n : names) {
     if (name == n) {
@@ -1744,6 +1815,12 @@ void RunTick(CStateManager& mgr) {
     CmdItems(mgr);
   } else if (name == "heal") {
     CmdHeal(mgr);
+  } else if (name == "kill") {
+    CmdKill(mgr);
+  } else if (name == "hurt") {
+    CmdHurt(sCmd.args.size() > 1 ? sCmd.args[1] : std::string());
+  } else if (name == "die") {
+    CmdDie(mgr);
   } else if (name == "god") {
     CmdGod();
   } else if (name == "visor") {
@@ -1830,6 +1907,14 @@ void RunFrame() {
   } else if (name == "quit") {
     Finish();
     sQuit = true;
+  } else if (name == "phazongun") {
+    CStateManager* const mgr = const_cast< CStateManager* >(PortDebug::StateManager());
+    if (mgr == nullptr || mgr->GetPlayer() == nullptr) {
+      return Finish("not in a game");
+    }
+    const std::string mode = sCmd.args.size() > 1 ? Lower(sCmd.args[1]) : "on";
+    const_cast< CPlayerGun* >(mgr->GetPlayer()->GetPlayerGun())->PortForcePhazonBeam(mode != "off");
+    Finish();
   } else if (name == "title") {
     CStateManager* const mgr = const_cast< CStateManager* >(PortDebug::StateManager());
     if (mgr == nullptr) {
@@ -1857,6 +1942,18 @@ void RunFrame() {
       return Finish("usage: original [on|off]");
     }
     Out(PortDebug::OriginalExperience() ? "original experience on" : "original experience off");
+    Finish();
+  } else if (name == "keypreset") {
+    const std::string preset = sCmd.args.size() > 1 ? Lower(sCmd.args[1]) : "";
+    if (!PortControls::ApplyKeyPresetNamed(preset)) {
+      return Finish("usage: keypreset classic|mouse");
+    }
+    Finish();
+  } else if (name == "padpreset") {
+    const std::string preset = sCmd.args.size() > 1 ? Lower(sCmd.args[1]) : "";
+    if (!PortControls::ApplyPadPresetNamed(preset)) {
+      return Finish("usage: padpreset gamecube|remastered|modern|southpaw");
+    }
     Finish();
   } else if (name == "fov") {
     const float fov =
@@ -1958,7 +2055,7 @@ void RunFrame() {
     Out("%s", PortSaveState::LastMessage().c_str());
     Finish();
   } else if (name == "remastered") {
-    // remastered [start <image.nsp> [key file] | cancel]: the import of
+    // remastered [start <image.nsp|xci> [key file] | cancel]: the import of
     // port_remastered_import.h, and how far it is.
     const std::string verb = sCmd.args.size() > 1 ? Lower(sCmd.args[1]) : "";
     if (verb == "start" && sCmd.args.size() > 2) {
@@ -1969,7 +2066,7 @@ void RunFrame() {
     } else if (verb == "cancel") {
       PortRemastered::CancelImport();
     } else if (!verb.empty()) {
-      return Finish("usage: remastered [start <image.nsp> [key file] | cancel]");
+      return Finish("usage: remastered [start <image.nsp|xci> [key file] | cancel]");
     }
     const PortRemastered::ImportState state = PortRemastered::ImportStatus();
     Out("%s %d/%d failed %d: %s",
@@ -2872,6 +2969,12 @@ bool PortConsoleFrame(unsigned frame) {
     }
   }
   return sQuit;
+}
+
+float PortConsoleTakePendingHurt() {
+  const float amount = sPendingHurt;
+  sPendingHurt = 0.f;
+  return amount;
 }
 
 void PortConsoleTick(CStateManager& mgr) {

@@ -12,11 +12,15 @@
 
 #include "../gfx/bloom.hpp"
 #include "../gfx/volfog.hpp"
+#include "../gfx/thermal.hpp"
+#include "../gfx/xray.hpp"
 #include "../gfx/depth_peek.hpp"
 #include "geometry_cache.hpp"
 #include "native_vertex.hpp"
 #include "../gfx/probe.hpp"
 #include "../gfx/shadow.hpp"
+#include "../gfx/hash.hpp"
+#include "../gfx/pipeline_cache.hpp"
 #include "../gfx/recording.hpp"
 #include "../gfx/stereo_shadow.hpp"
 #include "../internal.hpp"
@@ -29,6 +33,7 @@
 #include "shader_info.hpp"
 #include "texture.hpp"
 
+#include <absl/container/flat_hash_map.h>
 #include <tracy/Tracy.hpp>
 
 #include <algorithm>
@@ -128,6 +133,7 @@ void write_list_indices(u16* out, GXPrimitive prim, u16 vtxStart, u16 vtxCount) 
   }
 }
 
+// Sized once and written directly (upstream 2f044fe6 did the same): this runs for nearly every draw.
 u32 prepare_idx_buffer(ByteBuffer& buf, GXPrimitive prim, u16 vtxStart, u16 vtxCount) noexcept {
   const u32 count = list_index_count(prim, vtxCount);
   write_list_indices(reinterpret_cast<u16*>(buf.append_uninitialized(count * sizeof(u16))), prim, vtxStart, vtxCount);
@@ -166,6 +172,15 @@ struct FogRangeLutEntry {
 
 constexpr size_t MaxFogRangeLuts = 32;
 std::vector<FogRangeLutEntry> sFogRangeLuts;
+
+struct PipelineMemo {
+  ShaderInfo shaderInfo{};
+  gfx::PipelineRef shadowPipelineRef{};
+  bool shadowCaster = false;
+};
+// Keyed by pipeline ref (the config's hash); entries stay valid until the config's pipeline is
+// dropped, which gfx::touch_pipeline reports.
+absl::flat_hash_map<gfx::PipelineRef, PipelineMemo> sPipelineMemo;
 
 struct DrawCache {
   PipelineConfig config{};
@@ -975,23 +990,43 @@ static void push_gx_draw(GXPrimitive prim, GXVtxFmt fmt, u32 vtxCount, gfx::Rang
     const bool prevShadowReceive = cache.shaderInfo.shadowReceive;
     const bool prevUsesLightmap = cache.shaderInfo.usesLightmap;
     populate_pipeline_config(cache.config, prim, fmt);
-    cache.shaderInfo = build_shader_info(cache.config.shaderConfig);
-    warn_missing_uv_sets(cache.config.shaderConfig, cache.shaderInfo);
-    cache.pipelineRef = gfx::pipeline_ref(cache.config);
+    // PrimedGun: the eye passes' pipelines (multiviewPipelineRefs) were the previous config's.
     cache.multiviewPipelineMask = 0;
-    // Only an opaque surface that writes depth casts: the shadow map's vertex-only pass can't
-    // alpha-test or blend. The game draws most opaque surfaces as a ONE/ZERO blend.
-    const auto& sc = cache.config.shaderConfig;
-    const bool opaque = cache.config.blendMode == GX_BM_NONE ||
-                        (cache.config.blendMode == GX_BM_BLEND && cache.config.blendFacSrc == GX_BL_ONE &&
-                         cache.config.blendFacDst == GX_BL_ZERO);
-    cache.shadowCaster = cache.shaderInfo.usesShadow && cache.config.depthCompare && cache.config.depthUpdate &&
-                         opaque && !sc.alphaCompare && sc.depthOnly == 0;
-    if (cache.shadowCaster) {
-      PipelineConfig shadowConfig = cache.config;
-      shadowConfig.shadowPass = 1;
-      shadowConfig.msaaSamples = 1;
-      cache.shadowPipelineRef = gfx::pipeline_ref(shadowConfig);
+    // A frame switches pipelines hundreds of times between a few hundred configs. The config's
+    // hash is the pipeline's ref, so a config seen before reuses its shader info and shadow
+    // pipeline without the second lookup (shader info depends on the config alone).
+    const gfx::PipelineRef ref = xxh3_hash(cache.config, static_cast<HashType>(gfx::ShaderType::GX));
+    auto memoIt = sPipelineMemo.find(ref);
+    if (memoIt != sPipelineMemo.end() && gfx::touch_pipeline(ref) &&
+        (!memoIt->second.shadowCaster || gfx::touch_pipeline(memoIt->second.shadowPipelineRef))) {
+      const auto& memo = memoIt->second;
+      cache.shaderInfo = memo.shaderInfo;
+      cache.pipelineRef = ref;
+      cache.shadowCaster = memo.shadowCaster;
+      cache.shadowPipelineRef = memo.shadowPipelineRef;
+    } else {
+      cache.shaderInfo = build_shader_info(cache.config.shaderConfig);
+      warn_missing_uv_sets(cache.config.shaderConfig, cache.shaderInfo);
+      cache.pipelineRef = gfx::pipeline_ref(cache.config);
+      // Only an opaque surface that writes depth casts: the shadow map's vertex-only pass can't
+      // alpha-test or blend. The game draws most opaque surfaces as a ONE/ZERO blend.
+      const auto& sc = cache.config.shaderConfig;
+      const bool opaque = cache.config.blendMode == GX_BM_NONE ||
+                          (cache.config.blendMode == GX_BM_BLEND && cache.config.blendFacSrc == GX_BL_ONE &&
+                           cache.config.blendFacDst == GX_BL_ZERO);
+      cache.shadowCaster = cache.shaderInfo.usesShadow && cache.config.depthCompare && cache.config.depthUpdate &&
+                           opaque && !sc.alphaCompare && sc.depthOnly == 0;
+      if (cache.shadowCaster) {
+        PipelineConfig shadowConfig = cache.config;
+        shadowConfig.shadowPass = 1;
+        shadowConfig.msaaSamples = 1;
+        cache.shadowPipelineRef = gfx::pipeline_ref(shadowConfig);
+      }
+      sPipelineMemo.insert_or_assign(cache.pipelineRef, PipelineMemo{
+                                                            .shaderInfo = cache.shaderInfo,
+                                                            .shadowPipelineRef = cache.shadowPipelineRef,
+                                                            .shadowCaster = cache.shadowCaster,
+                                                        });
     }
     cache.fmt = fmt;
     cache.lineMode = lineMode;
@@ -1855,7 +1890,8 @@ static constexpr bool aurora_subcommand_ids_unique() noexcept {
       GX_AURORA_PORT_DRAW_SERIAL,         GX_AURORA_PORT_DRAW_ID_MODE,        GX_AURORA_RESIDENT_RETAIN,
       GX_AURORA_RESIDENT_RELEASE,         GX_AURORA_RESIDENT_CALL_DL,         GX_AURORA_PORT_SHADOW_CASTER,
       GX_AURORA_PORT_SHADOW_FRAME,        GX_AURORA_PORT_SHADOW_RENDER,       GX_AURORA_PORT_ROOM_LIGHTS,
-      GX_AURORA_PORT_PARTICLE_FOG,        GX2_SET_POLYGON_OFFSET,
+      GX_AURORA_PORT_PARTICLE_FOG,        GX_AURORA_PORT_XRAY,                GX_AURORA_PORT_THERMAL,
+      GX2_SET_POLYGON_OFFSET,
       // PrimedGun's
       GX_AURORA_STEREO_DRAW_ROUTE,        GX_AURORA_STEREO_HEAD_LOCKED_PLANE, GX_AURORA_STEREO_SCREEN_TEX_MTX,
       GX_AURORA_MAP_BATCH,                GX_AURORA_CALL_CACHED_DL,           GX_AURORA_FREE_GEOMETRY_SET,
@@ -1973,7 +2009,13 @@ void handle_aurora(ByteReader& reader) noexcept {
     auto& array = g_gxState.arrays[attrIdx];
     const auto newData = reinterpret_cast<void*>(arrayAddr);
     if (array.data != newData || array.size != arraySize || array.le != le) {
-      if (array.le != le || (attrIdx == GX_VA_TEX7 && (array.data == nullptr) != (newData == nullptr))) {
+      // Only an indexed attribute's array, or TEX7's under pbr (bind_pos_active), is in the
+      // pipeline config (a VCD or pbr change dirties it anyway).
+      const auto type = g_gxState.vtxDesc[attrIdx];
+      const bool inConfig =
+          type == GX_INDEX8 || type == GX_INDEX16 || (attrIdx == GX_VA_TEX7 && g_gxState.pbr != 0);
+      if (inConfig &&
+          (array.le != le || (attrIdx == GX_VA_TEX7 && (array.data == nullptr) != (newData == nullptr)))) {
         // Endianness is baked into the shader
         g_gxState.dirty |= DirtyPipeline;
       }
@@ -2413,6 +2455,32 @@ void handle_aurora(ByteReader& reader) noexcept {
       g_gxState.volFog = false;
       g_gxState.dirty |= DirtyPipeline;
     }
+  } else if (subCmd == GX_AURORA_PORT_XRAY) {
+    gfx::xray::Params params;
+    u32 words[sizeof(params) / sizeof(u32)];
+    for (u32& word : words) {
+      word = reader.read<u32>();
+    }
+    std::memcpy(&params, words, sizeof(params));
+    // PrimedGun: an immersive frame's eye passes replay no encoder tasks (as bloom::record), so the
+    // post would reach only the mono EFB and split the eye passes in two. The game draws retail's
+    // visor in such a frame (CStateManager::DrawWorld); this covers a frame whose presentation
+    // became immersive after the game checked. The payload is read above either way, so the FIFO
+    // stays in step.
+    if (!gfx::stereo_shadow::active()) {
+      gfx::xray::record(params);
+    }
+  } else if (subCmd == GX_AURORA_PORT_THERMAL) {
+    gfx::thermal::Params params;
+    u32 words[sizeof(params) / sizeof(u32)];
+    for (u32& word : words) {
+      word = reader.read<u32>();
+    }
+    std::memcpy(&params, words, sizeof(params));
+    // PrimedGun: skipped in an immersive frame, as the X-ray post above.
+    if (!gfx::stereo_shadow::active()) {
+      gfx::thermal::record(params);
+    }
   } else if (subCmd == GX_AURORA_PORT_PARTICLE_FOG) {
     const bool on = reader.read<u8>() != 0;
     if (g_gxState.particleFog != on) {
@@ -2615,6 +2683,9 @@ void clear_draw_cache() noexcept {
 void reset_draw_cache() noexcept {
   // Initialization/shutdown can replace layouts and default texture views.
   sBindGroupCache.clear();
+  // The memo's pipelines go with the pipeline cache's shutdown, and its uniform sizes follow the
+  // device's uniform alignment.
+  sPipelineMemo.clear();
   sDrawCache = {};
   geometry_cache::clear();
   clear_native_vertex_choices();

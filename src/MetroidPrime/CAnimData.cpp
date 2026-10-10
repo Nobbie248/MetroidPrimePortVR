@@ -25,20 +25,6 @@
 
 #include "Kyoto/Math/CloseEnough.hpp"
 
-#ifdef TARGET_PC
-#include "Kyoto/Basics/CBasics.hpp"
-#include <string.h>
-
-// Port: the model's position array is kept as the file stores it, big-endian
-// (CSkinRules::PortBuildPointsAndNormals swaps each float as it skins). Read
-// a vertex of it in host byte order.
-static CVector3f PortReadBigVector(const uchar* p) {
-  float v[3];
-  memcpy(v, p, sizeof(v));
-  return CVector3f(CBasics::SwapBytes(v[0]), CBasics::SwapBytes(v[1]), CBasics::SwapBytes(v[2]));
-}
-#endif
-
 #include "rstl/algorithm.hpp"
 #include "rstl/math.hpp"
 
@@ -47,8 +33,23 @@ static CVector3f PortReadBigVector(const uchar* p) {
 #include "MetroidPrime/Cameras/CCameraManager.hpp"
 #include "port_debug.h"
 
+#include "Kyoto/Basics/CBasics.hpp"
+
 #include <stdlib.h>
 #include <string.h>
+
+// The model's positions stay big-endian on PC (the skinning loads swap them), so the
+// fallback AABB swaps each one. Points past the array's size are skipped.
+static void PortAccumulateModelBounds(CAABox& aabb, const CSkinnedModel* model) {
+  const float* pos = model->GetModel()->GetPositions();
+  const uint bytes = model->GetModel()->GetCubeModel()->GetModelInstance().GetVertexSize();
+  const int count = rstl::min_val(model->GetNumPoints(), static_cast< int >(bytes / 12));
+  for (int i = 0; i < count; ++i) {
+    const float* v = pos + i * 3;
+    aabb.AccumulateBounds(CVector3f(CBasics::SwapBytes(v[0]), CBasics::SwapBytes(v[1]),
+                                    CBasics::SwapBytes(v[2])));
+  }
+}
 
 // Previous tick's pose for smoothing (see PortNotePoseBuild at the end).
 struct CAnimData::SPortPoseHistory {
@@ -135,13 +136,7 @@ CAnimData::CAnimData(
 
   xd8_modelData->CalculateDefault();
 #ifdef TARGET_PC
-  // Port: swap the big-endian positions; summed as native floats they gave
-  // garbage bounds (see PortReadBigVector).
-  const uchar* pointBytes =
-      reinterpret_cast< const uchar* >(xd8_modelData->GetModel()->GetPositions());
-  for (int i = 0; i < xd8_modelData->GetNumPoints(); ++i) {
-    x108_aabb.AccumulateBounds(PortReadBigVector(pointBytes + i * sizeof(CVector3f)));
-  }
+  PortAccumulateModelBounds(x108_aabb, *xd8_modelData);
 #else
   const CVector3f* pointItr =
       reinterpret_cast< const CVector3f* >(xd8_modelData->GetModel()->GetPositions());
@@ -294,13 +289,7 @@ void CAnimData::SubstituteModelData(const TLockedToken< CSkinnedModel >& model) 
   x108_aabb = CAABox::MakeMaxInvertedBox();
 
 #ifdef TARGET_PC
-  // Port: swap the big-endian positions; summed as native floats they gave
-  // garbage bounds (see PortReadBigVector).
-  const uchar* pointBytes =
-      reinterpret_cast< const uchar* >(xd8_modelData->GetModel()->GetPositions());
-  for (int i = 0; i < xd8_modelData->GetNumPoints(); ++i) {
-    x108_aabb.AccumulateBounds(PortReadBigVector(pointBytes + i * sizeof(CVector3f)));
-  }
+  PortAccumulateModelBounds(x108_aabb, *xd8_modelData);
 #else
   const CVector3f* pointItr =
       reinterpret_cast< const CVector3f* >(xd8_modelData->GetModel()->GetPositions());

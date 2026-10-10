@@ -49,6 +49,7 @@ CParticleSwoosh::CParticleSwoosh(const TToken< CSwooshDescription > desc, const 
 , x158_curParticle(0)
 , x1ac_particleCount(0)
 , x1b0_SPLN(0)
+, x1b8_SIDE(2) // Remastered's CSwooshDescription ctor defaults SIDE (desc+0x208) to 2
 , x1c0_rand(x1c_desc->x45_26_CRND ? CCast::ToInt16(CStopwatch::GetGlobalMicros())
                                   : CCast::ToInt16(99))
 , x1c4_(0.f)
@@ -70,6 +71,10 @@ CParticleSwoosh::CParticleSwoosh(const TToken< CSwooshDescription > desc, const 
 , x208_maxRadius(0.f)
 , x20c_moduColor(0xffffffff) {
   int i = 0;
+#ifdef TARGET_PC
+  xPortVars.Init(x1c_desc->xPortVars.get());
+  CPortVarScope portVarScope(&xPortVars);
+#endif
   CGlobalRandom _(x1c0_rand);
   mSwooshAliveCount++;
 
@@ -148,6 +153,7 @@ const bool CParticleSwoosh::Update(double dt) {
     return false;
   }
   dt = fxScope.dt;
+  CPortVarScope portVarScope(&xPortVars);
 #endif
   if (!IsLargeEnough()) {
     return false;
@@ -301,6 +307,9 @@ void CParticleSwoosh::UpdateTranslationAndOrientation() {
     if (portVfx) {
       SPortVfxPoint& point = xPortVfxPts[i];
       PortVfxEvalPoint(*x1c_desc->xPortVfx, swoosh.mFrame, point.iten, point.vpmt);
+      if (x1c_desc->x14_COLR) {
+        x1c_desc->x14_COLR->GetValueHdr(swoosh.mFrame, point.color);
+      }
     }
 #endif
     swoosh.mLeftRad = GetLeftRadius(i);
@@ -357,6 +366,7 @@ void CParticleSwoosh::Render() {
   const CVector3f portGlobalTranslation = xa4_globalTranslation;
   const CTransform4f portGlobalOrientation = xb0_globalOrientation;
   const bool portPresenting = PortBeginPresent();
+  CPortVarScope portVarScope(&xPortVars);
 #endif
   if (x1b4_LENG >= 2 && x1ac_particleCount > 1) {
     CStopwatch timer;
@@ -659,8 +669,8 @@ void CParticleSwoosh::PortRenderVfx() {
     const SPortVfxPoint& pb = xPortVfxPts[prevIdx];
     auto pointAt = [&](float t, float color[4], float extra[4][4]) {
       const float iten = pa.iten + (pb.iten - pa.iten) * t;
-      const float ca[4] = {a.mColor.GetRed(), a.mColor.GetGreen(), a.mColor.GetBlue(), a.mColor.GetAlpha()};
-      const float cb[4] = {b.mColor.GetRed(), b.mColor.GetGreen(), b.mColor.GetBlue(), b.mColor.GetAlpha()};
+      const float* ca = pa.color;
+      const float* cb = pb.color;
       for (int c = 0; c < 4; ++c) {
         color[c] = (ca[c] + (cb[c] - ca[c]) * t) * (c < 3 ? iten : 1.f) * modu[c];
         for (int k = 0; k < 4; ++k) {
@@ -1488,6 +1498,8 @@ const CVector3f& CParticleSwoosh::GetGlobalTranslation() const { return xa4_glob
 const CVector3f& CParticleSwoosh::GetTranslation() const { return x38_translation; }
 
 #ifdef TARGET_PC
+bool CParticleSwoosh::PortIsRemastered() const { return x1c_desc->xPortIrnd; }
+
 uint CParticleSwoosh::PortFxAsset() const { return CToken(x1c_desc).GetTag().GetId(); }
 
 void CParticleSwoosh::PortFxDescribe(PortFxInfo& out) const {

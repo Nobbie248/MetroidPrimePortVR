@@ -142,10 +142,14 @@ void render_stereo_eye_pass_commands(const wgpu::RenderPassEncoder& pass, Render
     } break;
     case CommandType::SetScissor: {
       const auto& sc = cmd.data.setScissor;
-      const auto left = static_cast<int32_t>(std::floor(static_cast<float>(sc.x) * scaleX));
-      const auto top = static_cast<int32_t>(std::floor(static_cast<float>(sc.y) * scaleY));
-      const auto right = static_cast<int32_t>(std::ceil(static_cast<float>(sc.x + sc.width) * scaleX));
-      const auto bottom = static_cast<int32_t>(std::ceil(static_cast<float>(sc.y + sc.height) * scaleY));
+      // Every edge rounds the same way, as upstream's map_logical_scissor does (afbc94b4), so rects that
+      // share an edge in the EFB share one in the eye target. Flooring the left and ceiling the right
+      // overlapped them by a pixel at non-integer scales, and a model drawn in abutting scissored slices
+      // blended that column twice.
+      const auto left = static_cast<int32_t>(std::lround(static_cast<float>(sc.x) * scaleX));
+      const auto top = static_cast<int32_t>(std::lround(static_cast<float>(sc.y) * scaleY));
+      const auto right = static_cast<int32_t>(std::lround(static_cast<float>(sc.x + sc.width) * scaleX));
+      const auto bottom = static_cast<int32_t>(std::lround(static_cast<float>(sc.y + sc.height) * scaleY));
       apply_scissor(pass,
                     ClipRect{
                         .x = std::max(left, 0),

@@ -7,12 +7,15 @@
 #include "MetroidPrime/Factories/CScannableObjectInfo.hpp"
 #include "MetroidPrime/Player/CPlayer.hpp"
 #include "MetroidPrime/TCastTo.hpp"
+#include "Collision/CMaterialFilter.hpp"
+#include "Collision/CRayCastResult.hpp"
 #include "MetroidPrime/Tweaks/CTweakGui.hpp"
 #include "MetroidPrime/Tweaks/CTweakGuiColors.hpp"
 #include "MetroidPrime/Tweaks/CTweakPlayer.hpp"
 #include "MetroidPrime/Tweaks/CTweakTargeting.hpp"
 
 #include "Kyoto/Audio/CSfxManager.hpp"
+#include "Kyoto/Graphics/CGX.hpp"
 #include "Kyoto/Graphics/CGraphics.hpp"
 #include "Kyoto/Graphics/CModel.hpp"
 #include "Kyoto/Graphics/CModelFlags.hpp"
@@ -29,6 +32,43 @@
 #include "vr/vr_look_scan.h"
 #include "vr/vr_view.h"
 #include <dolphin/gx/GXAurora.h>
+#endif
+
+#ifdef TARGET_PC
+#include "port_debug.h"
+#include "port_room_env.h"
+
+#include "Kyoto/Graphics/CCubeMaterial.hpp"
+#include "Kyoto/Graphics/CCubeModel.hpp"
+
+// Port: the Remastered scan indicators (kb func/CPlayerVisorMP1-DrawScanObjectIndicators) apply
+// when the scan icon's CMDL is the converted one (the Remastered models mod puts
+// CMDL_ScanIconNoncritical through the PBR path: kStateFlag_PortPBR). The critical icon is not
+// converted, so the noncritical one stands for the pair.
+static bool PortScanIconsRemastered(const CModel* model) {
+  if (model == nullptr)
+    return false;
+  const CCubeModel* cube = model->GetCubeModel();
+  if (cube == nullptr)
+    return false;
+  const uint count = cube->PortMaterialCount();
+  for (uint i = 0; i < count; ++i) {
+    if (cube->GetMaterialByIndex(static_cast< int >(i)).IsFlagSet(kStateFlag_PortPBR))
+      return true;
+  }
+  return false;
+}
+
+// Port: stand-ins for Remastered's runtime-built scan filters (0x4b22be0 family, contents not
+// recoverable from the binary); same shape as the orbit line-of-sight filters.
+static const CMaterialFilter kPortScanLosFilter = CMaterialFilter::MakeIncludeExclude(
+    CMaterialList(kMT_Solid), CMaterialList(kMT_ProjectilePassthrough, kMT_ScanPassthrough, kMT_Player));
+static const CMaterialFilter kPortScanOccluderFilter = CMaterialFilter::MakeIncludeExclude(
+    CMaterialList(kMT_Solid, kMT_Occluder),
+    CMaterialList(kMT_ProjectilePassthrough, kMT_ScanPassthrough, kMT_Player));
+
+// Remastered's smoothstep of the pop-in t (0xe62e74).
+static float PortScanSmooth(float t) { return t * t * (3.f - 2.f * t); }
 #endif
 
 static const int skPixelsPerTileDimension16Bit = 4;
@@ -229,6 +269,10 @@ void CPlayerVisor::Update(float dt, const CStateManager& mgr) {
   x90_xrayBlur.Update(dt);
   const CPlayerState& playerState = *mgr.GetPlayerState();
   CPlayerState::EPlayerVisor activeVisor = playerState.GetActiveVisor(mgr);
+#ifdef TARGET_PC
+  PortRoomEnv::XRayTick(dt, activeVisor == CPlayerState::kPV_XRay);
+  PortRoomEnv::ThermalTick(dt, activeVisor == CPlayerState::kPV_Thermal);
+#endif
   CPlayerState::EPlayerVisor curVisor = playerState.GetCurrentVisor();
   CPlayerState::EPlayerVisor transVisor = playerState.GetTransitioningVisor();
   CPlayer::EPlayerScanState scanState = mgr.GetPlayer()->GetPlayerScanState();
@@ -311,7 +355,17 @@ void CPlayerVisor::Touch() const {
 
 void CPlayerVisor::DrawThermalEffect(const CStateManager& mgr) const {}
 
-void CPlayerVisor::DrawXRayEffect(const CStateManager& mgr) const { x90_xrayBlur.Draw(); }
+void CPlayerVisor::DrawXRayEffect(const CStateManager& mgr) const {
+#ifdef TARGET_PC
+  // Remastered's ramp and vignette replace retail's blur copy.
+  // PortVr: XRayPass is false in an immersive frame (port_room_env.cpp XRayPostEnabled), whose
+  // eyes then each take retail's blur copy.
+  if (PortRoomEnv::XRayPass(false)) {
+    return;
+  }
+#endif
+  x90_xrayBlur.Draw();
+}
 
 // The scan window is authored in pixels of a 448-high 4:3 view. Below 4:3 the view is narrower
 // than that, so the window shrinks to keep its share of the width (and its proportions).
@@ -322,31 +376,9 @@ static float ScanWindowFit(int vpWidth, int vpHeight) {
   return 1.f;
 }
 
-void CPlayerVisor::DrawScanEffect(const CStateManager& mgr,
-                                  const CTargetingManager* const tgtMgr) const {
-#ifdef TARGET_PC
-  // PortVr: the scan window is 2D content (a copy of the framebuffer's centre
-  // stretched over a pane, and its frame). The headset lays it on the plane in
-  // front of the head that CInGameGuiManager::Draw sets, and takes the copy
-  // from each eye through that plane, so the window points where the head does
-  // and magnifies each eye's own view (or, with vr_scan_zoom off, shows it as is).
-  AuroraSetStereoDrawRoute(AURORA_STEREO_ROUTE_HEAD_LOCKED_2D);
-#endif
-  const bool indicatorsDrawn = DrawScanObjectIndicators(mgr);
-  if (tgtMgr != nullptr && indicatorsDrawn) {
-    CGraphics::SetDepthRange(0.125f + FLT_EPSILON, 0.125f + FLT_EPSILON);
-#ifdef TARGET_PC
-    // PortVr: the reticle sits on its target in the world (as in CSamusHud::Draw).
-    AuroraSetStereoDrawRoute(AURORA_STEREO_ROUTE_WORLD);
-#endif
-    tgtMgr->Draw(mgr, false);
-#ifdef TARGET_PC
-    AuroraSetStereoDrawRoute(AURORA_STEREO_ROUTE_HEAD_LOCKED_2D);
-#endif
-    CGraphics::SetDepthRange(0.015625f, 0.03125f);
-  }
-  int vpLeft, vpTop, vpWidth, vpHeight;
-  CGraphics::GetViewport(vpLeft, vpTop, vpWidth, vpHeight);
+// The magnification of the scan window and the size of the screen copy it shows.
+float CPlayerVisor::ScanWindowCopySize(const CStateManager& mgr, int vpWidth, int vpHeight,
+                                       int& width, int& height) const {
   const float transFactor = mgr.GetPlayerState()->GetVisorTransitionFactor();
   const float scanSidesStart = gpTweakGui->GetScanSidesStartTime();
   const float scanSidesDuration = gpTweakGui->GetScanSidesDuration();
@@ -369,27 +401,139 @@ void CPlayerVisor::DrawScanEffect(const CStateManager& mgr,
   // zoom off (vr_scan_zoom), the copy is the pane's size, so each eye's copy
   // through the head-locked plane is exactly the view behind the pane. It is
   // rounded to the nearest pixel, not up to the GameCube's 4-pixel tiles,
-  // which would still zoom it by a percent or two.
-  const bool portVrNoZoom = PortVr::VrScanWindowNoZoom();
-  const int width =
-      portVrNoZoom
-          ? CMath::Clamp(skPixelsPerTileDimension16Bit, CCast::ToInt(vpW + 0.5f), vpWidth)
-          : CMath::Clamp(skPixelsPerTileDimension16Bit, round_up_to_tile(vpW / divisor), vpWidth);
-  const int height =
-      portVrNoZoom
-          ? CMath::Clamp(skPixelsPerTileDimension16Bit, CCast::ToInt(vpH + 0.5f), vpHeight)
-          : CMath::Clamp(skPixelsPerTileDimension16Bit, round_up_to_tile(vpH / divisor), vpHeight);
-#else
-  const int width =
-      CMath::Clamp(skPixelsPerTileDimension16Bit, round_up_to_tile(vpW / divisor), vpWidth);
-  const int height =
-      CMath::Clamp(skPixelsPerTileDimension16Bit, round_up_to_tile(vpH / divisor), vpHeight);
+  // which would still zoom it by a percent or two. The window then magnifies
+  // nothing.
+  if (PortVr::VrScanWindowNoZoom()) {
+    width = CMath::Clamp(skPixelsPerTileDimension16Bit, CCast::ToInt(vpW + 0.5f), vpWidth);
+    height = CMath::Clamp(skPixelsPerTileDimension16Bit, CCast::ToInt(vpH + 0.5f), vpHeight);
+    return 1.f;
+  }
 #endif
-  GXSetTexCopySrc(vpLeft + (vpWidth - width) / 2, vpTop + (vpHeight - height) / 2, width, height);
-  void* const buffer = CGraphics::GetDolphinSpareBuffer();
-  GXSetTexCopyDst(width, height, GX_TF_RGB565, GX_FALSE);
-  GXCopyTex(buffer, GX_FALSE);
+  width = CMath::Clamp(skPixelsPerTileDimension16Bit, round_up_to_tile(vpW / divisor), vpWidth);
+  height = CMath::Clamp(skPixelsPerTileDimension16Bit, round_up_to_tile(vpH / divisor), vpHeight);
+  return divisor;
+}
+
+#ifdef TARGET_PC
+// The zoomed copy (sharp scan window), keyed apart from the spare buffer; valid for the frame
+// that made it, until DrawScanEffect takes it.
+static u8 sPortScanZoomCopy[32];
+static bool sPortScanZoomCopied = false;
+static int sPortScanZoomWidth = 0;
+static int sPortScanZoomHeight = 0;
+
+bool CPlayerVisor::PortScanZoom(const CStateManager& mgr, float& zoom, int& width,
+                                int& height) const {
+  sPortScanZoomCopied = false;
+  // PortVr: not while immersive. The zoomed pass is one mono view through the game camera,
+  // copied from the screen's centre; the headset's window is copied from each eye through the
+  // head-locked plane (DrawScanEffect), where the eyes' own projections replace the zoomed one
+  // and the plane's rectangle isn't the screen's centre. It would also draw the world twice
+  // per eye. The headset's window keeps the retail copy (unmagnified with vr_scan_zoom off).
+  // PortDebug::SharpScanWindow() is already off while the headset runs (debug_ui.cpp);
+  // this keeps the immersive case safe on its own.
+  if (!PortDebug::SharpScanWindow() || PortVr::VrImmersive() ||
+      mgr.GetPlayerState()->GetActiveVisor(mgr) != CPlayerState::kPV_Scan ||
+      mgr.GetPlayerState()->GetVisorTransitionFactor() <= 0.f ||
+      x108_newScanPane.GetObject() == nullptr) {
+    return false;
+  }
+  int vpLeft, vpTop, vpWidth, vpHeight;
+  CGraphics::GetViewport(vpLeft, vpTop, vpWidth, vpHeight);
+  zoom = ScanWindowCopySize(mgr, vpWidth, vpHeight, width, height);
+  // The zoomed view shows the copy's area at `zoom` times its size; one bigger than the
+  // screen is zoomed less, so the window still shows exactly that area.
+  zoom = rstl::min_val(zoom, rstl::min_val(static_cast< float >(vpWidth) / width,
+                                           static_cast< float >(vpHeight) / height));
+  return zoom > 1.001f;
+}
+
+void CPlayerVisor::PortCopyScanZoom(int width, int height, float zoom) {
+  int vpLeft, vpTop, vpWidth, vpHeight;
+  CGraphics::GetViewport(vpLeft, vpTop, vpWidth, vpHeight);
+  // Whole tiles, as retail's copy.
+  const int zoomWidth =
+      rstl::max_val(4, rstl::min_val(vpWidth, static_cast< int >(width * zoom + 0.5f)) & ~3);
+  const int zoomHeight =
+      rstl::max_val(4, rstl::min_val(vpHeight, static_cast< int >(height * zoom + 0.5f)) & ~3);
+  GXSetTexCopySrc(vpLeft + (vpWidth - zoomWidth) / 2, vpTop + (vpHeight - zoomHeight) / 2,
+                  zoomWidth, zoomHeight);
+  GXSetTexCopyDst(zoomWidth, zoomHeight, GX_TF_RGB565, GX_FALSE);
+  // A clearing copy clears the whole EFB on aurora (the next pass's load op), not only the
+  // copied rectangle as on the GameCube: the frame's world then draws on a clean EFB.
+  CGX::SetZMode(true, GX_LEQUAL, true);
+  GXSetColorUpdate(GX_TRUE);
+  GXSetAlphaUpdate(GX_TRUE);
+  GXCopyTex(sPortScanZoomCopy, GX_TRUE);
   GXPixModeSync();
+  sPortScanZoomWidth = zoomWidth;
+  sPortScanZoomHeight = zoomHeight;
+  sPortScanZoomCopied = true;
+}
+
+void CPlayerVisor::PortDropScanZoom() { sPortScanZoomCopied = false; }
+
+void CPlayerVisor::PortDrawScanOverlay(const CStateManager& mgr,
+                                       const CTargetingManager* const tgtMgr) const {
+  const bool indicatorsDrawn = DrawScanObjectIndicators(mgr);
+  // PortVr: DrawScanObjectIndicators leaves the scan window's head-locked route; the reticle
+  // and then the frame's own world (CMFGame::Draw) draw in the world. The zoomed pass never
+  // runs immersive (PortScanZoom), so this only keeps the route as the world expects it.
+  AuroraSetStereoDrawRoute(AURORA_STEREO_ROUTE_WORLD);
+  if (tgtMgr != nullptr && indicatorsDrawn) {
+    CGraphics::SetDepthRange(0.125f + FLT_EPSILON, 0.125f + FLT_EPSILON);
+    tgtMgr->Draw(mgr, false);
+    CGraphics::SetDepthRange(0.015625f, 0.03125f);
+  }
+}
+#endif
+
+void CPlayerVisor::DrawScanEffect(const CStateManager& mgr,
+                                  const CTargetingManager* const tgtMgr) const {
+#ifdef TARGET_PC
+  // PortVr: the scan window is 2D content (a copy of the framebuffer's centre
+  // stretched over a pane, and its frame). The headset lays it on the plane in
+  // front of the head that CInGameGuiManager::Draw sets, and takes the copy
+  // from each eye through that plane, so the window points where the head does
+  // and magnifies each eye's own view (or, with vr_scan_zoom off, shows it as is).
+  // The sharp scan window's zoomed copy is never made while immersive (PortScanZoom).
+  AuroraSetStereoDrawRoute(AURORA_STEREO_ROUTE_HEAD_LOCKED_2D);
+#endif
+  const bool indicatorsDrawn = DrawScanObjectIndicators(mgr);
+  if (tgtMgr != nullptr && indicatorsDrawn) {
+    CGraphics::SetDepthRange(0.125f + FLT_EPSILON, 0.125f + FLT_EPSILON);
+#ifdef TARGET_PC
+    // PortVr: the reticle sits on its target in the world (as in CSamusHud::Draw).
+    AuroraSetStereoDrawRoute(AURORA_STEREO_ROUTE_WORLD);
+#endif
+    tgtMgr->Draw(mgr, false);
+#ifdef TARGET_PC
+    AuroraSetStereoDrawRoute(AURORA_STEREO_ROUTE_HEAD_LOCKED_2D);
+#endif
+    CGraphics::SetDepthRange(0.015625f, 0.03125f);
+  }
+  int vpLeft, vpTop, vpWidth, vpHeight;
+  CGraphics::GetViewport(vpLeft, vpTop, vpWidth, vpHeight);
+  const float transFactor = mgr.GetPlayerState()->GetVisorTransitionFactor();
+  int width, height;
+  ScanWindowCopySize(mgr, vpWidth, vpHeight, width, height);
+  const float fit = ScanWindowFit(vpWidth, vpHeight);
+  void* buffer = CGraphics::GetDolphinSpareBuffer();
+#ifdef TARGET_PC
+  if (sPortScanZoomCopied) {
+    sPortScanZoomCopied = false;
+    buffer = sPortScanZoomCopy;
+    width = sPortScanZoomWidth;
+    height = sPortScanZoomHeight;
+  } else
+#endif
+  {
+    GXSetTexCopySrc(vpLeft + (vpWidth - width) / 2, vpTop + (vpHeight - height) / 2, width,
+                    height);
+    GXSetTexCopyDst(width, height, GX_TF_RGB565, GX_FALSE);
+    GXCopyTex(buffer, GX_FALSE);
+    GXPixModeSync();
+  }
 #ifdef TARGET_PC
   // PortVr: the dim tints the whole view, not just the plane.
   AuroraSetStereoDrawRoute(AURORA_STEREO_ROUTE_FULLSCREEN);
@@ -635,7 +779,14 @@ void CPlayerVisor::UpdateScanObjectIndicators(const CStateManager& mgr, float dt
       target.x8_inRangeTimer = rstl::min_val(1.f, target.x8_inRangeTimer + dt2);
     if (const CActor* actor = TCastToConstPtr< CActor >(mgr.GetObjectById(target.x0_objId))) {
       const CGameCamera& camera = mgr.GetCameraManager()->GetCurrentCamera(mgr);
+#ifdef TARGET_PC
+      const bool portRem = PortScanIconsRemastered(x124_scanIconNoncritical.GetObject());
+      // Remastered boxes the scan indicator position, not the orbit position (0xe632c4).
+      CVector3f orbitPos = camera.ConvertToScreenSpace(portRem ? actor->GetScanObjectIndicatorPosition(mgr)
+                                                              : actor->GetOrbitPosition(mgr));
+#else
       CVector3f orbitPos = camera.ConvertToScreenSpace(actor->GetOrbitPosition(mgr));
+#endif
       orbitPos.SetX(0.5f * (orbitPos.GetX() * CGraphics::GetViewportWidth()) +
                     0.5f * CGraphics::GetViewportWidth());
       orbitPos.SetY(0.5f * (orbitPos.GetY() * CGraphics::GetViewportHeight()) +
@@ -644,9 +795,53 @@ void CPlayerVisor::UpdateScanObjectIndicators(const CStateManager& mgr, float dt
           orbitPos, mgr.GetPlayer()->GetOrbitZoneMode(), mgr.GetPlayer()->GetOrbitZoneType());
 #ifdef TARGET_PC
       // PortVr: look to scan: the frame lights for the object the head picks.
+      // The Remastered icons pop in for the objects look to scan shows icons
+      // for (VrLookToScanNearby: the wide cone around the gaze, the pick
+      // included) rather than for the body camera's screen box.
+      bool portRemBox = inBox;
       TUniqueId lookTarget = kInvalidUniqueId;
       if (PortVr::VrLookToScanTarget(mgr, lookTarget)) {
         inBox = target.x0_objId == lookTarget;
+        if (portRem) {
+          portRemBox = inBox;
+          int lookCount = 0;
+          const TUniqueId* const look = PortVr::VrLookToScanNearby(mgr, lookCount);
+          for (int j = 0; j < lookCount && !portRemBox; ++j)
+            portRemBox = look[j] == target.x0_objId;
+        }
+      }
+      if (portRem) {
+        // t eases 3/s toward "in the box and visible" (0xe632c4). Visibility is last frame's
+        // (the render list is swapped one frame late). Remastered takes static LOS or a GPU
+        // occlusion query of a 0.2x0.2 sprite; the port approximates both with one world ray
+        // from the camera to the orbit position (unverified filter, no GPU query).
+        const bool wasVisible = target.xPort_visible;
+        {
+          // PortVr: while immersive the ray starts at the eyes (the camera plus the head's
+          // tracked offset), the viewpoint DrawScanObjectIndicators scales and turns the icons
+          // for; VrHeadGaze leaves camPos at the camera otherwise.
+          CVector3f camPos = camera.GetTranslation();
+          CVector3f portGaze;
+          PortVr::VrHeadGaze(camera.GetTransform(), camPos, portGaze);
+          const CVector3f toTarget = actor->GetOrbitPosition(mgr) - camPos;
+          const float len = toTarget.Magnitude();
+          bool clear = false;
+          if (len > 0.f && len < gpTweakPlayer->GetScanMaxTargetDistance()) {
+            const CVector3f dir = toTarget * (1.f / len);
+            TEntityList nearList;
+            TUniqueId hitId = kInvalidUniqueId;
+            CStateManager& smgr = const_cast< CStateManager& >(mgr);
+            // As retail's orbit LOS (CPlayerOrbit.cpp): the target itself is excluded from the
+            // near list and the ray runs the full distance to the orbit position.
+            smgr.BuildNearList(nearList, camPos, dir, len, kPortScanOccluderFilter, actor);
+            clear = smgr.RayWorldIntersection(hitId, camPos, dir, len, kPortScanLosFilter, nearList)
+                        .IsInvalid() ||
+                    hitId == target.x0_objId;
+          }
+          target.xPort_visible = clear;
+        }
+        target.xPort_t =
+            CMath::Clamp(0.f, target.xPort_t + ((portRemBox && wasVisible) ? 3.f : -3.f) * dt, 1.f);
       }
 #endif
       if (inBox != target.xc_inBox) {
@@ -753,9 +948,17 @@ bool CPlayerVisor::DrawScanObjectIndicators(const CStateManager& mgr) const {
   CFrustumPlanes frustum(cameraXf, 0.01745329238474369f * camera.GetRenderFov(), camera.GetAspectRatio(),
                          1.f, false, 100.f);
   gpRender->SetClippingPlanes(frustum);
-  gpRender->SetPerspective(camera.GetRenderFov(), CGraphics::GetViewportWidth(),
+#ifdef TARGET_PC
+  gpRender->SetPerspective(CStateManager::PortZoomedFov(camera.GetRenderFov()),
+                           CGraphics::GetViewportWidth(),
                            CGraphics::GetViewportHeight(), camera.GetNearClipDistance(),
                            camera.GetFarClipDistance());
+#else
+  gpRender->SetPerspective(camera.GetRenderFov(),
+                           CGraphics::GetViewportWidth(),
+                           CGraphics::GetViewportHeight(), camera.GetNearClipDistance(),
+                           camera.GetFarClipDistance());
+#endif
 #ifdef TARGET_PC
   // PortVr: the icons face the head, as they face the camera on the TV; in the
   // headset the camera only carries the body's yaw.
@@ -795,6 +998,20 @@ bool CPlayerVisor::DrawScanObjectIndicators(const CStateManager& mgr) const {
                                    ? gpTweakGuiColors->GetScanIconCriticalDimColor()
                                    : gpTweakGuiColors->GetScanIconNoncriticalDimColor();
       CVector3f scanPosition = actor->GetScanObjectIndicatorPosition(mgr);
+#ifdef TARGET_PC
+      const bool portRem = PortScanIconsRemastered(x124_scanIconNoncritical.GetObject());
+      float portSmooth = 1.f;
+      if (portRem) {
+        // 0xe62e74: placed at the shake-offset camera translation too, drawn only inside the
+        // max target distance and while t > 0.
+        scanPosition += mgr.GetCameraManager()->GetGlobalCameraTranslation(mgr);
+        if ((scanPosition - cameraPosition).Magnitude() >= gpTweakPlayer->GetScanMaxTargetDistance())
+          continue;
+        portSmooth = PortScanSmooth(target.xPort_t);
+        if (portSmooth == 0.f)
+          continue;
+      }
+#endif
       float scale;
       CMatrix3f iconRotation = cameraRotation;
 #ifdef TARGET_PC
@@ -814,6 +1031,10 @@ bool CPlayerVisor::DrawScanObjectIndicators(const CStateManager& mgr) const {
             scanPosition, 1.f, gpTweakTargeting->x21c_scanTargetClampMin,
             gpTweakTargeting->x220_scanTargetClampMax, mgr);
       }
+#ifdef TARGET_PC
+      if (portRem)
+        scale *= portSmooth * 0.19999999f + 0.8f;
+#endif
       CTransform4f xf(CMatrix3f::Scale(scale) * iconRotation, scanPosition);
       float distance = (scanPosition - cameraPosition).Magnitude();
       float scanRange = gpTweakPlayer->GetScanningRange();
@@ -834,6 +1055,13 @@ bool CPlayerVisor::DrawScanObjectIndicators(const CStateManager& mgr) const {
         iconAlpha *= alphaScale;
       }
       gpRender->SetModelMatrix(xf);
+#ifdef TARGET_PC
+      if (portRem) {
+        model->Draw(CModelFlags::AlphaBlended(iconColor.WithAlphaModulatedBy(iconAlpha * farT * portSmooth))
+                        .DepthCompareUpdate(false, false));
+        continue;
+      }
+#endif
       model->Draw(CModelFlags::Additive(iconColor.WithAlphaModulatedBy(iconAlpha * farT))
                       .DepthCompareUpdate(true, false));
     }

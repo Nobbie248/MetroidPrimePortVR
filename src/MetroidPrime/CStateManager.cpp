@@ -304,7 +304,27 @@ bool PortStartAreaMusic(CStateManager& mgr) {
 }
 } // namespace
 
-bool PortWarpKeepsMusic() { return sPortWarpMusicPending; }
+// Port: a save-state load (PortSaveState) quits like a world warp and then
+// places Samus away from the spawn point, so it keeps the track the same way
+// and starts the area's music once she is placed. With none found, the old
+// track plays on in the same world and stops in another.
+bool sPortStateLoadMusic = false;
+bool sPortStateLoadSameWorld = false;
+
+bool PortWarpKeepsMusic() { return sPortWarpMusicPending || sPortStateLoadMusic; }
+
+void PortKeepMusicForStateLoad(bool sameWorld) {
+  sPortStateLoadMusic = true;
+  sPortStateLoadSameWorld = sameWorld;
+}
+
+void PortStartStateLoadMusic(CStateManager& mgr) {
+  if (!sPortStateLoadMusic)
+    return;
+  sPortStateLoadMusic = false;
+  if (!PortStartAreaMusic(mgr) && !sPortStateLoadSameWorld)
+    CStreamAudioManager::StopAll();
+}
 
 namespace {
 
@@ -2666,7 +2686,12 @@ CFrustumPlanes CStateManager::SetupViewForDraw(const CViewport& viewport) const 
   const int left = viewport.mLeft + (viewport.mWidth - width) / 2;
   const int top = viewport.mTop + (viewport.mHeight - height) / 2;
 
+#ifdef TARGET_PC
+  const float tangent =
+      CMath::SlowTangentR(CMath::Deg2Rad(0.5f * cam.GetRenderFov())) / sPortViewZoom;
+#else
   const float tangent = CMath::SlowTangentR(CMath::Deg2Rad(0.5f * cam.GetRenderFov()));
+#endif
   const float fov = 2.f * CMath::ArcTangentR(tangent * xf30_viewportScaleY);
 
   gpRender->SetViewport(left, top, width, height);
@@ -3184,10 +3209,26 @@ void CStateManager::PortCaptureProbeFace() const {
 }
 #endif
 
+#ifdef TARGET_PC
+float CStateManager::sPortViewZoom = 1.f;
+
+float CStateManager::PortZoomedFov(float fov) {
+  if (sPortViewZoom == 1.f)
+    return fov;
+  const float tangent = CMath::SlowTangentR(CMath::Deg2Rad(0.5f * fov)) / sPortViewZoom;
+  return 2.f * CMath::Rad2Deg(CMath::ArcTangentR(tangent));
+}
+#endif
+
 void CStateManager::DrawWorld() const {
 #ifdef TARGET_PC
+  // The Performance tab's world-draw time (a sharp scan window's zoomed pass counts too).
   const PortDebug::ScopedPhaseTimer phaseTimer(PortDebug::kPhaseDrawWorld);
-  PortCaptureProbeFace();
+  // A zoomed pass (sharp scan window) draws before the frame's own: the frame's captures and
+  // the gun belong to that one.
+  const bool portZoomed = sPortViewZoom != 1.f;
+  if (!portZoomed)
+    PortCaptureProbeFace();
 #endif
   const CTimeProvider timeProvider(xf14_curTimeMod900);
   const CViewport backupViewport = CGraphics::GetViewport();
@@ -3305,6 +3346,10 @@ void CStateManager::DrawWorld() const {
   // Remastered fogs the opaque world and sky full-screen, then the actors and transparents as
   // they draw (up to GXPortVolumetricFogEnd).
   PortDrawVolumetricFog(*this, backupViewMatrix, frustum);
+  // Remastered's X-ray distortion of the opaque world (pass A of its visor post).
+  if (GetPlayerState()->GetActiveVisor(*this) == CPlayerState::kPV_XRay) {
+    PortRoomEnv::XRayPass(true);
+  }
 #endif
   bool morphingPlayerVisible = false;
   rstl::reserved_vector< const CActor*, 1024 > thermalActors;
@@ -3435,6 +3480,9 @@ void CStateManager::DrawWorld() const {
       }
       CGraphics::SetDepthRange(0.125f, 1.f);
     }
+#ifdef TARGET_PC
+    if (!PortRoomEnv::ThermalPass(false, xf28_thermColdScale2 + xf24_thermColdScale1))
+#endif
     gpRender->DoThermalBlendCold();
     xf34_thermalFlag = kTD_Hot;
     for (const TUniqueId* it = renderFirst.begin(); it != renderFirst.end(); ++it) {
@@ -3483,10 +3531,18 @@ void CStateManager::DrawWorld() const {
 
   x87c_fluidPlaneManager->EndFrame();
   gpRender->SetWorldFog(kRFM_None, 0.f, 1.f, CColor::Black());
+#ifdef TARGET_PC
+  if (gkWorldOnlyReflection && !portZoomed) {
+#else
   if (gkWorldOnlyReflection) {
+#endif
     const_cast< CStateManager* >(this)->CacheReflection();
   }
+#ifdef TARGET_PC
+  if (x84c_player != nullptr && !portZoomed) {
+#else
   if (x84c_player != nullptr) {
+#endif
 #ifdef TARGET_PC
     // Port: with the FOV slider off retail, draw the arm cannon at the retail
     // FOV (a view-model FOV), so a wide view doesn't shrink it or push it off
@@ -3513,7 +3569,8 @@ void CStateManager::DrawWorld() const {
 #endif
   }
 #ifdef TARGET_PC
-  PortViewModel::Draw(*this);
+  if (!portZoomed)
+    PortViewModel::Draw(*this);
 #endif
   if (!renderLast.empty()) {
     CGraphics::SetDepthRange(0.015625f, 0.03125f);
@@ -3530,6 +3587,9 @@ void CStateManager::DrawWorld() const {
     CGraphics::SetDepthRange(0.125f, 1.f);
   }
   if (thermal) {
+#ifdef TARGET_PC
+    if (!PortRoomEnv::ThermalPass(true, xf28_thermColdScale2 + xf24_thermColdScale1))
+#endif
     gpRender->DoThermalBlendHot();
     gpRender->SetThermal(false, 0.f, CColor::Black());
     xf34_thermalFlag = kTD_Bypass;

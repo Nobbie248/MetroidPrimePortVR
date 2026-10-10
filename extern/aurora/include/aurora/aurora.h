@@ -215,12 +215,20 @@ typedef struct {
    */
   const uint8_t* pipelineCacheSeedData;
   size_t pipelineCacheSeedSize;
+  /* Merge no initial pipeline cache at all (recording a new seed from an empty cache). */
+  bool pipelineCacheNoSeed;
 
   /*
    * A directory (with a trailing slash) Dawn searches first for the Vulkan library, e.g. a shim
    * for a custom driver. Null searches the usual places only.
    */
   const char* vulkanLibraryDir;
+
+  /*
+   * When set and only the Null backend started (no GPU and no software adapter), this message is
+   * shown in an error box and the process exits with status 1, instead of running with no picture.
+   */
+  const char* noGraphicsMessage;
 } AuroraConfig;
 
 typedef struct {
@@ -306,6 +314,13 @@ void aurora_set_resampler(AuroraSampler sampler);
 void aurora_set_graphics_quality(uint32_t msaa, uint16_t maxTextureAnisotropy);
 /** Sets the clock timescale. Default 1.0f. 0.0f is paused. Range 0.0f-16.0f. */
 void aurora_set_timescale(float scale);
+
+/**
+ * Holds background pipeline builds (the cache and shipped seed, compiled ahead of use) while paused.
+ * Pipelines a draw looks up still compile. Starts paused under D3D11, where a build blocks every
+ * other object creation; the app resumes them when it no longer loads much.
+ */
+void aurora_set_background_pipelines_paused(bool paused);
 
 AuroraBackend aurora_get_backend();
 // The driver's description from the graphics adapter (e.g. "Turnip Mesa driver 25.1.0"); "" before init.

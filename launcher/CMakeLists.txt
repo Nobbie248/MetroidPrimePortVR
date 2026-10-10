@@ -46,14 +46,18 @@ target_compile_definitions(PrimedGun PRIVATE
     PRIMEDGUN_LAUNCHER_VERSION="${PRIMEDGUN_LAUNCHER_VERSION}")
 target_include_directories(PrimedGun PRIVATE
     ui
-    ${PROJECT_SOURCE_DIR}/platform/include
-    ${PROJECT_BINARY_DIR}/generated)
+    ${PROJECT_SOURCE_DIR}/platform/include)
 target_link_libraries(PrimedGun PRIVATE
     primedgun_launcher_core Qt6::Widgets aurora::card ${AURORA_SDL3_TARGET})
 if(WIN32)
     target_link_libraries(PrimedGun PRIVATE shell32 ole32 advapi32)
 endif()
+# The build revision (MP_BUILD_REVISION in platform/include/port_build_info.h) is
+# defined in the root's generated source since upstream 074e531a, so it is built
+# into this target too. The generated folder is not on the include path: in an
+# older build folder it still holds a stale port_build_info.h.
 add_dependencies(PrimedGun port_build_info)
+target_sources(PrimedGun PRIVATE "${PROJECT_BINARY_DIR}/generated/port_build_info.cpp")
 
 # Qt's DLLs and platform plugin, and PrimedGun's cannon texture slots (seeded
 # into the user folder on first start).

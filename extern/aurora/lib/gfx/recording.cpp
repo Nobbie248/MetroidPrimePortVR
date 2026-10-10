@@ -1970,6 +1970,31 @@ Range push_uniform(const uint8_t* data, size_t length) {
   return push(uniforms, data, length, alignment);
 }
 
+Range map_uniform(uint8_t*& out) {
+  out = nullptr;
+  if (!check_recording("map_uniform")) {
+    return {};
+  }
+  auto& uniforms = current_frame_packet().uniforms;
+  const auto alignment = resources().limits.minUniformBufferOffsetAlignment;
+  // PrimedGun: the same headroom as push_uniform for the MaxUniformSize this maps, so a multiview
+  // draw's eye-pair window (stereo_multiview.hpp) stays inside the buffer.
+  if (!fits(uniforms, gx::MaxUniformSize + 2 * gx::MaxUniformSize, alignment)) {
+    return OverflowRange;
+  }
+  const size_t alignedBegin = AURORA_ALIGN(uniforms.size(), alignment);
+  if (alignedBegin > uniforms.size()) {
+    uniforms.append_zeroes(alignedBegin - uniforms.size());
+  }
+  out = uniforms.append_uninit(gx::MaxUniformSize);
+  return {static_cast<uint32_t>(alignedBegin), gx::MaxUniformSize};
+}
+
+void unmap_uniform(Range& range, size_t length) {
+  current_frame_packet().uniforms.truncate(range.offset + length);
+  range.size = static_cast<uint32_t>(length);
+}
+
 Range push_storage(const uint8_t* data, size_t length) {
   ZoneScoped;
   if (!check_recording("push_storage")) {

@@ -36,7 +36,7 @@ public final class MetroidPrimeActivity extends SDLActivity {
     // Distinct from SDL's own dialog request codes, which count up from 0.
     private static final int REQUEST_TEXTURE_PACK = 0x7e57;
     private static final int REQUEST_STORAGE = 0x7e58;
-    // The Remastered import's .nsp (+0) and prod.keys (+1).
+    // The Remastered import's .nsp/.xci (+0) and prod.keys (+1).
     private static final int REQUEST_REMASTERED = 0x7e59;
     private TouchControlsView touchControls;
     private final AtomicBoolean texturePackCopying = new AtomicBoolean();
@@ -47,6 +47,46 @@ public final class MetroidPrimeActivity extends SDLActivity {
     private static native void nativeTexturePackStatus(String status);
     private static native void nativeTexturePackReady();
     private static native void nativeRemasteredPicked(int which, String uri);
+    // Implemented in src/Kyoto/Graphics/DolphinCGraphics.cpp.
+    private static native boolean nativeFramePresented();
+
+    // The surface stays black until the game presents its first frame, about
+    // 2 s after the system splash on a phone (GPU setup, mod scan, pipeline
+    // seed). Keeps the app icon up over it until then.
+    private void showStartupCover() {
+        if (nativeFramePresentedSafe()) {
+            return;
+        }
+        final android.widget.FrameLayout cover = new android.widget.FrameLayout(this);
+        cover.setBackgroundColor(0xFF000000);
+        android.widget.ImageView icon = new android.widget.ImageView(this);
+        icon.setImageResource(R.mipmap.ic_launcher);
+        int size = Math.round(160 * getResources().getDisplayMetrics().density);
+        cover.addView(icon, new android.widget.FrameLayout.LayoutParams(size, size, android.view.Gravity.CENTER));
+        mLayout.addView(cover, new android.widget.RelativeLayout.LayoutParams(
+            android.widget.RelativeLayout.LayoutParams.MATCH_PARENT,
+            android.widget.RelativeLayout.LayoutParams.MATCH_PARENT));
+        cover.postDelayed(new Runnable() {
+            @Override
+            public void run() {
+                if (nativeFramePresentedSafe()) {
+                    cover.animate().alpha(0f).setDuration(150).withEndAction(() -> mLayout.removeView(cover));
+                } else {
+                    cover.postDelayed(this, 30);
+                }
+            }
+        }, 30);
+    }
+
+    // The library is loaded by SDLActivity.onCreate; if that failed, there's
+    // no native side to wait for.
+    private static boolean nativeFramePresentedSafe() {
+        try {
+            return nativeFramePresented();
+        } catch (UnsatisfiedLinkError e) {
+            return true;
+        }
+    }
 
     @Override
     protected String[] getLibraries() {
@@ -76,6 +116,7 @@ public final class MetroidPrimeActivity extends SDLActivity {
             mLayout.addView(touchControls, new android.widget.RelativeLayout.LayoutParams(
                 android.widget.RelativeLayout.LayoutParams.MATCH_PARENT,
                 android.widget.RelativeLayout.LayoutParams.MATCH_PARENT));
+            showStartupCover();
         }
         preferHighestRefreshRate();
         warnIfDataFolderUnreachable();
@@ -203,7 +244,8 @@ public final class MetroidPrimeActivity extends SDLActivity {
     }
 
     // Called from the debug overlay, on the SDL thread: picks the Remastered
-    // .nsp (which 0) or prod.keys (which 1). Neither has a MIME type of its own.
+    // .nsp/.xci (which 0), prod.keys (which 1) or a PAL disc image for its
+    // languages (which 2). None has a MIME type of its own.
     public void pickRemasteredFile(int which) {
         runOnUiThread(() -> {
             Intent intent = new Intent(Intent.ACTION_OPEN_DOCUMENT)
@@ -244,7 +286,7 @@ public final class MetroidPrimeActivity extends SDLActivity {
             }
             return;
         }
-        if (requestCode == REQUEST_REMASTERED || requestCode == REQUEST_REMASTERED + 1) {
+        if (requestCode >= REQUEST_REMASTERED && requestCode <= REQUEST_REMASTERED + 2) {
             Uri uri = data != null && resultCode == RESULT_OK ? data.getData() : null;
             if (uri != null) {
                 rememberRemasteredPick(requestCode - REQUEST_REMASTERED, uri);

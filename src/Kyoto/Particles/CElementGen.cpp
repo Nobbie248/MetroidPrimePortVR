@@ -186,6 +186,10 @@ CElementGen::CElementGen(TToken< CGenDescription > gen, EModelOrientationType or
 , xPortVsmtMask(0)
 #endif
 {
+#ifdef TARGET_PC
+  xPortVars.Init(x28_loadedGenDesc->xPortVars.get());
+  CPortVarScope portVarScope(&xPortVars);
+#endif
   CGlobalRandom gr(x27c_randState);
 
   if (CIntElement* seed = x28_loadedGenDesc->x10_SEED) {
@@ -545,6 +549,9 @@ const bool CElementGen::Update(double dt) {
   dt = fxScope.dt;
 #endif
   CParticleGlobals::SParticleSystem thisSystem('PART', this);
+#ifdef TARGET_PC
+  CPortVarScope portVarScope(&xPortVars);
+#endif
 
   if (x28_loadedGenDesc->x4_PSWT && !x26d_25_warmedUp) {
     int pswt = 0;
@@ -826,6 +833,11 @@ void CElementGen::UpdateExistingParticles() {
     }
     if (CColorElement* colr = x28_loadedGenDesc->x24_COLR) {
       colr->GetValue(particleFrame, p->x34_color);
+#ifdef TARGET_PC
+      if (x28_loadedGenDesc->xPortVfx) {
+        colr->GetValueHdr(particleFrame, p->xPortColor);
+      }
+#endif
     }
 #ifdef TARGET_PC
     if (x28_loadedGenDesc->xPortVfx) {
@@ -924,6 +936,11 @@ void CElementGen::CreateNewParticles(int count) {
 
     if (CColorElement* colr = x28_loadedGenDesc->x24_COLR) {
       colr->GetValue(0, particle.x34_color);
+#ifdef TARGET_PC
+      if (x28_loadedGenDesc->xPortVfx) {
+        colr->GetValueHdr(0, particle.xPortColor);
+      }
+#endif
     } else {
       particle.x34_color = CColor(0xFFFFFFFF);
     }
@@ -1148,6 +1165,9 @@ void CElementGen::SetParticleEmission(bool emission) {
 
 void CElementGen::ForceParticleCreation(int amount) {
   CParticleGlobals::SParticleSystem thisSystem('PART', this);
+#ifdef TARGET_PC
+  CPortVarScope portVarScope(&xPortVars);
+#endif
   CParticleGlobals::SetEmitterTime(x74_curFrame);
   CreateNewParticles(amount);
 }
@@ -1208,6 +1228,9 @@ void CElementGen::Render() {
 #endif
 
   CParticleGlobals::SParticleSystem sys('PART', this);
+#ifdef TARGET_PC
+  CPortVarScope portVarScope(&xPortVars);
+#endif
 
 #ifdef TARGET_PC
   CVector3f portSavedGlobal = xe8_globalTranslation;

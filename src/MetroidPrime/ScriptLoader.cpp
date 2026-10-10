@@ -16,6 +16,7 @@
 #include "MetroidPrime/CStateManager.hpp"
 #include "MetroidPrime/CWorld.hpp"
 #include "port_actor_collision_bounds.h"
+#include "port_ap_world.h"
 #include "port_apclient.h"
 #include "port_hints.h"
 #include "port_log.h"
@@ -1510,7 +1511,12 @@ CEntity* ScriptLoader::LoadRelay(CStateManager& mgr, CInputStream& in, int propC
 #ifdef TARGET_PC
   CScriptMemoryRelay* relay =
       rs_new CScriptMemoryRelay(mgr.AllocateUniqueId(), name, info, b1, b2, b3);
-  if (portName == "Memory Relay - dim scan holo")
+  // Only an elevator room's, on layer 0, as randomprime: Save Station Mines A
+  // has one by that name for its gate, which an early Activate breaks.
+  if (portName == "Memory Relay - dim scan holo" && (info.GetEditorId().value >> 26) == 0 &&
+      mgr.GetWorld() != nullptr &&
+      PortApWorld::IsElevatorRoom(static_cast< uint32_t >(
+          mgr.GetWorld()->IGetAreaAlways(info.GetAreaId())->IGetAreaAssetId())))
     PortQueueElevatorHolo(relay->GetUniqueId(), relay->GetEditorId());
   return relay;
 #else
@@ -3002,8 +3008,15 @@ CEntity* ScriptLoader::LoadVisorFlare(CStateManager& mgr, CInputStream& in, int 
 
 CEntity* ScriptLoader::LoadWorldTeleporter(CStateManager& mgr, CInputStream& in, int propCount,
                                            const CEntityInfo& info) {
+#ifdef TARGET_PC
+  // Port: PAL elevators have 26 properties; its 5 trailing ones (two bools,
+  // three floats) are left unread and skipped by LoadScriptObject.
+  if (!(propCount >= 4 && propCount <= 26 ? true : false))
+    return nullptr;
+#else
   if (!(propCount >= 4 && propCount <= 21 ? true : false))
     return nullptr;
+#endif
 
   rstl::string name = mgr.HashInstanceName(in);
   bool active = in.Get< bool >();
@@ -3813,8 +3826,14 @@ CEntity* ScriptLoader::LoadActorContraption(CStateManager& mgr, CInputStream& in
 
 CEntity* ScriptLoader::LoadOcculus(CStateManager& mgr, CInputStream& in, int propCount,
                                    const CEntityInfo& info) {
+#ifdef TARGET_PC
+  // Port: PAL's Oculus adds a trailing float, left unread.
+  if (propCount != 15 && propCount != 16)
+    return nullptr;
+#else
   if (propCount != 15)
     return nullptr;
+#endif
 
   SScaledActorHead head(in, mgr);
 
@@ -4079,8 +4098,14 @@ CEntity* ScriptLoader::LoadIceZoomer(CStateManager& mgr, CInputStream& in, int p
 
 CEntity* ScriptLoader::LoadRidley(CStateManager& mgr, CInputStream& in, int propCount,
                                   const CEntityInfo& info) {
+#ifdef TARGET_PC
+  // Port: PAL's Ridley has 40 properties (see CRidleyData).
+  if (propCount < CRidley::GetNumProperties() && propCount != 40)
+    return nullptr;
+#else
   if (propCount < CRidley::GetNumProperties())
     return nullptr;
+#endif
 
   SScaledActorHead head(in, mgr);
 

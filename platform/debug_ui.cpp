@@ -15,6 +15,8 @@
 #include "port_apclient.h"
 #include "port_rando_gen.h"
 #include "port_controls.h"
+#include "port_input_devices.h"
+#include "port_input_remap_ui.h"
 #include "port_data_folder.h"
 #include "port_gci.h"
 #include "port_mods.h"
@@ -36,17 +38,14 @@
 #include "port_textures.h"
 #include "port_build_info.h"
 #include "port_gpu_driver.h"
+#include "port_disc.h"
+#include "port_pal_languages.h"
 #include "vr/openxr_integration.h"
 #include "vr/vr_debug_tab.h"
+#include "vr/vr_pad.h"
 #include "vr/vr_settings.h"
 #if defined(__ANDROID__)
 #include "touch_pad.h"
-#endif
-// PrimedGun: cmake/BuildRevision.cmake writes the fork's release version next to
-// MP_BUILD_VERSION in port_build_info.h. A header generated before it did must not
-// break the build, so the About line then shows an empty version.
-#ifndef MP_PRIMEDGUN_VERSION
-#define MP_PRIMEDGUN_VERSION ""
 #endif
 
 #include "MetroidPrime/Cameras/CCameraManager.hpp"
@@ -64,9 +63,12 @@
 #include "MetroidPrime/CStateManager.hpp"
 #include "MetroidPrime/CWorld.hpp"
 #include "MetroidPrime/CScriptLayerManager.hpp"
+#include "MetroidPrime/Player/CGameOptions.hpp"
 #include "MetroidPrime/Player/CGameState.hpp"
 #include "MetroidPrime/Player/CPlayerState.hpp"
 #include "Kyoto/CResFactory.hpp"
+#include "Kyoto/Streams/CMemoryInStream.hpp"
+#include "Kyoto/Streams/CMemoryStreamOut.hpp"
 #include "Kyoto/Audio/CSfxManager.hpp"
 #include "MetroidPrime/SFX/UI.h"
 
@@ -102,6 +104,9 @@
 #include <cctype>
 #include <unistd.h>
 #endif
+#if !defined(_WIN32)
+extern char** environ;
+#endif
 
 #include <algorithm>
 #include <atomic>
@@ -132,6 +137,9 @@ extern "C" int AIPortOutputEnabled(void);
 extern "C" void salSetMuted(int muted);
 
 namespace {
+
+static_assert(PortInput::kScancodeLShift == SDL_SCANCODE_LSHIFT);
+PortInput::Settings& sInput = PortInput::MutableSettings();
 bool sInitialized = false;
 bool sFastBoot = false;
 bool sSkipCutscenes = false;
@@ -140,6 +148,10 @@ unsigned sSimRate = 60;
 bool sSimAdaptive = false;
 float sTickPeriod = 1.f / 60.f;
 bool sFrameLimitEnabled = true;
+int sFpsCap = 0; // with the 60 FPS cap off; 0 = unlimited
+constexpr int kFpsCapMin = 30;
+constexpr int kFpsCapMax = 500;
+int ClampFpsCap(int fps) { return fps <= 0 ? 0 : std::clamp(fps, kFpsCapMin, kFpsCapMax); }
 bool sTurbo = false;
 unsigned sTurboTicks = 1;
 bool sTraceTiming = false;
@@ -152,7 +164,14 @@ uint64_t sTimingWallLastNs = 0;
 unsigned sTimingFrames = 0, sTimingTicks = 0;
 double sActualFps = 0.0, sActualTps = 0.0;
 double sThroughputFps = 0.0;
+// On by default on macOS: Dawn's Metal backend has no non-tearing mode besides
+// vsync (Mailbox keeps displaySyncEnabled), and Immediate at the 60 fps cap on a
+// 60 Hz panel shows a tear line rolling slowly up or down the screen.
+#if defined(__APPLE__)
+bool sVsyncEnabled = true;
+#else
 bool sVsyncEnabled = false;
+#endif
 // Android hides the status and navigation bars by default; a desktop starts windowed.
 #if defined(__ANDROID__)
 bool sFullscreen = true;
@@ -180,8 +199,16 @@ int sDynHoldFor = 30;       // the next such hold; doubles each time
 PortDebug::EAspectMode sAspectMode = PortDebug::kAspect_Window;
 bool sHudWide = false;
 bool sCinemaBars = false;
+bool sSharpScanWindow = false;
+// Index into kPromptGlyphs; 0 = follow the input in use. Atomic: PortPrompts reads it off the UI thread.
+std::atomic< int > sPromptGlyphs{0};
+constexpr const char* kPromptGlyphs[] = {"auto", "xbox", "playstation", "switch", "gamecube", "keyboard"};
 bool sShowShaderCompilation = true;
+bool sShowMenuHint = true;
 int sHudScale = PortDebug::kHudScaleMax;
+int sCrosshairOpacity = PortDebug::kCrosshairOpacityMax;
+bool sCrosshairCustomColor = false;
+float sCrosshairColor[3] = {1.f, 1.f, 1.f};
 bool sHideHelmet = true;
 bool sHideVisorEffects = false;
 bool sHideMinimap = false;
@@ -202,19 +229,11 @@ bool sSkippableCutscenes = false;
 std::string sTextLanguage;
 int sElevatorRide = PortDebug::kElevatorRide_Original;
 bool sSaveStateHotkeys = true;
-bool sMouseAim = false;
-bool sTwinStick = false;
 float sTwinStickRightY = 0.f;
-bool sBeamShiftHeld = false;
 std::atomic<bool> sTouchBeamShift{false}; // the touch twin layout's held Beam button
 std::atomic<bool> sTouchTurboFire{false}; // the touch Turbo button, held
-bool sSpringBall = true;
-bool sSwapScanXray = false;
-bool sTouchColors = false; // Android touch overlay: the GameCube pad's colours
-bool sTouchLabels = true;  // and each button's function under its letter
-bool sTouchTurbo = false;  // a Turbo button beside Fire
-bool sTouchFloatingStick = true;  // the left stick appears where the left half is touched
-bool sFastMorph = false;
+// PrimedGun: the controls settings (sInput) keep their defaults in PortInput::Settings
+// (port_input_settings.h), the fork's Spring Ball on by default among them.
 bool sInvulnerable = false;
 // MP_GODMODE, for this run only: -1 unset, else 0 or 1. Never saved, and changing the
 // setting ends it.
@@ -222,15 +241,9 @@ int sInvulnerableRun = -1;
 // On by default: a game that closes at launch gives no chance to tick the box
 // first, and a phone or a desktop launcher has no terminal to read.
 bool sLogFile = true;
-bool sLockOnToggle = false;
-bool sStickyCharge = false;
-bool sRapidCharge = false;
 // The Randomizer page's options; the console's `rando gen` reads them too.
 std::mutex sRandoMutex;
 PortRandoGen::Settings sRandoSettings;
-bool sSpringFlick = false;
-float sSpringFlickRate = 6.f;
-float sStickAimRate = 900.f;
 float sFirstPersonFov = PortDebug::kFovRetail;
 int sMsaa = 1;
 // The Quest defaults to 4x, the level retail asks for (GX_ANISO_4).
@@ -245,10 +258,6 @@ bool sOpenGlesAtStart = false;
 // Setting `gpu_driver`: an installed custom Vulkan driver's id (port_gpu_driver.h), "" = the system's.
 std::string sGpuDriver;
 std::string sGpuDriverAtStart;
-// Setting `gpu_driver_ok`: the driver last kept after its trial run (DrawGpuDriverTrial).
-std::string sGpuDriverKept;
-// This run is a driver's trial: the marker main() left, removed once the user keeps it.
-std::string sGpuDriverTrialMarker;
 bool sUnlockHardMode = false;
 // Setting `storage_clamp`: -1 auto (aurora decides), 0 off, 1 on; read once when shaders are first made.
 int sStorageClamp = -1;
@@ -272,28 +281,6 @@ std::string sModsDisabled;
 // values for the port's additions while it is on. The saved settings are left as they
 // are, so turning it off brings them back.
 bool sOriginalExperience = false;
-// Gyro aiming: off / hold / always, auto / controller / phone, and how fast a
-// rotation turns into aim travel.
-int sGyroMode = 0;
-int sGyroSource = 0;
-float sGyroRate = 600.f;
-// Touch aim (Android): dragging on the free screen area turns the view by the
-// finger's travel. Speed is aim pixels per dp; 2.25 turns ~180 degrees over a
-// 400 dp drag at the default mouse sensitivity (pi / 0.0035 / 400).
-bool sTouchAim = true;
-float sTouchAimSpeed = 2.25f;
-// Tap the minimap to open the map (Android): the HUD publishes the minimap's
-// screen rect, the touch overlay hit-tests it and injects a Z press per tap.
-bool sTouchMapTap = true;
-// Hold-and-slide beam and visor wheels (Android overlay): the player's state is
-// published each frame, the overlay's pick comes back as a request that
-// ControlMapper reads for a few polls as if the command's button were pressed.
-bool sTouchWheels = true;
-// Classic GameCube layout (Android overlay): C-stick, D-pad and the per-option
-// toggles. Off, the overlay has no C-stick and dragging aims like a mouse.
-bool sTouchClassic = false;
-bool sTouchTwinStick = false;  // exclusive with sTouchClassic; classic wins on load
-bool sTouchVisorTapScan = false;
 std::atomic<uint32_t> sWheelMask{0};
 // The touch wheels' icons: ARGB pixels per [wheel][item], filled by the game thread, copied out by
 // the Android UI thread.
@@ -312,6 +299,7 @@ std::atomic<int> sVisorRequest{-1};
 std::atomic<uint64_t> sVisorRequestUntilNs{0};
 std::atomic<int> sBeamRequest{-1};
 std::atomic<uint64_t> sBeamRequestUntilNs{0};
+std::atomic<uint64_t> sSpringRequestUntilNs{0};
 constexpr uint64_t kWheelRequestNs = 120'000'000;
 std::mutex sMinimapMutex;
 bool sMinimapValid = false;
@@ -342,30 +330,16 @@ std::atomic<bool> sTouchAimDown{false};
 std::atomic<uint64_t> sTouchAimHoldUntilNs{0};
 bool sMouseCaptured = false;
 bool sMouseGameplayActive = false;
-bool sMouseInvertX = false;
-bool sMouseInvertY = false;
-bool sMouseButtons = true;
-// What each mouse button does under mouse aim (PortInputMap::EMouseAction).
-int sMouseActions[PortInputMap::kMouseButtonCount] = {
-    PortInputMap::DefaultMouseAction(0), PortInputMap::DefaultMouseAction(1),
-    PortInputMap::DefaultMouseAction(2), PortInputMap::DefaultMouseAction(3),
-    PortInputMap::DefaultMouseAction(4)};
-// The beam shift: two keys or mouse buttons (scancode or PAD_KEY_MOUSE_*) and
-// a controller button (an SDL gamepad button or PAD_NATIVE_BUTTON_TRIGGER_*),
-// -1 for none.
-int sShiftBindings[3] = {SDL_SCANCODE_LSHIFT, -1, -1};
-int sTurboBindings[3] = {-1, -1, -1}; // turbo fire: two keys, then a controller button
-// A second controller button per PAD button, indexed by the PAD bit's position;
-// the same codes as the shift's pad slot, -1 for none.
-int sPadAltButtons[PortDebug::kPadAltCount] = {-1, -1, -1, -1, -1, -1, -1, -1,
-                                               -1, -1, -1, -1, -1, -1, -1, -1};
-bool sMouseCrosshair = true;
-int sCrosshairSize = PortDebug::kCrosshairSizeDefault;
+// The game's CGameOptions as hex of its PutTo bits. Retail keeps them only in each
+// save file and resets them on the title screen, so a change made without saving
+// at a station was gone on the next launch (issue #45). The port keeps one global
+// copy, like Remastered.
+std::string sGameOptions;
+bool sGameOptionsRestored = false;
 PortMouse::AimState sMouseAimState;
 PortMouse::ButtonGate sMouseButtonGate;
 PortMouse::ButtonGate sMouseMenuGate;
 PortMouse::HeldButtons sMouseHeldButtons;
-float sMouseSensitivity = 0.0035f;
 float sMousePendingX = 0.f;
 float sMousePendingY = 0.f;
 float sMouseFrameX = 0.f;
@@ -425,22 +399,10 @@ std::atomic< bool > sTouchColorsFlag{false};
 std::atomic< bool > sTouchLabelsFlag{true};
 std::atomic< bool > sTouchTurboFlag{false};
 std::atomic< bool > sTouchFloatingStickFlag{true};
-// The Android touch overlay's gap to the side edges for every control, and the
-// left stick's extra gap on top of it, in dp. Read from the UI thread.
-constexpr float kTouchMarginMaxDp = 300.f;
-constexpr float kTouchSideMarginDefault = 16.f;
-constexpr float kTouchStickInsetDefault = 32.f;
-std::atomic< float > sTouchSideMargin{kTouchSideMarginDefault};
-std::atomic< float > sTouchStickInset{kTouchStickInsetDefault};
-// The face buttons' and C-stick's extra gap to the right edge, in dp.
-constexpr float kTouchButtonInsetDefault = 0.f;
-std::atomic< float > sTouchButtonInset{kTouchButtonInsetDefault};
-// Each touch control's own offset and size, as an opaque string the touch view
-// parses (`<id>:<dx>,<dy>,<scale>;...`). Java reads and writes it on the UI thread
-// and the settings file on the game thread, hence the mutex.
-std::mutex sTouchLayoutMutex;
-std::string sTouchLayout;
-constexpr size_t kTouchLayoutMaxLen = 4096;
+constexpr float kTouchMarginMaxDp = PortInput::kTouchMarginMaxDp;
+constexpr float kTouchSideMarginDefault = PortInput::kTouchSideMarginDefault;
+constexpr float kTouchStickInsetDefault = PortInput::kTouchStickInsetDefault;
+constexpr float kTouchButtonInsetDefault = PortInput::kTouchButtonInsetDefault;
 // Java's layout change is saved by the game thread's next frame: ImGui's settings
 // path isn't safe from the UI thread.
 std::atomic< bool > sTouchLayoutSavePending{false};
@@ -518,16 +480,6 @@ bool ParseBool(const std::string& value) {
   return value == "1" || value == "true" || value == "on" || value == "yes";
 }
 
-// The mouse button a settings key such as "mouse_left" names, or -1.
-int MouseButtonSetting(const std::string& key) {
-  for (int i = 0; i < PortInputMap::kMouseButtonCount; ++i) {
-    if (key == PortInputMap::MouseButtonKey(i)) {
-      return i;
-    }
-  }
-  return -1;
-}
-
 std::string Trim(const std::string& text) {
   const size_t begin = text.find_first_not_of(" \t\r\n");
   if (begin == std::string::npos) {
@@ -561,8 +513,13 @@ void ApplySetting(const std::string& key, const std::string& value) {
   if (PortVr::ApplyVrSetting(key, value)) {
     return;
   }
+  if (PortInput::ApplySetting(key, value)) {
+    return;
+  }
   if (key == "frame_limit") {
     sFrameLimitEnabled = ParseBool(value);
+  } else if (key == "fps_cap") {
+    sFpsCap = ClampFpsCap(std::atoi(value.c_str()));
   } else if (key == "vsync") {
     sVsyncEnabled = ParseBool(value);
   } else if (key == "fullscreen") {
@@ -606,14 +563,39 @@ void ApplySetting(const std::string& key, const std::string& value) {
     }
   } else if (key == "cinema_bars") {
     sCinemaBars = ParseBool(value);
+  } else if (key == "sharp_scan_window") {
+    sSharpScanWindow = ParseBool(value);
+  } else if (key == "prompt_glyphs") {
+    for (int i = 0; i < int(std::size(kPromptGlyphs)); ++i) {
+      if (value == kPromptGlyphs[i]) {
+        sPromptGlyphs.store(i, std::memory_order_relaxed);
+      }
+    }
   } else if (key == "show_shader_compilation") {
     sShowShaderCompilation = ParseBool(value);
+  } else if (key == "show_menu_hint") {
+    sShowMenuHint = ParseBool(value);
   } else if (key == "hud_wide") {
     sHudWide = ParseBool(value);
   } else if (key == "hud_scale") {
     const int s = std::atoi(value.c_str());
     if (s >= PortDebug::kHudScaleMin && s <= PortDebug::kHudScaleMax) {
       sHudScale = s;
+    }
+  } else if (key == "crosshair_opacity") {
+    const int s = std::atoi(value.c_str());
+    if (s >= PortDebug::kCrosshairOpacityMin && s <= PortDebug::kCrosshairOpacityMax) {
+      sCrosshairOpacity = s;
+    }
+  } else if (key == "crosshair_color") {
+    // RRGGBB, or empty for the game's own colour.
+    unsigned rgb = 0;
+    sCrosshairCustomColor =
+        value.size() == 6 && std::sscanf(value.c_str(), "%6x", &rgb) == 1;
+    if (sCrosshairCustomColor) {
+      for (int i = 0; i < 3; ++i) {
+        sCrosshairColor[i] = static_cast< float >((rgb >> (16 - 8 * i)) & 0xff) / 255.f;
+      }
     }
   } else if (key == "hide_helmet") {
     sHideHelmet = ParseBool(value);
@@ -661,8 +643,6 @@ void ApplySetting(const std::string& key, const std::string& value) {
   } else if (key == "gpu_driver") {
     sGpuDriver = value;
     sGpuDriverAtStart = value;
-  } else if (key == "gpu_driver_ok") {
-    sGpuDriverKept = value;
   } else if (key == "storage_clamp") {
     const int v = std::atoi(value.c_str());
     sStorageClamp = v < 0 ? -1 : (v > 0 ? 1 : 0);
@@ -677,127 +657,8 @@ void ApplySetting(const std::string& key, const std::string& value) {
     if (std::isfinite(f) && f >= PortDebug::kFovMin && f <= PortDebug::kFovMax) {
       sFirstPersonFov = f;
     }
-  } else if (key == "mouse_aim") {
-    sMouseAim = ParseBool(value);
-  } else if (key == "twin_stick") {
-    sTwinStick = ParseBool(value);
-  } else if (key == "touch_colors") {
-    sTouchColors = ParseBool(value);
-  } else if (key == "touch_labels") {
-    sTouchLabels = ParseBool(value);
-  } else if (key == "touch_turbo") {
-    sTouchTurbo = ParseBool(value);
-  } else if (key == "touch_floating_stick") {
-    sTouchFloatingStick = ParseBool(value);
-  } else if (key == "stick_aim_rate") {
-    const float f = static_cast< float >(std::atof(value.c_str()));
-    if (std::isfinite(f) && f >= 50.f && f <= 4000.f) {
-      sStickAimRate = f;
-    }
-  } else if (key == "gyro_mode") {
-    const long v = std::strtol(value.c_str(), nullptr, 10);
-    if (v >= 0 && v <= 2) {
-      sGyroMode = static_cast< int >(v);
-    }
-  } else if (key == "gyro_source") {
-    const long v = std::strtol(value.c_str(), nullptr, 10);
-    if (v >= 0 && v <= 2) {
-      sGyroSource = static_cast< int >(v);
-    }
-  } else if (key == "gyro_rate") {
-    const float f = static_cast< float >(std::atof(value.c_str()));
-    if (std::isfinite(f) && f >= 20.f && f <= 5000.f) {
-      sGyroRate = f;
-    }
-  } else if (key == "touch_aim") {
-    sTouchAim = ParseBool(value);
-  } else if (key == "touch_map_tap") {
-    sTouchMapTap = ParseBool(value);
-  } else if (key == "touch_classic_gc") {
-    sTouchClassic = ParseBool(value);
-  } else if (key == "touch_twin_stick") {
-    sTouchTwinStick = ParseBool(value);
-  } else if (key == "touch_wheels") {
-    sTouchWheels = ParseBool(value);
-  } else if (key == "touch_visor_tap_scan") {
-    sTouchVisorTapScan = ParseBool(value);
-  } else if (key == "touch_aim_speed") {
-    const float f = static_cast< float >(std::atof(value.c_str()));
-    if (std::isfinite(f) && f >= 0.25f && f <= 10.f) {
-      sTouchAimSpeed = f;
-    }
-  } else if (key == "touch_side_margin" || key == "touch_stick_inset" ||
-             key == "touch_button_inset") {
-    const float f = static_cast< float >(std::atof(value.c_str()));
-    if (std::isfinite(f) && f >= 0.f && f <= kTouchMarginMaxDp) {
-      (key == "touch_side_margin"   ? sTouchSideMargin
-       : key == "touch_stick_inset" ? sTouchStickInset
-                                    : sTouchButtonInset)
-          .store(f);
-    }
-  } else if (key == "touch_layout") {
-    // Printable ASCII only: JNI's NewStringUTF aborts on invalid UTF-8.
-    const bool ascii = std::all_of(value.begin(), value.end(),
-                                   [](unsigned char c) { return c >= 0x20 && c < 0x7F; });
-    if (ascii && value.size() <= kTouchLayoutMaxLen) {
-      std::lock_guard< std::mutex > lock(sTouchLayoutMutex);
-      sTouchLayout = value;
-    }
-  } else if (key == "mouse_invert_x") {
-    sMouseInvertX = ParseBool(value);
-  } else if (key == "mouse_invert_y") {
-    sMouseInvertY = ParseBool(value);
-  } else if (key == "mouse_buttons") {
-    sMouseButtons = ParseBool(value);
-  } else if (key == "mouse_crosshair") {
-    sMouseCrosshair = ParseBool(value);
-  } else if (key == "crosshair_size") {
-    const int s = std::atoi(value.c_str());
-    if (s >= PortDebug::kCrosshairSizeMin && s <= PortDebug::kCrosshairSizeMax) {
-      sCrosshairSize = s;
-    }
-  } else if (key == "mouse_sensitivity") {
-    const float f = static_cast< float >(std::atof(value.c_str()));
-    if (std::isfinite(f) && f > 0.f && f <= 1.f) {
-      sMouseSensitivity = f;
-    }
-  } else if (key == "spring_ball") {
-    sSpringBall = ParseBool(value);
-  } else if (key == "swap_scan_xray") {
-    sSwapScanXray = ParseBool(value);
-  } else if (key == "shift_key" || key == "shift_key_alt" || key == "shift_pad") {
-    const int slot = key == "shift_key" ? 0 : key == "shift_key_alt" ? 1 : 2;
-    // A number, or the value is ignored (atoi would read junk as scancode 0).
-    char* end = nullptr;
-    const long code = std::strtol(value.c_str(), &end, 10);
-    if (end != value.c_str() && *end == '\0') {
-      sShiftBindings[slot] = static_cast< int >(code);
-    }
-  } else if (key == "turbo_key" || key == "turbo_key_alt" || key == "turbo_pad") {
-    const int slot = key == "turbo_key" ? 0 : key == "turbo_key_alt" ? 1 : 2;
-    char* end = nullptr;
-    const long code = std::strtol(value.c_str(), &end, 10);
-    if (end != value.c_str() && *end == '\0') {
-      sTurboBindings[slot] = static_cast< int >(code);
-    }
-  } else if (key == "pad_alt") {
-    // kPadAltCount comma-separated codes; a short or malformed list keeps the
-    // rest as they are.
-    const char* cursor = value.c_str();
-    for (int i = 0; i < PortDebug::kPadAltCount && *cursor != '\0'; ++i) {
-      char* end = nullptr;
-      const long code = std::strtol(cursor, &end, 10);
-      if (end == cursor) {
-        break;
-      }
-      sPadAltButtons[i] = static_cast< int >(code);
-      cursor = *end == ',' ? end + 1 : end;
-    }
-  } else if (MouseButtonSetting(key) >= 0) {
-    const int action = PortInputMap::MouseActionFromName(value.c_str());
-    if (action >= 0) {
-      sMouseActions[MouseButtonSetting(key)] = action;
-    }
+  } else if (key == "game_options") {
+    sGameOptions = value;
   } else if (key == "speedrun_timer") {
     sSpeedrunTimer = ParseBool(value);
   } else if (key == "livesplit") {
@@ -819,20 +680,12 @@ void ApplySetting(const std::string& key, const std::string& value) {
     sOriginalExperience = ParseBool(value);
   } else if (key == "mods_disabled") {
     sModsDisabled = value;
-  } else if (key == "fast_morph") {
-    sFastMorph = ParseBool(value);
   } else if (key == "invulnerable") {
     sInvulnerable = ParseBool(value);
   } else if (key == "logging") {
     // Not "log_file": builds from before the log was on by default wrote
     // log_file=0 into every settings file, which kept it off after an update.
     sLogFile = ParseBool(value);
-  } else if (key == "lock_on_toggle") {
-    sLockOnToggle = ParseBool(value);
-  } else if (key == "sticky_charge") {
-    sStickyCharge = ParseBool(value);
-  } else if (key == "rapid_charge") {
-    sRapidCharge = ParseBool(value);
   } else if (key == "rando_settings") {
     PortRandoGen::Settings parsed;
     if (!PortRandoGen::ParseSettings(value, parsed)) {
@@ -840,13 +693,6 @@ void ApplySetting(const std::string& key, const std::string& value) {
     }
     std::lock_guard< std::mutex > lock(sRandoMutex);
     sRandoSettings = parsed;
-  } else if (key == "spring_ball_flick") {
-    sSpringFlick = ParseBool(value);
-  } else if (key == "spring_ball_flick_rate") {
-    const float f = static_cast< float >(std::atof(value.c_str()));
-    if (std::isfinite(f) && f >= 2.f && f <= 20.f) {
-      sSpringFlickRate = f;
-    }
   } else if (key == "sim_rate") {
     const long rate = std::strtol(value.c_str(), nullptr, 10);
     if (rate >= 30 && rate <= 480) {
@@ -913,7 +759,9 @@ void ForEachSettingLine(std::istream& in, Use&& use) {
   }
 }
 
-// The values the game would read from `in`, a later line winning.
+// The values the game would read from `in`, a later line winning. Not the log's
+// SettingsValues below, which keeps a '#' inside a value: this one reads as
+// LoadSettings does, so PollSettingsFile compares like with like.
 std::map< std::string, std::string > SettingValues(std::istream& in) {
   std::map< std::string, std::string > values;
   ForEachSettingLine(in, [&values](const std::string& key, const std::string& value) { values[key] = value; });
@@ -932,22 +780,16 @@ void LoadSettings() {
     ApplySetting(key, value);
     values[key] = value;
   });
-  if (sTouchClassic) {
-    sTouchTwinStick = false;
-  }
+  PortInput::PostLoad();
   std::lock_guard< std::mutex > lock(sSettingsFileMutex);
   sSettingsFileValues = std::move(values);
   // Read again at the first poll: a change made since is applied then.
   sSettingsFileTime = std::filesystem::file_time_type::min();
 }
 
-void SaveSettings() {
-  if (!sInitialized || !sSettingsDirty) {
-    return;
-  }
-  const std::string path = SettingsFilePath();
-  // Port: the text is built here and written to a temporary file that replaces the
-  // old one, so an app killed mid-write (Android) keeps the previous settings.
+// The settings file's text, as written by SaveSettings and copied into the log
+// (the VR lines included).
+std::string SettingsText() {
   std::ostringstream file;
   const char* aspect = sAspectMode == PortDebug::kAspect_16_9  ? "16:9"
                        : sAspectMode == PortDebug::kAspect_Window ? "window"
@@ -957,8 +799,23 @@ void SaveSettings() {
   file << "aspect=" << aspect << '\n';
   file << "hud_wide=" << (sHudWide ? 1 : 0) << '\n';
   file << "cinema_bars=" << (sCinemaBars ? 1 : 0) << '\n';
+  file << "sharp_scan_window=" << (sSharpScanWindow ? 1 : 0) << '\n';
+  file << "prompt_glyphs=" << kPromptGlyphs[sPromptGlyphs.load(std::memory_order_relaxed)] << '\n';
   file << "show_shader_compilation=" << (sShowShaderCompilation ? 1 : 0) << '\n';
+  file << "show_menu_hint=" << (sShowMenuHint ? 1 : 0) << '\n';
   file << "hud_scale=" << sHudScale << '\n';
+  file << "crosshair_opacity=" << sCrosshairOpacity << '\n';
+  {
+    char hex[8] = "";
+    if (sCrosshairCustomColor) {
+      unsigned rgb = 0;
+      for (const float c : sCrosshairColor) {
+        rgb = rgb << 8 | static_cast< unsigned >(std::lround(std::clamp(c, 0.f, 1.f) * 255.f));
+      }
+      std::snprintf(hex, sizeof(hex), "%06x", rgb);
+    }
+    file << "crosshair_color=" << hex << '\n';
+  }
   file << "hide_helmet=" << (sHideHelmet ? 1 : 0) << '\n';
   file << "hide_visor_effects=" << (sHideVisorEffects ? 1 : 0) << '\n';
   file << "hide_minimap=" << (sHideMinimap ? 1 : 0) << '\n';
@@ -977,7 +834,6 @@ void SaveSettings() {
   file << "msaa=" << sMsaa << '\n';
   file << "opengles=" << (sOpenGles ? 1 : 0) << '\n';
   file << "gpu_driver=" << sGpuDriver << '\n';
-  file << "gpu_driver_ok=" << sGpuDriverKept << '\n';
   file << "anisotropy=" << sAnisotropy << '\n';
   file << "unlock_hard_mode=" << (sUnlockHardMode ? 1 : 0) << '\n';
   file << "unlock_fusion_suit=" << (sUnlockFusionSuit ? 1 : 0) << '\n';
@@ -1003,6 +859,7 @@ void SaveSettings() {
   file << "dynamic_res_target=" << sDynamicResTarget << '\n';
   file << "dynamic_res_min=" << sDynamicResMin << '\n';
   file << "frame_limit=" << (sFrameLimitEnabled ? 1 : 0) << '\n';
+  file << "fps_cap=" << sFpsCap << '\n';
   file << "sim_rate=" << sSimRate << '\n';
   file << "sim_adaptive=" << (sSimAdaptive ? 1 : 0) << '\n';
   file << "smooth_frames=" << (sSmoothFrames ? 1 : 0) << '\n';
@@ -1011,65 +868,18 @@ void SaveSettings() {
   file << "room_geo_lod=" << PortRoomGeo::LodDistance() << '\n';
   file << "remastered_import_geometry=" << (sImportGeometry ? 1 : 0) << '\n';
   file << "remastered_import_effects=" << (sImportEffects ? 1 : 0) << '\n';
-  file << "mouse_aim=" << (sMouseAim ? 1 : 0) << '\n';
-  file << "twin_stick=" << (sTwinStick ? 1 : 0) << '\n';
-  file << "touch_colors=" << (sTouchColors ? 1 : 0) << '\n';
-  file << "touch_labels=" << (sTouchLabels ? 1 : 0) << '\n';
-  file << "touch_turbo=" << (sTouchTurbo ? 1 : 0) << '\n';
-  file << "touch_floating_stick=" << (sTouchFloatingStick ? 1 : 0) << '\n';
-  file << "spring_ball=" << (sSpringBall ? 1 : 0) << '\n';
-  file << "swap_scan_xray=" << (sSwapScanXray ? 1 : 0) << '\n';
-  file << "shift_key=" << sShiftBindings[0] << '\n';
-  file << "shift_key_alt=" << sShiftBindings[1] << '\n';
-  file << "shift_pad=" << sShiftBindings[2] << '\n';
-  file << "turbo_key=" << sTurboBindings[0] << '\n';
-  file << "turbo_key_alt=" << sTurboBindings[1] << '\n';
-  file << "turbo_pad=" << sTurboBindings[2] << '\n';
-  file << "pad_alt=";
-  for (int i = 0; i < PortDebug::kPadAltCount; ++i) {
-    file << (i != 0 ? "," : "") << sPadAltButtons[i];
-  }
-  file << '\n';
-  file << "fast_morph=" << (sFastMorph ? 1 : 0) << '\n';
+  PortInput::WriteControlSettings(file);
   file << "invulnerable=" << (sInvulnerable ? 1 : 0) << '\n';
   file << "logging=" << (sLogFile ? 1 : 0) << '\n';
-  file << "lock_on_toggle=" << (sLockOnToggle ? 1 : 0) << '\n';
-  file << "sticky_charge=" << (sStickyCharge ? 1 : 0) << '\n';
-  file << "rapid_charge=" << (sRapidCharge ? 1 : 0) << '\n';
+  PortInput::WriteGameplaySettings(file);
   {
     std::lock_guard< std::mutex > lock(sRandoMutex);
     file << "rando_settings=" << PortRandoGen::SettingsText(sRandoSettings) << '\n';
   }
-  file << "spring_ball_flick=" << (sSpringFlick ? 1 : 0) << '\n';
-  file << "spring_ball_flick_rate=" << sSpringFlickRate << '\n';
-  file << "stick_aim_rate=" << sStickAimRate << '\n';
-  file << "gyro_mode=" << sGyroMode << '\n';
-  file << "gyro_source=" << sGyroSource << '\n';
-  file << "gyro_rate=" << sGyroRate << '\n';
-  file << "touch_aim=" << (sTouchAim ? 1 : 0) << '\n';
-  file << "touch_aim_speed=" << sTouchAimSpeed << '\n';
-  file << "touch_side_margin=" << sTouchSideMargin.load() << '\n';
-  file << "touch_stick_inset=" << sTouchStickInset.load() << '\n';
-  file << "touch_button_inset=" << sTouchButtonInset.load() << '\n';
-  {
-    std::lock_guard< std::mutex > lock(sTouchLayoutMutex);
-    file << "touch_layout=" << sTouchLayout << '\n';
+  PortInput::WriteAimSettings(file);
+  if (!sGameOptions.empty()) {
+    file << "game_options=" << sGameOptions << '\n';
   }
-  file << "touch_map_tap=" << (sTouchMapTap ? 1 : 0) << '\n';
-  file << "touch_classic_gc=" << (sTouchClassic ? 1 : 0) << '\n';
-  file << "touch_twin_stick=" << (sTouchTwinStick ? 1 : 0) << '\n';
-  file << "touch_wheels=" << (sTouchWheels ? 1 : 0) << '\n';
-  file << "touch_visor_tap_scan=" << (sTouchVisorTapScan ? 1 : 0) << '\n';
-  file << "mouse_invert_x=" << (sMouseInvertX ? 1 : 0) << '\n';
-  file << "mouse_invert_y=" << (sMouseInvertY ? 1 : 0) << '\n';
-  file << "mouse_buttons=" << (sMouseButtons ? 1 : 0) << '\n';
-  for (int i = 0; i < PortInputMap::kMouseButtonCount; ++i) {
-    file << PortInputMap::MouseButtonKey(i) << '=' << PortInputMap::MouseActionInfo(sMouseActions[i]).name
-         << '\n';
-  }
-  file << "mouse_crosshair=" << (sMouseCrosshair ? 1 : 0) << '\n';
-  file << "crosshair_size=" << sCrosshairSize << '\n';
-  file << "mouse_sensitivity=" << sMouseSensitivity << '\n';
   if (!sDiscPath.empty()) {
     file << "disc_path=" << sDiscPath << '\n';
   }
@@ -1091,7 +901,65 @@ void SaveSettings() {
     file << '\n';
   }
   PortVr::WriteVrSettings(file);
-  const std::string text = file.str();
+  return file.str();
+}
+
+// key=value lines of a settings text, comments skipped.
+std::map< std::string, std::string > SettingsValues(const std::string& text) {
+  std::map< std::string, std::string > values;
+  std::istringstream lines(text);
+  std::string line;
+  while (std::getline(lines, line)) {
+    const size_t separator = line.find('=');
+    if (!line.empty() && line[0] != '#' && separator != std::string::npos) {
+      values[line.substr(0, separator)] = line.substr(separator + 1);
+    }
+  }
+  return values;
+}
+
+// Paths in the log keep only their file name: the folders say nothing about a bug.
+std::string LoggedSettingValue(const std::string& key, const std::string& value) {
+  if (key == "disc_path" || key == "remastered_nsp" || key == "remastered_keys") {
+    const size_t slash = value.find_last_of("/\\");
+    return slash == std::string::npos ? value : value.substr(slash + 1);
+  }
+  return value;
+}
+
+// The settings last copied into the log; SaveSettings logs what changed since.
+std::map< std::string, std::string > sLoggedSettings;
+bool sSettingsLogged = false;
+
+void LogSettingChanges(const std::string& text) {
+  std::map< std::string, std::string > values = SettingsValues(text);
+  if (sSettingsLogged) {
+    for (const auto& [key, value] : values) {
+      const auto old = sLoggedSettings.find(key);
+      const std::string before = old == sLoggedSettings.end() ? "(unset)" : LoggedSettingValue(key, old->second);
+      if (old == sLoggedSettings.end() || old->second != value) {
+        PortLog::Write("port: setting %s: %s -> %s\n", key.c_str(), before.c_str(),
+                       LoggedSettingValue(key, value).c_str());
+      }
+    }
+    for (const auto& [key, value] : sLoggedSettings) {
+      if (values.find(key) == values.end()) {
+        PortLog::Write("port: setting %s: %s -> (unset)\n", key.c_str(), LoggedSettingValue(key, value).c_str());
+      }
+    }
+  }
+  sLoggedSettings = std::move(values);
+}
+
+void SaveSettings() {
+  if (!sInitialized || !sSettingsDirty) {
+    return;
+  }
+  const std::string text = SettingsText();
+  LogSettingChanges(text);
+  const std::string path = SettingsFilePath();
+  // Port: the text is written to a temporary file that replaces the old one, so an
+  // app killed mid-write (Android) keeps the previous settings.
   const std::filesystem::path target = PortPaths::detail::FromUtf8(path);
   std::filesystem::path temporary = target;
   temporary += ".tmp";
@@ -1261,31 +1129,8 @@ void EnsureInitialized() {
   }
   sHudWide = port::EnvFlag("MP_HUD_WIDE", sHudWide);
   sCinemaBars = port::EnvFlag("MP_CINEMA_BARS", sCinemaBars);
-  sRapidCharge = port::EnvFlag("MP_RAPID_CHARGE", sRapidCharge);
-  if (port::EnvFlag("MP_MOUSE_AIM")) {
-    sMouseAim = true;
-  }
-  if (port::EnvFlag("MP_TWIN_STICK")) {
-    sTwinStick = true;
-  }
-  if (port::EnvFlag("MP_MOUSE_INVERT_X")) {
-    sMouseInvertX = true;
-  }
-  if (port::EnvFlag("MP_MOUSE_INVERT_Y")) {
-    sMouseInvertY = true;
-  }
-  if (port::EnvFlag("MP_DISABLE_MOUSE_BUTTONS")) {
-    sMouseButtons = false;
-  }
-  if (port::EnvFlag("MP_DISABLE_MOUSE_CROSSHAIR")) {
-    sMouseCrosshair = false;
-  }
-  {
-    const float value = port::EnvFloat("MP_MOUSE_SENS", 0.f);
-    if (std::isfinite(value) && value > 0.f) {
-      sMouseSensitivity = value;
-    }
-  }
+  sSharpScanWindow = port::EnvFlag("MP_SHARP_SCAN_WINDOW", sSharpScanWindow);
+  PortInput::ApplyEnvOverrides();
   if (port::EnvFlag("MP_DISABLE_AI_AUDIO")) {
     sAiAudioEnabled = false;
   }
@@ -1303,6 +1148,9 @@ void EnsureInitialized() {
     sSimAdaptive = true;
   }
   sOriginalExperience = port::EnvFlag("MP_ORIGINAL", sOriginalExperience);
+  if (std::getenv("MP_FPS_CAP") != nullptr) {
+    sFpsCap = ClampFpsCap(port::EnvInt("MP_FPS_CAP", 0));
+  }
 
   std::atexit(SaveSettings);
   ApplyLiveSplit();
@@ -1419,6 +1267,11 @@ bool FrameLimitEnabled() {
   return EffectiveFrameLimit();
 }
 
+int FrameRateCap() {
+  EnsureInitialized();
+  return EffectiveFrameLimit() ? 60 : sFpsCap;
+}
+
 
 static double DynamicResTargetFps() {
   double target = sDynamicResTarget;
@@ -1426,7 +1279,8 @@ static double DynamicResTargetFps() {
     const SDL_DisplayMode* mode = SDL_GetCurrentDisplayMode(SDL_GetPrimaryDisplay());
     target = mode != nullptr && mode->refresh_rate > 0.f ? mode->refresh_rate : 60.0;
   }
-  return EffectiveFrameLimit() ? std::min(target, 60.0) : target;
+  const int cap = EffectiveFrameLimit() ? 60 : sFpsCap;
+  return cap > 0 ? std::min(target, static_cast< double >(cap)) : target;
 }
 
 static void ResetDynamicRes() {
@@ -1547,8 +1401,8 @@ void RecordFrame(uint64_t durationNs, unsigned ticks, bool presented) {
     sTimingLoops = 0;
     if (sTraceTiming) {
       std::fprintf(stderr,
-                   "[timing] presented=%.1f FPS throughput=%.1f FPS simulation=%.1f ticks/s cap=%s\n",
-                   sActualFps, sThroughputFps, sActualTps, EffectiveFrameLimit() ? "60" : "off");
+                   "[timing] presented=%.1f FPS throughput=%.1f FPS simulation=%.1f ticks/s cap=%d\n",
+                   sActualFps, sThroughputFps, sActualTps, EffectiveFrameLimit() ? 60 : sFpsCap);
     }
     UpdateDynamicRes(sActualFps, sTimingFrames);
     sTimingNs = 0;
@@ -1660,6 +1514,20 @@ bool CinemaBars() {
   return sCinemaBars || sOriginalExperience;
 }
 
+bool SharpScanWindow() {
+  EnsureInitialized();
+  // PortVr: off while the headset runs. Its scan pane magnifies each eye's own view
+  // (vr_scan_zoom, CPlayerVisor), while this window is a second mono world render
+  // through a zoomed camera with its own post pass: the world route re-projects
+  // every world draw through the eyes, and the Quest would pay for the world twice.
+  return sSharpScanWindow && !sOriginalExperience && !PortVr::OpenXRIsRunning();
+}
+
+const char* PromptGlyphs() {
+  const int glyphs = sPromptGlyphs.load(std::memory_order_relaxed);
+  return glyphs > 0 ? kPromptGlyphs[glyphs] : nullptr;
+}
+
 int HudScale() {
   EnsureInitialized();
   return sOriginalExperience ? kHudScaleMax : sHudScale;
@@ -1669,6 +1537,20 @@ void SetHudScale(int percent) {
   EnsureInitialized();
   sHudScale = std::clamp(percent, kHudScaleMin, kHudScaleMax);
   MarkDirty();
+}
+
+int CrosshairOpacity() {
+  EnsureInitialized();
+  return sOriginalExperience ? kCrosshairOpacityMax : sCrosshairOpacity;
+}
+
+bool CrosshairColor(float rgb[3]) {
+  EnsureInitialized();
+  if (!sCrosshairCustomColor || sOriginalExperience) {
+    return false;
+  }
+  std::copy_n(sCrosshairColor, 3, rgb);
+  return true;
 }
 
 bool HideHelmet() {
@@ -1854,20 +1736,6 @@ void SetGpuDriver(const std::string& id) {
     sGpuDriver = id;
     MarkDirty();
   }
-  // Keeping confirms only the current choice: another one gets its own trial.
-  if (sGpuDriverKept != id) {
-    sGpuDriverKept.clear();
-  }
-}
-
-const std::string& GpuDriverKept() {
-  EnsureInitialized();
-  return sGpuDriverKept;
-}
-
-void BeginGpuDriverTrial(const std::string& markerPath) {
-  EnsureInitialized();
-  sGpuDriverTrialMarker = markerPath;
 }
 
 int Anisotropy() {
@@ -1946,18 +1814,19 @@ void SetUnlockGalleries(bool enabled) {
 
 bool MouseAim() {
   EnsureInitialized();
-  return sMouseAim;
+  // PortVr: off while the PrimedGun pad owns port 0, as twin stick is (TwinStick).
+  return sInput.mouseAim && !PortVr::VrPadOwnsPort0();
 }
 
 void SetMouseAim(bool enabled) {
   EnsureInitialized();
-  sMouseAim = enabled;
+  sInput.mouseAim = enabled;
   ResetMouseAim();
 }
 
 bool TouchDirectAim() {
 #if defined(__ANDROID__)
-  return !sTouchClassic && sTouchActive.load(std::memory_order_acquire) && !Visible();
+  return !sInput.touchClassic && sTouchActive.load(std::memory_order_acquire) && !Visible();
 #else
   return false;
 #endif
@@ -1977,23 +1846,31 @@ bool DirectAim() { return MouseAim() || TwinStick() || TouchDirectAim(); }
 // touch overlay always does what its buttons say. The F1 menu (Visible) sees the stored values.
 bool TwinStick() {
   EnsureInitialized();
+  // PortVr: the PrimedGun pad is the GameCube pad it emulates, so while it owns port 0 the
+  // desktop's direct aim stands down (MouseAim too). Twin stick would eat its C-stick (the beam
+  // wheel's pulse, the morph ball's right stick), and DirectAim would turn the look stick's turn
+  // into a strafe and switch off the snap turn and directional movement; the head and the
+  // tracked cannon aim instead. Gamepad mode's controllers are an ordinary pad and keep it.
+  if (PortVr::VrPadOwnsPort0()) {
+    return false;
+  }
 #if defined(__ANDROID__)
   // Touch has its own twin stick (the right stick aims), apart from the pad preset.
   if (TouchActive()) {
-    return sTouchTwinStick;
+    return sInput.touchTwinStick;
   }
 #endif
-  return sTwinStick && !TouchActive();
+  return sInput.twinStick && !TouchActive();
 }
 
 bool PadTwinStick() {
   EnsureInitialized();
-  return sTwinStick;
+  return sInput.twinStick;
 }
 
 void SetTwinStick(bool enabled) {
   EnsureInitialized();
-  sTwinStick = enabled;
+  sInput.twinStick = enabled;
   MarkDirty();
 }
 
@@ -2001,35 +1878,32 @@ float TwinStickRightY() { return sTwinStickRightY; }
 
 void SetTwinStickRightY(float y) { sTwinStickRightY = y; }
 
-bool BeamShiftHeld() { return sBeamShiftHeld; }
-
-bool TouchBeamShift() { return sTouchBeamShift.load(std::memory_order_acquire) && TouchActive(); }
+bool TouchBeamShift() { return sTouchBeamShift.load(std::memory_order_acquire); }
 
 bool TouchTurboFire() {
   return sTouchTurboFire.load(std::memory_order_acquire) && TouchActive() && !sOriginalExperience;
 }
 
-void SetBeamShiftHeld(bool held) { sBeamShiftHeld = held; }
-
 bool SpringBall() {
   EnsureInitialized();
-  return sSpringBall && !sOriginalExperience;
+  return sInput.springBall && !sOriginalExperience;
 }
 
 void SetSpringBall(bool enabled) {
   EnsureInitialized();
-  sSpringBall = enabled;
+  sInput.springBall = enabled;
   MarkDirty();
 }
 
 bool SwapScanXray() {
   EnsureInitialized();
-  return sSwapScanXray && !TouchActive() && !sOriginalExperience;
+  // PortVr: not for the PrimedGun pad either: its visor gesture is left scan, right X-ray.
+  return sInput.swapScanXray && !TouchActive() && !sOriginalExperience && !PortVr::VrPadOwnsPort0();
 }
 
 void SetSwapScanXray(bool enabled) {
   EnsureInitialized();
-  sSwapScanXray = enabled;
+  sInput.swapScanXray = enabled;
   MarkDirty();
 }
 
@@ -2038,13 +1912,13 @@ int TurboBinding(int slot) {
   if (slot == 2 && TouchActive()) {
     return -1;
   }
-  return slot >= 0 && slot < 3 ? sTurboBindings[slot] : -1;
+  return slot >= 0 && slot < 3 ? sInput.turboBindings[slot] : -1;
 }
 
 void SetTurboBinding(int slot, int code) {
   EnsureInitialized();
   if (slot >= 0 && slot < 3) {
-    sTurboBindings[slot] = code;
+    sInput.turboBindings[slot] = code;
     MarkDirty();
   }
 }
@@ -2054,33 +1928,33 @@ int ShiftBinding(int slot) {
   if (slot == 2 && TouchActive()) {
     return -1;
   }
-  return slot >= 0 && slot < 3 ? sShiftBindings[slot] : -1;
+  return slot >= 0 && slot < 3 ? sInput.shiftBindings[slot] : -1;
 }
 
 void SetShiftBinding(int slot, int code) {
   EnsureInitialized();
   if (slot >= 0 && slot < 3) {
-    sShiftBindings[slot] = code;
+    sInput.shiftBindings[slot] = code;
     MarkDirty();
   }
 }
 
 int PadAltButton(int bit) {
   EnsureInitialized();
-  return bit >= 0 && bit < kPadAltCount && !TouchActive() ? sPadAltButtons[bit] : -1;
+  return bit >= 0 && bit < kPadAltCount && !TouchActive() ? sInput.padAltButtons[bit] : -1;
 }
 
 void SetPadAltButton(int bit, int code) {
   EnsureInitialized();
-  if (bit >= 0 && bit < kPadAltCount && sPadAltButtons[bit] != code) {
-    sPadAltButtons[bit] = code;
+  if (bit >= 0 && bit < kPadAltCount && sInput.padAltButtons[bit] != code) {
+    sInput.padAltButtons[bit] = code;
     MarkDirty();
   }
 }
 
 int MouseAction(int button) {
   EnsureInitialized();
-  return button >= 0 && button < PortInputMap::kMouseButtonCount ? sMouseActions[button]
+  return button >= 0 && button < PortInputMap::kMouseButtonCount ? sInput.mouseActions[button]
                                                                   : PortInputMap::kMA_None;
 }
 
@@ -2088,7 +1962,7 @@ void SetMouseAction(int button, int action) {
   EnsureInitialized();
   if (button >= 0 && button < PortInputMap::kMouseButtonCount && action >= 0 &&
       action < PortInputMap::kMA_Count) {
-    sMouseActions[button] = action;
+    sInput.mouseActions[button] = action;
     // A button held as it changes must not start the new action mid-press.
     sMouseButtonGate.Reset();
     MarkDirty();
@@ -2215,34 +2089,34 @@ void SetLogFile(bool enabled) {
 
 bool FastMorph() {
   EnsureInitialized();
-  return sFastMorph && !sOriginalExperience;
+  return sInput.fastMorph && !sOriginalExperience;
 }
 
 void SetFastMorph(bool enabled) {
   EnsureInitialized();
-  sFastMorph = enabled;
+  sInput.fastMorph = enabled;
   MarkDirty();
 }
 
 bool LockOnToggle() {
   EnsureInitialized();
-  return sLockOnToggle && !sOriginalExperience;
+  return sInput.lockOnToggle && !sOriginalExperience;
 }
 
 void SetLockOnToggle(bool enabled) {
   EnsureInitialized();
-  sLockOnToggle = enabled;
+  sInput.lockOnToggle = enabled;
   MarkDirty();
 }
 
 bool StickyCharge() {
   EnsureInitialized();
-  return sStickyCharge && !sOriginalExperience;
+  return sInput.stickyCharge && !sOriginalExperience;
 }
 
 void SetStickyCharge(bool enabled) {
   EnsureInitialized();
-  sStickyCharge = enabled;
+  sInput.stickyCharge = enabled;
   MarkDirty();
 }
 
@@ -2254,35 +2128,46 @@ PortRandoGen::Settings RandoSettings() {
 
 bool RapidCharge() {
   EnsureInitialized();
-  return sRapidCharge && !sOriginalExperience;
+  return sInput.rapidCharge && !sOriginalExperience;
 }
 
 void SetRapidCharge(bool enabled) {
   EnsureInitialized();
-  sRapidCharge = enabled;
+  sInput.rapidCharge = enabled;
+  MarkDirty();
+}
+
+bool RemasteredMovement() {
+  EnsureInitialized();
+  return sInput.remasteredMovement && !sOriginalExperience;
+}
+
+void SetRemasteredMovement(bool enabled) {
+  EnsureInitialized();
+  sInput.remasteredMovement = enabled;
   MarkDirty();
 }
 
 bool SpringBallFlick() {
   EnsureInitialized();
-  return sSpringFlick && !sOriginalExperience;
+  return sInput.springFlick && !sOriginalExperience;
 }
 
 void SetSpringBallFlick(bool enabled) {
   EnsureInitialized();
-  sSpringFlick = enabled;
+  sInput.springFlick = enabled;
   MarkDirty();
 }
 
 float SpringBallFlickRate() {
   EnsureInitialized();
-  return sSpringFlickRate;
+  return sInput.springFlickRate;
 }
 
 void SetSpringBallFlickRate(float radiansPerSecond) {
   EnsureInitialized();
   if (std::isfinite(radiansPerSecond) && radiansPerSecond >= 2.f && radiansPerSecond <= 20.f) {
-    sSpringFlickRate = radiansPerSecond;
+    sInput.springFlickRate = radiansPerSecond;
     MarkDirty();
   }
 }
@@ -2299,13 +2184,13 @@ void SetGyroOverride(bool active, float pitch, float yaw) {
 
 float StickAimRate() {
   EnsureInitialized();
-  return sStickAimRate;
+  return sInput.stickAimRate;
 }
 
 void SetStickAimRate(float pixelsPerSecond) {
   EnsureInitialized();
-  if (std::isfinite(pixelsPerSecond) && pixelsPerSecond >= 50.f && pixelsPerSecond <= 4000.f) {
-    sStickAimRate = pixelsPerSecond;
+  if (std::isfinite(pixelsPerSecond) && pixelsPerSecond >= 50.f && pixelsPerSecond <= 10000.f) {
+    sInput.stickAimRate = pixelsPerSecond;
     MarkDirty();
   }
 }
@@ -2322,15 +2207,15 @@ void AddStickAim(float x, float y, float dt) {
     y = -y;
   }
   // x right / y up; the aim state expects SDL-style right/down positive.
-  sStickAimVelX = x * sStickAimRate;
-  sStickAimVelY = -y * sStickAimRate;
+  sStickAimVelX = x * sInput.stickAimRate;
+  sStickAimVelY = -y * sInput.stickAimRate;
   sMouseFrameX += sStickAimVelX * dt;
   sMouseFrameY += sStickAimVelY * dt;
 }
 
 int GyroMode() {
   EnsureInitialized();
-  return sGyroMode;
+  return sInput.gyroMode;
 }
 
 void SetGyroMode(int mode) {
@@ -2338,13 +2223,13 @@ void SetGyroMode(int mode) {
   if (mode < 0 || mode > 2) {
     return;
   }
-  sGyroMode = mode;
+  sInput.gyroMode = mode;
   MarkDirty();
 }
 
 int GyroSource() {
   EnsureInitialized();
-  return sGyroSource;
+  return sInput.gyroSource;
 }
 
 void SetGyroSource(int source) {
@@ -2352,20 +2237,20 @@ void SetGyroSource(int source) {
   if (source < 0 || source > 2) {
     return;
   }
-  sGyroSource = source;
+  sInput.gyroSource = source;
   MarkDirty();
 }
 
 float GyroRate() {
   EnsureInitialized();
-  return sGyroRate;
+  return sInput.gyroRate;
 }
 
 void SetGyroRate(float pixelsPerSecondPerRad) {
   EnsureInitialized();
   if (std::isfinite(pixelsPerSecondPerRad) && pixelsPerSecondPerRad >= 20.f &&
       pixelsPerSecondPerRad <= 5000.f) {
-    sGyroRate = pixelsPerSecondPerRad;
+    sInput.gyroRate = pixelsPerSecondPerRad;
     MarkDirty();
   }
 }
@@ -2397,8 +2282,8 @@ bool ReadGyroRates(float& pitch, float& yaw) {
     sGyroStatus = "console";
     return true;
   }
-  const bool wantController = sGyroSource == 0 || sGyroSource == 1;
-  const bool wantPhone = sGyroSource == 0 || sGyroSource == 2;
+  const bool wantController = sInput.gyroSource == 0 || sInput.gyroSource == 1;
+  const bool wantPhone = sInput.gyroSource == 0 || sInput.gyroSource == 2;
   bool haveRates = false;
 
   if (wantController) {
@@ -2486,11 +2371,11 @@ void PollGyro() {
   }
   // Gyro feeds the same aim state the mouse, twin stick and the touch layout's
   // drag aim use, so aiming only has an effect where that is driving the
-  // camera. Flicks need no aim. The raw sTwinStick: TwinStick() reads false
+  // camera. Flicks need no aim. The raw sInput.twinStick: TwinStick() reads false
   // while touch is in use, yet touch keeps the direct aim path.
-  const bool aim = sGyroMode != 0 && (sMouseAim || sTwinStick || TouchDirectAim());
-  if (!aim && !sSpringFlick) {
-    sGyroStatus = sGyroMode == 0 ? "off" : "needs mouse aim, twin stick or touch controls";
+  const bool aim = sInput.gyroMode != 0 && (sInput.mouseAim || sInput.twinStick || TouchDirectAim());
+  if (!aim && !sInput.springFlick) {
+    sGyroStatus = sInput.gyroMode == 0 ? "off" : "needs mouse aim, twin stick or touch controls";
     return;
   }
 
@@ -2502,25 +2387,25 @@ void PollGyro() {
     return;
   }
 
-  if (sSpringFlick) {
+  if (sInput.springFlick) {
     // One flick per upward swing: it re-arms once the pitch speed has dropped
     // to half the threshold. The latch outlives the tick so a flick just before
     // the ball lands still springs.
-    if (sSpringFlickArmed && pitch > sSpringFlickRate) {
+    if (sSpringFlickArmed && pitch > sInput.springFlickRate) {
       sSpringFlickLatch = 0.2f;
       sSpringFlickArmed = false;
-    } else if (pitch < sSpringFlickRate * 0.5f) {
+    } else if (pitch < sInput.springFlickRate * 0.5f) {
       sSpringFlickArmed = true;
     }
   }
   if (!aim) {
-    if (sGyroMode != 0) {
+    if (sInput.gyroMode != 0) {
       sGyroStatus = "flicks only (aim needs mouse aim, twin stick or touch controls)";
     }
     return;
   }
 
-  bool active = sGyroMode == 2;
+  bool active = sInput.gyroMode == 2;
   if (!active) {
     // Hold to aim: right stick click on a pad, left ctrl on a keyboard.
     if (SDL_Gamepad* pad = PADGetSDLGamepadForIndex(0)) {
@@ -2541,8 +2426,8 @@ void PollGyro() {
   }
   // x right / y up, the same shape AddStickAim takes; the aim state expects
   // right/down positive.
-  sGyroPendingX += yaw * sGyroRate * dt;
-  sGyroPendingY -= pitch * sGyroRate * dt;
+  sGyroPendingX += yaw * sInput.gyroRate * dt;
+  sGyroPendingY -= pitch * sInput.gyroRate * dt;
 }
 
 void ResetMouseAim() {
@@ -2575,14 +2460,14 @@ void SetMouseGameplayActive(bool active) {
   sMouseGameplayActive = active;
   if (!active) ResetMouseAim();
 }
-bool MouseInvertX() { EnsureInitialized(); return sMouseInvertX; }
-bool MouseInvertY() { EnsureInitialized(); return sMouseInvertY; }
-bool MouseButtons() { EnsureInitialized(); return sMouseButtons; }
-bool MouseCrosshair() { EnsureInitialized(); return sMouseCrosshair; }
-int CrosshairSize() { EnsureInitialized(); return sCrosshairSize; }
+bool MouseInvertX() { EnsureInitialized(); return sInput.mouseInvertX; }
+bool MouseInvertY() { EnsureInitialized(); return sInput.mouseInvertY; }
+bool MouseButtons() { EnsureInitialized(); return sInput.mouseButtons; }
+bool MouseCrosshair() { EnsureInitialized(); return sInput.mouseCrosshair; }
+int CrosshairSize() { EnsureInitialized(); return sInput.crosshairSize; }
 void SetCrosshairSize(int percent) {
   EnsureInitialized();
-  sCrosshairSize = std::clamp(percent, kCrosshairSizeMin, kCrosshairSizeMax);
+  sInput.crosshairSize = std::clamp(percent, kCrosshairSizeMin, kCrosshairSizeMax);
   MarkDirty();
 }
 unsigned MouseWeaponButtons(unsigned held) {
@@ -2612,13 +2497,13 @@ void SynchronizeMouseAim(float x, float y, float z) { sMouseAimState.Synchronize
 
 float MouseSensitivity() {
   EnsureInitialized();
-  return sMouseSensitivity;
+  return sInput.mouseSensitivity;
 }
 
 void SetMouseSensitivity(float radiansPerPixel) {
   EnsureInitialized();
   if (std::isfinite(radiansPerPixel) && radiansPerPixel > 0.f) {
-    sMouseSensitivity = radiansPerPixel;
+    sInput.mouseSensitivity = radiansPerPixel;
   }
 }
 
@@ -2632,73 +2517,73 @@ void AddMouseDelta(float dx, float dy) {
 
 bool TouchAim() {
   EnsureInitialized();
-  return sTouchAim;
+  return sInput.touchAim;
 }
 
 void SetTouchAim(bool on) {
   EnsureInitialized();
-  sTouchAim = on;
+  sInput.touchAim = on;
   MarkDirty();
 }
 
 bool TouchMapTap() {
   EnsureInitialized();
-  return sTouchMapTap;
+  return sInput.touchMapTap;
 }
 
 void SetTouchMapTap(bool on) {
   EnsureInitialized();
-  sTouchMapTap = on;
+  sInput.touchMapTap = on;
   MarkDirty();
 }
 
 bool TouchClassic() {
   EnsureInitialized();
-  return sTouchClassic;
+  return sInput.touchClassic;
 }
 
 void SetTouchClassic(bool on) {
   EnsureInitialized();
-  sTouchClassic = on;
+  sInput.touchClassic = on;
   if (on) {
-    sTouchTwinStick = false;
+    sInput.touchTwinStick = false;
   }
   MarkDirty();
 }
 
 bool TouchTwinStick() {
   EnsureInitialized();
-  return sTouchTwinStick;
+  return sInput.touchTwinStick;
 }
 
 void SetTouchTwinStick(bool on) {
   EnsureInitialized();
-  sTouchTwinStick = on;
+  sInput.touchTwinStick = on;
   if (on) {
-    sTouchClassic = false;
+    sInput.touchClassic = false;
   }
   MarkDirty();
 }
 
 bool TouchWheels() {
   EnsureInitialized();
-  return sTouchWheels;
+  return sInput.touchWheels;
 }
 
 void SetTouchWheels(bool on) {
   EnsureInitialized();
-  sTouchWheels = on;
+  sInput.touchWheels = on;
   MarkDirty();
 }
 
 bool TouchVisorTapScan() {
   EnsureInitialized();
-  return sTouchVisorTapScan;
+  return sInput.touchVisorTapScan;
 }
 
 void SetTouchVisorTapScan(bool on) {
   EnsureInitialized();
-  sTouchVisorTapScan = on;
+  sInput.touchVisorTapScan = on;
   MarkDirty();
 }
 
@@ -2817,6 +2702,16 @@ bool VisorRequested(int visor) {
 
 bool BeamRequested(int beam) {
   return sBeamRequest.load() == beam && SDL_GetTicksNS() < sBeamRequestUntilNs.load();
+}
+
+void RequestSpringBall() { sSpringRequestUntilNs.store(SDL_GetTicksNS() + kWheelRequestNs); }
+
+bool SpringBallRequested() { return SDL_GetTicksNS() < sSpringRequestUntilNs.load(); }
+
+void RequestSaveStateHotkey(int which) {
+  if (which == 1 || which == 2) {
+    sSaveStateHotkey.store(which, std::memory_order_release);
+  }
 }
 
 // Game thread, once per HUD draw (valid=false when the minimap isn't shown).
@@ -2944,13 +2839,13 @@ bool ConsumeMapTapZ() {
 
 float TouchAimSpeed() {
   EnsureInitialized();
-  return sTouchAimSpeed;
+  return sInput.touchAimSpeed;
 }
 
 void SetTouchAimSpeed(float pixelsPerDp) {
   EnsureInitialized();
   if (std::isfinite(pixelsPerDp)) {
-    sTouchAimSpeed = std::clamp(pixelsPerDp, 0.25f, 10.f);
+    sInput.touchAimSpeed = std::clamp(pixelsPerDp, 0.25f, 10.f);
     MarkDirty();
   }
 }
@@ -2958,13 +2853,13 @@ void SetTouchAimSpeed(float pixelsPerDp) {
 // Called from the Android UI thread; the game thread drains it in
 // BeginFrameMouse.
 void AddTouchAim(float dxDp, float dyDp) {
-  if ((!sTouchAim && sTouchClassic) || Visible() || !std::isfinite(dxDp) ||
+  if ((!sInput.touchAim && sInput.touchClassic) || Visible() || !std::isfinite(dxDp) ||
       !std::isfinite(dyDp)) {
     return;
   }
   std::lock_guard lock(sTouchAimMutex);
-  sTouchAimPendingX += dxDp * sTouchAimSpeed;
-  sTouchAimPendingY += dyDp * sTouchAimSpeed;
+  sTouchAimPendingX += dxDp * sInput.touchAimSpeed;
+  sTouchAimPendingY += dyDp * sInput.touchAimSpeed;
 }
 
 void BeginFrameMouse() {
@@ -3009,7 +2904,7 @@ bool TakeTouchLook(float& dyaw, float& dpitch) {
   // Same signs and scale as the mouse aim: right/down travel in, world yaw/pitch out.
   dyaw = x * MouseSensitivity() * (MouseInvertX() ? 1.f : -1.f);
   dpitch = y * MouseSensitivity() * (MouseInvertY() ? 1.f : -1.f);
-  return sTouchAim && !Visible();
+  return sInput.touchAim && !Visible();
 }
 
 bool PresentedAimDelta(float fraction, float& dyaw, float& dpitch) {
@@ -3553,22 +3448,17 @@ bool TouchColorsFlag() { return sTouchColorsFlag.load(std::memory_order_acquire)
 bool TouchLabelsFlag() { return sTouchLabelsFlag.load(std::memory_order_acquire); }
 bool TouchTurboFlag() { return sTouchTurboFlag.load(std::memory_order_acquire); }
 bool TouchFloatingStickFlag() { return sTouchFloatingStickFlag.load(std::memory_order_acquire); }
-float TouchSideMarginDp() { return sTouchSideMargin.load(); }
-float TouchStickInsetDp() { return sTouchStickInset.load(); }
-float TouchButtonInsetDp() { return sTouchButtonInset.load(); }
+float TouchSideMarginDp() { return sInput.touchSideMargin.load(); }
+float TouchStickInsetDp() { return sInput.touchStickInset.load(); }
+float TouchButtonInsetDp() { return sInput.touchButtonInset.load(); }
 
 std::string TouchLayout() {
-  std::lock_guard< std::mutex > lock(sTouchLayoutMutex);
-  return sTouchLayout;
+  return PortInput::TouchLayout();
 }
 
 void SetTouchLayout(const std::string& layout) {
-  if (layout.size() > kTouchLayoutMaxLen) {
+  if (!PortInput::SetTouchLayout(layout)) {
     return;
-  }
-  {
-    std::lock_guard< std::mutex > lock(sTouchLayoutMutex);
-    sTouchLayout = layout;
   }
   sTouchLayoutSavePending.store(true, std::memory_order_release);
 }
@@ -3583,6 +3473,117 @@ void SaveSettingsNow() {
 // A VR setting changed (vr/vr_settings.cpp): write the file on the next
 // occasion the overlay would, as for any of its own settings.
 void MarkVrSettingsDirty() { sSettingsDirty = true; }
+
+static void PollSettingsFile(bool now);
+
+namespace {
+// CGameOptions::PutTo: x0_'s 64 bytes, then 58 bits of options.
+constexpr size_t kGameOptionsBytes = 72;
+
+std::string GameOptionsHex(CGameOptions& options) {
+  uchar bytes[128] = {};
+  {
+    CMemoryStreamOut out(bytes, sizeof(bytes));
+    options.PutTo(out);
+    out.Flush();
+  }
+  static const char kDigits[] = "0123456789abcdef";
+  std::string hex;
+  for (size_t i = 0; i < kGameOptionsBytes; ++i) {
+    hex += kDigits[bytes[i] >> 4];
+    hex += kDigits[bytes[i] & 0xF];
+  }
+  return hex;
+}
+
+// PrimedGun: the game's options are saved once they have rested this long. The pause
+// menu's sliders set an option on every step while the stick is held, and rewriting
+// the settings file each frame is slow on the Quest's shared storage.
+constexpr uint64_t kGameOptionsSaveDelayMs = 500;
+bool sGameOptionsSavePending = false;
+uint64_t sGameOptionsChangedMs = 0; // SDL_GetTicks of the last change
+
+// Records the game's options whenever they change, wherever from (pause menu,
+// front-end options, F1, a loaded save state).
+void SyncGameOptions() {
+  if (!sGameOptionsRestored || gpGameState == nullptr) {
+    return;
+  }
+  std::string hex = GameOptionsHex(gpGameState->GameOptions());
+  if (hex != sGameOptions) {
+    sGameOptions = std::move(hex);
+    // Dirty at once, so an exit or a trip to the background (SaveSettings) still
+    // writes a change whose delay has not run out.
+    MarkDirty();
+    sGameOptionsSavePending = true;
+    sGameOptionsChangedMs = SDL_GetTicks();
+  }
+  // A dragged F1 slider is saved when it's let go.
+  if (sGameOptionsSavePending && SDL_GetTicks() - sGameOptionsChangedMs >= kGameOptionsSaveDelayMs &&
+      (!sVisible || !ImGui::IsAnyItemActive())) {
+    sGameOptionsSavePending = false;
+    // Another save may have written it meanwhile (F1's own, when the overlay is open).
+    if (sSettingsDirty) {
+      // PrimedGun: what the launcher wrote since the last poll first, as DrawUI's
+      // save does, or this save would write the game's old values over it.
+      PollSettingsFile(true);
+      SaveSettings();
+    }
+  }
+}
+} // namespace
+
+void RestoreGameOptions() {
+  EnsureInitialized();
+  sGameOptionsRestored = true;
+  if (gpGameState == nullptr || sGameOptions.size() != kGameOptionsBytes * 2) {
+    return;
+  }
+  uchar bytes[128] = {};
+  for (size_t i = 0; i < kGameOptionsBytes; ++i) {
+    const unsigned long value = std::strtoul(sGameOptions.substr(i * 2, 2).c_str(), nullptr, 16);
+    bytes[i] = static_cast< uchar >(value);
+  }
+  CMemoryInStream in(bytes, sizeof(bytes));
+  gpGameState->GameOptions() = CGameOptions(in);
+  gpGameState->GameOptions().EnsureOptions();
+}
+
+void LogSettings() {
+  EnsureInitialized();
+  LogSettingChanges(SettingsText());
+  sSettingsLogged = true;
+  // Wrapped into lines of a readable length; keys in alphabetical order.
+  std::string line;
+  const auto flush = [&line] {
+    if (!line.empty()) {
+      PortLog::Write("port: settings:%s\n", line.c_str());
+      line.clear();
+    }
+  };
+  for (const auto& [key, value] : sLoggedSettings) {
+    const std::string entry = " " + key + "=" + LoggedSettingValue(key, value);
+    if (line.size() + entry.size() > 160) {
+      flush();
+    }
+    line += entry;
+  }
+  flush();
+  // MP_* variables override the file for one run (already in the values above).
+#if defined(_WIN32)
+  char** env = _environ;
+#else
+  char** env = environ;
+#endif
+  for (; env != nullptr && *env != nullptr; ++env) {
+    if (std::strncmp(*env, "MP_", 3) == 0) {
+      PortLog::Write("port: env: %s\n", *env);
+    }
+  }
+  if (sOriginalExperience) {
+    PortLog::Write("port: original experience on: the getters return retail values, not the ones above\n");
+  }
+}
 
 // Set while the disc is mounted, before the first frame.
 bool sDiscReadFailedLastSession = false;
@@ -4037,10 +4038,10 @@ void UpdateControllerNav() {
     }
   }
   sOverlayVisible.store(sVisible, std::memory_order_release);
-  sTouchColorsFlag.store(sTouchColors, std::memory_order_release);
-  sTouchLabelsFlag.store(sTouchLabels, std::memory_order_release);
-  sTouchTurboFlag.store(sTouchTurbo && !sOriginalExperience, std::memory_order_release);
-  sTouchFloatingStickFlag.store(sTouchFloatingStick, std::memory_order_release);
+  sTouchColorsFlag.store(sInput.touchColors, std::memory_order_release);
+  sTouchLabelsFlag.store(sInput.touchLabels, std::memory_order_release);
+  sTouchTurboFlag.store(sInput.touchTurbo && !sOriginalExperience, std::memory_order_release);
+  sTouchFloatingStickFlag.store(sInput.touchFloatingStick, std::memory_order_release);
 
   ImGuiIO& io = ImGui::GetIO();
   io.BackendFlags |= ImGuiBackendFlags_HasGamepad;
@@ -4077,7 +4078,7 @@ void UpdateControllerNav() {
   // While the Controls tab captures a pad input, the pad binds instead of
   // navigating (releasing everything here also ends any nav press in progress).
   // A pad that went away releases everything the same way.
-  const bool capturing = pad == nullptr || PortControls::Capturing();
+  const bool capturing = pad == nullptr || PortInputRemap::Capturing();
   const auto held = [pad, capturing](SDL_GamepadButton button) {
     return !capturing && SDL_GetGamepadButton(pad, button);
   };
@@ -4172,11 +4173,30 @@ void EndOriginalLocked(bool locked) {
 
 void DrawPerformanceTab() {
   ImGui::SeparatorText("Frame rate");
+  // PortVr: the game loop then waits on the headset's frame requests and skips both caps
+  // (src/MetroidPrime/main.cpp).
+  if (PortVr::OpenXRIsRunning()) {
+    ImGui::TextDisabled("The headset paces frames while it runs: these caps apply to flat-screen play only.");
+  }
   const bool locked = BeginOriginalLocked();
   bool frameLimit = sFrameLimitEnabled;
   if (ImGui::Checkbox("60 FPS cap (target)", &frameLimit)) {
     SetFrameLimitEnabled(frameLimit);
     MarkDirty();
+  }
+  {
+    // One past the top is "Unlimited" (saved as 0).
+    ImGui::BeginDisabled(sFrameLimitEnabled);
+    int cap = sFpsCap > 0 ? sFpsCap : kFpsCapMax + 1;
+    if (ImGui::SliderInt("FPS cap", &cap, kFpsCapMin, kFpsCapMax + 1, cap > kFpsCapMax ? "Unlimited" : "%d FPS",
+                         ImGuiSliderFlags_AlwaysClamp)) {
+      sFpsCap = cap > kFpsCapMax ? 0 : ClampFpsCap(cap);
+      ResetDynamicRes();
+      MarkDirty();
+    }
+    ImGui::EndDisabled();
+    ItemHelp("With the 60 FPS cap off, the most frames drawn a second. Vsync still holds it to "
+             "the display's refresh rate.");
   }
   // Both, because they answer different questions. Throughput is what the
   // machine produces once the pacing wait is excluded; presented is what
@@ -4340,7 +4360,8 @@ std::string CardImportDolphin() {
   }
   const PortGci::DolphinCard dolphin = PortGci::FindDolphinCard();
   if (!dolphin.Found()) {
-    return "No Dolphin memory card found (GC/USA/Card A or GC/MemoryCardA.USA.raw in "
+    return std::string("No Dolphin memory card found (GC/") + PortGci::CardRegion() + "/Card A or GC/MemoryCardA." +
+           PortGci::CardRegion() + ".raw in "
            "Dolphin's user folder).";
   }
   // Dolphin uses one or the other, per its settings: try the one written last.
@@ -4377,7 +4398,8 @@ std::string CardExportDolphin() {
   }
   const PortGci::DolphinCard dolphin = PortGci::FindDolphinCard();
   if (!dolphin.Found()) {
-    return "No Dolphin memory card found (GC/USA/Card A or GC/MemoryCardA.USA.raw in "
+    return std::string("No Dolphin memory card found (GC/") + PortGci::CardRegion() + "/Card A or GC/MemoryCardA." +
+           PortGci::CardRegion() + ".raw in "
            "Dolphin's user folder); start a GameCube game in Dolphin once to create it.";
   }
   std::string text;
@@ -4510,7 +4532,9 @@ void DrawMemoryCard() {
   if (ImGui::Button("Import from Dolphin")) {
     sCardStatus = CardImportDolphin();
   }
-  ItemHelp("Dolphin's card is looked for in its user folder (GC/USA/Card A, GC/MemoryCardA.USA.raw).");
+  ItemHelp((std::string("Dolphin's card is looked for in its user folder (GC/") + PortGci::CardRegion() +
+            "/Card A, GC/MemoryCardA." + PortGci::CardRegion() + ".raw).")
+               .c_str());
 #endif
   ImGui::EndDisabled();
   ImGui::BeginDisabled(busy || saves == 0);
@@ -4519,8 +4543,9 @@ void DrawMemoryCard() {
     sCardExportQueue = PortGci::GameFiles(folder);
     OpenCardDialog(kCardPick_ExportFile);
   }
-  ItemHelp("Saves each file in turn; keep Dolphin's names (01-GM8E-MetroidPrime A.gci) for its GCI "
-           "folder.");
+  ItemHelp((std::string("Saves each file in turn; keep Dolphin's names (01-") + PortGci::GameCode() +
+            "-MetroidPrime A.gci) for its GCI folder.")
+               .c_str());
 #else
   if (ImGui::Button("Export to folder...")) {
     OpenCardDialog(kCardPick_ExportFolder);
@@ -4556,6 +4581,9 @@ void DrawMemoryCard() {
 // key file, converted here into the remastered-models mod.
 std::mutex sRemasteredPickMutex;
 std::vector<std::pair<int, std::string>> sRemasteredPicks;
+// Which 2 of the same picker: a PAL image for its languages (DrawLanguageSection).
+constexpr int kPalLanguagesPick = 2;
+std::string sPalLanguagesPick;
 
 #if defined(__ANDROID__)
 // Not SDL_ShowOpenFileDialog: Android often kills the game behind the picker
@@ -4604,13 +4632,21 @@ void OpenRemasteredDialog(int which) {
   const SDL_DialogFileCallback done = [](void* userdata, const char* const* files, int) {
     if (files != nullptr && files[0] != nullptr) {
       std::lock_guard lock(sRemasteredPickMutex);
-      sRemasteredPicks.emplace_back(int(reinterpret_cast< intptr_t >(userdata)), files[0]);
+      const int which = int(reinterpret_cast< intptr_t >(userdata));
+      if (which == kPalLanguagesPick) {
+        sPalLanguagesPick = files[0];
+      } else {
+        sRemasteredPicks.emplace_back(which, files[0]);
+      }
     }
   };
-  static const SDL_DialogFileFilter imageFilters[] = {{"Switch images (.nsp)", "nsp"}, {"All files", "*"}};
+  static const SDL_DialogFileFilter imageFilters[] = {{"Switch images (.nsp, .xci)", "nsp;xci"}, {"All files", "*"}};
   static const SDL_DialogFileFilter keyFilters[] = {{"Key files (.keys)", "keys"}, {"All files", "*"}};
+  static const SDL_DialogFileFilter discFilters[] = {
+      {"GameCube images (.iso, .gcm, .rvz, .wia, .gcz, .ciso, .wbfs, .tgc)", "iso;gcm;rvz;wia;gcz;ciso;wbfs;tgc"},
+      {"All files", "*"}};
   SDL_ShowOpenFileDialog(done, reinterpret_cast< void* >(static_cast< intptr_t >(which)), window,
-                         which == 0 ? imageFilters : keyFilters, 2, nullptr, false);
+                         which == 0 ? imageFilters : which == 1 ? keyFilters : discFilters, 2, nullptr, false);
 }
 #endif
 
@@ -4945,13 +4981,37 @@ void DrawUpdateToast() {
   ImGui::End();
 }
 
-// While pipelines compile in the background (the shipped seed on a first start, then new
-// shaders as they appear): after half a second, a count and a bar since the toast opened.
+// Under D3D11 (old GPUs: D3D12 and Vulkan failed), the seed's shader builds wait while no
+// game is loaded. Those drivers run every object creation under one lock, so the front end's
+// loads waited behind each build: a crawling title screen and file select for minutes
+// (issue #54: GTX 550 Ti, 0.2-1.7 s per shader). In game it loads little and runs smoothly.
+// Aurora starts them held under D3D11.
+bool sBackgroundShadersHeld = false;
+
+void HoldBackgroundShadersOnFrontEnd() {
+  // MP_HOLD_FRONTEND_SHADERS=1/0 forces it on/off on any backend.
+  static const bool sHoldHere = port::EnvFlag("MP_HOLD_FRONTEND_SHADERS", aurora_get_backend() == BACKEND_D3D11);
+  static bool sSynced = false;
+  const bool hold = sHoldHere && sStateManager == nullptr;
+  if (!sSynced || hold != sBackgroundShadersHeld) {
+    sSynced = true;
+    sBackgroundShadersHeld = hold;
+    aurora_set_background_pipelines_paused(hold);
+  }
+}
+
+// While the startup compile runs (the pipeline cache and shipped seed, queued before the first
+// frame): after half a second, a count and a bar since the toast opened. Once that queue has
+// drained, shaders met in game compile without it.
 void DrawShaderCompilationToast() {
   static double sQueuedSince = -1.0;
   static uint32_t sBase = 0; // createdPipelines when the toast opened
+  static bool sStartupDone = false;
   const AuroraStats* stats = aurora_get_stats();
-  if (!sShowShaderCompilation || stats == nullptr || stats->queuedPipelines == 0) {
+  if (stats != nullptr && stats->queuedPipelines == 0) {
+    sStartupDone = true;
+  }
+  if (!sShowShaderCompilation || stats == nullptr || sStartupDone || sBackgroundShadersHeld) {
     sQueuedSince = -1.0;
     return;
   }
@@ -4984,6 +5044,46 @@ void DrawShaderCompilationToast() {
                        ImVec2(width, std::max(6.f, ImGui::GetFontSize() * 0.4f)), "");
   }
   ImGui::End();
+}
+
+// Once per launch, for 8 s, until the panel is first opened: how to open it. Top left,
+// clear of the other toasts (top and bottom centre) and Android's START/MENU buttons.
+void DrawMenuHintToast() {
+  static double sShownAt = -1.0;
+  static bool sDone = false;
+  if (sDone || !sShowMenuHint) {
+    return;
+  }
+  if (sVisible) {
+    sDone = true;
+    return;
+  }
+  const double now = ImGui::GetTime();
+  if (sShownAt < 0.0) {
+    sShownAt = now;
+  }
+  const double age = now - sShownAt;
+  if (age > 8.0) {
+    sDone = true;
+    return;
+  }
+  const ImGuiViewport* viewport = ImGui::GetMainViewport();
+  ImGui::SetNextWindowPos(ImVec2(viewport->Pos.x + 16.f, viewport->Pos.y + 16.f), ImGuiCond_Always);
+  ImGui::SetNextWindowBgAlpha(0.7f);
+  // Fades out over the last second.
+  ImGui::PushStyleVar(ImGuiStyleVar_Alpha, static_cast<float>(std::clamp(8.0 - age, 0.0, 1.0)));
+  if (ImGui::Begin("##menu-hint-toast", nullptr,
+                   ImGuiWindowFlags_NoDecoration | ImGuiWindowFlags_NoInputs | ImGuiWindowFlags_NoNav |
+                       ImGuiWindowFlags_NoFocusOnAppearing | ImGuiWindowFlags_NoSavedSettings |
+                       ImGuiWindowFlags_AlwaysAutoResize)) {
+#if defined(__ANDROID__)
+    ImGui::TextUnformatted("Tap the cog button (F1 on a keyboard) for settings");
+#else
+    ImGui::TextUnformatted("Press F1 for settings");
+#endif
+  }
+  ImGui::End();
+  ImGui::PopStyleVar();
 }
 
 // Once per launch, for longer and in red: the last session ended on a failed disc read.
@@ -5021,72 +5121,6 @@ void DrawDiscReadFailedAlert() {
   ImGui::End();
   ImGui::PopStyleVar(2);
   ImGui::PopStyleColor(3);
-}
-
-// A custom driver's first run: it may start fine and still draw garbage (Turnip
-// builds made for another GPU did), which leaves no readable menu to switch back.
-// So it has to be kept here within kTrialSeconds; otherwise, or if the game closes
-// first (main() finds the marker), the system driver comes back.
-void DrawGpuDriverTrial() {
-  constexpr float kTrialSeconds = 30.f;
-  static float sElapsed = 0.f;
-  if (sGpuDriverTrialMarker.empty()) {
-    return;
-  }
-  // The panel stays open meanwhile: it's what routes taps and clicks to this window.
-  sVisible = true;
-  // Long frames (pipeline builds, the app in the background) don't eat into the time
-  // the user has to read the prompt.
-  sElapsed += std::min(ImGui::GetIO().DeltaTime, 0.1f);
-  const auto finish = [](bool keep) {
-    std::error_code ec;
-    std::filesystem::remove(sGpuDriverTrialMarker, ec);
-    sGpuDriverTrialMarker.clear();
-    sVisible = false;
-    if (keep) {
-      sGpuDriverKept = PortGpuDriver::Active();
-    } else if (sGpuDriver == PortGpuDriver::Active()) {
-      sGpuDriver.clear();
-    }
-    MarkDirty();
-    SaveSettings();
-    if (!keep) {
-      // The driver can't be swapped while running; the next start uses the system's.
-      PortLog::Write("port: GPU driver %s not kept; closing to start on the system driver\n",
-                     PortGpuDriver::Active().c_str());
-      SDL_Event quit{};
-      quit.type = SDL_EVENT_QUIT;
-      SDL_PushEvent(&quit);
-    }
-  };
-  const float left = kTrialSeconds - sElapsed;
-  if (left <= 0.f) {
-    finish(false);
-    return;
-  }
-  const ImGuiViewport* viewport = ImGui::GetMainViewport();
-  ImGui::SetNextWindowPos(viewport->GetCenter(), ImGuiCond_Always, ImVec2(0.5f, 0.5f));
-  ImGui::SetNextWindowSize(ImVec2(std::min(viewport->Size.x - 32.f, ImGui::GetFontSize() * 32.f), 0.f));
-  const bool open = ImGui::Begin("Keep this Vulkan driver?", nullptr,
-                                 ImGuiWindowFlags_NoCollapse | ImGuiWindowFlags_NoMove | ImGuiWindowFlags_NoResize |
-                                     ImGuiWindowFlags_NoSavedSettings);
-  // Drawn before the panel, which would otherwise cover it.
-  ImGui::BringWindowToDisplayFront(ImGui::GetCurrentWindow());
-  if (open) {
-    ImGui::TextWrapped("The game is running on %s.", aurora_get_gpu_driver());
-    ImGui::TextWrapped("If the picture looks right, keep it. Otherwise the game closes in %d s and starts on the "
-                       "system driver next time.",
-                       int(left) + 1);
-    const float width = (ImGui::GetContentRegionAvail().x - ImGui::GetStyle().ItemSpacing.x) * 0.5f;
-    if (ImGui::Button("Keep", ImVec2(width, 0.f))) {
-      finish(true);
-    }
-    ImGui::SameLine();
-    if (ImGui::Button("Use system driver", ImVec2(width, 0.f))) {
-      finish(false);
-    }
-  }
-  ImGui::End();
 }
 
 void DrawRemasteredImport() {
@@ -5151,7 +5185,7 @@ void DrawRemasteredImport() {
   }
   const PortRemastered::ImportState state = PortRemastered::ImportStatus();
   ImGui::TextWrapped("Converts the models of your own copy of Metroid Prime Remastered into a mod. It needs the "
-                     "game's .nsp and your console's key file (prod.keys), and takes a few minutes.");
+                     "game's .nsp or .xci and your console's key file (prod.keys), and takes a few minutes.");
   if (PortMods::StaleRemasteredImport() != nullptr) {
     ImGui::TextColored(ThemeWarnColor(),
                        "Re-import needed: the installed models were made by an older version.");
@@ -5163,11 +5197,11 @@ void DrawRemasteredImport() {
   ImGui::BeginDisabled(state.running);
 #if defined(__ANDROID__)
   // No path to type here: the files are picked, and shown by name.
-  if (ImGui::Button("Pick the .nsp...##remastered-image")) {
+  if (ImGui::Button("Pick the .nsp/.xci...##remastered-image")) {
     OpenRemasteredDialog(0);
   }
   ImGui::SameLine();
-  ImGui::TextUnformatted(sPickNames[0].empty() ? "Metroid Prime Remastered .nsp" : sPickNames[0].c_str());
+  ImGui::TextUnformatted(sPickNames[0].empty() ? "Metroid Prime Remastered .nsp or .xci" : sPickNames[0].c_str());
   if (ImGui::Button("Pick the keys...##remastered-keys")) {
     OpenRemasteredDialog(1);
   }
@@ -5178,7 +5212,7 @@ void DrawRemasteredImport() {
   ImGui::PopStyleColor();
 #else
   ImGui::SetNextItemWidth(ImGui::GetContentRegionAvail().x * 0.6f);
-  ImGui::InputTextWithHint("##remastered-image", "Metroid Prime Remastered .nsp", sImage, sizeof(sImage));
+  ImGui::InputTextWithHint("##remastered-image", "Metroid Prime Remastered .nsp or .xci", sImage, sizeof(sImage));
   ImGui::SameLine();
   if (ImGui::Button("Browse...##remastered-image")) {
     OpenRemasteredDialog(0);
@@ -5696,6 +5730,15 @@ void DrawVideoDisplay() {
   ImGui::SetItemTooltip("Off: cutscenes narrower than 16:9 fill the screen with the full shot.\n"
                         "On: the original 16:9 letterbox.");
 
+  if (ImGui::Checkbox("Sharp scan window", &sSharpScanWindow)) {
+    MarkDirty();
+  }
+  ImGui::SetItemTooltip("On: the scan visor's magnifier draws the world again through a zoomed\n"
+                        "camera, so it shows full detail (and HD textures) at any resolution.\n"
+                        "Costs a second world render while the scan visor is up.\n"
+                        "Off: the original magnified copy of the screen.\n"
+                        "Off while the headset runs.");
+
   ImGui::SeparatorText("HUD and view");
   bool hudWide = sHudWide;
   if (ImGui::Checkbox("Widescreen HUD (spread to edges)", &hudWide)) {
@@ -5710,6 +5753,23 @@ void DrawVideoDisplay() {
   if (ImGui::SliderInt("HUD scale", &hudScale, kHudScaleMin, kHudScaleMax, "%d%%")) {
     SetHudScale(hudScale);
   }
+  if (ImGui::SliderInt("Crosshair opacity", &sCrosshairOpacity, kCrosshairOpacityMin,
+                       kCrosshairOpacityMax, "%d%%")) {
+    MarkDirty();
+  }
+  ImGui::SetItemTooltip("The crosshair in the middle of the screen (free aim, mouse aim, twin "
+                        "stick). 100%% is full strength; the game's own crosshair is much fainter (19%%).");
+  if (ImGui::Checkbox("Custom crosshair colour", &sCrosshairCustomColor)) {
+    MarkDirty();
+  }
+  ImGui::SetItemTooltip("Off: the game's own colour.");
+  ImGui::SameLine();
+  ImGui::BeginDisabled(!sCrosshairCustomColor);
+  if (ImGui::ColorEdit3("##crosshair_color", sCrosshairColor,
+                        ImGuiColorEditFlags_NoInputs | ImGuiColorEditFlags_NoLabel)) {
+    MarkDirty();
+  }
+  ImGui::EndDisabled();
   bool hideHelmet = sHideHelmet;
   if (ImGui::Checkbox("Hide helmet", &hideHelmet)) {
     SetHideHelmet(hideHelmet);
@@ -5797,8 +5857,6 @@ void ProcessGpuDriverPick() {
   if (id.empty()) {
     sGpuDriverStatus = "Couldn't install it: " + error + ".";
   } else {
-    // A reinstalled id may be a different build of the driver.
-    sGpuDriverKept.clear();
     SetGpuDriver(id);
     sGpuDriverStatus = "Installed " + id + ".";
   }
@@ -5888,8 +5946,13 @@ void DrawVideoQuality() {
   if (ImGui::Checkbox("Show shader compilation", &sShowShaderCompilation)) {
     MarkDirty();
   }
-  ImGui::SetItemTooltip("A small progress bar while shaders compile in the background (mostly the first start\n"
-                        "after an install or update). Draws whose shader isn't ready yet are skipped.");
+  ImGui::SetItemTooltip("A small progress bar while the shader cache compiles at startup (longest on the first\n"
+                        "start after an install or update). Draws whose shader isn't ready yet are skipped.");
+  if (ImGui::Checkbox("Show F1 hint at launch", &sShowMenuHint)) {
+    MarkDirty();
+  }
+  ImGui::SetItemTooltip("A note in the top left corner for the first seconds of each launch saying how to\n"
+                        "open this panel.");
   locked = BeginOriginalLocked();
   {
     int aniso = 0;
@@ -6090,28 +6153,40 @@ void DrawTexturePack() {
 }
 
 void DrawControlsOptions() {
-  ImGui::SeparatorText("Buttons");
   const bool locked = BeginOriginalLocked();
-  bool lockOnToggle = sLockOnToggle;
+  ImGui::SeparatorText("On-screen prompts");
+  int glyphs = sPromptGlyphs.load(std::memory_order_relaxed);
+  if (ImGui::Combo("Button glyphs", &glyphs,
+                   "Follow the input in use\0" "Xbox\0" "PlayStation\0" "Nintendo Switch\0" "GameCube\0"
+                   "Keyboard & mouse\0")) {
+    sPromptGlyphs.store(glyphs, std::memory_order_relaxed);
+    MarkDirty();
+  }
+  ItemHelp("Which buttons the game's prompts and tutorials show. Follow: the keyboard, controller or "
+           "touch layout you last used. GameCube shows the game's own art.");
+
+  ImGui::SeparatorText("Buttons");
+  bool lockOnToggle = sInput.lockOnToggle;
   if (ImGui::Checkbox("Toggle Lock-On", &lockOnToggle)) {
     SetLockOnToggle(lockOnToggle);
   }
-  ItemHelp("Press L once to lock on, scan, strafe or grapple, and again to let go. The lock also "
-           "lets go by itself when its target is gone.");
-  bool stickyCharge = sStickyCharge;
+  ItemHelp("Press L once to lock on, scan or grapple, and again to let go. With nothing to lock "
+           "on, L works as usual (strafe while held). The lock also lets go by itself when its "
+           "target is gone.");
+  bool stickyCharge = sInput.stickyCharge;
   if (ImGui::Checkbox("Sticky Charge", &stickyCharge)) {
     SetStickyCharge(stickyCharge);
   }
   ItemHelp("Taps fire as usual. Hold fire for a moment and let go, and the beam keeps charging; press "
            "fire again to shoot. Needs the Charge Beam.");
-  bool rapidCharge = sRapidCharge;
+  bool rapidCharge = sInput.rapidCharge;
   if (ImGui::Checkbox("Remastered charge (rapid fire)", &rapidCharge)) {
     SetRapidCharge(rapidCharge);
   }
   ItemHelp("As in Metroid Prime Remastered: holding fire fires a few shots before charging (3 in all "
            "with Power, 2 with Wave or Plasma, 1 with Ice), then charges faster, so a full charge takes about as "
            "long as before. Without the Charge Beam it fires the same shots, then waits for you to let go.");
-  bool swapScanXray = sSwapScanXray;
+  bool swapScanXray = sInput.swapScanXray;
   if (ImGui::Checkbox("Swap the Scan and X-Ray visor buttons", &swapScanXray)) {
     SetSwapScanXray(swapScanXray);
   }
@@ -6120,7 +6195,7 @@ void DrawControlsOptions() {
                         "turns it on and the other presets off.");
 
   ImGui::SeparatorText("Morph ball");
-  bool fastMorph = sFastMorph;
+  bool fastMorph = sInput.fastMorph;
   if (ImGui::Checkbox("Fast Morph", &fastMorph)) {
     SetFastMorph(fastMorph);
   }
@@ -6129,7 +6204,7 @@ void DrawControlsOptions() {
            "whole jump arc carries over.");
   const int springRule = PortAp::SpringBallRule();
   ImGui::BeginDisabled(springRule >= 0);
-  bool springBall = sSpringBall;
+  bool springBall = sInput.springBall;
   if (ImGui::Checkbox("Spring Ball (C-stick up)", &springBall)) {
     SetSpringBall(springBall);
   }
@@ -6149,87 +6224,111 @@ void DrawControlsOptions() {
 
 void DrawControlsKeyboardMouse() {
   ImGui::SeparatorText("Mouse aim");
-  bool mouseAim = sMouseAim;
+  bool mouseAim = sInput.mouseAim;
   if (ImGui::Checkbox("Mouse aim", &mouseAim)) {
     SetMouseAim(mouseAim);
+    // Mouse aim replaces the R-button free look, so without twin-stick a pad
+    // would have no aim at all. Both add into the same aim; twin-stick can
+    // still be switched off on its own.
+    if (mouseAim) SetTwinStick(true);
     MarkDirty();
   }
-  if (ImGui::SliderFloat("Sensitivity", &sMouseSensitivity, 0.0005f, 0.02f, "%.4f rad/px",
+  ImGui::TextDisabled("Also switches on Twin stick, so a controller's right stick aims too.");
+  if (ImGui::SliderFloat("Sensitivity", &sInput.mouseSensitivity, 0.0005f, 0.02f, "%.4f rad/px",
                          ImGuiSliderFlags_Logarithmic)) {
     MarkDirty();
   }
-  if (ImGui::Checkbox("Invert X", &sMouseInvertX)) {
+  if (ImGui::Checkbox("Invert X", &sInput.mouseInvertX)) {
     MarkDirty();
   }
   ImGui::SameLine();
-  if (ImGui::Checkbox("Invert Y", &sMouseInvertY)) {
+  if (ImGui::Checkbox("Invert Y", &sInput.mouseInvertY)) {
     MarkDirty();
   }
   ImGui::SameLine();
-  if (ImGui::Checkbox("Weapon buttons", &sMouseButtons)) {
+  if (ImGui::Checkbox("Weapon buttons", &sInput.mouseButtons)) {
     sMouseButtonGate.Reset();
     MarkDirty();
   }
-  ImGui::SetItemTooltip("Mouse buttons are set in Controls > Keyboard & mouse. Existing "
+  ImGui::SetItemTooltip("Mouse buttons are set below and in Controls > Remap. Existing "
                         "keyboard/controller weapon bindings also work.");
-  if (ImGui::Checkbox("Crosshair", &sMouseCrosshair)) {
+  if (ImGui::Checkbox("Crosshair", &sInput.mouseCrosshair)) {
     MarkDirty();
   }
   ImGui::SetItemTooltip("A crosshair at the aim point while mouse aiming.");
   ImGui::SameLine();
-  int crosshairSize = sCrosshairSize;
+  int crosshairSize = sInput.crosshairSize;
   ImGui::SetNextItemWidth(ImGui::GetFontSize() * 10.f);
   if (ImGui::SliderInt("Size", &crosshairSize, kCrosshairSizeMin, kCrosshairSizeMax, "%d%%")) {
     SetCrosshairSize(crosshairSize);
   }
   ImGui::SetItemTooltip("Applies under mouse aim and twin stick.");
 
-  PortControls::DrawKeyboardMouse();
+  ImGui::SeparatorText("Mouse buttons");
+  ImGui::TextDisabled("Mouse buttons are bound in Controls > Remap (Keyboard & mouse).");
 }
 
 void DrawControlsController() {
   ImGui::SeparatorText("Stick aim");
-  bool twinStick = sTwinStick;
+  bool twinStick = sInput.twinStick;
   if (ImGui::Checkbox("Twin stick (right stick aims)", &twinStick)) {
     SetTwinStick(twinStick);
     MarkDirty();
   }
   ItemHelp("Twin stick uses the right stick as a direct camera aim (the same path as the mouse) and "
            "consumes it, so it no longer free-looks. Fire stays on whatever is bound to A; remap it "
-           "in Controls > Controller.");
-  ImGui::BeginDisabled(!sTwinStick);
-  float stickRate = sStickAimRate;
-  if (ImGui::SliderFloat("Stick aim speed", &stickRate, 100.f, 3000.f, "%.0f px/s",
-                         ImGuiSliderFlags_Logarithmic)) {
-    SetStickAimRate(stickRate);
+           "in Controls > Remap.");
+  bool remasteredMovement = sInput.remasteredMovement;
+  if (ImGui::Checkbox("Remastered movement (twin stick and mouse aim)", &remasteredMovement)) {
+    SetRemasteredMovement(remasteredMovement);
   }
-  // The game's own option, saved with its settings; free look uses it too.
-  ImGui::BeginDisabled(gpGameState == nullptr);
-  bool invertY = gpGameState != nullptr && gpGameState->GameOptions().GetInvertYAxis();
-  if (ImGui::Checkbox("Invert stick aim Y (the game's Reverse Y Axis)", &invertY)) {
-    gpGameState->GameOptions().SetInvertYAxis(invertY);
+  ItemHelp("Moves as Metroid Prime Remastered and PrimeHack do: diagonals as fast as straight "
+           "ahead, and a steady air drag, so a jump keeps a smooth arc. Off, jumps move as on the "
+           "GameCube, whose speed dips at takeoff and picks up again near the top. Classic "
+           "controls always move as on the GameCube.");
+  // Shown only with twin stick on, as the pause menu's Stick Aim Speed row.
+  if (sInput.twinStick) {
+    float stickRate = sInput.stickAimRate;
+    if (ImGui::SliderFloat("Stick aim speed", &stickRate, 100.f, 8100.f, "%.0f px/s",
+                           ImGuiSliderFlags_Logarithmic)) {
+      SetStickAimRate(stickRate);
+    }
+    ItemHelp("How fast the right stick turns the camera at full tilt. 900 px/s (the default) is "
+             "about 180 degrees a second at the default mouse sensitivity.");
+    // The game's own option, saved with its settings; free look uses it too.
+    ImGui::BeginDisabled(gpGameState == nullptr);
+    bool invertY = gpGameState != nullptr && gpGameState->GameOptions().GetInvertYAxis();
+    if (ImGui::Checkbox("Invert stick aim Y (the game's Reverse Y Axis)", &invertY)) {
+      gpGameState->GameOptions().SetInvertYAxis(invertY);
+    }
+    ImGui::EndDisabled();
   }
-  ImGui::EndDisabled();
-  ImGui::EndDisabled();
-  PortControls::DrawController();
+  if (SDL_Gamepad* pad = PADGetSDLGamepadForIndex(0);
+      pad != nullptr && SDL_IsJoystickVirtual(SDL_GetGamepadID(pad))) {
+    // Aurora ignores mappings on the virtual touch pad.
+    ImGui::TextWrapped("The touch controls always use the GameCube layout; presets and remaps apply to "
+                       "real controllers only.");
+  } else {
+    PortControls::DrawDeadZones();
+  }
 }
 
 void DrawControlsTouchGyro() {
 #if defined(__ANDROID__)
   ImGui::SeparatorText("Touch controls");
-  if (ImGui::Checkbox("Coloured buttons", &sTouchColors)) {
+  if (ImGui::Checkbox("Coloured buttons", &sInput.touchColors)) {
     MarkDirty();
   }
   ItemHelp("Draws the on-screen buttons in the GameCube pad's colours: green A, red B, yellow "
            "C-stick, purple Z. Off, they are plain and see-through.");
-  if (ImGui::Checkbox("Button descriptions", &sTouchLabels)) {
+  if (ImGui::Checkbox("Button descriptions", &sInput.touchLabels)) {
     MarkDirty();
   }
   ItemHelp("Writes what each on-screen button does next to its letter (Fire, Jump, Lock...). "
            "Off, only the letters are shown.");
   ImGui::BeginDisabled(sOriginalExperience);
-  if (ImGui::Checkbox("Turbo fire button", &sTouchTurbo)) {
-    if (!sTouchTurbo) {
+  if (ImGui::Checkbox("Turbo fire button", &sInput.touchTurbo)) {
+    if (!sInput.touchTurbo) {
       sTouchTurboFire.store(false, std::memory_order_release);
     }
     MarkDirty();
@@ -6237,13 +6336,13 @@ void DrawControlsTouchGyro() {
   ImGui::EndDisabled();
   ItemHelp("Adds a Turbo button next to Fire: holding it fires as if Fire were tapped as fast as the "
            "game accepts. It can be moved and resized in Edit layout.");
-  if (ImGui::Checkbox("Floating left stick", &sTouchFloatingStick)) {
+  if (ImGui::Checkbox("Floating left stick", &sInput.touchFloatingStick)) {
     MarkDirty();
   }
   ItemHelp("Hides the left stick until a finger touches a free spot on the left half of the screen, "
            "then centres it under that finger. Another finger on the left half aims, like the rest "
            "of the free area. The map screen keeps the fixed stick.");
-  int touchLayout = sTouchClassic ? 1 : sTouchTwinStick ? 2 : 0;
+  int touchLayout = sInput.touchClassic ? 1 : sInput.touchTwinStick ? 2 : 0;
   static const char* const kTouchLayouts[] = {"Default", "Classic GameCube", "Twin stick (Remastered)"};
   if (ImGui::Combo("Layout", &touchLayout, kTouchLayouts, 3)) {
     SetTouchClassic(touchLayout == 1);
@@ -6259,8 +6358,8 @@ void DrawControlsTouchGyro() {
            "(Remastered): a right stick that aims, with Remastered's Dual Sticks buttons (Jump, "
            "Fire, Morph, Missile, LT Lock) and a D-pad for visors; hold Y (Beam) and press the D-pad to pick "
            "a beam. The free-area drag stays on; the wheels can replace the D-pad.");
-  ImGui::BeginDisabled(!sTouchClassic);
-  bool touchAim = sTouchAim;
+  ImGui::BeginDisabled(!sInput.touchClassic);
+  bool touchAim = sInput.touchAim;
   if (ImGui::Checkbox("Touch aim", &touchAim)) {
     SetTouchAim(touchAim);
   }
@@ -6269,28 +6368,28 @@ void DrawControlsTouchGyro() {
            "levels out when you let go. Otherwise the view aims like a mouse, by the distance "
            "dragged. Not while locked on or in the ball.");
   ImGui::EndDisabled();
-  bool touchMapTap = sTouchMapTap;
+  bool touchMapTap = sInput.touchMapTap;
   if (ImGui::Checkbox("Tap minimap for map", &touchMapTap)) {
     SetTouchMapTap(touchMapTap);
   }
   ItemHelp("Tapping the minimap opens the map; hides the GameCube layout's Z button.");
-  ImGui::BeginDisabled(!sTouchClassic && !sTouchTwinStick);
-  bool touchWheels = sTouchWheels;
+  ImGui::BeginDisabled(!sInput.touchClassic && !sInput.touchTwinStick);
+  bool touchWheels = sInput.touchWheels;
   if (ImGui::Checkbox("Beam and visor wheels", &touchWheels)) {
     SetTouchWheels(touchWheels);
   }
   ItemHelp("Replaces the D-pad with a Visor and a Beam button. Hold one, slide to a sector, "
            "let go to pick. Letting go in the middle cancels. Off, the D-pad is back.");
   ImGui::EndDisabled();
-  ImGui::BeginDisabled(!((!sTouchClassic && !sTouchTwinStick) || sTouchWheels));
-  bool touchVisorTapScan = sTouchVisorTapScan;
+  ImGui::BeginDisabled(!((!sInput.touchClassic && !sInput.touchTwinStick) || sInput.touchWheels));
+  bool touchVisorTapScan = sInput.touchVisorTapScan;
   if (ImGui::Checkbox("Tap Visor for Scan Visor", &touchVisorTapScan)) {
     SetTouchVisorTapScan(touchVisorTapScan);
   }
   ItemHelp("A quick tap on the Visor button (no slide) selects the Scan Visor.");
   ImGui::EndDisabled();
-  ImGui::BeginDisabled(!(!sTouchClassic || sTouchAim));
-  float touchAimSpeed = sTouchAimSpeed;
+  ImGui::BeginDisabled(!(!sInput.touchClassic || sInput.touchAim));
+  float touchAimSpeed = sInput.touchAimSpeed;
   if (ImGui::SliderFloat("Touch aim speed", &touchAimSpeed, 0.5f, 6.f, "%.2f px/dp",
                          ImGuiSliderFlags_Logarithmic)) {
     SetTouchAimSpeed(touchAimSpeed);
@@ -6298,31 +6397,31 @@ void DrawControlsTouchGyro() {
   ItemHelp("How far the view turns per dp of finger travel. The default turns about 180 degrees "
            "over a 400 dp drag at the default mouse sensitivity.");
   ImGui::EndDisabled();
-  float sideMargin = sTouchSideMargin.load();
+  float sideMargin = sInput.touchSideMargin.load();
   if (ImGui::SliderFloat("Side margin", &sideMargin, 0.f, kTouchMarginMaxDp, "%.0f dp")) {
-    sTouchSideMargin.store(sideMargin);
+    sInput.touchSideMargin.store(sideMargin);
     MarkDirty();
   }
   ItemHelp("Moves every on-screen control in from the left and right edges, for curved screen "
            "edges or a case.");
-  float stickInset = sTouchStickInset.load();
+  float stickInset = sInput.touchStickInset.load();
   if (ImGui::SliderFloat("Stick inset", &stickInset, 0.f, kTouchMarginMaxDp, "%.0f dp")) {
-    sTouchStickInset.store(stickInset);
+    sInput.touchStickInset.store(stickInset);
     MarkDirty();
   }
   ItemHelp("Extra room between the left stick and the screen's left edge, on top of the side "
            "margin.");
-  float buttonInset = sTouchButtonInset.load();
+  float buttonInset = sInput.touchButtonInset.load();
   if (ImGui::SliderFloat("Button inset", &buttonInset, 0.f, kTouchMarginMaxDp, "%.0f dp")) {
-    sTouchButtonInset.store(buttonInset);
+    sInput.touchButtonInset.store(buttonInset);
     MarkDirty();
   }
   ItemHelp("Extra room between the face buttons (and the classic C-stick) and the screen's right "
            "edge, on top of the side margin.");
   if (ImGui::Button("Reset margins")) {
-    sTouchSideMargin.store(kTouchSideMarginDefault);
-    sTouchStickInset.store(kTouchStickInsetDefault);
-    sTouchButtonInset.store(kTouchButtonInsetDefault);
+    sInput.touchSideMargin.store(kTouchSideMarginDefault);
+    sInput.touchStickInset.store(kTouchStickInsetDefault);
+    sInput.touchButtonInset.store(kTouchButtonInsetDefault);
     MarkDirty();
   }
   if (ImGui::Button("Edit layout")) {
@@ -6336,23 +6435,23 @@ void DrawControlsTouchGyro() {
 
   ImGui::SeparatorText("Gyro aim");
   const char* gyroModes[] = {"Off", "Hold to aim", "Always aim"};
-  int gyroMode = sGyroMode;
+  int gyroMode = sInput.gyroMode;
   if (ImGui::Combo("Mode", &gyroMode, gyroModes, 3)) {
     SetGyroMode(gyroMode);
   }
   ItemHelp("Tilt the pad or the phone to aim. Hold to aim uses right stick click or left ctrl. Needs "
            "mouse aim, twin stick or the touch controls (not the classic layout), since the gyro "
            "feeds that same aim.");
-  ImGui::BeginDisabled(sGyroMode == 0 && !sSpringFlick);
+  ImGui::BeginDisabled(sInput.gyroMode == 0 && !sInput.springFlick);
   const char* gyroSources[] = {"Auto", "Controller", "Phone"};
-  int gyroSource = sGyroSource;
+  int gyroSource = sInput.gyroSource;
   if (ImGui::Combo("Source", &gyroSource, gyroSources, 3)) {
     SetGyroSource(gyroSource);
   }
   ImGui::Text("Gyro: %s", GyroStatus());
   ImGui::EndDisabled();
-  ImGui::BeginDisabled(sGyroMode == 0);
-  float gyroRate = sGyroRate;
+  ImGui::BeginDisabled(sInput.gyroMode == 0);
+  float gyroRate = sInput.gyroRate;
   // The ## suffix keeps its ImGui id apart from the mouse Sensitivity slider.
   if (ImGui::SliderFloat("Sensitivity##gyro", &gyroRate, 50.f, 3000.f, "%.0f px/s per rad/s",
                          ImGuiSliderFlags_Logarithmic)) {
@@ -6360,14 +6459,14 @@ void DrawControlsTouchGyro() {
   }
   ImGui::EndDisabled();
 
-  bool springFlick = sSpringFlick;
+  bool springFlick = sInput.springFlick;
   if (ImGui::Checkbox("Spring Ball on gyro flick", &springFlick)) {
     SetSpringBallFlick(springFlick);
   }
   ItemHelp("Tilt the pad or phone up sharply to spring, like Trilogy's nunchuk flick. Uses the gyro "
            "source below; gyro aim can stay off. Raise the strength if it springs by accident.");
-  ImGui::BeginDisabled(!sSpringFlick);
-  float flickRate = sSpringFlickRate;
+  ImGui::BeginDisabled(!sInput.springFlick);
+  float flickRate = sInput.springFlickRate;
   if (ImGui::SliderFloat("Flick strength", &flickRate, 2.f, 20.f, "%.1f rad/s")) {
     SetSpringBallFlickRate(flickRate);
   }
@@ -7123,6 +7222,70 @@ void DrawRemasteredWarning() {
 
 }
 
+// The PAL disc's languages for a USA one (port_pal_languages.h).
+void DrawPalLanguages() {
+  if (PortDisc::Current() == PortDisc::Version::Pal) {
+    ImGui::TextDisabled("PAL disc: support is experimental.");
+    ItemHelp("The port runs the USA 1.00 code on the PAL disc's data. It has been checked on every "
+             "room, but less played than a USA disc: please report anything that differs.");
+    return;
+  }
+  std::string picked;
+  {
+    std::lock_guard lock(sRemasteredPickMutex);
+#if defined(__ANDROID__)
+    // A pick the previous process never saw (the game was killed behind the picker).
+    static bool sTookFile = false;
+    if (!sTookFile) {
+      sTookFile = true;
+      std::ifstream in(RemasteredPickFile(kPalLanguagesPick));
+      std::string uri;
+      if (std::getline(in, uri) && !uri.empty()) {
+        sPalLanguagesPick = uri;
+      }
+    }
+#endif
+    picked.swap(sPalLanguagesPick);
+  }
+  static std::string sStartError;
+  if (!picked.empty()) {
+#if defined(__ANDROID__)
+    std::remove(RemasteredPickFile(kPalLanguagesPick).c_str());
+#endif
+    sStartError = PortPalLanguages::Start(picked) ? "" : "An import is already running.";
+  }
+  const PortPalLanguages::State state = PortPalLanguages::Status();
+  const int installed = PortPalLanguages::Installed();
+  ImGui::BeginDisabled(state.running);
+  if (ImGui::Button(installed > 0 ? "Import the PAL languages again..." : "Add languages from a PAL disc...")) {
+    OpenRemasteredDialog(kPalLanguagesPick);
+  }
+  ImGui::EndDisabled();
+  ItemHelp("For a USA disc: pick your own PAL Metroid Prime image (GM8P01) to add its French, German, "
+           "Spanish and Italian text and its fonts. Only the text is taken; the game stays the USA "
+           "one. Restart afterwards so every menu and the font take it.");
+  if (installed > 0 && !state.running) {
+    ImGui::SameLine();
+    if (ImGui::Button("Remove")) {
+      PortPalLanguages::Remove();
+    }
+    ImGui::SetItemTooltip("Deletes the imported PAL languages. Text already loaded stays until a restart.");
+  }
+  if (state.running) {
+    ImGui::TextDisabled("%s...", state.message.c_str());
+  } else if (state.finished) {
+    if (state.ok) {
+      ImGui::TextWrapped("%s", state.message.c_str());
+    } else {
+      ImGui::TextColored(ThemeWarnColor(), "%s", state.message.c_str());
+    }
+  } else if (!sStartError.empty()) {
+    ImGui::TextColored(ThemeWarnColor(), "%s", sStartError.c_str());
+  } else if (installed > 0) {
+    ImGui::TextDisabled("PAL languages added (%d text tables).", installed);
+  }
+}
+
 void DrawLanguageSection() {
   ImGui::SeparatorText("Language");
   {
@@ -7140,10 +7303,12 @@ void DrawLanguageSection() {
                      static_cast< int >(PortRemastered::kTextLanguageCount) + 1)) {
       SetTextLanguage(language == 0 ? "" : PortRemastered::kTextLanguages[language - 1].code);
     }
-    ItemHelp("The language of the game's text. Only English is on the disc: the others come with the "
-             "Remastered import (its text), and any text it lacks stays English. Text already on "
-             "screen changes the next time its menu or screen opens.");
+    ItemHelp("The language of the game's text. A USA disc has only English; a PAL disc also has French, "
+             "German, Spanish and Italian (or add them below), and the Remastered import adds its "
+             "languages (its text wins). Text missing in a language stays English. Text already on screen "
+             "changes the next time its menu or screen opens; the font changes after a restart.");
   }
+  DrawPalLanguages();
 
 }
 
@@ -7794,9 +7959,14 @@ void DrawGameAudio() {
   if (ImGui::SliderInt("Sound effects volume", &sfxPct, 0, 100, "%d%%") && gpGameState != nullptr) {
     gpGameState->GameOptions().SetSfxVolume((sfxPct * 127 + 50) / 100, true);
   }
+  // Sound mode: Mono / Stereo / Dolby Surround
+  int soundMode = gpGameState != nullptr ? static_cast<int>(gpGameState->GameOptions().GetSurroundMode()) : CAudioSys::kSM_Stereo;
+  constexpr const char* kSoundModeLabels[] = {"Mono", "Stereo", "Dolby Surround"};
+  if (ImGui::Combo("Sound mode", &soundMode, kSoundModeLabels, IM_ARRAYSIZE(kSoundModeLabels)) && gpGameState != nullptr) {
+    gpGameState->GameOptions().SetSurroundMode(static_cast<CAudioSys::ESurroundModes>(soundMode), true);
+  }
   ImGui::EndDisabled();
-  ImGui::SetItemTooltip("The pause menu's volume options. Like them, they are stored in the save\n"
-                        "file the next time you save, and loading a save restores its volumes.");
+  ImGui::SetItemTooltip("These audio options are saved globally and persist across restarts.");
 }
 
 void DrawOriginalSection() {
@@ -7831,16 +8001,20 @@ void DrawControlsTab() {
     DrawControlsOptions();
     ImGui::EndTabItem();
   }
-  if (SubTab("Controls", "Keyboard & mouse")) {
+  if (SubTab("Controls", "Mouse settings")) {
     DrawControlsKeyboardMouse();
     ImGui::EndTabItem();
   }
-  if (SubTab("Controls", "Controller")) {
+  if (SubTab("Controls", "Controller settings")) {
     DrawControlsController();
     ImGui::EndTabItem();
   }
   if (SubTab("Controls", "Touch & gyro")) {
     DrawControlsTouchGyro();
+    ImGui::EndTabItem();
+  }
+  if (SubTab("Controls", "Remap")) {
+    PortInputRemap::Draw();
     ImGui::EndTabItem();
   }
   ImGui::EndTabBar();
@@ -8162,12 +8336,31 @@ void DrawRandomizerTab() {
                        sMessage.c_str());
   }
 
+  static constexpr const char* kPlayHelp = "Plays this seed with its own save card. A running Archipelago session "
+                                           "is replaced. Seeds are switched at the title screen.";
+  static constexpr const char* kDeleteHelp = kInlineHelp
+      ? "Delete removes the seed, its progress and its save card (not the seed being played)."
+      : "Deletes the seed, its progress and its save card.";
   ImGui::SeparatorText("Seeds");
   if (sRows.empty()) {
     ImGui::TextDisabled("No seeds yet.");
   } else if (inGame) {
     ImGui::TextDisabled("Quit to the title screen to switch seeds.");
   }
+  if (kInlineHelp && !sRows.empty()) {
+    // Inline help under each button would push the rest of the row off the right edge.
+    ItemHelp(kPlayHelp);
+    ItemHelp(kDeleteHelp);
+  }
+  // Keeps the row's next button on this line only if it fits, else wraps it.
+  const auto sameLineIfFits = [](const char* label) {
+    const ImGuiStyle& style = ImGui::GetStyle();
+    const float width = ImGui::CalcTextSize(label).x + style.FramePadding.x * 2.f;
+    const float right = ImGui::GetWindowPos().x + ImGui::GetWindowContentRegionMax().x;
+    if (ImGui::GetItemRectMax().x + style.ItemSpacing.x + width <= right) {
+      ImGui::SameLine();
+    }
+  };
   bool deleted = false;
   for (const RandoSeedRow& row : sRows) {
     const bool current = !inPlay.empty() && PortAp::SameSoloSeed(inPlay, row.name);
@@ -8177,7 +8370,9 @@ void DrawRandomizerTab() {
     } else {
       ImGui::TextUnformatted(row.name.c_str());
     }
-    ImGui::TextDisabled("%s", row.summary.c_str());
+    ImGui::PushStyleColor(ImGuiCol_Text, ImGui::GetStyleColorVec4(ImGuiCol_TextDisabled));
+    ImGui::TextWrapped("%s", row.summary.c_str());
+    ImGui::PopStyleColor();
     ImGui::BeginDisabled(inGame && !current);
     if (ImGui::Button("Play")) {
       std::string error;
@@ -8185,9 +8380,10 @@ void DrawRandomizerTab() {
       sMessage = sMessageError ? error : "Playing seed " + row.name;
     }
     ImGui::EndDisabled();
-    ItemHelp("Plays this seed with its own save card. A running Archipelago session is replaced. "
-             "Seeds are switched at the title screen.");
-    ImGui::SameLine();
+    if (!kInlineHelp) {
+      ItemHelp(kPlayHelp);
+    }
+    sameLineIfFits("Spoiler");
     if (ImGui::Button("Spoiler")) {
       PortRandoGen::Seed seed;
       std::string error;
@@ -8196,7 +8392,7 @@ void DrawRandomizerTab() {
       sSpoilerText = PortRandoGen::Load(PortRandoGen::SeedPath(row.name), seed, error) ? seed.spoiler
                                                                                        : "Could not read: " + error;
     }
-    ImGui::SameLine();
+    sameLineIfFits("Write spoiler file");
     if (ImGui::Button("Write spoiler file")) {
       PortRandoGen::Seed seed;
       std::string error;
@@ -8210,14 +8406,15 @@ void DrawRandomizerTab() {
         sSpoilerNote = out.good() ? "Wrote " + path : "Could not write " + path;
       }
     }
-    ImGui::SameLine();
+    sameLineIfFits("Delete");
     ImGui::BeginDisabled(current);
     if (ImGui::Button("Delete")) {
       ImGui::OpenPopup("Delete seed?");
     }
     ImGui::EndDisabled();
-    ItemHelp(current ? "This seed is being played. Play another seed or disconnect first."
-                     : "Deletes the seed, its progress and its save card.");
+    if (!kInlineHelp) {
+      ItemHelp(current ? "This seed is being played. Play another seed or disconnect first." : kDeleteHelp);
+    }
     if (ImGui::BeginPopupModal("Delete seed?", nullptr, ImGuiWindowFlags_AlwaysAutoResize)) {
       ImGui::Text("Delete seed %s, its progress and its save card?", row.name.c_str());
       ImGui::TextUnformatted("This can't be undone.");
@@ -8718,16 +8915,25 @@ void DrawUI() {
   PortImporters::Poll();
 #endif
   FinishRemasteredImport();
+  DrawMenuHintToast();
   DrawStaleImportToast();
   DrawUpdateToast();
   DrawDiscReadFailedAlert();
-  DrawGpuDriverTrial();
+  HoldBackgroundShadersOnFrontEnd();
   DrawShaderCompilationToast();
   if (sTouchLayoutSavePending.exchange(false, std::memory_order_acq_rel)) {
     MarkDirty();
     SaveSettings();
   }
+  SyncGameOptions();
   if (!sVisible) {
+    // Changes from the pause menu or the console are saved at exit; log them when
+    // they're made, at most once a second.
+    static auto sLastChangeLog = std::chrono::steady_clock::now();
+    if (sSettingsDirty && sSettingsLogged && std::chrono::steady_clock::now() - sLastChangeLog > std::chrono::seconds(1)) {
+      sLastChangeLog = std::chrono::steady_clock::now();
+      LogSettingChanges(SettingsText());
+    }
     UpdateMenuSounds(false);
     sTouchScroll = TouchScroll{};
     if (sGalleryOpen) {
@@ -8840,6 +9046,19 @@ Java_org_metroidprime_port_TouchControlsView_nativeVirtualButton(JNIEnv*, jclass
   if (SDL_Joystick* pad = TouchPad().handle) {
     SDL_SetJoystickVirtualButton(pad, static_cast< int >(button), down == JNI_TRUE);
   }
+}
+
+// Every overlay control's press and release, for touch: bindings in controls.toml.
+extern "C" JNIEXPORT void JNICALL
+Java_org_metroidprime_port_TouchControlsView_nativeTouchControl(JNIEnv*, jclass, jint control,
+                                                                jboolean down) {
+  PortInputDevices::SetTouchControl(static_cast< int >(control), down == JNI_TRUE);
+}
+
+// Whether a binding takes over the control, so the overlay skips its own button.
+extern "C" JNIEXPORT jboolean JNICALL
+Java_org_metroidprime_port_TouchControlsView_nativeTouchControlBound(JNIEnv*, jclass, jint control) {
+  return PortInputDevices::TouchControlBound(static_cast< int >(control)) ? JNI_TRUE : JNI_FALSE;
 }
 
 extern "C" JNIEXPORT void JNICALL
@@ -9094,7 +9313,11 @@ Java_org_metroidprime_port_MetroidPrimeActivity_nativeRemasteredPicked(JNIEnv* e
   const char* chars = env->GetStringUTFChars(uri, nullptr);
   if (chars != nullptr) {
     std::lock_guard lock(PortDebug::sRemasteredPickMutex);
-    PortDebug::sRemasteredPicks.emplace_back(int(which), chars);
+    if (which == PortDebug::kPalLanguagesPick) {
+      PortDebug::sPalLanguagesPick = chars;
+    } else {
+      PortDebug::sRemasteredPicks.emplace_back(int(which), chars);
+    }
     env->ReleaseStringUTFChars(uri, chars);
   }
 }

@@ -7,11 +7,18 @@
 #include "vr/prime_vr_policy.h"
 #include "vr/vr_view.h"
 
+#include <atomic>
+#ifdef __ANDROID__
+#include <jni.h>
+#endif
+
 // Tracks whether an Aurora frame is currently open. GXInit (CGraphics::Startup)
 // submits register writes the Aurora worker processes, so a frame must be open
 // before it runs; the first EndScene closes it.
 namespace {
 bool s_auroraFrameOpen = false;
+// Set once the first frame is presented: Android's startup cover waits for it.
+std::atomic< bool > s_framePresented{false};
 bool AuroraFrameBegin() {
   if (!s_auroraFrameOpen && aurora_begin_frame_tagged(PortVr::PrimeVRPolicyContentTag())) {
     // Only mark open when Aurora actually begins a frame; otherwise a later
@@ -26,9 +33,19 @@ void AuroraFrameEnd() {
     // the headset only ever replays a stereo packet built for this content.
     aurora_end_frame_tagged(PortVr::PrimeVRPolicyContentTag());
     s_auroraFrameOpen = false;
+    s_framePresented.store(true, std::memory_order_relaxed);
   }
 }
 } // namespace
+
+#ifdef __ANDROID__
+// Polled by MetroidPrimeActivity's startup cover, which hides the black
+// surface during init (the mod scan alone takes ~1 s on a phone).
+extern "C" JNIEXPORT jboolean JNICALL
+Java_org_metroidprime_port_MetroidPrimeActivity_nativeFramePresented(JNIEnv*, jclass) {
+  return s_framePresented.load(std::memory_order_relaxed) ? JNI_TRUE : JNI_FALSE;
+}
+#endif
 
 #include "Kyoto/Alloc/CMemory.hpp"
 #include "Kyoto/Basics/COsContext.hpp"

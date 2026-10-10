@@ -351,9 +351,9 @@ ShaderInfo build_shader_info(const ShaderConfig& config) noexcept {
   if (config.pbr) {
     info.usesPbr = true;
     info.usesLightmap = config.pbrLightmapAttr != GX_VA_NULL;
-    // 7 single + ambient 6 + volume 6 + tone 3 + backlight 3 + light skip + light scale, then the linear light
-    // colours, then 3 HDR rows per light, then the lightmap and the room lights
-    info.uniformSize += sizeof(Mat3x4<float>) + sizeof(Vec4<float>) * (32 + GX::MaxLights * 4);
+    // The probe, 7 single + ambient 6 + volume 6 + tone 3 + backlight 3 + light skip + light scale, then the
+    // linear light colours, then 3 HDR rows per light, then shield 8, the lightmap 4 and the room lights
+    info.uniformSize += sizeof(Mat3x4<float>) + sizeof(Vec4<float>) * (27 + GX::MaxLights * 4 + 8 + 4 + 1);
   }
   if (config.hudSample >= 2) {
     info.usesHudDyin = true;
@@ -500,10 +500,18 @@ static void fill_uniform(ByteBuffer& buf, const ShaderInfo& info) noexcept {
     Vec4<float> lightScale = g_gxState.pbrLightScale;
     lightScale.z() = g_gxState.pbrBrdfLut ? 1.f : 0.f;
     buf.append(lightScale);
-    // The lights' colours made linear here once, not per light in every pixel.
-    for (const auto& light : g_gxState.lights) {
-      const auto linear = [](float c) { return std::pow(std::max(c, 0.f), 2.2f); };
-      buf.append(Vec4<float>{linear(light.color.x()), linear(light.color.y()), linear(light.color.z()), 0.f});
+    // The lights' colours made linear here once, not per light in every pixel. Lights rarely change
+    // between draws, so the last colours seen per slot are kept with their linear values.
+    static std::array<Vec4<float>, GX::MaxLights> lastColor{};
+    static std::array<Vec4<float>, GX::MaxLights> lastLinear{};
+    for (size_t i = 0; i < g_gxState.lights.size(); ++i) {
+      const auto& color = g_gxState.lights[i].color;
+      if (color.x() != lastColor[i].x() || color.y() != lastColor[i].y() || color.z() != lastColor[i].z()) {
+        const auto linear = [](float c) { return std::pow(std::max(c, 0.f), 2.2f); };
+        lastColor[i] = color;
+        lastLinear[i] = Vec4<float>{linear(color.x()), linear(color.y()), linear(color.z()), 0.f};
+      }
+      buf.append(lastLinear[i]);
     }
     for (const auto& v : g_gxState.pbrLightHdr) {
       buf.append(v);
@@ -575,8 +583,19 @@ static void fill_uniform(ByteBuffer& buf, const ShaderInfo& info) noexcept {
 }
 
 gfx::Range build_uniform(const ShaderInfo& info) noexcept {
-  std::array<uint32_t, 2> unused{};
-  return build_uniform(info, unused);
+  ZoneScoped;
+  // Filled in place in the frame's uniform buffer, inside a MaxUniformSize window (build_shader_info
+  // refuses anything larger), then trimmed to what was written. This overload stages no eye copies and
+  // keeps no snapshot: both need the uniform's CPU-side bytes (the overload below).
+  uint8_t* out = nullptr;
+  auto range = gfx::map_uniform(out);
+  if (out == nullptr) {
+    return range;
+  }
+  ByteBuffer buf{out, MaxUniformSize};
+  fill_uniform(buf, info);
+  gfx::unmap_uniform(range, buf.size());
+  return range;
 }
 
 bool uniform_matches(const ShaderInfo& info, const ByteBuffer& snapshot) noexcept {
@@ -589,19 +608,22 @@ bool uniform_matches(const ShaderInfo& info, const ByteBuffer& snapshot) noexcep
   return candidate.size() == snapshot.size() && std::memcmp(candidate.data(), snapshot.data(), snapshot.size()) == 0;
 }
 
+// PrimedGun: if this overload ever fills the frame's buffer in place like the one above, gfx::unmap_uniform
+// must trim the range before gfx::stage_stereo_uniforms runs: the MultiviewClip eye clips have to land at
+// the mono uniform's aligned end, which stage_stereo_uniforms checks, and the stereo layout takes the
+// range's size. The eye copies and the snapshot must still be read from CPU-side bytes.
 gfx::Range build_uniform(const ShaderInfo& info, std::array<uint32_t, 2>& stereoUniformOffsets,
                          ByteBuffer* snapshot) noexcept {
   ZoneScoped;
-  static ByteBuffer buf;
+  // The eye copies and the snapshot uniform_matches compares are read from CPU-side bytes: the frame's
+  // uniform buffer is write-mapped memory, which is slow to read back, so this overload doesn't fill it
+  // in place. The uniform is filled straight into the snapshot when there is one (no copy for it) and
+  // copied into the frame's buffer once.
+  static ByteBuffer scratch;
+  ByteBuffer& buf = snapshot != nullptr ? *snapshot : scratch;
   buf.clear();
   fill_uniform(buf, info);
-  if (snapshot != nullptr) {
-    snapshot->clear();
-    std::memcpy(snapshot->append_uninitialized(buf.size()), buf.data(), buf.size());
-  }
   const auto range = gfx::push_uniform(buf.data(), buf.size());
-  // The eye copies are composed from the CPU-side bytes while they are in hand:
-  // the staged uniform lives in write-mapped memory, which is slow to read back.
   auto layout = gfx::StereoUniformLayout::for_gx(info.lineMode, info.lightingEnabled,
                                                  static_cast<uint32_t>(info.loadsTevReg.count()), range.size);
   // Vertices without a matrix index all take the current position matrix

@@ -25,7 +25,8 @@ endif()
 # PrimedGun: the fork's own release version is the set(PRIMEDGUN_LAUNCHER_VERSION ...)
 # line in launcher/CMakeLists.txt, which every PrimedGun release bumps together with
 # versionName in quest/app/build.gradle.kts. MP_BUILD_VERSION above stays upstream's;
-# this one is MP_PRIMEDGUN_VERSION, empty when it can't be read.
+# this one is kMpPrimedGunVersion (MP_PRIMEDGUN_VERSION in platform/include's
+# port_build_info.h), empty when it can't be read.
 set(primedgun_version "")
 if(EXISTS "${SOURCE_DIR}/launcher/CMakeLists.txt")
     file(STRINGS "${SOURCE_DIR}/launcher/CMakeLists.txt" primedgun_line
@@ -34,13 +35,16 @@ if(EXISTS "${SOURCE_DIR}/launcher/CMakeLists.txt")
         set(primedgun_version "${CMAKE_MATCH_1}")
     endif()
 endif()
-set(content "#pragma once\n#define MP_BUILD_REVISION \"${revision}\"\n#define MP_BUILD_VERSION \"${version}\"\n#define MP_PRIMEDGUN_VERSION \"${primedgun_version}\"\n")
+# extern: a namespace-scope const is otherwise internal, and the include can find a
+# stale generated port_build_info.h (the old scheme's, next to this file) instead
+# of the declaring header.
+set(content "#include \"port_build_info.h\"\nextern const char kMpBuildRevision[] = \"${revision}\";\nextern const char kMpBuildVersion[] = \"${version}\";\nextern const char kMpPrimedGunVersion[] = \"${primedgun_version}\";\n")
 set(previous "")
-if(EXISTS "${OUTPUT_HEADER}")
-    file(READ "${OUTPUT_HEADER}" previous)
+if(EXISTS "${OUTPUT_SOURCE}")
+    file(READ "${OUTPUT_SOURCE}" previous)
 endif()
 if(NOT previous STREQUAL content)
-    get_filename_component(output_dir "${OUTPUT_HEADER}" DIRECTORY)
+    get_filename_component(output_dir "${OUTPUT_SOURCE}" DIRECTORY)
     file(MAKE_DIRECTORY "${output_dir}")
-    file(WRITE "${OUTPUT_HEADER}" "${content}")
+    file(WRITE "${OUTPUT_SOURCE}" "${content}")
 endif()

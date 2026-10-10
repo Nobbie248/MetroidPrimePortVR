@@ -6,13 +6,29 @@
 #include "Kyoto/Graphics/CModel.hpp"
 #include "Kyoto/Math/CVector3f.hpp"
 
-#ifdef TARGET_PC
-#include "Kyoto/Basics/CBasics.hpp"
-#include <string.h>
-#endif
-
 #include "rstl/pair.hpp"
 #include "rstl/vector.hpp"
+
+#ifdef TARGET_PC
+#include "Kyoto/Basics/CBasics.hpp"
+
+#include <rstl/math.hpp>
+
+#include <vector>
+
+// The model's vertex arrays stay big-endian on PC (the skinning loads swap them).
+// Entries past the array's `bytes` read as zero.
+static std::vector< CVector3f > NativeVectors(const float* in, uint bytes, uint count,
+                                              uint stride) {
+  std::vector< CVector3f > out(count, CVector3f(0.f, 0.f, 0.f));
+  const uint avail = rstl::min_val(count, bytes / (stride * 12));
+  for (uint i = 0; i < avail; ++i) {
+    const float* v = in + i * stride * 3;
+    out[i] = CVector3f(CBasics::SwapBytes(v[0]), CBasics::SwapBytes(v[1]), CBasics::SwapBytes(v[2]));
+  }
+  return out;
+}
+#endif
 
 typedef rstl::pair< CVector3f, rstl::list< uint > > TPosToVertListPair;
 
@@ -24,34 +40,10 @@ CSkinnedModelWithAvgNormals::CSkinnedModelWithAvgNormals(const CSkinnedModel& sk
   int vertexCount = skinnedModel.GetNumPoints();
 #endif
 #ifdef TARGET_PC
-  // Port: the model keeps its position and normal arrays as the file stores
-  // them, big-endian (CSkinRules::PortBuildPointsAndNormals swaps each float as
-  // it skins; CCubeModel::SetSkinningArraysCurrent notes the same). Summed as
-  // native floats they were garbage: most came out denormal or zero, so the
-  // normalised average was 0/0 or x/0, and CVertexMorphEffect, which weights
-  // each vertex of the frozen (ice beam) shell by these normals, pushed the
-  // vertices of a NaN or infinite normal out to infinity. Swap them once here.
-  // NBT normals are nine (N, B, T) or fifteen floats per vertex; N is the first,
-  // and only N is kept, so nativeNormals holds one vector per vertex.
-  const uint srcNormalVecs = skinnedModel.GetModel()->GetCubeModel()->NormalVecs();
-  rstl::vector< CVector3f > nativePositions(vertexCount);
-  rstl::vector< CVector3f > nativeNormals(vertexCount);
-  {
-    const uchar* srcPositions =
-        reinterpret_cast< const uchar* >(skinnedModel.GetModel()->GetPositions());
-    const uchar* srcNormals =
-        reinterpret_cast< const uchar* >(skinnedModel.GetModel()->GetNormals());
-    for (uint i = 0; i < vertexCount; ++i) {
-      float p[3];
-      float n[3];
-      memcpy(p, srcPositions + i * sizeof(p), sizeof(p));
-      memcpy(n, srcNormals + i * srcNormalVecs * sizeof(n), sizeof(n));
-      nativePositions.push_back(CVector3f(CBasics::SwapBytes(p[0]), CBasics::SwapBytes(p[1]),
-                                          CBasics::SwapBytes(p[2])));
-      nativeNormals.push_back(CVector3f(CBasics::SwapBytes(n[0]), CBasics::SwapBytes(n[1]),
-                                        CBasics::SwapBytes(n[2])));
-    }
-  }
+  const std::vector< CVector3f > nativePositions =
+      NativeVectors(skinnedModel.GetModel()->GetPositions(),
+                    skinnedModel.GetModel()->GetCubeModel()->GetModelInstance().GetVertexSize(),
+                    vertexCount, 1);
   const CVector3f* modelPositions = nativePositions.data();
 #else
   const CVector3f* modelPositions =
@@ -83,9 +75,13 @@ CSkinnedModelWithAvgNormals::CSkinnedModelWithAvgNormals(const CSkinnedModel& sk
   }
 
 #ifdef TARGET_PC
+  // NBT normals are nine (N, B, T) or fifteen floats per vertex; N is the first.
+  const std::vector< CVector3f > nativeNormals =
+      NativeVectors(skinnedModel.GetModel()->GetNormals(),
+                    skinnedModel.GetModel()->GetCubeModel()->GetModelInstance().GetNormalSize(),
+                    vertexCount,
+                    skinnedModel.GetModel()->GetCubeModel()->NormalVecs());
   const CVector3f* normals = nativeNormals.data();
-  // The NBT entry stride (NormalVecs) was applied in the swap above: nativeNormals
-  // already holds one N per vertex.
   const uint normalStride = 1;
 #else
   const CVector3f* normals =

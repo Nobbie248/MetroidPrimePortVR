@@ -524,4 +524,8 @@ VrPadState GetVrPadState() noexcept {
     return g_state;
 }
 
+// The motor claim is the port claim: VrPadUpdate sets it when the controllers
+// take port 0 and clears it with PADClearVirtualStatus when they let go.
+bool VrPadOwnsPort0() noexcept { return g_owns_motor.load(std::memory_order_relaxed); }
+
 } // namespace PortVr

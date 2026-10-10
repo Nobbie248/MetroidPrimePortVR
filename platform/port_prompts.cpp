@@ -5,6 +5,7 @@
 #include "port_debug.h"
 #include "port_embedded.h"
 #include "port_textures.h"
+#include "vr/vr_pad.h"
 
 #include <dolphin/gx.h>
 #include <dolphin/pad.h>
@@ -772,6 +773,14 @@ const char* ActiveDevice() {
   }
   // Original experience shows the disc's own prompts, whatever is being pressed.
   if (PortDebug::OriginalExperience()) {
+    return "gamecube";
+  }
+  if (const char* forced = PortDebug::PromptGlyphs()) {
+    return forced;
+  }
+  // PortVr: the PrimedGun pad is the GameCube pad it emulates, while it owns port 0. It sends
+  // no SDL events, so the last keyboard or pad touched would otherwise pick the icons.
+  if (PortVr::VrPadOwnsPort0()) {
     return "gamecube";
   }
   switch (sActiveInput.load(std::memory_order_relaxed)) {

@@ -85,4 +85,12 @@ struct VrPadState {
 };
 VrPadState GetVrPadState() noexcept;
 
+// The headset controllers own port 0: VrPadUpdate has claimed it (and its
+// motor) for PrimedGun's control scheme. A lock-free read, safe from any
+// thread, and false in a build without OpenXR. The desktop's direct aim (mouse
+// aim, twin stick) stands down meanwhile: the head and the tracked cannon aim,
+// and the look stick turns or snaps. Gamepad mode's controllers are an
+// ordinary SDL pad and never set it.
+bool VrPadOwnsPort0() noexcept;
+
 } // namespace PortVr

@@ -15,6 +15,7 @@
 
 #ifdef TARGET_PC
 #include "port_controls.h"
+#include "port_input_devices.h"
 #include "port_input_map.h"
 #include "vr/openxr_integration.h"
 #endif
@@ -27,15 +28,32 @@ static_assert(PortInputMap::kPadA == PAD_BUTTON_A && PortInputMap::kPadL == PAD_
                   PortInputMap::kPadStart == PAD_BUTTON_START && PortInputMap::kPadZ == PAD_TRIGGER_Z,
               "PortInputMap's pad bits are dolphin/pad.h's");
 
-// The D-pad picks beams while the shift is held (PortInputMap::ShiftDPadToCStick).
-void ApplyBeamShift(PADStatus& status) {
-  unsigned buttons = status.button;
-  int x = status.substickX;
-  int y = status.substickY;
-  PortInputMap::ShiftDPadToCStick(buttons, x, y);
-  status.button = static_cast< u16 >(buttons);
-  status.substickX = static_cast< s8 >(x);
-  status.substickY = static_cast< s8 >(y);
+bool KeyHeld(const bool* keys, int numKeys, s32 scancode) {
+  return keys != nullptr && scancode > PAD_KEY_INVALID && scancode < numKeys && keys[scancode];
+}
+
+// Port 0's keyboard keys held on a C-stick direction (the keyboard presets pick
+// beams that way).
+struct SKeyboardPadHeld {
+  bool cStick = false;
+};
+
+SKeyboardPadHeld KeyboardPadHeld() {
+  SKeyboardPadHeld held;
+  int numKeys = 0;
+  const bool* keys = SDL_GetKeyboardState(&numKeys);
+  for (u32 slot = 0; slot < PAD_KEY_SLOT_COUNT; ++slot) {
+    u32 count = 0;
+    if (const PADKeyAxisBinding* axes = PADGetKeyAxisBindingsSlot(PAD_CHAN0, slot, &count)) {
+      for (u32 i = 0; i < count; ++i) {
+        if (!KeyHeld(keys, numKeys, axes[i].scancode)) continue;
+        if (axes[i].padAxis >= PAD_AXIS_RIGHT_X_POS && axes[i].padAxis <= PAD_AXIS_RIGHT_Y_NEG) {
+          held.cStick = true;
+        }
+      }
+    }
+  }
+  return held;
 }
 } // namespace
 
@@ -80,9 +98,6 @@ void CDolphinController::Poll() {
 }
 
 void CDolphinController::ReadDevices() {
-  PADStatus status[4]{};
-  PADRead(status);
-  PADClamp(status);
   // Not SDL_GetMouseState: that counts touches as left clicks.
   unsigned held = PortDebug::MouseHeldButtons() & PortInputMap::kMouseButtonMask;
   bool inputFocused = SDL_GetKeyboardFocus() != nullptr;
@@ -97,66 +112,16 @@ void CDolphinController::ReadDevices() {
   // the player cannot see the desktop window to click back into it.
   inputFocused = inputFocused || PortVr::OpenXRHeadsetHasInputFocus();
 #endif
-  int mouseActions[PortInputMap::kMouseButtonCount];
-  for (int i = 0; i < PortInputMap::kMouseButtonCount; ++i) {
-    mouseActions[i] = PortDebug::MouseAction(i);
-  }
-  const unsigned mouse = PortDebug::MouseWeaponButtons(held);
-  // Out of first-person aim the buttons bound to A and B still press them:
-  // bombs and boosts in morph ball, advancing text boxes and menus. Its gate
-  // also waits for a release, so a held charge carried into morph ball does
-  // not drop a bomb. Only those buttons feed the gate, so a held side button
-  // with nothing to do there does not hold it shut.
-  const unsigned menuPad = PortInputMap::kPadA | PortInputMap::kPadB;
-  const PortInputMap::SMouseResult menuMouse = PortInputMap::MouseActions(
-      mouseActions,
-      PortDebug::MouseMenuButtons(held & PortInputMap::MouseButtonsFor(mouseActions, menuPad),
-                                  inputFocused),
-      menuPad);
-  if (menuMouse.buttons != 0) {
-    status[0].err = PAD_ERR_NONE;
-    status[0].button |= static_cast< u16 >(menuMouse.buttons);
-  }
-  bool mouseShift = false;
-  if (PortDebug::MouseGameplayActive() && PortDebug::MouseCaptured() && PortDebug::MouseButtons()) {
-    // Add held states to the normal PAD path: its press/release edges drive
-    // charge shots and missile cooldowns. Saved bindings remain untouched.
-    status[0].err = PAD_ERR_NONE;
-    const PortInputMap::SMouseResult actions = PortInputMap::MouseActions(mouseActions, mouse);
-    status[0].button |= static_cast< u16 >(actions.buttons);
-    // Fully depressed, after PADClamp's dead zone.
-    if (actions.buttons & PAD_TRIGGER_L) status[0].triggerL = 150;
-    if (actions.buttons & PAD_TRIGGER_R) status[0].triggerR = 150;
-    mouseShift = actions.shift;
-  }
-  // Alt controller buttons (Controls tab): Aurora maps one native button to
-  // each PAD button, the port ORs in a second.
-  if (status[0].err == PAD_ERR_NONE) {
-    const unsigned alt = PortControls::HeldAltPadButtons();
-    status[0].button |= static_cast< u16 >(alt);
-    if ((alt & PAD_TRIGGER_L) && status[0].triggerL < 150) status[0].triggerL = 150;
-    if ((alt & PAD_TRIGGER_R) && status[0].triggerR < 150) status[0].triggerR = 150;
-  }
-  // A touch-overlay minimap tap: one poll of Z held, released on the next.
-  if (PortDebug::ConsumeMapTapZ()) {
-    status[0].err = PAD_ERR_NONE;
-    status[0].button |= PAD_TRIGGER_Z;
-  }
-  // Turbo fire (Controls tab binding, unbound by default, or the touch Turbo
-  // button): A pressed on one poll and released on the next, so the gun sees a
-  // press edge every other tick and its own shot delays set the rate. A real A
-  // held alongside wins, as mashing would not release it either.
-  static unsigned sTurboTicks = 0;
-  if (PortControls::TurboHeld() || PortDebug::TouchTurboFire()) {
-    if ((sTurboTicks++ & 1) == 0) {
-      status[0].err = PAD_ERR_NONE;
-      status[0].button |= PAD_BUTTON_A;
-    }
-  } else {
-    sTurboTicks = 0;
-  }
-  // The beam shift, bound in the Controls tab (left shift by default).
-  const bool shiftHeld = mouseShift || PortControls::ShiftHeld() || PortDebug::TouchBeamShift();
+  // Every binding (pad, keyboard, mouse, alt buttons, turbo, touch extras) goes
+  // through the input engine; Aurora's PADRead then adds the virtual pads and
+  // its suppression to port 0's result. The PrimedGun VR pad is one of those
+  // virtual pads (PADSetVirtualStatus): merged after the engine's override, it
+  // is neither remapped nor chorded here.
+  const PortInputDevices::SPoll devices = PortInputDevices::Poll(held, inputFocused);
+  PADSetPortOverride(0, &devices.status);
+  PADStatus status[4]{};
+  PADRead(status);
+  PADClamp(status);
   for (int i = 0; i < 4; ++i) {
     // One disconnected port must not prevent the other ports updating. Clear
     // stale held buttons on disconnect and keep UI interaction out of gameplay.
@@ -167,40 +132,28 @@ void CDolphinController::ReadDevices() {
     }
   }
   memcpy(x4_status, status, sizeof(status));
-  PortDebug::SetBeamShiftHeld(shiftHeld && inputFocused && !PortDebug::Visible());
 
   // Twin-stick: feed the right stick into the first-person aim and consume it,
-  // so it does not also drive the game's own free-look.
-  if (PortDebug::TwinStick() && x4_status[0].err == PAD_ERR_NONE) {
-    const float sx = static_cast< float >(x4_status[0].substickX) / 127.f;
-    const float sy = static_cast< float >(x4_status[0].substickY) / 127.f;
-    PortDebug::AddStickAim(sx, sy, PortDebug::TickPeriod());
-    PortDebug::SetTwinStickRightY(sy);
-    x4_status[0].substickX = 0;
-    x4_status[0].substickY = 0;
-
-    // Beams are selected from the C-stick, which twin-stick just consumed, so
-    // under twin-stick left shift (and the touch overlay's held Beam button) is a
-    // beam shift too, and so are the L trigger and LB unless a pad button is
-    // bound as the shift (Remastered's layout locks on with L and jumps with LB).
-    // Touch has its own shift button, so there L and LB stay lock-on and jump.
-    const bool* keys = SDL_GetKeyboardState(nullptr);
-    SDL_Gamepad* pad = PADGetSDLGamepadForIndex(0);
-    const bool padShiftBound = PortDebug::ShiftBinding(2) >= 0 || PortDebug::TouchActive();
-    const bool beamModifier =
-        shiftHeld || (keys != nullptr && keys[SDL_SCANCODE_LSHIFT] != 0) ||
-        (!padShiftBound && ((x4_status[0].button & PAD_TRIGGER_L) != 0 ||
-                            (pad != nullptr && SDL_GetGamepadButton(pad, SDL_GAMEPAD_BUTTON_LEFT_SHOULDER))));
-    if (beamModifier) {
-      ApplyBeamShift(x4_status[0]);
+  // so it does not also drive the game's own free-look. The map screen keeps
+  // the C-stick: it pans the map there.
+  if (PortDebug::TwinStick() && !PortDebug::MapScreenOpen() && x4_status[0].err == PAD_ERR_NONE) {
+    // Under mouse aim the mouse aims, so a keyboard key on the C-stick picks a
+    // beam, as without twin-stick (the mouse-and-keyboard preset's 1-4), and is
+    // left to the game. Without it the keys aim (the classic preset's IJKL).
+    const SKeyboardPadHeld keyboard =
+        PortDebug::MouseAim() ? KeyboardPadHeld() : SKeyboardPadHeld{};
+    if (keyboard.cStick) {
+      PortDebug::SetTwinStickRightY(0.f);
+    } else {
+      const float sx = static_cast< float >(x4_status[0].substickX) / 127.f;
+      const float sy = static_cast< float >(x4_status[0].substickY) / 127.f;
+      PortDebug::AddStickAim(sx, sy, PortDebug::TickPeriod());
+      PortDebug::SetTwinStickRightY(sy);
+      x4_status[0].substickX = 0;
+      x4_status[0].substickY = 0;
     }
   } else {
     PortDebug::SetTwinStickRightY(0.f);
-    // Without twin-stick the C-stick still picks beams; the shift gives the
-    // D-pad the same job, for a keyboard or a pad whose C-stick is awkward.
-    if (shiftHeld && x4_status[0].err == PAD_ERR_NONE) {
-      ApplyBeamShift(x4_status[0]);
-    }
   }
 
   // Start+Back is the debug overlay chord; do not also pause the game with it.

@@ -1,3 +1,257 @@
+## Merged upstream port bc73f39f (2026-10-10)
+
+Upstream's 184 commits since 2d8d582d (2026-10-08 21:03 to 2026-10-10
+13:31): experimental PAL disc support (PAL saves go to the EUR card), user
+remapping (a binding engine with chords, layers and contexts, the F1 Remap
+page and `controls.toml`; the beam shift is now default chords; the mouse
+wheel cycles beams; a choice of button glyphs), more Remastered content
+(X-ray and thermal visor posts, scan icons, Phazon Beam materials, muzzle,
+charge, bomb, flamethrower and electric effects, morph ball glows), the sharp
+scan window, crosshair opacity and colour, GX and FIFO speed-ups (uniforms
+filled in place, a shader-info memo, bind groups keyed by handles, fewer
+pipeline rebuilds, a pool of pipeline compile threads), an FPS cap slider and
+a tick catch-up budget, 60 Hz movement values at any sim rate, game options
+kept across launches, every setting copied into the log, a software
+rendering fallback, a macOS build, the build revision as a generated source,
+and upstream's own fixes for the two big-endian readers the fork had fixed.
+Backup of the branch before the merge:
+`backup/OpenXR-before-upstream-merge-2026-10-10`. Nineteen files conflicted;
+upstream's code was also checked against the fork where git merged silently.
+
+- **Build info and the launchers.** Upstream now generates the build
+  revision as a source (074e531a, 6350679b): `generated/port_build_info.cpp`
+  defines extern `kMpBuildRevision` and `kMpBuildVersion`, and the static
+  `platform/include/port_build_info.h` names them `MP_BUILD_REVISION` and
+  `MP_BUILD_VERSION`. cmake/BuildRevision.cmake writes the fork's
+  `kMpPrimedGunVersion` into the same source (still read from
+  launcher/CMakeLists.txt's `set(PRIMEDGUN_LAUNCHER_VERSION "...")`), and the
+  header names it `MP_PRIMEDGUN_VERSION`. The `""` fallbacks in
+  platform/main.cpp and debug_ui.cpp are gone, so a missing declaration fails
+  the build, and the port_version test now wants "PrimedGun <version>
+  (Metroid Prime native port". PrimedGun.exe and libprimedgun_launcher.so
+  link no game code, so each compiles the generated source itself and takes
+  the header from platform/include only: an older build folder still holds
+  the old scheme's `generated/port_build_info.h`, whose literal macros would
+  freeze the revision. The About tab passes the revision through
+  `QString::fromLatin1`, since it is no longer a literal.
+- **Big-endian model readers.** Upstream fixed both readers the fork fixed
+  in 8796a7ab: b4dfc433 (`CSkinnedModelWithAvgNormals`, `NativeVectors`) and
+  e3ad88a4 (`CAnimData`'s fallback box, `PortAccumulateModelBounds`). Both
+  files are now upstream's, with one swap each, reads bounded by the arrays'
+  sizes, and no `PortReadBigVector`. Take upstream's versions on later merges
+  and never add a second swap (the 2026-10-07 ice beam entry says so too).
+- **Input rework.** Every desktop device now goes through upstream's binding
+  engine (`PortInputDevices::Poll`, then `PADSetPortOverride` on port 0). The
+  PrimedGun pad is still a virtual status (`PADSetVirtualStatus`) that
+  `PADRead` merges after the override, so Remap, `controls.toml`, the beam
+  chords and turbo never touch it: it is not remapped. Gamepad mode's
+  "OpenXR Controllers" pad is an ordinary SDL controller, read raw by the
+  engine, and follows the Controllers profile like any pad. The headset-focus
+  OR (2026-10-08) now sits before `Poll`, so it feeds the engine's focus gate
+  as well as the clearing after `PADRead`. The motor callback is untouched.
+  1f31e327 removed the old twin-stick "L is a beam shift", which turned the
+  VR lock plus the visor gesture into a beam pick.
+- **Direct aim stands down for the PrimedGun pad.** Mouse aim and twin stick
+  read as off while `PortVr::VrPadOwnsPort0()` (vr_pad.cpp's motor claim,
+  held while the controllers own port 0); 8c902112 (mouse aim) and the
+  presets now turn twin stick on far more often. Twin stick would eat the
+  pad's C-stick (the beam wheel's pulse, the morph ball's right stick), and
+  direct aim turns the look stick's turn into a strafe and switches off the
+  snap turn and directional movement. Swap Scan/X-Ray reads as off too, so the
+  visor gesture keeps left for Scan and right for X-Ray. The stored settings
+  and the F1 checkboxes are untouched, and Gamepad mode keeps them.
+- **Glyphs.** While the PrimedGun pad owns port 0 the prompts are the game's
+  own GameCube ones (`PortPrompts::ActiveDevice`). The pad sends no SDL
+  events, so before, the last key or pad touched picked the set. F1's
+  "Button glyphs" (`prompt_glyphs=`, 6a175aa7) still wins.
+- **Spring Ball on by default.** 24419e15 moved the controls settings into
+  `PortInput::Settings` with `springBall = false`. The fork's default
+  (5e3ebaa8) now lives there (port_input_settings.h), and
+  port_input_settings_tests checks it; fresh installs would otherwise lose
+  the right stick's spring in the morph ball. The other controls keys kept
+  their names, and the launchers write none of them.
+- **Per-eye uniforms.** c6f0f456 fills draw uniforms in place in the frame's
+  write-mapped buffer. GX draws keep the fork's three-argument
+  `build_uniform`: it fills the CPU snapshot (or a scratch buffer), copies it
+  once with `push_uniform` and stages the eye copies from those CPU bytes,
+  because the eye copies and the draw-merge snapshot must not read back
+  write-combined memory. That is still one copy fewer than before the merge.
+  Upstream's in-place fill lives only in the one-argument overload, which
+  nothing calls. Its `map_uniform` now keeps `push_uniform`'s headroom (a
+  multiview draw binds an eye-pair window past the uniform), and a comment
+  above the stereo overload gives the rules if it ever fills in place.
+- **PBR uniform size.** c6f0f456 also counts `pbr_shield` in the PBR uniform
+  size; 128 bytes were written past the count. That was a latent fork bug:
+  `staged_multiview_mode` found the eye data off by those bytes ("Multiview
+  uniform data lies ... bytes on"), so the Quest dropped every PBR draw from
+  its eye passes and the PC (256-byte alignment) drew about half of them with
+  the mono camera in both eyes. Remastered content had not been played in a
+  headset.
+- **Memo and bind groups vs stereo.** c3ea1cba's memo (shader info and
+  shadow pipeline per config hash) holds mono configs only: the eye variants
+  are built on a copy, and `cache.multiviewPipelineMask` is cleared before
+  the lookup, so a hit never reuses the last config's eye pipelines. The eye
+  variants are not memoized (below). `reset_draw_cache` clears the memo, and
+  `shutdown_pipeline_cache` resets the last-pipeline shortcut that
+  `touch_pipeline` trusts, for a future gfx re-initialization. edf63fc3's
+  handle key moved into the fork's `build_texture_bind_group`, so the mono,
+  multiview and per-eye groups all use it. The key starts with the layout,
+  and eye stand-ins and array views are handles of their own, so no two kinds
+  of group share an id. 19e221e2's field-by-field pipeline config keeps the
+  fork's ShaderConfig bytes 10-11.
+- **Eye-pass scissors** round every edge (`std::lround`), as afbc94b4 does
+  for the mono mapping, so slices that share an edge in the EFB share it in
+  the eye target instead of overlapping by a pixel and blending it twice.
+- **`PortGxLayoutEpoch` = 2.** No ShaderConfig byte moved, and
+  GXPipelineConfigVersion stays 15. But ecf519cf moved the port's HUD
+  material flags out of the texture slot mask: before it, every world
+  material with texture slot 0 or 1 set hudSample around its draw. Most GX
+  rows that alpha.1 and alpha.2 cached are therefore configs no draw asks for
+  any more, still compiled in the background at every start, now on several
+  threads. The bump drops every GX row once. The cost is one cold start: the
+  Quest, which ships no seed, compiles on its first room visits; the PC
+  merges the re-recorded seed (853f55ee) back.
+- **Remastered X-ray and thermal posts** (ca239f84, 530a5a48, 1e28066c,
+  f4303c84) are encoder tasks on the mono EFB, which the eye passes don't
+  replay. port_room_env.cpp's `XRayPostEnabled` and `ThermalPostEnabled` are
+  false while `PortVr::VrImmersive()`: one gate for X-ray pass A
+  (`CStateManager::DrawWorld`), pass B (`CPlayerVisor::DrawXRayEffect`), both
+  thermal passes and the X-ray baked-light override (0.6). An immersive frame
+  keeps retail's X-ray blur and thermal blends, which the fork already draws
+  per eye, and retail's baked light; the virtual screen and the desktop show
+  Remastered's posts. The game's call sites are upstream's again. As bloom
+  does, the FIFO also skips a post recorded while `stereo_shadow::active()`,
+  for a frame that turned immersive after the game asked. `XRayTick` and
+  `ThermalTick` stay ungated: `CPlayerVisor::Update` doesn't run while
+  paused, so a reset there would leave a paused virtual-screen frame
+  mid-ramp.
+- **Sharp scan window** (764058d8, 5c935ca2) is off while the headset runs:
+  `PortDebug::SharpScanWindow()` checks `OpenXRIsRunning()`, as `HudWide()`
+  does, and `CPlayerVisor::PortScanZoom` also refuses in an immersive frame.
+  Its zoom lives in the projection's x/y terms, which the eye passes replace;
+  its copy is the screen's centre, not the head-locked plane's rectangle; and
+  it would draw the world once more per eye. The headset keeps the fork's
+  per-eye scan window copy (magnified only with `vr_scan_zoom`), whose
+  no-zoom size is now an early return in upstream's `ScanWindowCopySize`.
+  `PortDrawScanOverlay` sets the WORLD route before the reticle. Chosen from
+  the code, not tried in a headset.
+- **Remastered scan icons with look to scan.** Upstream's icons (cabf1d5f,
+  2f26d238, 927c896e) fade in only while the object is in the scan box and
+  in sight. With look to scan on, the box is the head's single pick, so the
+  icons use the gaze's wide cone instead (`VrLookToScanNearby`, the pick
+  included), the objects look to scan already shows icons for; the scan
+  frame still lights for the pick alone. While immersive the line-of-sight
+  ray starts at the eyes (`VrHeadGaze`). The icons draw without depth, so the
+  fork's extended scan shield doesn't mask them: they show across the view,
+  as they show across the screen on the desktop.
+- **Crosshair.** 00e775bf and e2fd8c65 make the opacity setting the
+  crosshair's alpha (default 100%; the game's is 19%, drawn additively). In
+  an immersive frame the crosshair sits in the world (on the cannon ray's hit
+  with cannon targeting), and at full strength it would be about five times
+  brighter than alpha.2's, so there the setting scales the game's alpha
+  instead, as under Original experience. The idle crosshair keeps the fork's
+  cannon-ray placement first; otherwise upstream's simulation-to-presented
+  camera mapping (689c6cb1) replaces the fork's look-rotation correction.
+- **Flamethrower end caps** (1254a316) fade unless the stream's tail
+  projects near the screen's centre. With the tracked cannon the stream
+  follows the controller, so the tail is measured in the stream's own frame
+  (its emitter's orientation and position) through the camera's lens. Off
+  the headset that frame is the camera and the result is upstream's. The
+  caps are VFX custom draws, so for now this only shows on the mono image.
+- **Frame pacing.** While the headset runs it paces the loop
+  (`OpenXRWaitForFrameRequest`), and neither the 60 FPS cap nor upstream's
+  FPS cap slider (4816f64b) applies; F1's Frame rate section says so then.
+  Upstream's tick catch-up budget (2f72f9e3) applies in VR too: past
+  max(2 periods, 1/30 s) of tick work in one frame, the remaining ticks are
+  dropped and the game runs slow instead of spiralling. Interpolation stays
+  on. f0f13299 (Immediate presentation on D3D with vsync off) changes only
+  the desktop window's surface.
+- **Game options** are global now (dba5bd7a), kept in the settings file's
+  `game_options=` line rather than the save. `SyncGameOptions` saves them
+  once they have rested 0.5 s: the pause menu's sliders set an option on
+  every step, and the Quest's shared storage is slow to rewrite. It polls
+  the launcher's edits first, as DrawUI's save does.
+- **Sound mode.** sdk_stubs.cpp keeps the fork's `s_soundMode` (b476488f:
+  stereo by default, follows `OSSetSoundMode`), which already does what
+  upstream's 22ff478b (a constant stereo) wanted.
+- **Memory card import.** A card the launchers left goes into the disc's
+  region folder (`PortGci::CardRegion()`, EUR/Card A for a PAL disc,
+  6295169e) instead of a fixed USA one. The launchers still take only USA
+  1.00 (below).
+- **Checked, no change:** upstream's 60 Hz movement laws (e4a0af0b,
+  c3153ed0, dfc6efb5, 4a6b3f04, e24874a2) leave the fork's directional
+  movement alone, which sets the velocity itself with a ramp linear in time.
+  The Remastered muzzle flashes, holo wipe and lock-on extend follow the
+  tracked cannon (they draw in the gun view after its offset). The
+  Remastered charge rumble goes to the headset through the motor callback
+  (not felt yet). Every multiview rewrite anchor still matches after
+  8351cb4b (`pbr_scr` declared once; it copies the per-eye clip) and
+  5d289bcd (kind 35).
+
+Known gaps in the headset (Remastered content; retail-only installs are not
+affected): the mono-only Remastered particles of the 2026-10-08 entry now
+also include 20c9974b (muzzle and charge flashes, the Wave Buster impact),
+b2f7f58d (bombs), 64b66479 (ball glows and swooshes), 1254a316 (flamethrower
+caps and lights, the ice spreader), f4f5554a (ELSC electric effects) and
+df0d3652 (per-user replacements of shared retail effects). These are VFX
+custom draws, which the eye passes skip, so they are invisible in the
+headset. The Remastered X-ray and thermal posts reach only mono images (the
+desktop, the virtual screen). Stereo frames still copy and hash the 2.7 KB
+config for the eye pipeline on every pipeline switch, the part of
+c3ea1cba's saving the Quest's FIFO thread misses. The Remastered icons'
+line-of-sight test casts a world ray every tick for every remembered scan
+entry, in every visor. PBR rows in view space (world up, the probe, the
+ambient volume, the lightmap axes, the HDR light positions) are not
+recomposed per eye; only draws with full per-eye uniform copies (a per-eye
+screen texture matrix) would light from the mono camera's space, and none
+is PBR today. Without look to scan, Remastered icons still pop in by the
+body camera's screen box.
+
+Not done, user decisions:
+
+- **PAL in the launchers.** The game accepts a PAL disc (GM8P01 rev 0;
+  538f84f4, 12dc40e8, experimental), both launchers' disc checks only USA
+  1.00. The Quest refuses PAL everywhere; the PC launcher labels it "Wrong
+  game" but Play still runs it. Keep USA only (and gate Play), or accept PAL
+  (disc probe, QuestStorage, tests/port_launcher.cpp, region-aware card
+  folders and Transfer). PAL has never been played in the headset.
+- **Vsync in VR.** `vsync=1` (the PC launcher's Port Config) presents the
+  desktop mirror FIFO at the monitor's rate, which probably holds the
+  headset loop to it (not measured; it predates this merge). Keep it for a
+  smooth mirror, or ignore it while the headset runs.
+- **Game options from transferred Dolphin saves.** With global options the
+  first launch after updating starts from the defaults, and a loaded save's
+  own options are replaced, so options carried over by Transfer
+  (brightness, HUD opacity, invert Y, rumble...) are lost on first load.
+  Accept it with a setup note, or adopt a save's options once.
+- **Remastered VFX in the headset.** Draw imported PARTs through the retail
+  GX path while immersive (VMAT-only looks and HDR colours are lost, and
+  VMSH mesh effects with no PMDL draw nothing), or replay VFX custom draws
+  per eye in aurora (larger work).
+- **Pipeline compile pool on the Quest.** 4079fedc starts
+  hardware_concurrency/2 workers (about 3 on a Quest 3), all behind Dawn's
+  implicit device lock with the render worker and the XR pacing thread. A/B
+  `MP_PIPELINE_THREADS=1` against the default through `debug.mport.env` on a
+  cold room entry before capping it.
+- **Multiview memo refs.** Keep the eye variants' refs in the memo, checked
+  with `touch_pipeline`; measure with `MP_FRAME_STATS` on the Quest first.
+- **Remastered icon line-of-sight cost.** Cast only for entries that can be
+  drawn this frame (timer above 0, scan visor up).
+- **PBR view-space rows.** Recompose them per eye if a PBR draw ever gets a
+  per-eye screen texture matrix.
+- **Crosshair settings in the launchers.** `crosshair_opacity` and
+  `crosshair_color` are only in F1, which the Quest can't open.
+
+Tested: build/vr and build/nooxr 68/68 port tests (port_version now wants
+the PrimedGun version), gx_fifo_tests 247/247, the Qt launcher relinked,
+and the Quest APK built (both native libraries carry the current revision;
+no seed packaged). PC desktop boots to the Landing Site run clean in the VR
+build with the headset off, with VR on and no OpenXR runtime (the desktop
+fallback), and in the OpenXR-off build. The first start dropped 3975 GX
+rows (epoch 1 to 2) and merged the seed's 2210 rows back, all ready 1.5 s
+after startup. Not yet played in a headset (PC VR or Quest), and no
+Remastered content was tried.
+
 ## VR: the widescreen HUD is off while the headset runs (2026-10-09)
 
 A Quest 2 player on alpha.1 saw the radar and the visor selector off the HUD
@@ -201,11 +455,12 @@ upstream's code was also checked against the fork where git merged silently.
   upstream's versionName, so it would point PrimedGun players at the flat
   port: it is off (ApplyUpdateCheck), and F1's Updates section links to
   PrimedGun's releases. The check itself stays in the tree for small merges.
-- **Version.** The generated port_build_info.h also defines
-  `MP_PRIMEDGUN_VERSION`, read from launcher/CMakeLists.txt's
-  `set(PRIMEDGUN_LAUNCHER_VERSION "...")` (keep that form). --version, the
-  log header and F1 About show "PrimedGun x (native port y), build z";
-  MP_BUILD_VERSION stays upstream's.
+- **Version.** The build info also carries `MP_PRIMEDGUN_VERSION`, read from
+  launcher/CMakeLists.txt's `set(PRIMEDGUN_LAUNCHER_VERSION "...")` (keep
+  that form). Since the bc73f39f merge the generated port_build_info.cpp
+  defines it as `kMpPrimedGunVersion`, and platform/include/port_build_info.h
+  names the macro. --version, the log header and F1 About show "PrimedGun x
+  (native port y), build z"; MP_BUILD_VERSION stays upstream's.
 - **Original experience.** While the headset runs it leaves the helmet and
   the frame, actor, pose and particle interpolation to their own settings
   (the helmet is head-locked in VR and the headset presents above 60 Hz).
@@ -502,14 +757,17 @@ each vertex has its own position group (134 of 134, 371 of 371).
 - `CSkinnedModelWithAvgNormals`: under `TARGET_PC`, swap the positions and
   normals into native vectors once and average those. The console path is
   unchanged.
-- `CAnimData`: the constructor and `SetModel` accumulate `x108_aabb`, the
-  fallback bounding box of a character with no per-animation boxes, from the
-  same raw position array. Same swap (`PortReadBigVector`).
+- `CAnimData`: the constructor and `SubstituteModelData` accumulate
+  `x108_aabb`, the fallback bounding box of a character with no
+  per-animation boxes, from the same raw position array. Same swap.
 - Since upstream's NBT normals (ff4aa620, 7ecee577: N, B, T and sometimes a
   second B, T per entry), the swap reads each vertex's N at `NormalVecs()`
   vectors per entry, and `nativeNormals` keeps one vector per vertex.
-  Upstream's version of this constructor still averages the raw big-endian
-  floats: keep ours on merges.
+- Superseded since the bc73f39f merge (2026-10-10): upstream fixed both
+  readers itself, b4dfc433 (`NativeVectors`) and e3ad88a4
+  (`PortAccumulateModelBounds`), bounded by the arrays' sizes. Both files
+  are now upstream's and the fork's loops and `PortReadBigVector` are gone.
+  Take upstream's versions on merges and never add a second swap.
 
 Confirmed in the headset by the user: no more spiking ice. 42/42 port tests in
 `build/vr` and `build/nooxr`.

@@ -1209,25 +1209,45 @@ void CCompoundTargetReticle::DrawOrbitZoneGroup(const CMatrix3f& rot,
     CVector3f targetPos = xf4_targetPos;
     CMatrix3f crosshairRotation = rot;
 #ifdef TARGET_PC
-    // The idle crosshair sits on the tick's aim ray; keep it on the view's
-    // centre while per-frame look turns the view ahead of the tick.
-    CTransform4f look = CTransform4f::Identity();
+    const CCameraManager* camMgr = mgr.GetCameraManager();
     if (PortVr::VrCannonTargetPoint(mgr, targetPos)) {
-      CVector3f eye = mgr.GetCameraManager()->GetCurrentCameraTransform(mgr).GetTranslation();
+      // PortVr cannon targeting: the crosshair sits where the cannon's ray
+      // hits, found this frame against the presented camera, and faces the head.
+      const CTransform4f camXf = camMgr->GetCurrentCameraTransform(mgr);
+      CVector3f eye = camXf.GetTranslation();
       CVector3f gaze;
-      PortVr::VrHeadGaze(mgr.GetCameraManager()->GetCurrentCameraTransform(mgr), eye, gaze);
+      PortVr::VrHeadGaze(camXf, eye, gaze);
       crosshairRotation = CTransform4f::LookAt(eye, targetPos, rot.GetColumn(kDZ)).BuildMatrix3f();
       scale = CalculateClampedScale(targetPos, scale, tweak->x20c_reticuleClampMin,
                                     tweak->x210_reticuleClampMax, mgr);
-    } else if (mgr.GetCameraManager()->GetPresentedLookRotation(mgr, look)) {
-      const CVector3f eye = mgr.GetCameraManager()->GetCurrentCameraTransform(mgr).GetTranslation();
-      targetPos = eye + look.Rotate(targetPos - eye);
+    } else {
+      // The idle crosshair sits on the tick's aim ray, placed against the
+      // simulation camera. Keep it where it is relative to the view while
+      // smooth frames blend the camera between ticks or per-frame look turns it
+      // ahead, else it slides off-centre and snaps back every tick (issue #24).
+      targetPos = camMgr->GetCurrentCameraTransform(mgr) *
+                  (camMgr->GetSimulationCameraTransform(mgr).GetInverse() * targetPos);
     }
 #endif
     gpRender->SetModelMatrix(CTransform4f(crosshairRotation, targetPos) * CTransform4f::Scale(scale));
 
-    model->Draw(CModelFlags::Additive(
-                    tweak->x1c0_crosshairsColor.WithAlphaModulatedBy(x1e8_crosshairsScale))
+    CColor color = tweak->x1c0_crosshairsColor;
+#ifdef TARGET_PC
+    float rgb[3];
+    if (PortDebug::CrosshairColor(rgb)) {
+      color = CColor(rgb[0], rgb[1], rgb[2], color.GetAlpha());
+    }
+    // The tweak's alpha is 0.19, so the additive strokes barely show on a modern screen. Outside
+    // Original experience the opacity setting is the alpha itself (100% = full strength).
+    // PortVr: not in the headset's immersive view. There the crosshair sits in the world (on the
+    // cannon ray's hit with cannon targeting) and keeps the game's faint alpha, as it did before
+    // this setting; the setting scales that alpha, as under Original experience.
+    const float opacity = static_cast< float >(PortDebug::CrosshairOpacity()) / 100.f;
+    color = PortDebug::OriginalExperience() || PortVr::VrImmersive()
+                ? color.WithAlphaModulatedBy(opacity)
+                : CColor(color.GetRed(), color.GetGreen(), color.GetBlue(), opacity);
+#endif
+    model->Draw(CModelFlags::Additive(color.WithAlphaModulatedBy(x1e8_crosshairsScale))
                     .DepthCompareUpdate(false, false));
   }
 }
@@ -1391,9 +1411,15 @@ void CTargetingManager::Draw(const CStateManager& mgr, bool hideLockon) const {
   CFrustumPlanes frustum(camXf, curCam.GetRenderFov() * 0.01745329238474369f, curCam.GetAspectRatio(),
                          1.f, false, 100.f);
   gpRender->SetClippingPlanes(frustum);
+#ifdef TARGET_PC
+  gpRender->SetPerspective(CStateManager::PortZoomedFov(curCam.GetRenderFov()), static_cast< float >(CGraphics::GetViewport().mWidth),
+                           static_cast< float >(CGraphics::GetViewport().mHeight),
+                           curCam.GetNearClipDistance(), curCam.GetFarClipDistance());
+#else
   gpRender->SetPerspective(curCam.GetRenderFov(), static_cast< float >(CGraphics::GetViewport().mWidth),
                            static_cast< float >(CGraphics::GetViewport().mHeight),
                            curCam.GetNearClipDistance(), curCam.GetFarClipDistance());
+#endif
   x0_targetReticle.Draw(mgr, hideLockon);
 }
 
@@ -1533,10 +1559,17 @@ void COrbitPointMarker::Draw(const CStateManager& mgr) const {
         CFrustumPlanes frustum(camXf, curCam.GetRenderFov() * 0.01745329238474369f,
                                curCam.GetAspectRatio(), 1.f, false, 100.f);
         gpRender->SetClippingPlanes(frustum);
+#ifdef TARGET_PC
+        gpRender->SetPerspective(CStateManager::PortZoomedFov(curCam.GetRenderFov()),
+                                 static_cast< float >(CGraphics::GetViewport().mWidth),
+                                 static_cast< float >(CGraphics::GetViewport().mHeight),
+                                 curCam.GetNearClipDistance(), curCam.GetFarClipDistance());
+#else
         gpRender->SetPerspective(curCam.GetRenderFov(),
                                  static_cast< float >(CGraphics::GetViewport().mWidth),
                                  static_cast< float >(CGraphics::GetViewport().mHeight),
                                  curCam.GetNearClipDistance(), curCam.GetFarClipDistance());
+#endif
       }
 
       float scale;

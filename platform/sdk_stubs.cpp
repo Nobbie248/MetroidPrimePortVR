@@ -123,6 +123,8 @@ extern "C" void OSGetSavedRegion(void** start, void** end) {
     }
 }
 extern "C" u32 OSGetSoundMode(void) {
+    // Defaults to OS_SOUND_MODE_STEREO (upstream 22ff478b returns that
+    // constant); also tracks later Mono/Stereo choices from OSSetSoundMode.
     return s_soundMode.load(std::memory_order_relaxed);
 }
 extern "C" BOOL OSLink(OSModuleInfo* newModule, void* bss) {

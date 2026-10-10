@@ -451,6 +451,14 @@ if(ANDROID)
         include(cmake/AndroidOpenSSL.cmake)
     endif()
 else()
+    # PrimedGun: on Windows link OpenSSL in statically unless told otherwise, as
+    # upstream's CI does with -DOPENSSL_USE_STATIC_LIBS=TRUE. PrimedGun's zips are
+    # built on a desktop where the OpenSSL DLLs are installed, so a DLL link would
+    # run there and fail to start on a player's PC. Without OpenSSL at all, the
+    # Remastered import (Switch decryption) reports "built without OpenSSL".
+    if(WIN32 AND NOT DEFINED OPENSSL_USE_STATIC_LIBS)
+        set(OPENSSL_USE_STATIC_LIBS TRUE)
+    endif()
     find_package(OpenSSL)
 endif()
 function(mp_websocket_tls target)

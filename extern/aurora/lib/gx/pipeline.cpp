@@ -9,12 +9,22 @@
 #include "gx_fmt.hpp"
 #include "native_vertex.hpp"
 #include "shader_info.hpp"
+#include "../logging.hpp"
+#include "../webgpu/gpu.hpp"
 
 #include <tracy/Tracy.hpp>
+
+static aurora::Module Log("aurora::gx::pipeline");
 
 namespace aurora::gx {
 
 wgpu::RenderPipeline create_pipeline(const PipelineConfig& config) {
+  if (!pipeline_config_compatible(config, webgpu::g_lightmapBinding)) {
+    Log.error("Refusing GX pipeline with PBR lightmap attribute {}: lightmap binding is unsupported",
+              config.shaderConfig.pbrLightmapAttr);
+    return {};
+  }
+
   ZoneScoped;
   if ((config.shaderConfig.multiview == MultiviewClip || config.shaderConfig.multiview == MultiviewFull) &&
       !webgpu::g_multiviewSupported) {

@@ -36,6 +36,9 @@ class PrimedGunSetupFragment : Fragment(), PrimedGunRefreshable {
 
     private var binding: FragmentPrimedgunSetupBinding? = null
     private var discCheckJob: Job? = null
+    // The selected disc's name when its check last found a PAL disc, so a refresh keeps
+    // the label's "(PAL, experimental)" while the check runs again.
+    private var palDiscName: String? = null
 
     private val launcher: LauncherActivity? get() = activity as? LauncherActivity
 
@@ -120,7 +123,7 @@ class PrimedGunSetupFragment : Fragment(), PrimedGunRefreshable {
 
         val name = DiscCopy.selectedName(context) ?: disc.name
         b.setupSelectedGame.isVisible = haveDisc
-        b.setupSelectedGame.text = getString(R.string.primedgun_selected_game, name)
+        b.setupSelectedGame.text = selectedGameText(name, pal = name == palDiscName)
 
         b.setupSelectGame.isEnabled = !running && !busy
         b.setupPlay.isEnabled = !running && !busy && haveDisc
@@ -151,13 +154,22 @@ class PrimedGunSetupFragment : Fragment(), PrimedGunRefreshable {
         if (haveDisc && !copying) {
             discCheckJob?.cancel()
             discCheckJob = viewLifecycleOwner.lifecycleScope.launch {
-                val problem = withContext(Dispatchers.IO) { QuestStorage.checkDisc(disc) }
+                val (problem, pal) = withContext(Dispatchers.IO) {
+                    val found = QuestStorage.checkDisc(disc)
+                    found to (found == null && QuestStorage.cardRegion(context) == "EUR")
+                }
                 val current = binding ?: return@launch
                 current.setupRevisionWarning.isVisible = problem != null
                 current.setupRevisionWarning.text = problem?.let { shortWarning(it) }
+                palDiscName = if (pal) name else null
+                current.setupSelectedGame.text = selectedGameText(name, pal)
             }
         }
     }
+
+    // The game's PAL support is experimental, and its log says so too.
+    private fun selectedGameText(name: String, pal: Boolean): String =
+        getString(if (pal) R.string.primedgun_selected_game_pal else R.string.primedgun_selected_game, name)
 
     private fun shortWarning(problem: String): String = when {
         problem.contains("revision") -> getString(R.string.primedgun_wrong_revision)
@@ -295,7 +307,7 @@ class PrimedGunSetupFragment : Fragment(), PrimedGunRefreshable {
         if (result.cardStaged) {
             PrimedGunTransfer.report = getString(R.string.primedgun_transfer_card_staged, name)
         } else if (result.zipWithoutCard) {
-            PrimedGunTransfer.report = getString(R.string.primedgun_transfer_zip_no_card, name)
+            PrimedGunTransfer.report = getString(R.string.primedgun_transfer_zip_no_card, name, result.cardRegion)
         }
         if (outcome.appliedFrom != null) {
             PrimedGunTransfer.report += getString(R.string.primedgun_transfer_settings_done, outcome.appliedFrom)

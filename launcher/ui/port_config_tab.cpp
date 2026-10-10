@@ -75,7 +75,9 @@ void BuildPortConfigTab(TabContext& ctx, QTabWidget* tabs) {
   ctx.Separator(layout);
   layout->addWidget(ctx.Section(QObject::tr("Display")));
   ctx.Check(layout, QObject::tr("Fullscreen"), "fullscreen");
-  ctx.Check(layout, QObject::tr("VSync"), "vsync");
+  ctx.Check(layout, QObject::tr("VSync"), "vsync",
+            QObject::tr("Holds frames to the display's refresh rate. "
+                        "Off while the headset runs: the window only mirrors it."));
   ctx.Combo(layout, QObject::tr("MSAA"), "msaa",
             {{QObject::tr("Off"), QStringLiteral("1")}, {QObject::tr("4x"), QStringLiteral("4")}});
   ctx.Combo(layout, QObject::tr("Anisotropic filtering"), "anisotropy",

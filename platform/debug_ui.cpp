@@ -437,6 +437,9 @@ std::uintmax_t sSettingsFileSize = 0;
 uint64_t sSettingsPollMs = 0;
 bool sAudioSettingsApplied = false;
 bool sPresentationSettingsApplied = false;
+// PortVr: the vsync last handed to Aurora (EffectiveVsync), so DrawUI hands it
+// again when the headset starts or stops.
+bool sAppliedVsync = false;
 CStateManager* sStateManager = nullptr;
 int sPendingTeleport = -1;
 bool sHasWorldTeleport = false;
@@ -1423,6 +1426,19 @@ void SetFrameLimitEnabled(bool enabled) {
   }
 }
 
+// What Aurora presents with: the setting, but never under MP_TURBO, nor (PortVr:)
+// while the headset runs. The window only mirrors the headset then, and a present
+// held to the monitor's refresh rate would hold the headset's frames to it. The
+// setting itself stays, and applies again when the headset stops (DrawUI).
+static bool EffectiveVsync() { return sVsyncEnabled && !sTurbo && !PortVr::OpenXRIsRunning(); }
+
+// Hands Aurora EffectiveVsync(). Aurora then reconfigures the surface (a GPU sync),
+// so this runs on a change, never every frame.
+static void ApplyVsync() {
+  sAppliedVsync = EffectiveVsync();
+  aurora_enable_vsync(sAppliedVsync);
+}
+
 bool VsyncEnabled() {
   EnsureInitialized();
   return sVsyncEnabled;
@@ -1434,7 +1450,7 @@ void SetVsyncEnabled(bool enabled) {
   // previous present mode (e.g. the persisted value applied before the first
   // frame), which made the first toggle a no-op.
   sVsyncEnabled = enabled;
-  aurora_enable_vsync(enabled);
+  ApplyVsync();
 }
 
 bool Fullscreen() {
@@ -4174,9 +4190,10 @@ void EndOriginalLocked(bool locked) {
 void DrawPerformanceTab() {
   ImGui::SeparatorText("Frame rate");
   // PortVr: the game loop then waits on the headset's frame requests and skips both caps
-  // (src/MetroidPrime/main.cpp).
+  // (src/MetroidPrime/main.cpp), and the window presents without vsync (EffectiveVsync).
   if (PortVr::OpenXRIsRunning()) {
-    ImGui::TextDisabled("The headset paces frames while it runs: these caps apply to flat-screen play only.");
+    ImGui::TextDisabled("The headset paces frames while it runs: these caps and Vsync apply to "
+                        "flat-screen play only.");
   }
   const bool locked = BeginOriginalLocked();
   bool frameLimit = sFrameLimitEnabled;
@@ -5717,6 +5734,8 @@ void DrawVideoDisplay() {
     SetVsyncEnabled(vsync);
     MarkDirty();
   }
+  ImGui::SetItemTooltip("Holds frames to the display's refresh rate.\n"
+                        "Off while the headset runs: the window only mirrors it.");
 
   const bool locked = BeginOriginalLocked();
   int aspect = static_cast< int >(sAspectMode);
@@ -8815,7 +8834,7 @@ static bool ApplyChangedSetting(const std::string& key, const std::string& value
   }
   if (key == "vsync") {
     ApplySetting(key, value);
-    aurora_enable_vsync(sVsyncEnabled && !sTurbo);
+    ApplyVsync();
   } else if (key == "fullscreen") {
     ApplySetting(key, value);
     VISetWindowFullscreen(sFullscreen);
@@ -8895,7 +8914,14 @@ void DrawUI() {
     // Apply persisted vsync once the swapchain surface exists (first drawn
     // frame), so the present mode is chosen from real surface capabilities.
     sPresentationSettingsApplied = true;
-    aurora_enable_vsync(sVsyncEnabled && !sTurbo);
+    ApplyVsync();
+  } else if (EffectiveVsync() != sAppliedVsync) {
+    // PortVr: the headset started or stopped (a runtime that ends the session
+    // leaves the game on the desktop), and vsync follows it. Every change of the
+    // setting applies it at once, so only the headset gets here.
+    ApplyVsync();
+    PortLog::Write("metroid_prime_port: vsync %s now that the headset %s\n", sAppliedVsync ? "on" : "off",
+                   PortVr::OpenXRIsRunning() ? "runs" : "stopped");
   }
   if (sFullscreenHotkey.exchange(false, std::memory_order_acq_rel)) {
     SetFullscreen(!VIGetWindowFullscreen());

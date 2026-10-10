@@ -862,6 +862,11 @@ unpacks to a temporary directory instead of mounting.
   the whole screen on desktop, toggled with F11; on Android it hides the status
   and navigation bars (on by default there; a swipe from the edge shows them
   for a moment).
+- Vsync (F1 > Video > Display, persisted as `vsync`, default off, on on macOS): holds
+  presented frames to the display's refresh rate. Off under `MP_TURBO`, and off while
+  the headset runs: the window then only mirrors the headset, and a present held to the
+  monitor's rate would hold the headset's frames to it. The setting is kept and applies
+  again when the headset stops (PORT_NOTES.md, 2026-10-10).
 - Settings changed in the F1 overlay (aspect, vsync, render scale, frame limit,
   mouse aim/inversion/sensitivity, audio mutes) are saved to
   `port_settings.ini` in the user folder (`user/` beside the executable, see above) and restored on the next launch. The System page shows the
@@ -1240,10 +1245,11 @@ other `X:\Users\<name>`: `X:\Users\<user>`); the
   rides the elevator after loading, like stepping onto it. Console:
   `state list | last | save [n] | load [n] | undo | slot <n>`.
 - Memory card transfer (F1 > System > Memory card): moves saves between the
-  port's card (a GCI folder, `user/USA/Card A` beside the executable, or the current
-  Archipelago game's) and Dolphin's. Import takes a Dolphin `.gci`, a whole raw
-  card image (`MemoryCardA.USA.raw`, every Metroid Prime file in it) or, from the
-  console, a folder of `.gci` files; only GM8E/01 files are taken. The game
+  port's card (a GCI folder, `user/USA/Card A` beside the executable, `user/EUR/Card A`
+  for a PAL disc, or the current Archipelago game's) and Dolphin's. Import takes a
+  Dolphin `.gci`, a whole raw card image (`MemoryCardA.USA.raw`, every Metroid Prime
+  file in it) or, from the console, a folder of `.gci` files; only the mounted disc's
+  files are taken (GM8E/01, or GM8P/01 for PAL). The game
   alternates between `MetroidPrime A` and `B` and loads the newer, so an import
   replaces the whole set: the card's existing game files move to `_replaced/`
   (timestamped, never deleted). Imports are refused in game, since the next save
@@ -1255,7 +1261,8 @@ other `X:\Users\<name>`: `X:\Users\<user>`); the
   Dolphin's user folder (`XDG_DATA_HOME`/`~/.local/share/dolphin-emu`, the
   Flatpak's, `~/.dolphin-emu`; the registry's UserConfigPath or Documents on
   Windows) and uses its `GC/USA/Card A` folder and/or `GC/MemoryCardA.USA.raw`
-  (import takes the more recently written one); close Dolphin before exporting.
+  (`EUR` for a PAL disc; import takes the more recently written one); close Dolphin
+  before exporting.
   Android uses the system pickers: one save dialog per file on export, so keep
   Dolphin's names (`01-GM8E-MetroidPrime A.gci`). Logic in
   `platform/port_gci.cpp`, covered by `port_gci_tests`. Console:

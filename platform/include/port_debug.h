@@ -143,6 +143,9 @@ bool FrameLimitEnabled();
 int FrameRateCap();
 void SetFrameLimitEnabled(bool enabled);
 void RecordFrame(uint64_t durationNs, unsigned ticks, bool presented);
+// Setting `vsync`, as stored. Aurora presents without it under MP_TURBO and (PortVr:)
+// while the headset runs, as the window only mirrors the headset then; it applies
+// again when the headset stops.
 bool VsyncEnabled();
 void SetVsyncEnabled(bool enabled);
 // Setting `fullscreen`: a borderless fullscreen window on desktop (F11 toggles

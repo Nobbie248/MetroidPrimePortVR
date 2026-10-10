@@ -61,27 +61,43 @@ std::string ImportedBool(std::string_view value) {
   return FormatBool(lower == "true" || lower == "1" || lower == "yes" || lower == "on");
 }
 
+// Dolphin's card regions as its raw card names carry them (MemoryCardA.USA.raw).
+constexpr std::string_view kCardRegions[] = {"usa", "eur", "jap"};
+
+// ".usa." for "USA": how a region shows in a raw card's lower-case name.
+std::string RegionTag(std::string_view region) { return "." + Lower(region) + "."; }
+
 // PrimedGun's search: a memory card file worth considering, and how likely it
-// is to be the one the old install played on.
-bool LooksLikeMemoryCard(const fs::path& file) {
+// is to be the one the old install played on. PrimedGun looked for the USA card
+// only; the region is the card the selected disc's game mounts.
+bool LooksLikeMemoryCard(const fs::path& file, std::string_view region) {
   const std::string name = FileName(file);
   if (name.find(".backup-") != std::string::npos) {
     return false;
+  }
+  // Another region's card holds the other release's saves, which the game
+  // skips (PortGci::IsGameFile).
+  const std::string lowerRegion = Lower(region);
+  for (const std::string_view other : kCardRegions) {
+    if (other != lowerRegion && name.find(RegionTag(other)) != std::string::npos) {
+      return false;
+    }
   }
   const std::string ext = Lower(Utf8(file.extension()));
   return ext == ".raw" || ext == ".gcp";
 }
 
-int MemoryCardScore(const fs::path& file) {
+int MemoryCardScore(const fs::path& file, std::string_view region) {
   const std::string name = FileName(file);
+  const std::string tag = RegionTag(region);
   int score = 0;
-  if (name == "online.usa.raw") {
+  if (name == "online" + tag + "raw") {
     score += 100;
   }
-  if (name == "memorycarda.usa.raw") {
+  if (name == "memorycarda" + tag + "raw") {
     score += 90;
   }
-  if (name.find(".usa.") != std::string::npos) {
+  if (name.find(tag) != std::string::npos) {
     score += 50;
   }
   if (name.find("memorycarda") != std::string::npos || name.find("online") != std::string::npos) {
@@ -97,11 +113,14 @@ int MemoryCardScore(const fs::path& file) {
 // which is what PrimedGun installs used.
 constexpr int kGciFolderScore = 40;
 
-bool HasGameGci(const fs::path& folder) {
+bool HasGameGci(const fs::path& folder, std::string_view region) {
+  // Dolphin names a save 01-<game code>-<name>.gci: GM8E on the USA card, GM8P
+  // on the EUR one.
+  const std::string code = Lower(region) == "eur" ? "gm8p" : "gm8e";
   std::error_code ec;
   for (fs::directory_iterator it(folder, ec), end; !ec && it != end; it.increment(ec)) {
     const std::string name = FileName(it->path());
-    if (name.find("gm8e") != std::string::npos && name.size() > 4 &&
+    if (name.find(code) != std::string::npos && name.size() > 4 &&
         name.compare(name.size() - 4, 4, ".gci") == 0) {
       return true;
     }
@@ -109,7 +128,7 @@ bool HasGameGci(const fs::path& folder) {
   return false;
 }
 
-OldCard BestCardInDir(const fs::path& dir) {
+OldCard BestCardInDir(const fs::path& dir, std::string_view region) {
   OldCard best;
   std::error_code ec;
   if (!fs::is_directory(dir, ec)) {
@@ -118,7 +137,7 @@ OldCard BestCardInDir(const fs::path& dir) {
   std::vector<std::pair<fs::file_time_type, fs::path>> files;
   for (fs::directory_iterator it(dir, ec), end; !ec && it != end; it.increment(ec)) {
     std::error_code fileEc;
-    if (it->is_regular_file(fileEc) && LooksLikeMemoryCard(it->path())) {
+    if (it->is_regular_file(fileEc) && LooksLikeMemoryCard(it->path(), region)) {
       files.emplace_back(it->last_write_time(fileEc), it->path());
     }
   }
@@ -126,16 +145,17 @@ OldCard BestCardInDir(const fs::path& dir) {
   std::sort(files.begin(), files.end(),
             [](const auto& a, const auto& b) { return a.first > b.first; });
   for (const auto& [time, file] : files) {
-    const int score = MemoryCardScore(file);
+    const int score = MemoryCardScore(file, region);
     if (score > best.score) {
       best = {file, false, score};
     }
   }
-  // Dolphin's own card folders sit in User/GC; the port keeps its card in
-  // <exe>/USA/Card A, which must not be mistaken for an old one.
+  // Dolphin's own card folders sit in User/GC, one per region; the port keeps
+  // its card in <exe>/user/<region>/Card A, which must not be mistaken for an
+  // old one.
   if (FileName(dir) == "gc") {
-    const fs::path folder = dir / "USA" / "Card A";
-    if (kGciFolderScore > best.score && HasGameGci(folder)) {
+    const fs::path folder = dir / std::string(region) / "Card A";
+    if (kGciFolderScore > best.score && HasGameGci(folder, region)) {
       best = {folder, true, kGciFolderScore};
     }
   }
@@ -190,10 +210,10 @@ bool SamePath(const fs::path& a, const fs::path& b) {
   return Lower(Utf8(a.lexically_normal())) == Lower(Utf8(b.lexically_normal()));
 }
 
-OldCard BestCardIn(const std::vector<fs::path>& dirs) {
+OldCard BestCardIn(const std::vector<fs::path>& dirs, std::string_view region) {
   OldCard best;
   for (const fs::path& dir : dirs) {
-    const OldCard candidate = BestCardInDir(dir);
+    const OldCard candidate = BestCardInDir(dir, region);
     if (candidate.Found() && candidate.score > best.score) {
       best = candidate;
     }
@@ -333,7 +353,7 @@ fs::path OldCard::UserFolder() const {
   return gc.parent_path();
 }
 
-OldCard FindNearbyOldCard(const fs::path& launcherFolder) {
+OldCard FindNearbyOldCard(const fs::path& launcherFolder, std::string_view region) {
   const fs::path appDir = launcherFolder.lexically_normal();
   const fs::path installRoot = appDir.parent_path();
 
@@ -344,7 +364,7 @@ OldCard FindNearbyOldCard(const fs::path& launcherFolder) {
       AddSearchBase(dirs, child);
     }
   }
-  if (OldCard card = BestCardIn(dirs); card.Found()) {
+  if (OldCard card = BestCardIn(dirs, region); card.Found()) {
     return card;
   }
 
@@ -359,13 +379,13 @@ OldCard FindNearbyOldCard(const fs::path& launcherFolder) {
       AddSearchBase(dirs, sibling);
     }
   }
-  return BestCardIn(dirs);
+  return BestCardIn(dirs, region);
 }
 
-OldCard FindOldCardUnder(const fs::path& base) {
+OldCard FindOldCardUnder(const fs::path& base, std::string_view region) {
   std::vector<fs::path> dirs;
   AddSearchBase(dirs, base);
-  return BestCardIn(dirs);
+  return BestCardIn(dirs, region);
 }
 
 } // namespace PrimedGunLauncher

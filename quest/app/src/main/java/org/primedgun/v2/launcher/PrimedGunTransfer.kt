@@ -24,8 +24,10 @@ import org.primedgun.v2.R
  * The launcher cannot read a raw card itself (the card code is the game's, built on
  * SDL), so a card is left in the user folder's primedgun/pending_import and the game
  * imports it into its card at its next start (PortGci::ImportPending), keeping the
- * saves it replaces in USA/Card A/_replaced; the launcher then shows its report. The
- * settings become unsaved edits, as on the PC.
+ * saves it replaces in the card's _replaced folder; the launcher then shows its report.
+ * That card is the mounted disc's region's (USA/Card A, or EUR/Card A for a PAL disc),
+ * and the game takes only that region's saves, so a zip gives up the card of the copied
+ * disc's region ([QuestStorage.cardRegion]). The settings become unsaved edits, as on the PC.
  *
  * A transfer runs at process level, as the disc copy does ([begin]): leaving the Setup
  * tab while a large zip unpacks neither loses its settings nor its report, which the
@@ -116,11 +118,11 @@ object PrimedGunTransfer {
         val error: String?,
         /** A user-data zip that held settings but no card this recognises. */
         val zipWithoutCard: Boolean = false,
+        /** The card region a zip was searched for: USA, or EUR for a PAL disc. */
+        val cardRegion: String = "USA",
     )
 
     private val CARD_EXTENSIONS = setOf("raw", "gcp", "gci")
-    // Dolphin's slot A card, with its block count when it is not the default size.
-    private val RAW_CARD = Regex("""(^|/)gc/memorycarda\.usa(\.\d+)?\.raw$""")
 
     fun extensionOf(name: String): String = name.substringAfterLast('.', "").lowercase(Locale.ROOT)
 
@@ -143,6 +145,9 @@ object PrimedGunTransfer {
         scratch.deleteRecursively()
         val oldUser = File(scratch, "old_user")
         val cards = File(scratch, "cards")
+        // The card the game mounts for the copied disc, which takes only its region's
+        // saves. A picked card is staged as it is: the game keeps that region's saves.
+        val region = QuestStorage.cardRegion(context)
         try {
             when (val extension = extensionOf(name)) {
                 in CARD_EXTENSIONS -> copy(context, uri, File(cards, "card.$extension"))
@@ -151,23 +156,20 @@ object PrimedGunTransfer {
                     val file = if (name.equals("Qt.ini", ignoreCase = true)) "Qt.ini" else "PrimedGun.ini"
                     copy(context, uri, File(oldUser, "Config/$file"))
                 }
-                "zip" -> unzipUserData(context, uri, oldUser, cards)
+                "zip" -> unzipUserData(context, uri, oldUser, cards, region)
                 else -> return failure(context.getString(R.string.primedgun_transfer_wrong_extension))
             }
             val cardStaged = stageCards(context, cards)
             val (source, settings) = readSettings(oldUser)
             if (!cardStaged && source == null) {
                 return failure(
-                    context.getString(
-                        if (extensionOf(name) == "zip") R.string.primedgun_transfer_zip_empty
-                        else R.string.primedgun_transfer_nothing_found,
-                        name
-                    )
+                    if (extensionOf(name) == "zip") context.getString(R.string.primedgun_transfer_zip_empty, name, region)
+                    else context.getString(R.string.primedgun_transfer_nothing_found, name)
                 )
             }
             val zip = extensionOf(name) == "zip"
             val settingsSource = source?.let { if (zip) "$name ($it)" else name }
-            return Result(cardStaged, settingsSource, settings, null, zipWithoutCard = zip && !cardStaged)
+            return Result(cardStaged, settingsSource, settings, null, zipWithoutCard = zip && !cardStaged, cardRegion = region)
         } catch (e: Exception) {
             // Unreadable documents, revoked grants, malformed zips: a message, not a crash.
             return failure(context.getString(R.string.primedgun_transfer_copy_failed, e.message ?: e.toString()))
@@ -185,10 +187,17 @@ object PrimedGunTransfer {
     }
 
     // Dolphin's user folder export: entries relative to the user folder, perhaps under
-    // one more folder. The card is GC/MemoryCardA.USA.raw (MemoryCardA.USA.<blocks>.raw
-    // for another size) or the GCI folder GC/USA/Card A; the settings are
-    // Config/PrimedGun.ini and Config/Qt.ini.
-    private fun unzipUserData(context: Context, uri: Uri, oldUser: File, cards: File) {
+    // one more folder. The card is GC/MemoryCardA.<region>.raw
+    // (MemoryCardA.<region>.<blocks>.raw for another size) or the GCI folder
+    // GC/<region>/Card A, for the region the game mounts (USA, or EUR for a PAL disc);
+    // the settings are Config/PrimedGun.ini and Config/Qt.ini.
+    private fun unzipUserData(context: Context, uri: Uri, oldUser: File, cards: File, region: String) {
+        val lowerRegion = region.lowercase(Locale.ROOT)
+        // Dolphin's slot A card, with its block count when it is not the default size.
+        val rawCard = Regex("""(^|/)gc/memorycarda\.$lowerRegion(\.\d+)?\.raw$""")
+        val gciFolder = "gc/$lowerRegion/card a/"
+        // Dolphin names a save 01-<game code>-<name>.gci: GM8E on the USA card, GM8P on the EUR one.
+        val gameCode = if (region == "EUR") "gm8p" else "gm8e"
         val input = context.contentResolver.openInputStream(uri) ?: throw IOException("cannot open $uri")
         var raw: ByteArray? = null
         val gci = mutableMapOf<String, ByteArray>()
@@ -203,10 +212,10 @@ object PrimedGunTransfer {
                 when {
                     lower.endsWith("config/primedgun.ini") -> write(File(oldUser, "Config/PrimedGun.ini"), zip.readBytes())
                     lower.endsWith("config/qt.ini") -> write(File(oldUser, "Config/Qt.ini"), zip.readBytes())
-                    RAW_CARD.containsMatchIn(lower) -> raw = zip.readBytes()
-                    lower.contains("gc/usa/card a/") && lower.endsWith(".gci") -> {
+                    rawCard.containsMatchIn(lower) -> raw = zip.readBytes()
+                    lower.contains(gciFolder) && lower.endsWith(".gci") -> {
                         // Only the folder's own files, not its _replaced or backups.
-                        val rest = path.substring(lower.indexOf("gc/usa/card a/") + "gc/usa/card a/".length)
+                        val rest = path.substring(lower.indexOf(gciFolder) + gciFolder.length)
                         if (!rest.contains('/')) gci[rest] = zip.readBytes()
                     }
                 }
@@ -215,10 +224,10 @@ object PrimedGunTransfer {
         // PrimedGun's slot A is the raw card by default, so it comes first, as in the PC
         // launcher's search (primedgun_import.cpp scores it above the GCI folder); the GCI
         // folder counts only when it holds Metroid Prime saves (Dolphin names them
-        // 01-GM8E-<name>.gci).
-        val gameGci = gci.filterKeys { it.lowercase(Locale.ROOT).contains("gm8e") }
+        // 01-GM8E-<name>.gci, or 01-GM8P-<name>.gci on the EUR card).
+        val gameGci = gci.filterKeys { it.lowercase(Locale.ROOT).contains(gameCode) }
         when {
-            raw != null -> write(File(cards, "MemoryCardA.USA.raw"), raw!!)
+            raw != null -> write(File(cards, "MemoryCardA.$region.raw"), raw!!)
             gameGci.isNotEmpty() -> gameGci.forEach { (file, bytes) ->
                 write(File(cards, file.substringBeforeLast('.') + ".gci"), bytes)
             }

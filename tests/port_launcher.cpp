@@ -365,9 +365,22 @@ void TestDiscProbe(const fs::path& root) {
   Check(ProbeDiscBytes(".iso", iso.data(), iso.size()).check == DiscCheck::WrongRevision,
         "revision 2 is the wrong revision");
   iso[7] = 0;
+  Check(!ProbeDiscBytes(".iso", iso.data(), iso.size()).Pal(), "a USA disc is not PAL");
   std::memcpy(iso.data(), "GM8P01", 6);
+  const DiscInfo pal = ProbeDiscBytes(".gcm", iso.data(), iso.size());
+  Check(pal.check == DiscCheck::Ok && pal.Pal(), "the PAL disc is accepted, as the game does");
+  iso[7] = 1;
+  Check(ProbeDiscBytes(".gcm", iso.data(), iso.size()).check == DiscCheck::WrongRevision,
+        "a PAL revision other than 0 is the wrong revision");
+  iso[7] = 0;
+  std::memcpy(iso.data(), "GM8J01", 6);
   Check(ProbeDiscBytes(".gcm", iso.data(), iso.size()).check == DiscCheck::WrongGame,
-        "the PAL disc is the wrong game");
+        "the Japanese disc is the wrong game");
+  std::memcpy(iso.data(), "GM8E01", 6);
+  iso[6] = 1;
+  Check(ProbeDiscBytes(".iso", iso.data(), iso.size()).check == DiscCheck::WrongGame,
+        "a disc number other than 0 is the wrong game");
+  iso[6] = 0;
 
   std::vector<uint8_t> rvz(0x200, 0);
   std::memcpy(rvz.data(), "RVZ\x01", 4);
@@ -452,6 +465,8 @@ void TestImport(const fs::path& root) {
   const fs::path old = root / "PrimedGun 1.2" / "x64" / "User";
   WriteFile(old / "GC" / "MemoryCardA.USA.raw", std::string(0x2000, '\0'));
   WriteFile(old / "GC" / "MemoryCardA.USA.backup-20260101-000000.raw", "x");
+  // Dolphin's card for PAL discs, beside the USA one.
+  WriteFile(old / "GC" / "MemoryCardA.EUR.raw", std::string(0x2000, '\0'));
   WriteFile(old / "Config" / "PrimedGun.ini", "[Runtime]\nmetroid_hud_size = 1.25\n");
   WriteFile(old / "Config" / "Qt.ini",
             "[mainwindow]\nselected_metroid_prime_path=D:/Games/Metroid Prime.iso\n"
@@ -463,6 +478,10 @@ void TestImport(const fs::path& root) {
   const OldCard nearby = FindNearbyOldCard(root / "build" / "vr");
   Check(nearby.Found() && nearby.path.filename() == "MemoryCardA.USA.raw" && !nearby.isFolder,
         "PrimedGun's search finds the old raw card");
+  const OldCard nearbyPal = FindNearbyOldCard(root / "build" / "vr", "EUR");
+  Check(nearbyPal.Found() && nearbyPal.path.filename() == "MemoryCardA.EUR.raw" &&
+            !nearbyPal.isFolder,
+        "a PAL disc's search takes the EUR card beside the USA one");
   Check(!FindNearbyOldCard(root / "elsewhere" / "deep" / "x64").Found(),
         "nothing is found far from an old install");
   const OldCard picked = FindOldCardUnder(root / "PrimedGun 1.2");
@@ -485,6 +504,21 @@ void TestImport(const fs::path& root) {
   const OldCard folder = FindOldCardUnder(root / "Dolphin");
   Check(folder.Found() && folder.isFolder && folder.UserFolder() == (root / "Dolphin" / "User"),
         "a Dolphin GCI folder is found when there is no raw card");
+  Check(!FindOldCardUnder(root / "Dolphin", "EUR").Found(),
+        "Dolphin's USA card is not taken for a PAL disc");
+
+  // A PAL player's Dolphin: GM8P saves in the EUR GCI folder, and a USA raw card
+  // that holds none of them.
+  const fs::path palGc = root / "Dolphin PAL" / "User" / "GC";
+  WriteFile(palGc / "EUR" / "Card A" / "01-GM8P-MetroidPrime A.gci", "x");
+  WriteFile(palGc / "MemoryCardA.USA.raw", std::string(0x2000, '\0'));
+  const OldCard palFolder = FindOldCardUnder(root / "Dolphin PAL", "EUR");
+  Check(palFolder.Found() && palFolder.isFolder &&
+            palFolder.UserFolder() == (root / "Dolphin PAL" / "User"),
+        "a PAL disc takes Dolphin's EUR GCI folder, not a USA raw card");
+  const OldCard usaRaw = FindOldCardUnder(root / "Dolphin PAL");
+  Check(usaRaw.Found() && !usaRaw.isFolder && usaRaw.path.filename() == "MemoryCardA.USA.raw",
+        "a USA disc still takes the USA raw card there");
 }
 
 void TestDds() {

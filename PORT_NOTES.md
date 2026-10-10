@@ -1,3 +1,111 @@
+## PAL discs in the launchers, vsync off in the headset (2026-10-10)
+
+The user's answers to three of the bc73f39f merge's open questions (below):
+both launchers accept a PAL disc as the game does, vsync is ignored while the
+headset runs, and game options stay global.
+
+- **Discs the launchers accept.** The game takes USA 1.00 (GM8E01) or PAL
+  (GM8P01, experimental), disc 0, revision 0, and USA 1.01 and 1.02 only
+  under `MP_DISC_ANY_VERSION` (platform/disc.cpp `PortDisc::Identify`,
+  `IsAccepted`; 538f84f4, 12dc40e8). launcher/core/disc_probe.cpp now takes
+  GM8P01 revision 0 as Ok; another revision of either disc is Wrong revision,
+  and GM8J01 or a disc number other than 0 is Wrong game. `DiscInfo::Pal()`
+  tells a PAL disc by its game id, whatever the check says. On the Quest,
+  `QuestStorage.checkHeader` takes the same two. It gates more than the
+  label: the copy's last check (DiscCopy), Play, and the game activity,
+  which unsets `MP_DISC` on a problem, so the game would end at boot. The
+  copy's first check is the JNI probe, i.e. disc_probe.cpp. The launchers do
+  not mirror `MP_DISC_ANY_VERSION`: USA 1.01 and 1.02 still read Wrong
+  revision. The PC's Play is not gated on the check, so the game still runs
+  them under the flag; the Quest cannot set it. Both launchers show
+  "Selected: <file> (PAL, experimental)" for a PAL disc, as the game's log
+  calls its support experimental, and their select notes, setup notes and
+  About tabs name USA 1.00 or PAL.
+- **Card region.** The game keeps a PAL disc's saves on the EUR card,
+  `<card base>/EUR/Card A`, and reads only GM8P saves there
+  (`PortGci::CardRegion`, `IsGameFile`; 6295169e). The PC launcher's
+  `LauncherPaths::cardFolder` became `cardBase` (`PortPaths::CardFolder()`),
+  and Game Options > Open Memory Card Folder opens the selected disc's region
+  (`CardFolderFor`). The Quest's `QuestStorage.cardFolder` follows the copied
+  disc (`cardRegion` reads disc.iso's header). Either is USA when no disc is
+  selected or its header is not read (a WBFS without a header copy).
+  docs/NATIVE_PORT.md's memory card transfer text, upstream's and still
+  USA-only there, now names the EUR card and GM8P files for PAL; on a merge,
+  take upstream's wording once it does the same.
+- **Transfer of PAL cards.** The PC's Transfer probes the selected disc and,
+  for a PAL one, calls `PortGci::SetGameCode("GM8P")` first: PrimedGun.exe
+  compiles port_gci.cpp but never set the code, which stayed GM8E. So
+  `FindDolphinCard` looks in Dolphin's `GC/EUR/Card A` and
+  `GC/MemoryCardA.EUR.raw`, and `ImportFolder`/`ImportFile` copy only GM8P
+  saves, into `EUR/Card A`. The search for an old PrimedGun card
+  (primedgun_import.cpp) takes the region: it scores `MemoryCardA.EUR.raw`,
+  looks for `01-GM8P-*.gci` in `GC/EUR/Card A`, and skips raw cards named for
+  another region (before, a USA install could pick `MemoryCardA.EUR.raw`,
+  which imports nothing). The "not found" messages name the disc's region.
+  After a Transfer the old launcher's selected disc is adopted only when its
+  region matches the card just filled. The Quest's zip Transfer takes
+  `GC/MemoryCardA.<region>(.N).raw` or the GM8P/GM8E GCIs of
+  `GC/<region>/Card A` for the copied disc's region, and stages the raw as
+  `MemoryCardA.<region>.raw`; a picked .raw, .gcp or .gci is staged as it
+  is. The game imports pending_import into the mounted disc's region at the
+  next start and skips the other region's saves. With no disc selected both
+  launchers search and fill the USA card, so both setup notes say to select
+  the game first.
+- **The PC launcher's stored disc.** Its constructor now ends with
+  `UpdateSelectedGame()` instead of `SetRunning(false)`, so a disc kept from
+  the last session shows its name, PAL tag and Wrong game or Wrong revision
+  warning at launch. Before, only a new pick did (since dad03036).
+- **VR code with a PAL disc: checked, no change.** Nothing the fork adds to
+  src/, include/ or platform/ (vr/ included) is tied to USA data: no asset,
+  string-table, frame widget or DOL ids (`git diff bc73f39f de5a14bd`). The
+  scan shield is loaded by name (`CMDL_ScanShield`); the sky, the title-card
+  billboard and the beam wheel's items come from the level data or
+  upstream's own fields; the HUD planes' tangents come from the frame
+  camera at draw time, and PAL's frames differ only in text panes
+  (e66acd52). The port reports NTSC and runs PAL at 60 Hz, so the headset
+  pacing is unchanged. Room and world ids are the same on PAL (the cutscene
+  skip tables, `MP_BOOT_WORLD 39F2DE28:B2701146`). Not verified without a
+  PAL disc: whether PAL's arm-cannon textures hash as USA's (otherwise the
+  cannon slots silently show the retail cannon), and the scan shield
+  extension and `kHudBodyDepth`, tuned on USA's CMDL_ScanShield and
+  FRME_BaseHud. Upstream gap, left alone: save states record no disc region,
+  so the VR menu's LOAD NEWEST could load a state saved on the other
+  region's disc. PAL has still never been played in the headset.
+- **Vsync in VR** is ignored while the headset runs. debug_ui.cpp's
+  `EffectiveVsync()` is the setting, but never under MP_TURBO nor while
+  `PortVr::OpenXRIsRunning()`. F1's checkbox, the launcher's live edit and
+  the first drawn frame all hand it to Aurora through `ApplyVsync()`, and
+  DrawUI hands it again when it changes: in practice only when a PC runtime
+  ends the session and leaves the game on the desktop, which the log reports
+  ("vsync on now that the headset stopped"). Each call reconfigures the
+  surface after a GPU sync, so Aurora is called on a change only. The stored
+  `vsync=` stays, as F1 and the launcher show it, and applies again when the
+  headset stops. The window only mirrors the headset, and its FIFO present
+  at the monitor's rate in the render worker's end of frame would hold the
+  headset loop to it (never measured). F1's Vsync tooltip, its Frame rate
+  note, the PC launcher's VSync tooltip and the startup settings log ("on
+  (off while the headset runs)") say so. F1's checkbox now also leaves vsync
+  off under MP_TURBO, as the other two paths did. "Runs" is the pacing
+  thread being alive, as for the frame caps and `HudWide()`: with the
+  headset off the head the session idles, vsync stays off and the mirror may
+  tear. Nothing changes in build/nooxr (`OpenXRIsRunning()` is false there)
+  or on the Quest, which never presents the window while the headset owns
+  the display and whose launcher has no VSync control.
+- **Game options stay global** (user decision; upstream dba5bd7a). They live
+  in the settings file's `game_options=` line, and loading a save keeps them,
+  so the options a transferred Dolphin save carries (brightness, HUD
+  opacity, invert Y, rumble...) are replaced by the global ones on first
+  load, and the first start after updating begins from the defaults. Set
+  them once in the game's Options. No code change, and no setup note.
+
+Tested: build/vr and build/nooxr 68/68 port tests (port_launcher_tests
+now checks GM8P01 revision 0 as Ok, revision 1 as Wrong revision, and the
+region-aware card search), gx_fifo_tests 247/247, PrimedGun.exe relinked,
+and the Quest APK built (Kotlin compiled). Desktop boots to the Landing
+Site with the USA disc run clean (VR off, and VR on with no runtime). Not
+tried: a PAL disc (none here), a Dolphin Transfer of a PAL card, and vsync=1
+with the headset running.
+
 ## Merged upstream port bc73f39f (2026-10-10)
 
 Upstream's 184 commits since 2d8d582d (2026-10-08 21:03 to 2026-10-10
@@ -176,8 +284,8 @@ upstream's code was also checked against the fork where git merged silently.
   upstream's 22ff478b (a constant stereo) wanted.
 - **Memory card import.** A card the launchers left goes into the disc's
   region folder (`PortGci::CardRegion()`, EUR/Card A for a PAL disc,
-  6295169e) instead of a fixed USA one. The launchers still take only USA
-  1.00 (below).
+  6295169e) instead of a fixed USA one. The launchers still took only USA
+  1.00 then; they take PAL too since the entry above.
 - **Checked, no change:** upstream's 60 Hz movement laws (e4a0af0b,
   c3153ed0, dfc6efb5, 4a6b3f04, e24874a2) leave the fork's directional
   movement alone, which sets the velocity itself with a ramp linear in time.
@@ -209,21 +317,14 @@ body camera's screen box.
 
 Not done, user decisions:
 
-- **PAL in the launchers.** The game accepts a PAL disc (GM8P01 rev 0;
-  538f84f4, 12dc40e8, experimental), both launchers' disc checks only USA
-  1.00. The Quest refuses PAL everywhere; the PC launcher labels it "Wrong
-  game" but Play still runs it. Keep USA only (and gate Play), or accept PAL
-  (disc probe, QuestStorage, tests/port_launcher.cpp, region-aware card
-  folders and Transfer). PAL has never been played in the headset.
-- **Vsync in VR.** `vsync=1` (the PC launcher's Port Config) presents the
-  desktop mirror FIFO at the monitor's rate, which probably holds the
-  headset loop to it (not measured; it predates this merge). Keep it for a
-  smooth mirror, or ignore it while the headset runs.
-- **Game options from transferred Dolphin saves.** With global options the
-  first launch after updating starts from the defaults, and a loaded save's
-  own options are replaced, so options carried over by Transfer
-  (brightness, HUD opacity, invert Y, rumble...) are lost on first load.
-  Accept it with a setup note, or adopt a save's options once.
+- **PAL in the launchers.** Decided: both launchers accept PAL, with
+  region-aware card folders and Transfer (the entry above). PAL has never
+  been played in the headset.
+- **Vsync in VR.** Decided: ignored while the headset runs; the stored
+  setting stays and applies again when it stops (the entry above).
+- **Game options from transferred Dolphin saves.** Decided: options stay
+  global, so a transferred save's options are replaced on first load; no
+  setup note (the entry above).
 - **Remastered VFX in the headset.** Draw imported PARTs through the retail
   GX path while immersive (VMAT-only looks and HDR colours are lost, and
   VMSH mesh effects with no PMDL draw nothing), or replay VFX custom draws

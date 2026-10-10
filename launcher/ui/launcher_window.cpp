@@ -52,11 +52,10 @@ void StyleGameButton(QPushButton* button, bool primary = false) {
   button->setStyleSheet(primary ? Style::kPrimaryGameButton : Style::kGameButton);
 }
 
-QString DiscWarning(const QString& path) {
+QString DiscWarning(const QString& path, const DiscInfo& info) {
   if (path.isEmpty()) {
     return {};
   }
-  const DiscInfo info = ProbeDisc(ToPath(path));
   switch (info.check) {
   case DiscCheck::WrongGame:
     return QObject::tr("Wrong game");
@@ -71,6 +70,17 @@ QString DiscWarning(const QString& path) {
     break;
   }
   return {};
+}
+
+// Whether a disc image is PAL: its game keeps its saves on the EUR card and
+// reads only GM8P saves (PortGci::CardRegion, IsGameFile). False for anything
+// else, also when no disc is selected or its header is not read (WBFS).
+bool IsPalDisc(const QString& path) { return !path.isEmpty() && ProbeDisc(ToPath(path)).Pal(); }
+
+// The card the game mounts for that disc: <card base>/<region>/Card A.
+QString CardFolderFor(const LauncherPaths& paths, bool pal) {
+  return QDir::cleanPath(paths.cardBase +
+                         (pal ? QStringLiteral("/EUR/Card A") : QStringLiteral("/USA/Card A")));
 }
 
 } // namespace
@@ -142,7 +152,9 @@ LauncherWindow::LauncherWindow()
     }
   }
   WatchSettingsFile();
-  SetRunning(false);
+  // The disc kept from the last session gets its name, PAL tag and warning too
+  // (SetSelectedDisc does this only for a new pick); it also sets the buttons.
+  UpdateSelectedGame();
 }
 
 void LauncherWindow::BuildSetupTab(QTabWidget* tabs) {
@@ -157,7 +169,7 @@ void LauncherWindow::BuildSetupTab(QTabWidget* tabs) {
   m_selectedGame = new QLabel;
   layout->addWidget(m_selectedGame);
   auto* selectRow = new QHBoxLayout;
-  auto* selectNote = new QLabel(tr("Select Metroid Prime NTSC Revision 0 (1.0)."));
+  auto* selectNote = new QLabel(tr("Select Metroid Prime USA 1.00, or PAL (experimental)."));
   selectNote->setObjectName(QStringLiteral("PrimedGunMuted"));
   m_discWarning = new QLabel;
   m_discWarning->setObjectName(QStringLiteral("PrimedGunBad"));
@@ -400,11 +412,19 @@ void LauncherWindow::SetSelectedDisc(const QString& path) {
 
 void LauncherWindow::UpdateSelectedGame() {
   const QString path = SelectedDisc();
+  const DiscInfo info = path.isEmpty() ? DiscInfo{} : ProbeDisc(ToPath(path));
+  const QString name = QFileInfo(path).fileName();
+  QString selected;
+  if (!path.isEmpty()) {
+    // The game's PAL support is experimental, and its log says so too.
+    selected = info.check == DiscCheck::Ok && info.Pal()
+                   ? tr("Selected: %1 (PAL, experimental)").arg(name)
+                   : tr("Selected: %1").arg(name);
+  }
   m_selectedGame->setVisible(!path.isEmpty());
-  m_selectedGame->setText(path.isEmpty() ? QString()
-                                         : tr("Selected: %1").arg(QFileInfo(path).fileName()));
+  m_selectedGame->setText(selected);
   m_selectedGame->setToolTip(QDir::toNativeSeparators(path));
-  const QString warning = DiscWarning(path);
+  const QString warning = DiscWarning(path, info);
   m_discWarning->setText(warning);
   m_discWarning->setVisible(!warning.isEmpty());
   SetRunning(m_game != nullptr);
@@ -428,7 +448,8 @@ void LauncherWindow::ShowGameOptions() {
   menu.addAction(tr("Open Containing Folder"), this,
                  [path] { OpenFolder(QFileInfo(path).absolutePath()); });
   menu.addAction(tr("Open User Folder"), this, [this] { OpenFolder(m_paths.userFolder); });
-  menu.addAction(tr("Open Memory Card Folder"), this, [this] { OpenFolder(m_paths.cardFolder); });
+  menu.addAction(tr("Open Memory Card Folder"), this,
+                 [this] { OpenFolder(CardFolderFor(m_paths, IsPalDisc(SelectedDisc()))); });
   menu.addSeparator();
   menu.addAction(tr("Forget Selected Game"), this, [this] { SetSelectedDisc({}); });
   menu.exec(m_optionsButton->mapToGlobal(QPoint(0, m_optionsButton->height())));
@@ -457,9 +478,9 @@ void LauncherWindow::ShowSetupNotes() {
   auto* notes = new QLabel(
       tr(R"(<ul style="margin: 0; padding-left: 22px;">
 <li>Meta's own OpenXR environment is not recommended; try SteamVR or Virtual Desktop instead.</li>
-<li>Select your Metroid Prime NTSC Revision 0 (1.0) disc image (ISO, NKit ISO, RVZ or CISO), then press Play.</li>
+<li>Select your Metroid Prime USA 1.00 or PAL (experimental) disc image (ISO, NKit ISO, RVZ or CISO), then press Play.</li>
 <li>Check the Layout tab for controller bindings.</li>
-<li>To bring over your PrimedGun saves and settings, use Transfer PrimedGun Memory Card / Settings on this tab.</li>
+<li>To bring over your PrimedGun saves and settings, use Transfer PrimedGun Memory Card / Settings on this tab. Select your game first: a PAL disc uses the EUR card.</li>
 <li>Save states do not carry over from PrimedGun on Dolphin. Make sure to save normally before you transfer.</li>
 <li>Once in game, click the right stick to set your height.</li>
 <li>Try to stay in the centre of your play space and face forward, this mod is not roomscaled.</li>
@@ -489,6 +510,16 @@ void LauncherWindow::TransferOldSave() {
     return;
   }
 
+  // The card of the selected disc's region, the one the game mounts for it. A
+  // PAL disc's game reads only GM8P saves on the EUR card, so they come from
+  // Dolphin's EUR card (GC/EUR/Card A, MemoryCardA.EUR.raw). PortGci copies
+  // only the game code set here, and FindDolphinCard looks in that region's
+  // folders. USA when no disc is selected.
+  const bool pal = IsPalDisc(SelectedDisc());
+  const char* const region = pal ? "EUR" : "USA";
+  const QString discRegion = pal ? QStringLiteral("PAL") : QStringLiteral("USA");
+  PortGci::SetGameCode(pal ? "GM8P" : "GM8E");
+
   QMessageBox prompt(this);
   prompt.setWindowTitle(title);
   prompt.setText(tr("Transfer old save game."));
@@ -508,13 +539,14 @@ void LauncherWindow::TransferOldSave() {
     if (folder.isEmpty()) {
       return;
     }
-    card = FindOldCardUnder(ToPath(folder));
+    card = FindOldCardUnder(ToPath(folder), region);
     if (!card.Found()) {
-      QMessageBox::critical(this, title, tr("No memory card was found in that folder."));
+      QMessageBox::critical(
+          this, title, tr("No memory card for a %1 disc was found in that folder.").arg(discRegion));
       return;
     }
   } else if (prompt.clickedButton() == transfer) {
-    card = FindNearbyOldCard(ToPath(m_paths.exeFolder));
+    card = FindNearbyOldCard(ToPath(m_paths.exeFolder), region);
     if (!card.Found()) {
       const PortGci::DolphinCard dolphin = PortGci::FindDolphinCard();
       if (dolphin.Found()) {
@@ -533,8 +565,10 @@ void LauncherWindow::TransferOldSave() {
       } else {
         QMessageBox::critical(
             this, title,
-            tr("Could not find an old memory card near this PrimedGun install.\n\nPlace the new "
-               "version near your old PrimedGun folder, or use Choose Folder to pick it."));
+            tr("Could not find an old memory card for a %1 disc near this PrimedGun install.\n\n"
+               "Place the new version near your old PrimedGun folder, or use Choose Folder to "
+               "pick it.")
+                .arg(discRegion));
         return;
       }
     }
@@ -542,7 +576,8 @@ void LauncherWindow::TransferOldSave() {
     return;
   }
 
-  const std::filesystem::path destination = ToPath(m_paths.cardFolder);
+  const QString cardFolder = CardFolderFor(m_paths, pal);
+  const std::filesystem::path destination = ToPath(cardFolder);
   PortGci::Report report;
   if (card.isFolder) {
     report = PortGci::ImportFolder(card.path, destination);
@@ -579,13 +614,16 @@ void LauncherWindow::TransferOldSave() {
   m_ctx.RefreshAll();
   UpdateFooter();
   const QString oldGame = QString::fromStdString(old.gamePath);
-  if (SelectedDisc().isEmpty() && !oldGame.isEmpty() && QFileInfo::exists(oldGame)) {
+  // The old launcher's disc only when its region's card is the one just filled:
+  // a PAL disc would mount the EUR card, without these saves.
+  if (SelectedDisc().isEmpty() && !oldGame.isEmpty() && QFileInfo::exists(oldGame) &&
+      IsPalDisc(oldGame) == pal) {
     SetSelectedDisc(oldGame);
   }
 
   QString message = tr("Old memory card transferred from:\n%1\nto:\n%2\n\n%3")
                         .arg(QDir::toNativeSeparators(FromPath(card.path)),
-                             QDir::toNativeSeparators(m_paths.cardFolder), summary);
+                             QDir::toNativeSeparators(cardFolder), summary);
   if (!old.source.empty()) {
     message += tr("\n\nPrimedGun settings transferred from:\n%1\nUse Save Settings to keep them.")
                    .arg(QDir::toNativeSeparators(FromPath(old.source)));

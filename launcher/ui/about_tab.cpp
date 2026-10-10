@@ -56,7 +56,9 @@ void BuildAboutTab(TabContext& ctx, QTabWidget* tabs) {
   layout->addWidget(Paragraph(
       QObject::tr("Build: revision %1").arg(QString::fromLatin1(MP_BUILD_REVISION)), true));
   layout->addWidget(Paragraph(
-      QObject::tr("Supported game: Metroid Prime NTSC-U Revision 0 (1.0), game ID GM8E01"), true));
+      QObject::tr("Supported game: Metroid Prime USA 1.00 (GM8E01) or PAL (GM8P01, experimental), "
+                  "revision 0"),
+      true));
   layout->addWidget(Paragraph(
       QObject::tr("User folder: %1").arg(QDir::toNativeSeparators(ctx.paths.userFolder).toHtmlEscaped()),
       true));
@@ -72,8 +74,9 @@ void BuildAboutTab(TabContext& ctx, QTabWidget* tabs) {
                   "Setup tab. The game saves its settings and shader caches as it exits."),
       QObject::tr("The first start after an update compiles shaders in the background; later starts "
                   "are faster."),
-      QObject::tr("Your memory card is in USA/Card A beside the game, and the settings in "
-                  "port_settings.ini in the user folder shown above."),
+      QObject::tr("Your memory card is in USA/Card A (EUR/Card A for a PAL disc): Game Options > "
+                  "Open Memory Card Folder shows it. The settings are in port_settings.ini in the "
+                  "user folder shown above."),
   })));
 
   layout->addSpacing(8);

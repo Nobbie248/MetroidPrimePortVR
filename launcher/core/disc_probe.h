@@ -1,8 +1,10 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 //
-// Whether a disc image is one the game will boot: Metroid Prime NTSC-U
-// revision 0 (GM8E01, disc 0, v1.00; platform/main.cpp checks the same after
-// mounting it), in a format the port opens (main.cpp IsDiscImage).
+// Whether a disc image is one the game will boot: Metroid Prime USA 1.00
+// (GM8E01) or PAL (GM8P01, experimental), disc 0, revision 0, as
+// platform/disc.cpp PortDisc::IsAccepted takes them (main.cpp checks the
+// mounted disc again; USA 1.01 and 1.02 boot only under MP_DISC_ANY_VERSION,
+// which is left to the game), in a format the port opens (main.cpp IsDiscImage).
 
 #pragma once
 
@@ -27,6 +29,9 @@ struct DiscInfo {
   DiscCheck check = DiscCheck::Unreadable;
   std::string gameId; // six characters when the header was found
   int revision = -1;
+  // A PAL disc (GM8P01), whatever the check says: its game keeps its saves on
+  // Dolphin's EUR card instead of the USA one (PortGci::CardRegion).
+  bool Pal() const { return gameId == "GM8P01"; }
 };
 
 // The port's own extension list: .iso .gcm .rvz .wbfs .ciso .nkit.

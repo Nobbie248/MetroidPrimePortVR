@@ -35,7 +35,7 @@ struct LauncherPaths {
   QString userFolder;    // PortPaths::UserFolder(): settings, logs, texture pack
   QString settingsFile;  // <user>/port_settings.ini
   QString launcherIni;   // <user>/primedgun_launcher.ini
-  QString cardFolder;    // PortPaths::CardFolder() + USA/Card A
+  QString cardBase;      // PortPaths::CardFolder(); the card is USA/Card A in it (EUR for PAL)
   QString userTextures;  // MP_USER_TEXTURES, else <user>/user_textures
   QString lastRunLog;    // <user>/primedgun_last_run.log
   QString gameLog;       // <user>/metroid_prime_port.log (log_file=1)

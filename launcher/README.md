@@ -67,7 +67,9 @@ import, and the cannon pack.
   install around the launcher, the same way PrimedGun did, or in a folder you
   pick, or in Dolphin's own folder.
   - It imports the Metroid Prime saves into the game's card (`USA/Card A`) with
-    `platform/port_gci.cpp`.
+    `platform/port_gci.cpp`. When the selected disc is PAL, it looks for
+    Dolphin's EUR card instead and imports into `EUR/Card A`, as the game reads
+    it for that disc.
   - It loads the old `PrimedGun.ini` settings as unsaved changes.
 
 ## The Quest launcher

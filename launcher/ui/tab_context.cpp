@@ -81,7 +81,9 @@ LauncherPaths ResolvePaths() {
   paths.userFolder = user;
   paths.settingsFile = user + QStringLiteral("/port_settings.ini");
   paths.launcherIni = user + QStringLiteral("/primedgun_launcher.ini");
-  paths.cardFolder = QDir::cleanPath(FromUtf8Folder(PortPaths::CardFolder()) + QStringLiteral("/USA/Card A"));
+  // The card's region folder follows the selected disc (launcher_window.cpp
+  // CardFolderFor), as the game's does (PortGci::CardRegion).
+  paths.cardBase = QDir::cleanPath(FromUtf8Folder(PortPaths::CardFolder()));
   const QString textures = qEnvironmentVariable("MP_USER_TEXTURES");
   paths.userTextures = textures.isEmpty() ? user + QStringLiteral("/user_textures")
                                           : QDir::cleanPath(textures);

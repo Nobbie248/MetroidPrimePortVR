@@ -1380,12 +1380,18 @@ int main(int argc, char** argv) {
         if (PortDebug::RenderScale() > 0.f) {
             std::snprintf(scale, sizeof(scale), "%.2fx", static_cast<double>(PortDebug::RenderScale()));
         }
+        // The stored setting, and when Aurora presents without it anyway (debug_ui.cpp
+        // EffectiveVsync): under MP_TURBO, and (PortVr:) while the headset runs.
+        const char* vsync = !PortDebug::VsyncEnabled() ? "off"
+                            : PortDebug::Turbo()       ? "on (off under MP_TURBO)"
+                            : vrStartup == PortVr::OpenXRStartupResult::Prepared ? "on (off while the headset runs)"
+                                                                                 : "on";
         PortLog::Write("port: settings: backend %s, msaa %d, anisotropy %d, scale %s, dynamic-res %s, "
                        "smoothing %s (interp %s), vsync %s, frame-cap %d, remastered-models %s\n",
                        config.desiredBackend == BACKEND_OPENGLES ? "opengles" : "auto", PortDebug::Msaa(),
                        PortDebug::Anisotropy(), scale, dynamicRes,
                        PortDebug::SmoothFrames() ? "on" : "off", PortDebug::FrameInterpolation() ? "on" : "off",
-                       PortDebug::VsyncEnabled() ? "on" : "off", PortDebug::FrameRateCap(),
+                       vsync, PortDebug::FrameRateCap(),
                        remastered ? "on" : "off");
         PortDebug::LogSettings();
     }

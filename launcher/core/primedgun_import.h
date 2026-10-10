@@ -38,8 +38,10 @@ struct OldSettings {
 // The Qt launcher kept the applied cannon slot in Qt.ini, so that one wins.
 OldSettings ReadOldSettings(const std::filesystem::path& userFolder);
 
-// A Dolphin card found near an old install: a raw image (MemoryCardA.USA.raw,
-// .gcp) or a GCI folder (<GC>/USA/Card A).
+// A Dolphin card found near an old install, for one card region ("USA", or
+// "EUR" for a PAL disc, as PortGci::CardRegion names them): a raw image
+// (MemoryCardA.USA.raw, .gcp) or a GCI folder (<GC>/USA/Card A). A card named
+// for another region holds the other release's saves, which the game skips.
 struct OldCard {
   std::filesystem::path path;
   bool isFolder = false;
@@ -51,8 +53,9 @@ struct OldCard {
 
 // PrimedGun's two passes around the launcher's folder: the folders beside it,
 // then the folders beside its parent, each with the usual portable layouts.
-OldCard FindNearbyOldCard(const std::filesystem::path& launcherFolder);
+OldCard FindNearbyOldCard(const std::filesystem::path& launcherFolder,
+                          std::string_view region = "USA");
 // The same layouts under a folder the player picked (or that folder itself).
-OldCard FindOldCardUnder(const std::filesystem::path& base);
+OldCard FindOldCardUnder(const std::filesystem::path& base, std::string_view region = "USA");
 
 } // namespace PrimedGunLauncher

@@ -13,8 +13,8 @@ import java.io.RandomAccessFile
  * /sdcard/Android/data/org.primedgun.v2/files, as the Dolphin-based PrimedGun
  * used: a computer or adb can reach it without a special permission. The game
  * gets it as MP_USER_PATH (platform/include/port_paths.h), so port_settings.ini,
- * the memory card (USA/Card A), save states, user textures and the log all live
- * there. The game's caches stay in the private files folder.
+ * the memory card (USA/Card A, EUR/Card A for a PAL disc), save states, user
+ * textures and the log all live there. The game's caches stay in the private files folder.
  */
 object QuestStorage {
     const val DISC_FILE = "disc.iso"
@@ -46,8 +46,23 @@ object QuestStorage {
     /** The game's settings, which the launcher edits between runs. */
     fun settingsFile(context: Context): File = File(userFolder(context), "port_settings.ini")
 
-    /** The memory card the game mounts (DolphinCMemoryCardSys: <user>/USA/Card A). */
-    fun cardFolder(context: Context): File = File(userFolder(context), "USA/Card A")
+    /**
+     * The memory card the game mounts (DolphinCMemoryCardSys: <user>/<region>/Card A),
+     * for the copied disc's region ([cardRegion]). Reads the disc's first bytes.
+     */
+    fun cardFolder(context: Context): File = File(userFolder(context), "${cardRegion(context)}/Card A")
+
+    /**
+     * The copied disc's card region, as Dolphin and the game name it (PortGci::CardRegion):
+     * EUR for a PAL disc (GM8P01), else USA, also with no disc or a WBFS whose header is
+     * not read here. Reads the disc's first bytes (32 KiB at most).
+     */
+    fun cardRegion(context: Context): String {
+        val probe = ByteArray(CISO_DATA_OFFSET + 8)
+        val read = runCatching { RandomAccessFile(discImage(context), "r").use { readFully(it, probe) } }.getOrDefault(0)
+        val offset = headerOffset(probe, read)
+        return if (offset >= 0 && String(probe, offset, 6, Charsets.US_ASCII) == "GM8P01") "EUR" else "USA"
+    }
 
     /**
      * A memory card the launcher picked, which the game imports into [cardFolder] at
@@ -61,14 +76,14 @@ object QuestStorage {
     fun shippedCannonLibrary(context: Context): File = File(context.filesDir, "cannon_textures")
 
     /**
-     * Null when [file] holds Metroid Prime (USA) disc 0 revision 0, else what is
-     * wrong with it. The disc header is read where launcher/core/disc_probe.cpp
-     * reads it: offset 0 for a plain or NKit image, after the RVZ/WIA header, or
-     * in a CISO's first block. The game checks the mounted disc again.
+     * Null when [file] holds Metroid Prime USA 1.00 (GM8E01) or PAL (GM8P01,
+     * experimental), disc 0 revision 0, else what is wrong with it. These are the discs
+     * the game boots (platform/disc.cpp PortDisc::IsAccepted), and it checks the
+     * mounted disc again.
      */
     fun checkDisc(file: File): String? {
         if (!file.isFile || file.length() == 0L) {
-            return "No game disc: select Metroid Prime (USA) in the launcher."
+            return "No game disc: select Metroid Prime in the launcher."
         }
         val probe = ByteArray(CISO_DATA_OFFSET + 8)
         val read = try {
@@ -76,34 +91,45 @@ object QuestStorage {
         } catch (e: Exception) {
             return "The game disc cannot be read: ${e.message}"
         }
-        // WBFS keeps disc slot 0's header copy at its second hard-disk sector
-        // (launcher/core/disc_probe.cpp); without a readable one, the game checks
-        // the mounted disc.
+        return when (val offset = headerOffset(probe, read)) {
+            UNCHECKED -> null
+            TRUNCATED -> "The game disc is truncated or not a GameCube disc image."
+            else -> checkHeader(probe, offset)
+        }
+    }
+
+    /**
+     * Where the first [read] bytes of [probe] keep the disc header, as
+     * launcher/core/disc_probe.cpp reads it: offset 0 for a plain or NKit image, after
+     * the RVZ/WIA header, in a CISO's first block, or in a WBFS's copy of disc slot 0's
+     * header at its second hard-disk sector. [UNCHECKED] for a WBFS without a readable
+     * copy (the game checks the mounted disc), [TRUNCATED] when the header is out of reach.
+     */
+    private fun headerOffset(probe: ByteArray, read: Int): Int {
         if (read >= 4 && probe.startsWith("WBFS")) {
             val sectorShift = if (read > 12) probe[8].toInt() and 0xFF else 0
             if (sectorShift !in 9..14 || probe[12].toInt() == 0 || read < (1 shl sectorShift) + 8) {
-                return null
+                return UNCHECKED
             }
-            return checkHeader(probe, 1 shl sectorShift)
+            return 1 shl sectorShift
         }
-        val headerOffset = when {
+        val offset = when {
             read >= 4 && (probe.startsWith("RVZ\u0001") || probe.startsWith("WIA\u0001")) -> WIA_DISC_HEADER_OFFSET
-            read >= 4 && probe.startsWith("CISO") -> if (probe[8].toInt() != 0) CISO_DATA_OFFSET else -1
+            read >= 4 && probe.startsWith("CISO") -> if (probe[8].toInt() != 0) CISO_DATA_OFFSET else TRUNCATED
             else -> 0
         }
-        if (headerOffset < 0 || read < headerOffset + 8) {
-            return "The game disc is truncated or not a GameCube disc image."
-        }
-        return checkHeader(probe, headerOffset)
+        return if (offset < 0 || read < offset + 8) TRUNCATED else offset
     }
 
     private fun checkHeader(probe: ByteArray, offset: Int): String? {
         val gameId = String(probe, offset, 6, Charsets.US_ASCII)
         val disc = probe[offset + 6].toInt()
         val revision = probe[offset + 7].toInt()
+        // The Setup tab tells these apart by "not Metroid Prime" and "revision".
         return when {
-            gameId != "GM8E01" || disc != 0 -> "The selected disc is not Metroid Prime (USA) (game id $gameId)."
-            revision != 0 -> "The selected disc is revision $revision; PrimedGun v2 needs revision 0 (1.00)."
+            (gameId != "GM8E01" && gameId != "GM8P01") || disc != 0 ->
+                "The selected disc is not Metroid Prime USA or PAL (game id $gameId)."
+            revision != 0 -> "The selected disc is revision $revision; PrimedGun v2 needs revision 0: USA 1.00 or PAL."
             else -> null
         }
     }
@@ -125,4 +151,7 @@ object QuestStorage {
 
     private const val WIA_DISC_HEADER_OFFSET = 0x48 + 0x10
     private const val CISO_DATA_OFFSET = 0x8000
+    // headerOffset's answers when there is no header to read.
+    private const val UNCHECKED = -2
+    private const val TRUNCATED = -1
 }

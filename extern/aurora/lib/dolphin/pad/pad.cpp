@@ -1580,6 +1580,9 @@ static void load_keyboard_bindings() {
 }
 
 static void save_keyboard_bindings() {
+  if (aurora::io::config_persistence_disabled()) {
+    return;
+  }
   if (aurora::g_config.userPath == nullptr) {
     return;
   }
@@ -1608,6 +1611,9 @@ static void save_keyboard_bindings() {
 }
 
 void PADSerializeMappings() {
+  if (aurora::io::config_persistence_disabled()) {
+    return;
+  }
   if (aurora::g_config.userPath == nullptr) {
     return;
   }

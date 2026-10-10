@@ -1,6 +1,8 @@
 #include "MetroidPrime/Cameras/CCameraManager.hpp"
 
 #include "port_debug.h"
+#include "port_presentation_rules.h"
+#include "MetroidPrime/CActor.hpp"
 #include "port_room_liquid.h"
 #ifdef TARGET_PC
 #include "vr/vr_view.h"
@@ -50,6 +52,8 @@ float CCameraManager::sMaxShakeVolume = 127.f;
 namespace {
 const CCameraManager* sCameraSnapshotOwner = nullptr;
 TUniqueId sCameraSnapshotId = kInvalidUniqueId;
+// Tick generation (CActor::PortTickGeneration) that wrote the snapshot.
+uint sCameraSnapshotGeneration = 0;
 CTransform4f sPreviousCameraTransform = CTransform4f::Identity();
 CTransform4f sCurrentCameraTransform = CTransform4f::Identity();
 float sPresentationInterpolation = -1.f;
@@ -413,6 +417,7 @@ void CCameraManager::Update(float dt, CStateManager& mgr) {
   sCurrentCameraTransform = currentTransform;
   sCameraSnapshotOwner = this;
   sCameraSnapshotId = currentId;
+  sCameraSnapshotGeneration = CActor::PortTickGeneration();
 }
 
 void CCameraManager::SetInsideFluid(bool isInside, TUniqueId fluidId) {
@@ -552,7 +557,8 @@ void CCameraManager::RemoveCameraShaker(int id) {
 
 CTransform4f CCameraManager::GetCurrentCameraTransform(const CStateManager& mgr) const {
   if (sPresentationInterpolation >= 0.f && sCameraSnapshotOwner == this &&
-      sCameraSnapshotId == GetCurrentCameraId()) {
+      sCameraSnapshotId == GetCurrentCameraId() &&
+      PortSnapshotFresh(sCameraSnapshotGeneration, CActor::PortTickGeneration())) {
     CTransform4f presentation = InterpolateCameraTransform(sPreviousCameraTransform, sCurrentCameraTransform,
                                                            sPresentationInterpolation);
     if (mgr.GetPlayer()->MouseLookIsFree(mgr)) {
@@ -579,7 +585,9 @@ bool CCameraManager::GetPresentedLookRotation(const CStateManager& mgr,
   float dyaw = 0.f;
   float dpitch = 0.f;
   if (sPresentationInterpolation < 0.f || sCameraSnapshotOwner != this ||
-      sCameraSnapshotId != GetCurrentCameraId() || !mgr.GetPlayer()->MouseLookIsFree(mgr) ||
+      sCameraSnapshotId != GetCurrentCameraId() ||
+      !PortSnapshotFresh(sCameraSnapshotGeneration, CActor::PortTickGeneration()) ||
+      !mgr.GetPlayer()->MouseLookIsFree(mgr) ||
       !PortDebug::PresentedAimDelta(sPresentationInterpolation, dyaw, dpitch)) {
     return false;
   }

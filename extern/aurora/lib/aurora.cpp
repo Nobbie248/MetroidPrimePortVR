@@ -14,6 +14,7 @@
 #include "gx/gx.hpp"
 #include "gx/texture.hpp"
 #include "imgui.hpp"
+#include "io.hpp"
 #include "stereo_host.hpp"
 #include "webgpu/gpu.hpp"
 #include "webgpu/gpu_prof.hpp"
@@ -705,6 +706,7 @@ void aurora_end_frame_ex(uint64_t contentTag, void* imguiFrame) {
   aurora::end_frame(contentTag);
 }
 void aurora_set_background_pipelines_paused(bool paused) { aurora::gfx::set_background_pipelines_paused(paused); }
+void aurora_disable_config_persistence() { aurora::io::disable_config_persistence(); }
 AuroraBackend aurora_get_backend() { return aurora::g_config.desiredBackend; }
 const char* aurora_get_gpu_driver() {
   static std::string driver;

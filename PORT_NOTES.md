@@ -1,3 +1,67 @@
+## Merged upstream port 20ef08e3 (2026-10-10)
+
+Upstream's 19 commits since bc73f39f (2026-10-10 13:38 to 22:29): an Active
+controller selector in Remap (player one from any connected pad, f8a9fa37,
+20ef08e3), a reworked Remap editor, Reset configuration in F1 System
+(7f16dbb2, e52fd42b), PAL map legend icon fixes, and presentation fixes for
+the morph ball and the scan freeze (#70). Three files conflicted:
+CMakeLists.txt (the test list), aurora.cpp (includes) and debug_ui.cpp.
+
+- **Settings writes.** e52fd42b reports a failed write or close instead of
+  logging a save. The fork keeps its temporary file and rename (an app
+  killed mid-write keeps the old settings) and takes those checks: the
+  temporary file is closed and checked before the rename; one that opened
+  but could not be written is removed and the save stops, since the
+  in-place write after it would truncate the old file on a full disk; the
+  in-place fallback (a folder that refuses the temporary file or the
+  rename) checks its write and close too. A failed save leaves the settings
+  dirty, which is what stops the reset.
+- **Reset configuration** moves port_settings.ini, controls.toml, imgui.ini,
+  controller_ports.dat, keyboard_bindings.dat and the `*.controller`
+  mappings into a backup folder in the user folder and quits through the
+  normal exit, so the headset shuts down as usual. The `vr_*` lines go with
+  port_settings.ini: VR settings and calibration return to their defaults.
+  The fork keeps `vr_cannon_texture_slot` with the disc paths
+  (port_config_reset.h, tested): the cannon textures it names stay in
+  `user_textures/000_primedgun_cannon`, which the reset leaves alone, and
+  slot 0 would say those overrides are clear. Before its backup save the
+  reset polls what the launcher wrote, as DrawUI's save does. Every fork save
+  (SyncGameOptions, the VR settings and the VR menu, the background and exit
+  saves) goes through SaveSettings, which `sConfigReset` stops. The Quest
+  has no F1, so no reset there.
+- **Active controller.** The PrimedGun pad is unaffected: it is a virtual
+  status merged on port 0 after the bindings. Gamepad mode's "OpenXR
+  Controllers" pad behaves as before while no Active controller is saved.
+  Once a desktop pad is saved as Active controller, Aurora keeps every other
+  pad off port 0, so Gamepad mode gets no input while that pad is unplugged
+  (pick "OpenXR Controllers" there, or clear the choice); not changed. F1's
+  controller settings no longer call the headset pad the touch overlay
+  while the headset runs: its dead zones and remaps apply, for the session
+  only, since Aurora saves no mapping for a virtual pad (F1 says so).
+- **Interpolation (#70: 49fd705d, 05435688, 57951140).** Checked, no
+  change. The camera snapshot is used only in the tick that wrote it
+  (`PortSnapshotFresh`); headset frames with no tick (60 Hz simulation,
+  72-120 Hz headset) keep the tick's generation and still blend, and a tick
+  that skips `CCameraManager::Update` (scan-complete soft pause, pause)
+  falls back to the simulation camera, levelled by `LevelVrBallCamera` like
+  the other paths. `sPortCutNextUpdate` is consumed before the snapshot is
+  stamped, so a snap turn still cuts. The fully morphed player now blends
+  about the ball's centre; the morph and unmorph transitions keep the origin
+  pivot, so the VR unmorph base still cuts as before. To check in the
+  headset: above 45 degrees of roll a tick (a boost) upstream's rule snaps
+  the roll while the centre stays smooth, which may judder at 90-120 Hz;
+  report it upstream under #70 if it shows.
+- **Left to upstream:** the Start+Back chord, F1's pad navigation and gyro
+  still read enumeration slot 0 rather than the active pad, so with Gamepad
+  mode's pad and a desktop pad both connected they can read the wrong one.
+
+Tested: build/vr and build/nooxr 71/71 port tests (with upstream's
+port_presentation_rules_tests and port_config_reset_tests, the latter
+checking the kept cannon slot), gx_fifo_tests 247/247, and the Quest APK
+built. A desktop boot to the Landing Site with VR on and no OpenXR runtime
+ran clean. Not tried: Reset configuration, the Active controller selector,
+and the morph ball in a headset.
+
 ## PAL discs in the launchers, vsync off in the headset (2026-10-10)
 
 The user's answers to three of the bc73f39f merge's open questions (below):

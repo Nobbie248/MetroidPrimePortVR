@@ -873,6 +873,22 @@ unpacks to a temporary directory instead of mounting.
   path and has a **Save settings now** button. Environment variables still
   override the file for that run, and are written back into it if any setting is
   changed during that run.
+- F1 > System > Settings > **Reset configuration...** puts every port setting and
+  control mapping back to its default: after a confirmation it saves the current
+  settings, moves `port_settings.ini`, `controls.toml`, `imgui.ini`,
+  `controller_ports.dat`, `keyboard_bindings.dat` and the `*.controller` mapping
+  files into a new `config-backup-<date>-<time>/` folder inside the user folder
+  (older backups are never reused), and exits; the next launch starts from
+  defaults (`platform/include/port_config_reset.h`, test `port_config_reset_tests`).
+  Only those names are touched, a symlink among them makes it refuse, and a failed
+  move is rolled back and the error shown without quitting (if the rollback itself fails, the message names the files left in the backup folder). After a successful reset every later config write (settings, `imgui.ini`, Aurora's controller/keyboard files) is blocked for the process (`aurora_disable_config_persistence`). A fresh
+  `port_settings.ini` keeps just `disc_path`, `remastered_nsp` and `remastered_keys`,
+  so the disc isn't asked for again. Saves, save states, mods, caches, the disc and
+  the data folder location are not touched. Game options that retail keeps inside
+  a save file (invert Y, volumes...) come back when that save loads; the port's
+  global copy (`game_options=`) is in the reset settings. After the reset nothing
+  writes the settings (`SaveSettings` is disabled, ImGui's ini off) until the
+  process exits. To undo, copy the files back from the backup folder.
 - Original experience (top of F1 > Game and the pause-menu options, persisted as
   `original_experience`, `MP_ORIGINAL=1`, console `original [on|off]`): plays the
   game as retail without touching the saved settings, so turning it off restores
@@ -1014,14 +1030,20 @@ unpacks to a temporary directory instead of mounting.
   fires it; shorter taps shoot as usual. Both are off in morph ball and while
   input is disabled. The console's `status` prints the game's L/A and the charge.
 - The overlay's **Controls** page keeps settings only: "Mouse settings" (inversion,
-  crosshair) and "Controller settings" (dead
-  zones). Every binding is on **Controls > Remap**, below.
-- **Controls > Remap** binds any action, per device (the Device list: Keyboard & mouse, Touch,
-  Controllers, plus saved controller kind/model profiles; Advanced > "Separate bindings per
-  controller kind or model" lists the connected ones too). Actions are grouped (game buttons,
+  crosshair) and "Controller settings" (stick aim and dead
+  zones). **Remap > Active controller** selects any detected gamepad, including
+  one assigned to player 2 or later; the choice is saved and restored on reconnect.
+  Select it here before recording its bindings in Remap. Remap's "Controller bindings for" selects
+  binding profiles, not the controller used to play. Every binding is on **Controls > Remap**, below.
+- **Controls > Remap** lists all devices' bindings together, with keyboard, mouse, controller
+  and touch icons. "Controller bindings for" selects all controllers or a controller kind/model
+  profile, including saved profiles. Actions are grouped (game buttons,
   move and aim, beams, visors, Morph Ball, port, layers) with the GameCube button's game function
-  beside it; inputs the device has out of the box are marked "default". Editing one makes it
-  yours, "Revert" gives the default back, and Record accepts only that device's inputs. Keyboard &
+  beside it; default inputs are greyed out. Click an input to edit it, or **+** to open a new
+  binding editor beneath that action and start recording. The action is fixed to the row:
+  press an input and release it, then **Save** (or **Cancel**); **Record** captures again.
+  Record accepts keyboard, mouse or controller input; repeated identical
+  mappings are ignored. Editing a default makes it yours, and "Revert" gives the default back. Keyboard &
   mouse, Touch and Controllers are the Default profile restricted to that family of input;
   a kind or model is its own profile on top. "Reset..." restores a preset (after a confirmation).
   It binds any action to an input or a chord of up to four

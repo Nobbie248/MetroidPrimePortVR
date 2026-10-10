@@ -12,6 +12,7 @@
 #include "port_log.h"
 #include "port_log_file.h"
 #include "port_paths.h"
+#include "port_config_reset.h"
 #include "port_apclient.h"
 #include "port_rando_gen.h"
 #include "port_controls.h"
@@ -435,6 +436,9 @@ std::map< std::string, std::string > sSettingsFileValues;
 std::filesystem::file_time_type sSettingsFileTime = std::filesystem::file_time_type::min();
 std::uintmax_t sSettingsFileSize = 0;
 uint64_t sSettingsPollMs = 0;
+// Set once "Reset configuration" has moved the files away: nothing may write them
+// back before the process exits (SaveSettings returns early, ImGui's ini is off).
+bool sConfigReset = false;
 bool sAudioSettingsApplied = false;
 bool sPresentationSettingsApplied = false;
 // PortVr: the vsync last handed to Aurora (EffectiveVsync), so DrawUI hands it
@@ -955,7 +959,7 @@ void LogSettingChanges(const std::string& text) {
 }
 
 void SaveSettings() {
-  if (!sInitialized || !sSettingsDirty) {
+  if (!sInitialized || !sSettingsDirty || sConfigReset) {
     return;
   }
   const std::string text = SettingsText();
@@ -966,14 +970,26 @@ void SaveSettings() {
   const std::filesystem::path target = PortPaths::detail::FromUtf8(path);
   std::filesystem::path temporary = target;
   temporary += ".tmp";
+  bool opened = false;
   bool written = false;
   {
     std::ofstream out(temporary, std::ios::trunc);
     if (out.is_open()) {
+      opened = true;
       out << text;
       out.flush();
-      written = out.good();
+      // A failed close (a full disk can show up only there) must not replace the
+      // old file with a short one (upstream e52fd42b checks both too).
+      out.close();
+      written = !out.fail();
     }
+  }
+  if (opened && !written) {
+    // Nor may the in-place write below, which would truncate the old file.
+    std::error_code ignored;
+    std::filesystem::remove(temporary, ignored);
+    std::fprintf(stderr, "metroid_prime_port: could not write settings to %s (write failed)\n", path.c_str());
+    return;
   }
   std::error_code renameError;
   if (written) {
@@ -989,6 +1005,16 @@ void SaveSettings() {
       return;
     }
     out << text;
+    out.flush();
+    if (!out) {
+      std::fprintf(stderr, "metroid_prime_port: could not write settings to %s (write failed)\n", path.c_str());
+      return;
+    }
+    out.close();
+    if (out.fail()) {
+      std::fprintf(stderr, "metroid_prime_port: could not write settings to %s (close failed)\n", path.c_str());
+      return;
+    }
   }
   std::fprintf(stderr, "metroid_prime_port: saved settings to %s\n", path.c_str());
   sSettingsDirty = false;
@@ -4433,6 +4459,50 @@ std::string CardExportDolphin() {
 }
 
 namespace {
+#if defined(__ANDROID__)
+void SetNextAndroidSaveDialogFilename(const char* filename) {
+  JNIEnv* env = static_cast< JNIEnv* >(SDL_GetAndroidJNIEnv());
+  if (env == nullptr) {
+    return;
+  }
+  jobject activity = static_cast< jobject >(SDL_GetAndroidActivity());
+  if (activity == nullptr) {
+    return;
+  }
+
+  jclass cls = env->GetObjectClass(activity);
+  jmethodID method = nullptr;
+  jstring name = nullptr;
+  if (cls != nullptr && !env->ExceptionCheck()) {
+    method = env->GetStaticMethodID(cls, "setNextSaveDialogSuggestedFilename", "(Ljava/lang/String;)V");
+  }
+  if (env->ExceptionCheck()) {
+    env->ExceptionClear();
+    method = nullptr;
+  }
+  if (method != nullptr) {
+    name = env->NewStringUTF(filename != nullptr ? filename : "");
+    if (env->ExceptionCheck()) {
+      env->ExceptionClear();
+      name = nullptr;
+    }
+    if (name != nullptr) {
+      env->CallStaticVoidMethod(cls, method, name);
+      if (env->ExceptionCheck()) {
+        env->ExceptionClear();
+      }
+    }
+  }
+  if (name != nullptr) {
+    env->DeleteLocalRef(name);
+  }
+  if (cls != nullptr) {
+    env->DeleteLocalRef(cls);
+  }
+  env->DeleteLocalRef(activity);
+}
+#endif
+
 void OpenCardDialog(CardPick pick) {
   int windowCount = 0;
   SDL_Window** windows = SDL_GetWindows(&windowCount);
@@ -4472,6 +4542,11 @@ void OpenCardDialog(CardPick pick) {
     location = sCardExportQueue.empty()
                    ? std::string()
                    : PortGci::PathString(sCardExportQueue.front().filename());
+#if defined(__ANDROID__)
+    // SDL's Android save picker ignores its initial-location argument. Hand the
+    // current queue member's basename to its Java dialog instead.
+    SetNextAndroidSaveDialogFilename(location.c_str());
+#endif
     SDL_ShowSaveFileDialog(done, userdata, window, nullptr, 0,
                            location.empty() ? nullptr : location.c_str());
     break;
@@ -6322,13 +6397,19 @@ void DrawControlsController() {
     }
     ImGui::EndDisabled();
   }
-  if (SDL_Gamepad* pad = PADGetSDLGamepadForIndex(0);
-      pad != nullptr && SDL_IsJoystickVirtual(SDL_GetGamepadID(pad))) {
-    // Aurora ignores mappings on the virtual touch pad.
+  const s32 controllerIndex = PADGetIndexForPort(PAD_CHAN0);
+  if (SDL_Gamepad* pad = controllerIndex >= 0 ? PADGetSDLGamepadForIndex(static_cast< u32 >(controllerIndex)) : nullptr;
+      pad != nullptr && SDL_IsJoystickVirtual(SDL_GetGamepadID(pad)) && !PortVr::OpenXRIsRunning()) {
+    // Aurora ignores mappings on the virtual touch pad. PortVr: Gamepad mode's
+    // "OpenXR Controllers" is virtual too, but Remap and the dead zones apply to it
+    // while the game runs (Aurora saves no mapping for a virtual pad).
     ImGui::TextWrapped("The touch controls always use the GameCube layout; presets and remaps apply to "
                        "real controllers only.");
   } else {
     PortControls::DrawDeadZones();
+    if (pad != nullptr && SDL_IsJoystickVirtual(SDL_GetGamepadID(pad))) {
+      ImGui::TextDisabled("OpenXR Controllers: dead zones last until the game closes.");
+    }
   }
 }
 
@@ -6803,6 +6884,72 @@ void DrawSettingsSection() {
   ImGui::PushStyleColor(ImGuiCol_Text, ImGui::GetStyleColorVec4(ImGuiCol_TextDisabled));
   ImGui::TextWrapped("File: %s", path.c_str());
   ImGui::PopStyleColor();
+
+  static std::string sResetError;
+  if (ImGui::Button("Reset configuration...")) {
+    sResetError.clear();
+    ImGui::OpenPopup("Reset configuration?");
+  }
+  ImGui::SetItemTooltip("Back up and clear every port setting and control mapping.");
+  if (ImGui::BeginPopupModal("Reset configuration?", nullptr, ImGuiWindowFlags_AlwaysAutoResize)) {
+    ImGui::PushTextWrapPos(ImGui::GetFontSize() * 30.0f);
+    ImGui::TextUnformatted("This resets ALL port settings and control mappings (keyboard, mouse, touch and "
+                           "controllers) to their defaults on the next launch. The current files are moved to a "
+                           "backup folder inside the user folder, not deleted.");
+    ImGui::TextUnformatted("Save files, save states, mods, the disc image and the data folder location are not "
+                           "touched, and neither is the disc image path. Game options (invert Y, volumes...) stored "
+                           "inside a save file come back when that save loads.");
+    ImGui::TextUnformatted("The game closes now: progress since the last save station is lost. Start it again to "
+                           "get the defaults.");
+    if (!sResetError.empty()) {
+      ImGui::PushStyleColor(ImGuiCol_Text, ThemeBadColor());
+      ImGui::TextWrapped("Reset failed: %s", sResetError.c_str());
+      ImGui::PopStyleColor();
+    }
+    ImGui::PopTextWrapPos();
+    if (ImGui::Button("Reset and exit")) {
+      // Back up what is current, not what was last saved; a failed write stops here.
+      sSettingsDirty = true;
+      // PrimedGun: take what the launcher wrote since the last poll first, as
+      // DrawUI's save does, so the backup keeps it.
+      PollSettingsFile(true);
+      SaveSettings();
+      if (sSettingsDirty) {
+        sResetError = "could not save the current settings first, so nothing was moved.";
+      } else {
+        const std::string& folder = PortPaths::UserFolder();
+        const PortConfigReset::Result result =
+            PortConfigReset::Reset(PortConfigReset::detail::FromUtf8Path(folder.empty() ? "./" : folder));
+        if (!result.ok) {
+          sResetError = result.error;
+          if (!result.backupDir.empty()) {
+            sResetError += " Files that could not be restored are in " + result.backupDir + ".";
+          } else {
+            sResetError += " Your configuration files were not moved.";
+          }
+          PortLog::Write("port: reset configuration failed: %s\n", result.error.c_str());
+        } else {
+          PortLog::Write("port: reset configuration: %s\n",
+                         result.moved ? ("backup in " + result.backupDir).c_str() : "no files to move");
+          // From here no code path may write the configuration again.
+          sConfigReset = true;
+          aurora_disable_config_persistence();
+          if (ImGui::GetCurrentContext() != nullptr) {
+            ImGui::GetIO().IniFilename = nullptr;
+          }
+          SDL_Event quit{};
+          quit.type = SDL_EVENT_QUIT;
+          SDL_PushEvent(&quit);
+          ImGui::CloseCurrentPopup();
+        }
+      }
+    }
+    ImGui::SameLine();
+    if (ImGui::Button("Cancel")) {
+      ImGui::CloseCurrentPopup();
+    }
+    ImGui::EndPopup();
+  }
 }
 
 // The connection page of the Archipelago tab: the Connect form, recent games,

@@ -119,6 +119,26 @@ void wgpu_log(wgpu::LoggingType type, wgpu::StringView message) {
   Log.report(wgpu_log_level(type), "WebGPU message: {}", message);
 }
 
+#if defined(WEBGPU_DAWN) && defined(__ANDROID__) && defined(WGPU_DAWN_RENDER_PASS_MULTIVIEW_INIT)
+// Multiview is left off on an Adreno 6xx (Quest 2 and Quest Pro, Adreno 650): there the
+// impact particles of a charged shot came out as green and red blocks under multiview and
+// were right in a pass per eye (a Quest 2 player, 2026-10-09; the Quest 3's Adreno 740
+// draws them right either way). MP_MULTIVIEW_ADRENO6=1 takes it anyway, to test a fix.
+bool multiview_unsafe_on_adapter() noexcept {
+  if (const char* force = std::getenv("MP_MULTIVIEW_ADRENO6"); force != nullptr && *force == '1') {
+    return false;
+  }
+  // Device names look like "Adreno (TM) 650": the model is the first number after "Adreno".
+  const std::string_view device{g_adapterInfo.device};
+  const size_t adreno = device.find("Adreno");
+  if (adreno == std::string_view::npos) {
+    return false;
+  }
+  const size_t model = device.find_first_of("0123456789", adreno);
+  return model != std::string_view::npos && device[model] == '6';
+}
+#endif
+
 struct ResampleUniformBlock {
   uint32_t samplerMode = 0;
   float frameWidth = 0.f;
@@ -1130,8 +1150,13 @@ static bool initialize_once(AuroraBackend auroraBackend, bool allowCpu) {
       // render pass (gfx/stereo_multiview.hpp).
       if (g_config.xrInterop && g_backendType == wgpu::BackendType::Vulkan &&
           feature == wgpu::FeatureName::DawnMultiview) {
-        requiredFeatures.push_back(feature);
-        g_multiviewSupported = true;
+        if (multiview_unsafe_on_adapter()) {
+          Log.info("Vulkan multiview left off on {}: a pass per eye (MP_MULTIVIEW_ADRENO6=1 forces it)",
+                   std::string_view{g_adapterInfo.device});
+        } else {
+          requiredFeatures.push_back(feature);
+          g_multiviewSupported = true;
+        }
       }
 #endif
 #endif

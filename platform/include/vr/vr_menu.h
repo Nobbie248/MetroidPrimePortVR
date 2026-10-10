@@ -283,6 +283,7 @@ struct View {
     int state_slot = 1;          // PortSaveState's selected slot
     bool standalone = false;     // a standalone headset (Quest): its own CONFIG rows
     bool foveation_live = false; // this session has density maps: a level applies at once
+    bool multiview_available = true; // false on a GPU Aurora keeps on a pass per eye (Adreno 6xx)
     bool in_game = false;        // a game is running (the cheats need one)
     bool invulnerable = false;
     bool streamed_audio = true;
@@ -680,7 +681,7 @@ inline Row PortRow(const State& s, const PortVrSettings& v, const View& view, Po
     case PortItem::LeanBack:
         return {"LEAN BACK", FloatText(v.lean_back_degrees, 1)};
     case PortItem::Multiview:
-        return {"MULTIVIEW EYES", OnOff(v.multiview)};
+        return {"MULTIVIEW EYES", view.multiview_available ? OnOff(v.multiview) : "UNAVAILABLE"};
     case PortItem::DirectPresent:
         return {"DIRECT TO HEADSET - NEXT START", OnOff(v.direct_present)};
     case PortItem::Pipelined:
@@ -1588,7 +1589,9 @@ inline void Activate(State& s, PortVrSettings& v, const View& view, double now, 
             v.scan_zoom = !v.scan_zoom;
             break;
         case PortItem::Multiview:
-            v.multiview = !v.multiview;
+            if (view.multiview_available) {
+                v.multiview = !v.multiview;
+            }
             break;
         case PortItem::DirectPresent:
             v.direct_present = !v.direct_present;

@@ -1,3 +1,33 @@
+## VR: no multiview on an Adreno 6xx (Quest 2, Quest Pro) (2026-10-10)
+
+A Quest 2 player (alpha.1) saw green and red blocks among the particles of a
+charged shot's impact (Frigate wall): solid squares of 2x3 to 17x12 pixels in
+his video, off any grid and moving with the sparks, so drawn content rather
+than video damage. The same impact (PART 88576FD3, the charged Power Beam's
+default collision effect) played on the Quest 3 through the console (`fx
+88576FD3 4`, frozen with `fx timescale 0` at four moments) drew right on
+alpha.2 and on the branch head. On the Quest 2, MULTIVIEW EYES off made it
+right too: the bug is in what the Adreno 650 (driver 512.819.0, 04/2025)
+makes of our multiview shaders, which the Quest 3's Adreno 740 draws right.
+Particles fetch their vertices from storage buffers in the shader, while the
+world's resident geometry has native vertex input, which may be why only they
+broke; not confirmed.
+
+Aurora now leaves the DawnMultiview feature off on any Adreno 6xx
+(`multiview_unsafe_on_adapter` in webgpu/gpu.cpp), so the eyes take a pass
+each, as with the setting off, whatever the saved `vr_multiview` says (alpha.1
+players already have `vr_multiview=1` saved). The log says "Vulkan multiview
+left off on Adreno (TM) 650". `MP_MULTIVIEW_ADRENO6=1` takes multiview anyway,
+to try a fix on that GPU. The in-headset menu shows MULTIVIEW EYES as
+UNAVAILABLE there (and ignores the click); the F1 VR tab already greys the
+checkbox out when Aurora reports no multiview; the Quest launcher's note says
+so.
+
+Cost: multiview saved about 2 ms of GPU time per frame on the Quest 3; the
+Quest 2's cost in a pass per eye is not measured (its log showed 90 Hz with
+GPU 50-90 % busy under multiview). Untried: the clamped storage loads
+(`storage_clamp=1`) under multiview on the Quest 2, which might keep multiview.
+
 ## Merged upstream port 20ef08e3 (2026-10-10)
 
 Upstream's 19 commits since bc73f39f (2026-10-10 13:38 to 22:29): an Active

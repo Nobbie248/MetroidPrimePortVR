@@ -223,6 +223,7 @@ VrMenu::View BuildView(Menu& menu, const PortVrSettings& settings, double now) {
     view.standalone = true;
 #endif
     view.foveation_live = aurora_stereo_foveation_available();
+    view.multiview_available = aurora_get_stereo_multiview_available();
     view.in_game = PortDebug::StateManager() != nullptr;
     view.invulnerable = PortDebug::Invulnerable();
     view.streamed_audio = PortDebug::AiAudioEnabled();

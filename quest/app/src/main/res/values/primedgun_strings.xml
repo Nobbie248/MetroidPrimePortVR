@@ -315,7 +315,7 @@
     <string name="primedgun_section_advanced">Advanced</string>
     <string name="primedgun_advanced_note">The renderer\'s own switches, which the PC reaches through the F1 overlay. The defaults are the measured best on a Quest 3.</string>
     <string name="primedgun_multiview">Multiview eyes</string>
-    <string name="primedgun_multiview_note">Both eyes in one render pass.</string>
+    <string name="primedgun_multiview_note">Both eyes in one render pass. A Quest 2 or Quest Pro always draws a pass per eye: under multiview its GPU drew some particles as coloured blocks.</string>
     <string name="primedgun_direct_present">Direct to headset</string>
     <string name="primedgun_direct_present_note">The eyes go straight into the headset\'s images; off, through shared buffers on a second device.</string>
     <string name="primedgun_pipelined_rendering">Pipelined rendering</string>

@@ -47,6 +47,7 @@ struct StereoEyeParams {
   // eye's cant, the eye at the camera's centre, for draws that stand for
   // infinity (AURORA_STEREO_ROUTE_SKY).
   Mat3x4<float> skyViewFromCenter{};
+  Mat3x4<float> floatingHudViewFromCenter{};
 };
 
 // The finished eye image for the sink, as ref-counted handles so a frame in

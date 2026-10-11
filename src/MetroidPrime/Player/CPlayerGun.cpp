@@ -583,7 +583,7 @@ uint sPortGunPrevGeneration = 0;
 
 CTransform4f PortGunRelativePose(const CStateManager& mgr, const CTransform4f& gunWorldXf) {
   const CCameraManager* cameraManager = mgr.GetCameraManager();
-  return cameraManager->GetSimulationCameraTransform(mgr).GetQuickInverse() *
+  return PortVr::VrRoomScaleCameraTransform(cameraManager->GetSimulationCameraTransform(mgr)).GetQuickInverse() *
          CTransform4f::Translate(cameraManager->GetGlobalCameraTranslation(mgr)) * gunWorldXf;
 }
 } // namespace
@@ -608,7 +608,12 @@ void CPlayerGun::Render(const CStateManager& mgr, const CVector3f& pos,
     // The held weapon and its muzzle effects are cached at simulation time.
     // Render their relative pose against that same camera, not an interpolated
     // world camera from a different tick. Projectile simulation is unchanged.
-    const CTransform4f simView = mgr.GetCameraManager()->GetSimulationCameraTransform(mgr);
+    CTransform4f simView = mgr.GetCameraManager()->GetSimulationCameraTransform(mgr);
+#ifdef TARGET_PC
+    // Stereo adds the physical head offset to weapon draws too. Use the same
+    // room-scale base as the world, including for camera-relative interpolation.
+    simView = PortVr::VrRoomScaleCameraTransform(simView);
+#endif
     CGraphics::SetViewPointMatrix(simView);
 #ifdef TARGET_PC
     // Port: between ticks, blend the gun's pose relative to the camera (bob,

@@ -1593,6 +1593,17 @@ int CPlayer::GetNextBallTransitionAnim(float dt, bool& loop, CStateManager& mgr)
 void CPlayer::TransitionToMorphBallState(float dt, CStateManager& mgr) {
 #ifdef TARGET_PC
   PortVr::VrBeginBallCamera(mgr.GetCameraManager()->GetCurrentCameraTransform(mgr));
+  if (PortVr::VrImmersive() && !mgr.GetCameraManager()->IsInCinematicCamera()) {
+    // The animation and ball camera start from the same captured HMD heading.
+    // Capture above before turning the body: stereo still supplies head yaw.
+    const CVector3f facing = PortVr::VrBallCameraEntryDirection();
+    if (facing.CanBeNormalized()) {
+      SetTransform(CTransform4f::LookAt(GetTranslation(), GetTranslation() + facing, CVector3f::Up()));
+      // Her first visible transition frame is already facing the headset;
+      // actor interpolation must not ease from the old, hidden body heading.
+      PortSnapshotRenderTransform();
+    }
+  }
 #endif
   x584_ballTransitionAnim = ChoseTransitionToAnimation(dt, mgr);
   x58c_transitionVel = GetVelocityWR().Magnitude();

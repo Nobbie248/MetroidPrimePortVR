@@ -359,7 +359,7 @@ void VrLookTargetUpdate(CStateManager& mgr, const CPlayer& player) noexcept {
     }
     CVector3f origin;
     CVector3f direction;
-    const CTransform4f camera = player.GetFirstPersonCameraTransform(mgr);
+    const CTransform4f camera = VrRoomScaleCameraTransform(player.GetFirstPersonCameraTransform(mgr));
     if (!(cannonTargeting ? VrCannonAim(player, camera, origin, direction)
                          : VrHeadGaze(camera, origin, direction))) {
         return;

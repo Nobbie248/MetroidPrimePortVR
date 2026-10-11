@@ -477,13 +477,11 @@ void LauncherWindow::ShowSetupNotes() {
   contentLayout->setContentsMargins(14, 12, 14, 12);
   auto* notes = new QLabel(
       tr(R"(<ul style="margin: 0; padding-left: 22px;">
-<li>Meta's own OpenXR environment is not recommended; try SteamVR or Virtual Desktop instead.</li>
 <li>Select your Metroid Prime USA 1.00 or PAL (experimental) disc image (ISO, NKit ISO, RVZ or CISO), then press Play.</li>
 <li>Check the Layout tab for controller bindings.</li>
 <li>To bring over your PrimedGun saves and settings, use Transfer PrimedGun Memory Card / Settings on this tab. Select your game first: a PAL disc uses the EUR card.</li>
 <li>Save states do not carry over from PrimedGun on Dolphin. Make sure to save normally before you transfer.</li>
 <li>Once in game, click the right stick to set your height.</li>
-<li>Try to stay in the centre of your play space and face forward, this mod is not roomscaled.</li>
 <li>Settings changed here while the game runs apply in game at once (Enable VR waits for the next start). Changes made in game with F1 or the headset's menu show here too.</li>
 <li>Use Save Settings after changing PrimedGun options; Play saves them too.</li>
 </ul>)"),

@@ -1849,6 +1849,9 @@ void CPlayer::Think(float dt, CStateManager& mgr) {
   UpdatePhazonDamage(dt, mgr);
   PublishWheelState(*this, mgr);
   PortVrSnapTurn(mgr);
+#ifdef TARGET_PC
+  PortVr::VrRoomScaleUpdate(mgr, *this, dt);
+#endif
   if (!MouseControlsAllowed(mgr)) {
     UpdateTouchLook(dt, mgr);
     UpdateFreeLook(dt);

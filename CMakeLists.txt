@@ -749,6 +749,10 @@ if(MP_BUILD_TESTS)
     # Directional movement's heading, stick reading and speed ramp
     # (platform/include/vr/vr_directional_move.h): header-only, no game types.
     add_executable(port_vr_directional_move_tests tests/port_vr_directional_move.cpp)
+    add_executable(port_vr_room_scale_tests tests/port_vr_room_scale.cpp)
+    target_include_directories(port_vr_room_scale_tests PRIVATE platform/include)
+    add_test(NAME port_vr_room_scale_tests COMMAND port_vr_room_scale_tests)
+    set_tests_properties(port_vr_room_scale_tests PROPERTIES TIMEOUT 15 LABELS port)
     target_include_directories(port_vr_directional_move_tests PRIVATE platform/include)
     # Drives a real SDL virtual gamepad through the touch overlay's own code.
     # That code was Android-only and untested, so a wrong button mapping could

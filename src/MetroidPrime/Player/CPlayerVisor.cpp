@@ -822,7 +822,7 @@ void CPlayerVisor::UpdateScanObjectIndicators(const CStateManager& mgr, float dt
           // for; VrHeadGaze leaves camPos at the camera otherwise.
           CVector3f camPos = camera.GetTranslation();
           CVector3f portGaze;
-          PortVr::VrHeadGaze(camera.GetTransform(), camPos, portGaze);
+          PortVr::VrHeadGaze(mgr.GetCameraManager()->GetCurrentCameraTransform(mgr), camPos, portGaze);
           const CVector3f toTarget = actor->GetOrbitPosition(mgr) - camPos;
           const float len = toTarget.Magnitude();
           bool clear = false;

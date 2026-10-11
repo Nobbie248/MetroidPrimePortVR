@@ -8,11 +8,16 @@
 #include "vr/vr_beam_wheel.h"
 #include "vr/vr_pad.h"
 #include "vr/vr_settings.h"
+#include "vr/vr_room_scale.h"
 #include "port_surface_culling_math.h"
 
 #include "Kyoto/Math/CFrustumPlanes.hpp"
 #include "Kyoto/Math/CQuaternion.hpp"
 #include "MetroidPrime/CStateManager.hpp"
+#include "MetroidPrime/CGameCollision.hpp"
+#include "Collision/CCollisionInfo.hpp"
+#include "Collision/CCollisionPrimitive.hpp"
+#include "WorldFormat/CMetroidAreaCollider.hpp"
 #include "MetroidPrime/Cameras/CCameraManager.hpp"
 #include "MetroidPrime/Player/CPlayer.hpp"
 
@@ -45,6 +50,7 @@ float s_ballEntryYaw = 0.f;
 CVector3f s_ballEntryDirection(0.f, 1.f, 0.f);
 CTransform4f s_unmorphBase = CTransform4f::Identity();
 CVector3f s_unmorphOffset = CVector3f::Zero();
+RoomScale::State s_roomScale;
 
 bool ImmersiveNow() noexcept {
     if (!OpenXRIsRunning()) {
@@ -87,6 +93,16 @@ bool HeadRotation(CTransform4f& rotation) noexcept {
     return true;
 }
 
+CVector3f RoomScaleOffset(const OpenXRFrameRequest& request) noexcept {
+    if (!s_roomScale.valid || !request.immersive || !request.base_valid ||
+        request.tracking_origin_generation != s_roomScale.generation) {
+        return CVector3f::Zero();
+    }
+    const float lean = GetVrSettings().lean_back_degrees * kDegreesToRadians;
+    return AxisQuaternion(1.f, 0.f, 0.f, -lean).Transform(PrimeFromXr(s_roomScale.consumed)) *
+           request.units_per_meter;
+}
+
 CQuaternion Nlerp(const CQuaternion& from, CQuaternion to, float t) noexcept {
     if (CQuaternion::Dot(from, to) < 0.f) {
         to = CQuaternion(-to.GetScalar(), -to.GetVector());
@@ -100,6 +116,79 @@ CQuaternion Nlerp(const CQuaternion& from, CQuaternion to, float t) noexcept {
 } // namespace
 
 bool VrImmersive() noexcept { return ImmersiveNow(); }
+
+CTransform4f VrRoomScaleCameraTransform(const CTransform4f& cameraXf) noexcept {
+    OpenXRFrameRequest request{};
+    if (!ImmersiveNow() || !OpenXRLatestFrameRequest(request)) {
+        return cameraXf;
+    }
+    CTransform4f result = cameraXf;
+    result.SetTranslation(cameraXf.GetTranslation() - cameraXf.Rotate(RoomScaleOffset(request)));
+    return result;
+}
+
+void VrRoomScaleUpdate(CStateManager& mgr, CPlayer& player, float dt) noexcept {
+    OpenXRFrameRequest request{};
+    const bool tracked = ImmersiveNow() && OpenXRLatestFrameRequest(request) &&
+                         request.immersive && request.head_valid && request.base_valid;
+    const bool enabled = tracked && GetVrSettings().room_scale && dt > 0.f &&
+                         mgr.GetGameState() == CStateManager::kGS_Running &&
+                         PrimeVRPolicyGetSnapshot().game_mode == VRGameMode::InGame &&
+                         !mgr.GetCameraManager()->IsInCinematicCamera() &&
+                         player.GetMorphballTransitionState() == CPlayer::kMS_Unmorphed &&
+                         player.GetCameraState() == CPlayer::kCS_FirstPerson &&
+                         !player.GetControlsFrozen() && !player.IsAttached() &&
+                         player.GetGrappleState() == CPlayer::kGS_None && player.GetDeathTime() == 0.f;
+    const auto step = s_roomScale.Update(tracked, enabled, request.tracking_origin_generation,
+                                        request.head_position, request.base_position);
+    if (!enabled) {
+        return;
+    }
+    // Physical walking is horizontal; height/crouching stays in head tracking.
+    CVector3f remaining = BodyYaw(mgr.GetCameraManager()->GetSimulationCameraTransform(mgr))
+                              .Transform(PrimeFromXr(step) * request.units_per_meter);
+    if (!remaining.CanBeNormalized()) {
+        return;
+    }
+    const CCollisionPrimitive& prim = *player.GetCollisionPrimitive();
+    CAABox bounds = prim.CalculateAABox(player.GetPrimitiveTransform());
+    bounds.AccumulateBounds(bounds.GetMinPoint() + remaining);
+    bounds.AccumulateBounds(bounds.GetMaxPoint() + remaining);
+    const CVector3f margin(0.2f, 0.2f, 0.2f);
+    CAreaCollisionCache cache(CAABox(bounds.GetMinPoint() - margin, bounds.GetMaxPoint() + margin));
+    CGameCollision::BuildAreaCollisionCache(mgr, cache);
+    TEntityList nearList;
+    mgr.BuildColliderList(nearList, player, cache.GetCacheBounds());
+    // Sweep the full player bounds, then slide along the blocking surface.
+    // Do not alter stick velocity, gravity, jump state or player orientation.
+    for (int slide = 0; slide < 3 && remaining.CanBeNormalized(); ++slide) {
+        const float length = remaining.Magnitude();
+        const CVector3f direction = remaining / length;
+        double distance = length;
+        CCollisionInfo info;
+        TUniqueId hit = kInvalidUniqueId;
+        const bool blocked = CGameCollision::DetectCollision_Cached_Moving(
+            mgr, cache, prim, player.GetPrimitiveTransform(), player.GetMaterialFilter(),
+            nearList, direction, hit, info, distance);
+        const float travel = blocked ? std::clamp(float(distance) - 0.002f, 0.f, length) : length;
+        player.SetTranslation(player.GetTranslation() + direction * travel);
+        if (!blocked) {
+            break;
+        }
+        remaining -= direction * travel;
+        CVector3f normal = info.GetNormalLeft();
+        normal.SetZ(0.f);
+        if (!normal.CanBeNormalized()) {
+            break;
+        }
+        normal.Normalize();
+        const float intoWall = CVector3f::Dot(remaining, normal);
+        if (intoWall >= 0.f) {
+            break;
+        }
+        remaining -= normal * intoWall;
+    }
+}
 
 CTransform4f VrHeadFacingTransform(const CTransform4f& cameraXf) noexcept {
     CTransform4f head = CTransform4f::Identity();
@@ -222,7 +311,10 @@ CTransform4f VrBallCameraBaseTransform(const CTransform4f& camera, float weight)
 
 void VrBeginUnmorphCamera(const CTransform4f& camera, const CVector3f& eyePosition) noexcept {
     s_unmorphBase = camera.GetRotation();
-    s_unmorphOffset = camera.GetTranslation() - eyePosition;
+    OpenXRFrameRequest request{};
+    const CVector3f consumed = OpenXRLatestFrameRequest(request) ? camera.Rotate(RoomScaleOffset(request))
+                                                               : CVector3f::Zero();
+    s_unmorphOffset = camera.GetTranslation() + consumed - eyePosition;
 }
 
 CTransform4f VrUnmorphCameraBase(const CTransform4f& camera) noexcept {
@@ -328,6 +420,10 @@ bool TrackedCannonPose(const CPlayer& player, const CTransform4f& cameraXf,
     std::array<float, 3> base{};
     if (haveRequest && request.base_valid) {
         base = request.base_position;
+        if (s_roomScale.valid && request.tracking_origin_generation == s_roomScale.generation) {
+            base[0] += s_roomScale.consumed[0];
+            base[2] += s_roomScale.consumed[2];
+        }
     } else if (snapshot.head_pose.valid) {
         base = snapshot.head_pose.position;
     }

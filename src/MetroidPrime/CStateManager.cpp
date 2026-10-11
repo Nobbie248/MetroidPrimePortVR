@@ -3765,7 +3765,7 @@ void CStateManager::DrawSpaceWarp(const CVector3f& point, float strength) const 
     CVector3f viewer = curCam.GetTranslation();
     CVector3f headOrigin(CVector3f::Zero());
     CVector3f headDirection(CVector3f::Zero());
-    if (PortVr::VrHeadGaze(curCam.GetTransform(), headOrigin, headDirection)) {
+    if (PortVr::VrHeadGaze(x870_cameraManager->GetCurrentCameraTransform(*this), headOrigin, headDirection)) {
       viewer = headOrigin;
     }
     // At half retail's strength: seen from inside the headset the full warp read as too strong

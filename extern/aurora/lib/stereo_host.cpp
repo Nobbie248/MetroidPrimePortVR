@@ -8,6 +8,7 @@
 #include "gfx/stereo_foveation.hpp"
 #include "gfx/stereo_multiview.hpp"
 #include "gfx/stereo_replay.hpp"
+#include "gfx/floating_hud.hpp"
 #include "gfx/stereo_shadow.hpp"
 #include "gx/fifo.hpp"
 #include "webgpu/fdm.hpp"
@@ -157,6 +158,9 @@ void load_eye(gfx::StereoEyeParams& out, const AuroraStereoEye& eye) noexcept {
 } // namespace
 
 gfx::StereoFrameState begin_frame(uint64_t contentTag) noexcept {
+  static gfx::stereo_replay::FloatingHud floatingHud;
+  static uint64_t floatingTime = 0;
+  static uint64_t floatingTag = 0;
   gfx::StereoFrameState state{};
   if (g_provider == nullptr || g_sink == nullptr) {
     return state;
@@ -212,6 +216,8 @@ gfx::StereoFrameState begin_frame(uint64_t contentTag) noexcept {
     state.eyes[eye].skyViewFromCenter = gfx::stereo_replay::without_translation(state.eyes[eye].viewFromCenter);
   }
   if (packet.mode != AURORA_STEREO_FRAME_IMMERSIVE_REPLAY) {
+    floatingHud.Reset();
+    floatingTime = 0;
     return state;
   }
   if (!g_immersiveReplay.load(std::memory_order_relaxed)) {
@@ -227,6 +233,21 @@ gfx::StereoFrameState begin_frame(uint64_t contentTag) noexcept {
                packet.contentTag, contentTag);
     }
     return state;
+  }
+  // The floating HUD plane is separate from the fixed menu/cinema screen.
+  // Average the two eye poses to get the complete tracked head pose, ease it,
+  // then compose each actual eye against it (retaining stereo disparity).
+  const auto headPose = gfx::stereo_replay::center_head_pose(state.eyes[0].viewFromCenter,
+                                                           state.eyes[1].viewFromCenter);
+  if (floatingTag != packet.contentTag) floatingHud.Reset();
+  const float followDt = floatingTime != 0 && packet.displayTimeNanos >= floatingTime
+                            ? float(double(packet.displayTimeNanos - floatingTime) * 1.e-9)
+                            : 1.f / 60.f;
+  const auto floatingPose = floatingHud.Update(headPose, followDt);
+  floatingTime = packet.displayTimeNanos;
+  floatingTag = packet.contentTag;
+  for (auto& eye : state.eyes) {
+    eye.floatingHudViewFromCenter = gfx::stereo_replay::compose_affine(eye.viewFromCenter, floatingPose);
   }
   // Both eyes in one render pass when the device and the frame allow it
   // (gfx/stereo_multiview.hpp).

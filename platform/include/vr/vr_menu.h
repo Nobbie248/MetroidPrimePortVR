@@ -360,6 +360,7 @@ enum class PortItem : uint8_t {
     LookToGrapple,
     LookLockNoCameraTurn,
     BeamWheelHighlight,
+    RoomScale,
     Reset,
 };
 
@@ -403,6 +404,7 @@ inline PortList PortItems(const View& view) {
     add(PortItem::LookToGrapple);
     add(PortItem::LookLockNoCameraTurn);
     add(PortItem::BeamWheelHighlight);
+    add(PortItem::RoomScale);
     add(PortItem::Reset);
     return list;
 }
@@ -700,6 +702,8 @@ inline Row PortRow(const State& s, const PortVrSettings& v, const View& view, Po
         return {"NO CAMERA TURN ON LOCK", OnOff(v.look_lock_no_camera_turn)};
     case PortItem::BeamWheelHighlight:
         return {"BEAM WHEEL HUD HIGHLIGHT", OnOff(v.beam_wheel_hud_highlight)};
+    case PortItem::RoomScale:
+        return {"ROOM SCALE", OnOff(v.room_scale)};
     case PortItem::Reset:
         return {"RESET CONFIG", ConfirmText(s, kResetPortConfig)};
     }
@@ -1232,6 +1236,7 @@ inline void ResetPortConfig(PortVrSettings& v) {
     v.look_to_grapple = d.look_to_grapple;
     v.look_lock_no_camera_turn = d.look_lock_no_camera_turn;
     v.beam_wheel_hud_highlight = d.beam_wheel_hud_highlight;
+    v.room_scale = d.room_scale;
 }
 
 // A CONFIG choice one step on: -1 or +1, clamped at the ends for the
@@ -1619,6 +1624,9 @@ inline void Activate(State& s, PortVrSettings& v, const View& view, double now, 
             break;
         case PortItem::BeamWheelHighlight:
             v.beam_wheel_hud_highlight = !v.beam_wheel_hud_highlight;
+            break;
+        case PortItem::RoomScale:
+            v.room_scale = !v.room_scale;
             break;
         case PortItem::Reset:
             if (ConfirmReset(s, reset_action, now)) {

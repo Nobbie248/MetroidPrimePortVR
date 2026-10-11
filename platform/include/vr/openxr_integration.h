@@ -138,6 +138,7 @@ struct OpenXRFrameRequest {
     std::array<std::array<float, 4>, 2> eye_fov{}; // left, right, up, down angles (radians)
     std::array<float, 3> base_position{};
     bool base_valid = false;
+    uint64_t tracking_origin_generation = 0;
 };
 
 // Blocks until the pacing thread publishes a request newer than request.serial,

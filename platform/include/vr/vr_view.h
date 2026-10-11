@@ -30,6 +30,11 @@ namespace PortVr {
 // eye rather than on the virtual screen).
 bool VrImmersive() noexcept;
 
+// Horizontal physical walking moves the collision body. Rendering subtracts
+// the consumed tracking displacement because stereo replay adds it again.
+void VrRoomScaleUpdate(CStateManager& mgr, CPlayer& player, float dt) noexcept;
+CTransform4f VrRoomScaleCameraTransform(const CTransform4f& cameraXf) noexcept;
+
 // `cameraXf` with the head's rotation (relative to the recentred base)
 // composed in; `cameraXf` itself when not immersive or the head is unknown.
 CTransform4f VrHeadFacingTransform(const CTransform4f& cameraXf) noexcept;

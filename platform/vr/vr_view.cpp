@@ -131,7 +131,7 @@ void VrRoomScaleUpdate(CStateManager& mgr, CPlayer& player, float dt) noexcept {
     OpenXRFrameRequest request{};
     const bool tracked = ImmersiveNow() && OpenXRLatestFrameRequest(request) &&
                          request.immersive && request.head_valid && request.base_valid;
-    const bool enabled = tracked && GetVrSettings().experimental_room_scale && dt > 0.f &&
+    const bool enabled = tracked && GetVrSettings().room_scale && dt > 0.f &&
                          mgr.GetGameState() == CStateManager::kGS_Running &&
                          PrimeVRPolicyGetSnapshot().game_mode == VRGameMode::InGame &&
                          !mgr.GetCameraManager()->IsInCinematicCamera() &&

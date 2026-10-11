@@ -230,7 +230,7 @@ const Field kFields[] = {
     VR_BOOL(combat_jump_use_primary_button),
     VR_BOOL(gun_targeting_enabled),
     VR_BOOL(cannon_targeting),
-    VR_BOOL(experimental_room_scale),
+    VR_BOOL(room_scale),
     VR_FLOAT(gun_targeting_distance, 1.0f, 200.0f),
     VR_FLOAT(gun_targeting_radius, 0.1f, 25.0f),
     VR_BOOL(visor_helmet_enabled),

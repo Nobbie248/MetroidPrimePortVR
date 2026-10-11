@@ -333,8 +333,8 @@ void PushVrSettingsToAurora() noexcept {
     // PrimedGun's HUD distance and size: in the native build both are factors
     // of the HUD frame's authored distance and size (0.75 each by default).
     aurora_set_stereo_head_locked(settings.metroid_hud_size, settings.metroid_hud_distance);
-    // The morph ball's HUD is laid on the virtual screen menus and cinematics
-    // show on (AURORA_STEREO_ROUTE_SCREEN_2D), in game units ahead of the camera.
+    // The floating morph-ball HUD uses the menu screen's size and distance,
+    // with its own delayed headset pose (AURORA_STEREO_ROUTE_FLOATING_HUD).
     aurora_set_stereo_screen_2d(settings.screen_width_meters, settings.screen_distance_meters, settings.world_scale);
     // The pacing thread asks the runtime again when this changes.
     OpenXRSetDisplayRefreshRate(settings.display_refresh_rate);

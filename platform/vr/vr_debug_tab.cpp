@@ -319,8 +319,8 @@ void DrawVrDebugTab() {
   ImGui::SeparatorText("Virtual screen (menus, cinematics, morph ball HUD)");
   changed |= ImGui::SliderFloat("Screen distance", &s.screen_distance_meters, 0.5f, 5.f, "%.2f m");
   changed |= ImGui::SliderFloat("Screen width", &s.screen_width_meters, 0.5f, 6.f, "%.2f m");
-  ImGui::TextWrapped("In the morph ball the HUD hangs on this screen, ahead of where the game camera faces, rather "
-                     "than on the head.");
+  ImGui::TextWrapped("The morph-ball HUD uses this size and distance, floating toward the headset's "
+                     "position and facing with a gentle delay.");
   changed |= ImGui::Checkbox("Cinematics on the screen", &s.cinematic_screen_enabled);
   changed |= ImGui::Checkbox("Pause, map and logbook on the screen", &s.game_menu_screen_enabled);
 

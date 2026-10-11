@@ -66,7 +66,7 @@ struct FrameRecorder {
   uint32_t drawCallCount = 0;
   // Draws recorded under each stereo route this frame (AURORA_STEREO_ROUTE_*), for the
   // diagnostics line (log_stereo_frame_stats).
-  std::array<uint32_t, 8> routeDrawCounts{};
+  std::array<uint32_t, 9> routeDrawCounts{};
   uint32_t mergedDrawCallCount = 0;
   uint32_t renderPassCount = 0;
   bool inOffscreen = false;
@@ -550,7 +550,7 @@ void push_command(CommandType type, const Command::Data& data) {
 // Inline payload helpers: draw_payload.hpp (shared with the stereo eye encoder).
 
 void push_draw_command(DrawCommand data) {
-  ++g_recorder.routeDrawCounts[g_recorder.stereoRoute & 7];
+  ++g_recorder.routeDrawCounts[std::min<size_t>(g_recorder.stereoRoute, g_recorder.routeDrawCounts.size() - 1)];
   push_command(CommandType::Draw, Command::Data{.draw = data});
   ++g_recorder.drawCallCount;
 }
@@ -1318,7 +1318,8 @@ std::array<uint32_t, 2> stage_stereo_uniforms(const uint8_t* mono, Range monoRan
   // picture's aspect, and the draw's viewport keeps its place in that picture.
   stereo_replay::HudScreen screen{};
   stereo_replay::HudNdcRemap screenNdc{};
-  if (route == AURORA_STEREO_ROUTE_SCREEN_2D && monoSize.width != 0 && monoSize.height != 0) {
+  const bool screenRoute = route == AURORA_STEREO_ROUTE_SCREEN_2D || route == AURORA_STEREO_ROUTE_FLOATING_HUD;
+  if (screenRoute && monoSize.width != 0 && monoSize.height != 0) {
     const float width = static_cast<float>(monoSize.width);
     const float height = static_cast<float>(monoSize.height);
     screen = {
@@ -1333,7 +1334,7 @@ std::array<uint32_t, 2> stage_stereo_uniforms(const uint8_t* mono, Range monoRan
   const bool onScreen = screen.valid();
   // 2D content and full-screen effects: the same uniform in both eyes.
   const std::array<uint32_t, 2> same{monoRange.offset, monoRange.offset};
-  if (route == AURORA_STEREO_ROUTE_FULLSCREEN || (route == AURORA_STEREO_ROUTE_SCREEN_2D && !onScreen)) {
+  if (route == AURORA_STEREO_ROUTE_FULLSCREEN || (screenRoute && !onScreen)) {
     return state.multiview ? stage_eye_clips({monoProjection, monoProjection}, false) : same;
   }
   // An orthographic draw is 2D content, identical in both eyes, unless its
@@ -1359,7 +1360,9 @@ std::array<uint32_t, 2> stage_stereo_uniforms(const uint8_t* mono, Range monoRan
     for (uint32_t eye = 0; eye < AURORA_STEREO_EYE_COUNT; ++eye) {
       const auto& params = state.eyes[eye];
       if (onScreen) {
-        clips[eye] = stereo_replay::compose_screen_2d_projection(params.projection, params.viewFromCenter, screen,
+        const auto& screenView = route == AURORA_STEREO_ROUTE_FLOATING_HUD ? params.floatingHudViewFromCenter
+                                                                         : params.viewFromCenter;
+        clips[eye] = stereo_replay::compose_screen_2d_projection(params.projection, screenView, screen,
                                                                  monoProjection, screenNdc);
       } else if (onPlane) {
         clips[eye] = stereo_replay::compose_head_locked_2d_projection(
@@ -1409,10 +1412,12 @@ std::array<uint32_t, 2> stage_stereo_uniforms(const uint8_t* mono, Range monoRan
     const float renderScaleY =
         monoSize.height != 0 ? static_cast<float>(params.height) / static_cast<float>(monoSize.height) : 1.0f;
     if (onScreen) {
+      const auto& screenView = route == AURORA_STEREO_ROUTE_FLOATING_HUD ? params.floatingHudViewFromCenter
+                                                                       : params.viewFromCenter;
       compose_stereo_screen_2d_uniform(scratch.data(), layout,
                                        StereoEyeScreenCompose{
                                            .projection = &params.projection,
-                                           .viewFromCenter = &params.viewFromCenter,
+                                           .viewFromCenter = &screenView,
                                            .screen = screen,
                                            .ndcRemap = screenNdc,
                                            .renderScaleX = renderScaleX,

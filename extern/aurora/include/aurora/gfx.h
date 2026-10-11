@@ -118,6 +118,8 @@ typedef enum AuroraStereoDrawRoute {
   // units centred on the camera, pushed into the far depth range): the eyes see it with the head's rotation
   // only, no eye offset, so it has no disparity and does not shift when the head moves.
   AURORA_STEREO_ROUTE_SKY = 7,
+  // Detached 2D plane that gently follows the full headset pose (morph-ball HUD).
+  AURORA_STEREO_ROUTE_FLOATING_HUD = 8,
 } AuroraStereoDrawRoute;
 // AURORA_STEREO_ROUTE_HEAD_LOCKED draws are scaled about the camera origin
 // before the eye offset: sizeScale sets their angular size, distanceScale

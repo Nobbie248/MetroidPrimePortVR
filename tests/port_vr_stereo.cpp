@@ -436,6 +436,33 @@ int main() {
     Check(Near(out0.m0[3], 1.032f), "without a fixed slot every position matrix takes it");
   }
 
+  // A held weapon must use the world's compensated room-scale view. Stereo
+  // adds head translation to both draw passes; a raw simulation view would
+  // leave the weapon behind by the distance already walked by the body.
+  {
+    for (float walk : {-1.5f, 0.f, 1.5f}) {
+      for (float body : {walk, 0.f}) { // free walking and a collision-blocked step
+        const float handFromHead = 0.3f;
+        const float gunWorld = body + handFromHead;
+        const float renderBase = body - walk;
+        const auto gunInBase = Affine(1, 0, 0, gunWorld - renderBase,
+                                     0, 1, 0, 0, 0, 0, 1, -0.6f);
+        for (float eyeOffset : {-0.032f, 0.032f}) {
+          auto weapon = uniform;
+          std::memcpy(weapon.data() + layout.positionOffset, &gunInBase, sizeof(gunInBase));
+          const auto trackedEye = Affine(1, 0, 0, -walk - eyeOffset,
+                                        0, 1, 0, 0, 0, 0, 1, 0);
+          compose_stereo_uniform(weapon.data(), layout,
+                                StereoEyeCompose{&projection, &trackedEye, 1.f, 1.f, 1.f, 1.f});
+          Mat3x4<float> result;
+          std::memcpy(&result, weapon.data() + layout.positionOffset, sizeof(result));
+          Check(Near(result.m0[3], handFromHead - eyeOffset),
+                "room-scale weapon stays at the hand after walking or wall blocking");
+        }
+      }
+    }
+  }
+
   std::puts("port_vr_stereo_tests: ok");
   return 0;
 }

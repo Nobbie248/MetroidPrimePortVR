@@ -220,6 +220,9 @@ void DrawVrDebugTab() {
   ImGui::TextWrapped("Off, the scan window shows the view behind it unmagnified, keeping its frame.");
 
   ImGui::SeparatorText("Look targeting");
+  changed |= ImGui::Checkbox("Experimental Room Scale", &s.experimental_room_scale);
+  ImGui::TextWrapped("Physical walking moves Samus with collision checks in first person. "
+                     "Off by default. Morph ball and cinematics retain their camera movement.");
   changed |= ImGui::Checkbox("Cannon targeting", &s.cannon_targeting);
   ImGui::TextWrapped("Aim the cannon to select combat lock-on and grapple targets and place the combat reticle. "
                      "The scan visor keeps head targeting. Off uses the existing camera/head targeting. "

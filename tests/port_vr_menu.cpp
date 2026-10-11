@@ -371,9 +371,9 @@ void TestConfig() {
   Click(s, v, pc, kLabelX, RowY(kPortConfigTab, 5), now, actions);
   Check(!v.remove_cinematic_bars, "cinematic bars switch");
 
-  // Page 2 ends with RESET CONFIG, two clicks; it leaves PrimedGun's settings alone.
+  // Page 2 includes experimental room scale before reset.
   Click(s, v, pc, kNextX, kPageY, now, actions);
-  Check(s.port_page == 1 && ItemCount(s, pc) == 10, "config page 2");
+  Check(s.port_page == 1 && ItemCount(s, pc) == 11, "config page 2");
   // LOOK TO LOCK-ON, LOOK TO GRAPPLE and NO CAMERA TURN ON LOCK follow LOOK TO SCAN.
   Check(BuildRows(s, v, pc)[4].label == std::string("CANNON TARGETING") &&
             BuildRows(s, v, pc)[5].label == std::string("LOOK TO LOCK-ON") &&
@@ -398,12 +398,19 @@ void TestConfig() {
   Check(!v.look_to_lock_on && !v.look_to_grapple && v.look_lock_no_camera_turn,
         "look to lock-on, grapple and camera turn switches");
   v.metroid_hud_size = 2.0f;
+  Check(!v.experimental_room_scale, "experimental room scale defaults off");
   Click(s, v, pc, kLabelX, RowY(kPortConfigTab, 9), now, actions);
+  Check(v.experimental_room_scale && BuildRows(s, v, pc)[9].label == std::string("EXPERIMENTAL ROOM SCALE"),
+        "experimental room scale toggles on");
+  Click(s, v, pc, kLabelX, RowY(kPortConfigTab, 9), now, actions);
+  Check(!v.experimental_room_scale, "experimental room scale toggles off");
+  v.experimental_room_scale = true;
+  Click(s, v, pc, kLabelX, RowY(kPortConfigTab, 10), now, actions);
   Check(s.reset_confirm == kResetPortConfig && Near(v.render_scale, kVrRenderScaleMax), "reset config armed");
-  Click(s, v, pc, kLabelX, RowY(kPortConfigTab, 9), now, actions);
+  Click(s, v, pc, kLabelX, RowY(kPortConfigTab, 10), now, actions);
   Check(Near(v.render_scale, PortVrSettings{}.render_scale) && v.display_refresh_rate == 0.0f &&
             v.remove_cinematic_bars && v.look_to_lock_on && v.look_to_grapple && !v.look_lock_no_camera_turn &&
-            v.cannon_targeting && Near(v.metroid_hud_size, 2.0f),
+            v.cannon_targeting && !v.experimental_room_scale && Near(v.metroid_hud_size, 2.0f),
         "reset config");
 
   // The Quest: foveation waits for the next start without density maps.

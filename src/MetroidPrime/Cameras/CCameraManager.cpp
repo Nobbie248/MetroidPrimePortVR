@@ -88,12 +88,13 @@ CTransform4f LevelVrBallCamera(const CCameraManager& cameras, const CStateManage
     right.Normalize();
     const CPlayer& player = *mgr.GetPlayer();
     if (player.GetMorphballTransitionState() == CPlayer::kMS_Unmorphing) {
-      return PortVr::VrUnmorphCameraBase(xf);
+      return PortVr::VrRoomScaleCameraTransform(PortVr::VrUnmorphCameraBase(xf));
     }
-    return PortVr::VrBallCameraBaseTransform(
+    return PortVr::VrRoomScaleCameraTransform(PortVr::VrBallCameraBaseTransform(
         CTransform4f::FromColumns(right, CVector3f::Cross(CVector3f::Up(), right),
-                                  CVector3f::Up(), xf.GetTranslation()));
+                                  CVector3f::Up(), xf.GetTranslation())));
   }
+  return PortVr::VrRoomScaleCameraTransform(xf);
 #endif
   return xf;
 }
@@ -277,7 +278,7 @@ void CCameraManager::UpdateAudioListener(CStateManager& mgr) {
   CTransform4f xf = GetCurrentCameraTransform(mgr);
 #ifdef TARGET_PC
   // PortVr: directional audio follows the head, not the body.
-  xf = PortVr::VrHeadFacingTransform(xf);
+  xf = PortVr::VrHeadViewTransform(xf);
 #endif
 
   CSfxManager::UpdateListener(xf.GetTranslation(), CVector3f::Zero(), xf.GetColumn(kDY),

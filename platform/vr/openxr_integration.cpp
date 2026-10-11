@@ -1670,6 +1670,7 @@ private:
         if (position_valid && (!base_position_valid_ || !last_immersive_)) {
             base_position_ = CenterPosition(source.xr_frame);
             base_position_valid_ = true;
+            ++tracking_origin_generation_;
         }
         last_immersive_ = true;
         // Read once so both eyes are built from the same angle even if the
@@ -1885,6 +1886,7 @@ private:
         }
         request.base_position = base_position_;
         request.base_valid = base_position_valid_;
+        request.tracking_origin_generation = tracking_origin_generation_;
         {
             std::lock_guard lock(request_mutex_);
             request.serial = ++request_serial_;
@@ -2115,6 +2117,7 @@ private:
     std::string last_error_;
     std::array<float, 3> base_position_{};
     bool base_position_valid_ = false;
+    uint64_t tracking_origin_generation_ = 0;
     VirtualScreenAnchor virtual_screen_anchor_{};
     bool last_immersive_ = false;
     uint64_t applied_session_run_serial_ = 0;

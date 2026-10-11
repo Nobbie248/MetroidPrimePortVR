@@ -72,7 +72,7 @@ void CVisorFlare::Update(float dt, const CVector3f& pos, const CActor* act, CSta
 
     CTransform4f cameraXf = mgr.GetCameraManager()->GetCurrentCamera(mgr).GetTransform();
 #ifdef TARGET_PC
-    cameraXf = PortVr::VrHeadViewTransform(cameraXf);
+    cameraXf = PortVr::VrHeadViewTransform(mgr.GetCameraManager()->GetCurrentCameraTransform(mgr));
 #endif
     CVector3f camPos = cameraXf.GetTranslation();
     CVector3f camDiff = pos - camPos;
@@ -138,7 +138,7 @@ void CVisorFlare::Render(const CVector3f& inPos, const CStateManager& mgr) const
   const CGameCamera& cam = mgr.GetCameraManager()->GetCurrentCamera(mgr);
   CTransform4f cameraXf = cam.GetTransform();
 #ifdef TARGET_PC
-  cameraXf = PortVr::VrHeadViewTransform(cameraXf);
+  cameraXf = PortVr::VrHeadViewTransform(mgr.GetCameraManager()->GetCurrentCameraTransform(mgr));
 #endif
   CVector3f camPos = cameraXf.GetTranslation();
   CVector3f inPosCopy = inPos;

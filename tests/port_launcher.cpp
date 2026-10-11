@@ -182,6 +182,7 @@ void TestDefaultsMatchGame() {
       {"vr_render_scale", FormatFloat(s.render_scale)},
       {"vr_world_scale", FormatFloat(s.world_scale)},
       {"vr_immersive_replay", FormatBool(s.immersive_replay)},
+      {"vr_experimental_room_scale", FormatBool(s.experimental_room_scale)},
       {"vr_multiview", FormatBool(s.multiview)},
       {"vr_foveation", foveation(s.foveation)},
       {"vr_direct_present", FormatBool(s.direct_present)},

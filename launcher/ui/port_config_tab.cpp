@@ -50,6 +50,9 @@ void BuildPortConfigTab(TabContext& ctx, QTabWidget* tabs) {
       ->setToolTip(QObject::tr("Game units per metre; a larger value makes the world look smaller."));
   ctx.Check(layout, QObject::tr("Draw the world per eye"), "vr_immersive_replay",
             QObject::tr("Off shows the flat game image on the virtual screen."));
+  ctx.Check(layout, QObject::tr("Experimental Room Scale"), "vr_experimental_room_scale",
+            QObject::tr("Physical walking moves Samus with collision checks in first person. "
+                        "Off by default; morph ball and cinematics retain their camera movement."));
   ctx.Combo(layout, QObject::tr("Foveated rendering (Quest)"), "vr_foveation",
             {{QObject::tr("Off"), QStringLiteral("off")},
              {QObject::tr("Low"), QStringLiteral("low")},

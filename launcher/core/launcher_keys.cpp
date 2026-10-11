@@ -31,6 +31,7 @@ constexpr KeyInfo kKeys[] = {
 #endif
     {"vr_world_scale", K::Float, "1.5", 0.5f, 4.0f, 0.05f},
     {"vr_immersive_replay", K::Bool, "1"},
+    {"vr_room_scale", K::Bool, "1"},
     {"vr_multiview", K::Bool, "1"},
     {"vr_foveation", K::Choice, "off", 0, 0, 0, true, true, "off,low,medium,high"},
     {"vr_direct_present", K::Bool, "1"},

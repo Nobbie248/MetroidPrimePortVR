@@ -487,9 +487,9 @@ void CInGameGuiManager::Draw(const CStateManager& mgr) const {
 #ifdef TARGET_PC
     // PortVr: the minimap and its depth mask are drawn in the HUD frame
     // camera's space, so the headset keeps them in front of the head too.
-    // With the morph ball's HUD they go on the virtual screen with it
+    // With the morph ball's HUD they go on the floating plane with it
     // (CSamusHud::Draw), where they keep their place in its layout.
-    AuroraSetStereoDrawRoute(x34_samusHud->PortVrBallHudShown() ? AURORA_STEREO_ROUTE_SCREEN_2D
+    AuroraSetStereoDrawRoute(x34_samusHud->PortVrBallHudShown() ? AURORA_STEREO_ROUTE_FLOATING_HUD
                                                                  : AURORA_STEREO_ROUTE_HEAD_LOCKED);
     drawsSince();
 #endif

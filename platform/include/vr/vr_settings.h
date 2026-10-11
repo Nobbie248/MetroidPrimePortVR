@@ -41,6 +41,7 @@ struct PortVrSettings {
     float lean_back_degrees = 0.0f;
     bool passthrough = true;           // Quest only
     bool diagnostics_logging = false;  // [xr-diag]
+    bool room_scale = true;
     bool immersive_replay = true;      // draw the world per eye; off shows the mono image on the virtual screen
     bool multiview = true;             // Quest: both eyes in one Vulkan multiview render pass
     // Quest: fixed foveated rendering of the eye passes (fragment density maps through

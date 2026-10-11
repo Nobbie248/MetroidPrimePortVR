@@ -325,8 +325,7 @@
     <string name="primedgun_diagnostics_logging">Diagnostics logging</string>
     <string name="primedgun_diagnostics_logging_note">[xr-diag] timings in the log. They cost throughput; leave off to compare performance.</string>
 
-    <!-- About tab: launcher/ui/about_tab.cpp, in PrimedGun's Quest wording. The credits mirror
-         the Credits section of PrimedGun's README.md; keep the two in step. -->
+    <!-- About tab: keep credits in step with launcher/ui/about_tab.cpp. -->
     <string name="primedgun_section_about">PrimedGun</string>
     <string name="primedgun_about_summary">Metroid Prime as a native VR game, built on the Metroid Prime decompilation\'s native port.</string>
     <string name="primedgun_about_version">Version: %1$s</string>
@@ -337,12 +336,14 @@
     <string name="primedgun_section_useful_info">Useful Information</string>
     <string name="primedgun_about_useful_info_text">• Leave the game with Quit in the Quest menu, or with Stop on the Setup tab. The game saves its settings as it exits.\n\n• The first start after an update compiles shaders in the background; later starts are faster.\n\n• Your memory card is in USA/Card A (EUR/Card A for a PAL disc) and your settings in port_settings.ini, in the user folder shown above.</string>
     <string name="primedgun_section_links">Links</string>
-    <string name="primedgun_about_github">PrimedGun on GitHub</string>
+    <string name="primedgun_about_github">PrimedGun 2.0 — iChris4</string>
+    <string name="primedgun_about_legacy_github">PrimedGun Legacy — Nobbie</string>
     <string name="primedgun_about_discord">Dolphin VR Discord</string>
-    <string name="primedgun_about_discord_note">For further enhancements to your VR experience, join the Dolphin VR Discord.</string>
+    <string name="primedgun_about_flat2vr_discord">Flat2VR Modding Discord</string>
+    <string name="primedgun_about_discord_note">Join the Discord communities for VR modding discussions and support.</string>
     <string name="primedgun_about_no_browser">No browser available. Visit %1$s</string>
     <string name="primedgun_section_credits">Credits</string>
-    <string name="primedgun_about_credits_text">• Created by Nobbie.\n\n• Huge thank you to iChris4, who made Dolphin ReduX for PC and Quest, ported PrimedGun to the Quest, and early on helped fix the visor effects and ported the Metroid Prime override from the old Dolphin Hydra.\n\n• Thank you to the Metroid Prime modding community for the resources and research that helped make this possible.\n\n• Development references include the Metroid Prime decompilation project, Metaforce, and PrimeHack. Codex was used to assist with debugging, system integration, and iterative development.\n\n• Thank you to the Dolphin team.\n\n• Thank you to the early testers: GeekyGami, Lucaspec72, TorchRing, detective_yoshi, PHA3ESH1FTGAMES, retrovideogamer, Samevi, Mochu, VideoGameEsoterica and VRified Games.\n\n• Thank you to budwheizzah for helping test the Quest version.</string>
+    <string name="primedgun_about_credits_text"><b>Created by</b>\nNobbie and iChris4\n\n<b>Quest Port &amp; Early VR Development</b>\niChris4\nCreator of Dolphin ReduX for PC and Quest. Ported PrimedGun to Quest, contributed early visor effect fixes, and ported the Metroid Prime override from Dolphin Hydra.\n\n<b>Development References</b>\nMetroid Prime decompilation project\nMetaforce\nPrimeHack\n\n<b>Development Assistance</b>\nCodex — debugging, system integration, and iterative development.\n\n<b>Early Playtesting</b>\nGeekyGami\nLucaspec72\nTorchRing\ndetective_yoshi\nPHA3ESH1FTGAMES\nretrovideogamer\nSamevi\nMochu\nVideoGameEsoterica\nVRified Games\n\n<b>Quest Playtesting</b>\nbudwheizzah\n\n<b>Special Thanks</b>\nThe Metroid Prime modding community, for the resources and research that helped make PrimedGun possible.\nThe Dolphin team.</string>
     <string name="primedgun_section_native_port">Native Port</string>
     <string name="primedgun_about_native_port_text">• PrimedGun v2 runs on a native build of the Metroid Prime decompilation (PrimeDecomp), through Odran\'s MetroidPrimePort, drawn by Aurora.\n\n• Its OpenXR stereo rendering, head tracking and PrimedGun controls build on the OpenXR work from Wiicompiled VR.</string>
 </resources>

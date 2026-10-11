@@ -1,49 +1,73 @@
-# Metroid Prime — native port
+# PrimedGun 2.0
 
-A native build of **Metroid Prime** (GameCube, USA v1.00 `GM8E01_00`, or PAL `GM8P01` as experimental) for Linux,
-Windows and Android. The game is compiled natively from the
-[PrimeDecomp](https://github.com/PrimeDecomp/prime) decompiled source and renders
-through Aurora (SDL3 and WebGPU), with no emulator involved.
+**Created by Nobbie and iChris4.**
+
+PrimedGun 2.0 brings **Metroid Prime** to native VR on Windows PC and standalone
+Meta Quest. It builds on the controls and VR experience of
+[the original PrimedGun](https://github.com/Nobbie248/PrimedGun), with a native
+game engine based on [PrimeDecomp](https://github.com/PrimeDecomp/prime),
+Odran's MetroidPrimePort, and Aurora rendering.
+
+The underlying port also supports desktop play on Linux, Windows, and Android.
+OpenXR VR support is currently wired for Windows and Meta Quest.
 
 **No game content is included.** You need your own copy of the game: the port
 reads it from a disc image and never ships any of its assets. This repository
 ships no disc image, and neither does any package or release built from it.
 
-## What it adds over the console release
+## Features
 
-- Widescreen rendering — 4:3, 16:9 or following the window — with the HUD spread
-  to the edges and the menus, pause and map screens aspect-corrected
-- An uncapped presentation rate over a fixed-rate simulation, so physics and
-  animation stay console-accurate at any frame rate
-- Graphics options: first-person FOV, MSAA and anisotropic filtering, HUD scale,
-  and toggles to hide the helmet and the visor effects
-- Mouse aim and twin-stick aiming, with sensitivity, inversion and crosshair size
-- A Controls page for rebinding keyboard, mouse and controller, with a second key
-  per action, conflict warnings, controller presets (GameCube, Modern,
-  Southpaw), deadzones and gyro aim
-- Optional gameplay tweaks, all off by default: Fast Morph (quick morph and
-  unmorph that keep momentum), Spring Ball (optionally on a gyro flick), Toggle
-  Lock-On and Sticky Charge
-- Skippable cutscenes: Start skips cutscenes the console release forces you to
-  watch
-- Save states (eight slots plus undo, F5/F9) and a reveal-whole-map option with
-  an item, scan and room tracker
-- An on-screen in-game timer and a LiveSplit Server client that starts, splits
-  on upgrades and stops at the credits
-- Hard mode, the Fusion Suit and the image galleries can be unlocked without
-  beating the game
-- Memory card import and export as `.gci` files or raw card images, including
-  straight from and to Dolphin
-- A mods folder that replaces loose disc files or single resources inside PAKs (or adds new ones),
-  user texture packs, HD texture replacements, and in-game button prompts that
-  follow the input bound to each action
-- Discord Rich Presence on desktop (bring your own Discord application id)
-- The common options sit in pause > Options beside the game's own; the F1
-  overlay holds everything, in pages for Game, Controls, Video, Remastered,
-  Mods, Archipelago, Tracker, Save states, System and Debug (cheats sit behind
-  a "Show cheats" box)
-- A touch overlay on Android, with a virtual controller for the sticks, triggers,
-  shoulders and face buttons
+- Native OpenXR VR on PC and standalone Meta Quest.
+- Directional roomscale movement with a modern VR control scheme.
+- Controller-directed targeting and grapple controls.
+- 6DOF arm cannon tracking.
+- One-click height calibration and adjustable cannon position and rotation.
+- Cannon texture swapping through the launcher and in-headset menu.
+- In-headset settings for controls, calibration, graphics, and more.
+- Memory card and settings transfer from the original PrimedGun.
+- Native-port extras, including save states, texture packs, randomizer, and Archipelago multiworld support.
+- Left-handed support.
+
+## Setup Notes
+
+1. Launch **PrimedGun** and use **Select Game** to choose your own Metroid Prime
+   disc image. USA 1.00 (`GM8E01`, revision 0) is supported; PAL (`GM8P01`) is
+   experimental.
+2. On PC, start your OpenXR runtime and enable **VR** in **Port Config**. On
+   Quest, select the game in the launcher panel, then press **Play** to enter VR.
+3. Check the **Layout** tab for controller bindings and the **Controller** tab
+   for input options.
+4. Once in game, click the right stick to calibrate your height. Click the left
+   stick to open or close the in-headset settings menu.
+5. Use **Calibration** to adjust the arm cannon and **Cannon Textures** to select
+   its appearance.
+6. Use **Save Settings** after changing launcher options. **Play** also saves
+   pending changes. On Quest, change launcher settings before starting the game.
+
+To bring over existing progress, use **Transfer PrimedGun Memory Card / Settings**.
+On PC, select the old installation or user folder. On Quest, select a memory
+card, `PrimedGun.ini`, or an exported user-data ZIP. Select your game first so
+the correct regional memory card is used. Dolphin save states cannot be
+transferred; save normally in the game before moving your progress.
+
+Roomscale is optional. With it disabled, use stick movement and keep near your
+calibrated position. Physical walking with roomscale enabled applies during
+first-person gameplay.
+
+## Controller Settings
+
+The **Layout** tab shows the recommended controls. Use **Controller** to adjust
+the PrimedGun input options, **Calibration** for tracking and cannon alignment,
+and the in-headset menu to make changes while playing. The native build uses
+its own launcher and OpenXR controls; see [the launcher guide](launcher/README.md)
+for settings and transfer details.
+
+## Links
+
+- [PrimedGun 2.0 — iChris4](https://github.com/iChris4/MetroidPrimePortVR)
+- [PrimedGun Legacy — Nobbie](https://github.com/Nobbie248/PrimedGun)
+- [Dolphin VR Discord](https://discord.gg/GdmffzCTrh)
+- [Flat2VR Modding Discord](https://discord.gg/flat2vr)
 
 ## Randomizer and Archipelago
 
@@ -68,9 +92,11 @@ Cutscenes are always skippable in randomizer and Archipelago games.
 
 ## Downloads
 
-Releases are published on the
-[GitHub releases page](https://github.com/Odrannnn/MetroidPrimePort/releases).
-Every build needs your own disc image; none of them contains one.
+Check the [PrimedGun 2.0 releases page](https://github.com/iChris4/MetroidPrimePortVR/releases)
+for available builds. Every build needs your own disc image.
+
+The underlying native port supports the following package formats; consult
+each release for the files provided.
 
 | Platform | Artefact | Notes |
 | --- | --- | --- |
@@ -85,6 +111,37 @@ cannot be updated by one signed with another, so keep the key — see
 `docs/RELEASING.md`.
 
 ## Building
+
+### Windows VR and Launcher
+
+Use an MSVC developer shell with CMake 3.25+, Ninja, a C++20 toolchain, and
+Qt 6.5+. Replace the Qt path with your local installation:
+
+```bat
+cmake -S . -B build/vr -G Ninja -DCMAKE_BUILD_TYPE=RelWithDebInfo ^
+  -DCMAKE_C_COMPILER=clang-cl -DCMAKE_CXX_COMPILER=clang-cl ^
+  -DMP_ENABLE_OPENXR=ON -DMP_BUILD_LAUNCHER=ON ^
+  -DCMAKE_PREFIX_PATH=C:/path/to/Qt/6.5.1/msvc2019_64
+cmake --build build/vr --parallel
+```
+
+The launcher, `PrimedGun.exe`, is built beside `metroid_prime_port.exe`.
+See [launcher/README.md](launcher/README.md) for deployment details.
+
+### Standalone Meta Quest
+
+On Windows, install JDK 17, the Android SDK with NDK 29.0.14206865, CMake 3.25+,
+Ninja, Git, and Rust with the `aarch64-linux-android` target. Then run:
+
+```powershell
+.\quest\Build-Quest.ps1
+```
+
+Add `-Install` to install on an ADB-connected headset. The script builds the
+Quest Gradle project and its OpenXR native library. See the prerequisite and
+signing notes in [quest/Build-Quest.ps1](quest/Build-Quest.ps1).
+
+### Desktop Native Port
 
 Needs CMake 3.25+, Ninja and a C++20 toolchain. Aurora and MusyX are vendored, so
 a normal clone is enough; Aurora fetches its pinned dependencies on the first
@@ -102,7 +159,7 @@ On Windows, run from an MSVC developer shell and add
 Linux (GCC 14 and Clang 18) and Windows (clang-cl); see
 `.github/workflows/`.
 
-### Android
+### Flat Android Build
 
 ```sh
 tools/make_android_keystore.sh          # once; writes android/keystore.properties
@@ -142,7 +199,46 @@ are available as `MP_*` environment variables.
 `tools/make_flatpak.sh` a Flatpak. Neither bundles the disc. See
 `docs/NATIVE_PORT.md` for what each one expects from the host.
 
-## Credits and licensing
+## Credits
+
+### Created by
+
+Nobbie and iChris4
+
+### Quest Port & Early VR Development
+
+**iChris4** — creator of Dolphin ReduX for PC and Quest. Ported PrimedGun to
+Quest, contributed early visor effect fixes, and ported the Metroid Prime
+override from Dolphin Hydra.
+
+### Native Port & Rendering
+
+PrimeDecomp, Odran's MetroidPrimePort, and Aurora. OpenXR stereo rendering,
+head tracking, and PrimedGun controls build on the OpenXR work from Wiicompiled VR.
+
+### Development References
+
+Metroid Prime decompilation project, Metaforce, and PrimeHack.
+
+### Development Assistance
+
+Codex — debugging, system integration, and iterative development.
+
+### Early Playtesting
+
+GeekyGami, Lucaspec72, TorchRing, detective_yoshi, PHA3ESH1FTGAMES,
+retrovideogamer, Samevi, Mochu, VideoGameEsoterica, and VRified Games.
+
+### Quest Playtesting
+
+budwheizzah
+
+### Special Thanks
+
+The Metroid Prime modding community, for the resources and research that helped
+make PrimedGun possible, and the Dolphin team.
+
+## Licensing
 
 This is a fork of the [PrimeDecomp/prime](https://github.com/PrimeDecomp/prime)
 decompilation, which the game logic is built from. Aurora (`extern/aurora`) and

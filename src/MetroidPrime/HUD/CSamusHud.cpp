@@ -1667,11 +1667,11 @@ void CSamusHud::Draw(const CStateManager& mgr, float alpha, uint helmetVis, bool
       // PortVr: the morph ball's HUD is laid out for the whole picture (its
       // frame camera is orthographic), so head-locked it would cover each
       // eye's image and put its gauges at the edges of the lenses. The headset
-      // lays it, and the base frame drawn with it (hint messages), on the
-      // virtual screen in front of the player instead.
+      // lays it, and the base frame drawn with it (hint messages), on a
+      // detached plane that eases toward the headset's full pose instead.
       const bool vrBallScreen = PortVrBallHudShown();
       if (vrBallScreen) {
-        AuroraSetStereoDrawRoute(AURORA_STEREO_ROUTE_SCREEN_2D);
+        AuroraSetStereoDrawRoute(AURORA_STEREO_ROUTE_FLOATING_HUD);
       }
 #endif
       if (x288_loadedSelectedHud != nullptr) {

@@ -5,6 +5,7 @@
 // through (stereo_replay.hpp HeadLockedPlane: the scan visor's window).
 
 #include "gfx/stereo_uniform.hpp"
+#include "gfx/floating_hud.hpp"
 
 #include <cmath>
 #include <cstdio>
@@ -434,6 +435,100 @@ int main() {
     compose_stereo_uniform(all.data(), fixed, StereoEyeCompose{&projection, &view, 1.f, 1.f, 1.f, 1.f});
     std::memcpy(&out0, all.data() + fixed.positionOffset, sizeof(out0));
     Check(Near(out0.m0[3], 1.032f), "without a fixed slot every position matrix takes it");
+  }
+
+  // A held weapon must use the world's compensated room-scale view. Stereo
+  // adds head translation to both draw passes; a raw simulation view would
+  // leave the weapon behind by the distance already walked by the body.
+  {
+    for (float walk : {-1.5f, 0.f, 1.5f}) {
+      for (float body : {walk, 0.f}) { // free walking and a collision-blocked step
+        const float handFromHead = 0.3f;
+        const float gunWorld = body + handFromHead;
+        const float renderBase = body - walk;
+        const auto gunInBase = Affine(1, 0, 0, gunWorld - renderBase,
+                                     0, 1, 0, 0, 0, 0, 1, -0.6f);
+        for (float eyeOffset : {-0.032f, 0.032f}) {
+          auto weapon = uniform;
+          std::memcpy(weapon.data() + layout.positionOffset, &gunInBase, sizeof(gunInBase));
+          const auto trackedEye = Affine(1, 0, 0, -walk - eyeOffset,
+                                        0, 1, 0, 0, 0, 0, 1, 0);
+          compose_stereo_uniform(weapon.data(), layout,
+                                StereoEyeCompose{&projection, &trackedEye, 1.f, 1.f, 1.f, 1.f});
+          Mat3x4<float> result;
+          std::memcpy(&result, weapon.data() + layout.positionOffset, sizeof(result));
+          Check(Near(result.m0[3], handFromHead - eyeOffset),
+                "room-scale weapon stays at the hand after walking or wall blocking");
+        }
+      }
+    }
+  }
+
+  // Floating morph-ball HUD: full rotation and translation, with smooth lag
+  // independent of headset refresh rate. Large turns take the short path.
+  {
+    using namespace stereo_replay;
+    const auto pose = [](int axis, float angle, float x) {
+      auto m = Affine(1, 0, 0, x, 0, 1, 0, 0.4f, 0, 0, 1, -0.2f);
+      const int j = (axis + 1) % 3;
+      const int k = (axis + 2) % 3;
+      (*(&m.m0 + j))[j] = (*(&m.m0 + k))[k] = std::cos(angle);
+      (*(&m.m0 + j))[k] = -std::sin(angle);
+      (*(&m.m0 + k))[j] = std::sin(angle);
+      return m;
+    };
+    for (int axis = 0; axis < 3; ++axis) {
+      FloatingHud hud;
+      const auto start = pose(axis, 0.f, 0.f);
+      const auto target = pose(axis, 3.0f, 1.f);
+      hud.Update(start, 1.f / 90.f);
+      auto floating = hud.Update(target, 1.f / 90.f);
+      Check(floating.m0[3] > 0.f && floating.m0[3] < 0.2f, "floating HUD eases toward head translation");
+      const int j = (axis + 1) % 3;
+      Check((*(&floating.m0 + j))[j] > 0.9f, "floating HUD lags yaw, pitch and roll initially");
+      for (int frame = 0; frame < 180; ++frame) floating = hud.Update(target, 1.f / 90.f);
+      for (int row = 0; row < 3; ++row) {
+        for (int column = 0; column < 4; ++column) {
+          Check(std::fabs((*(&floating.m0 + row))[column] - (*(&target.m0 + row))[column]) < 0.001f,
+                "floating HUD catches up after looking left, right, up, down or behind");
+        }
+      }
+      // The filtered plane retains the two actual eye positions.
+      const auto headView = inverse_rigid(target);
+      const auto leftView = compose_affine(Affine(1,0,0,0.032f, 0,1,0,0, 0,0,1,0), headView);
+      const auto rightView = compose_affine(Affine(1,0,0,-0.032f, 0,1,0,0, 0,0,1,0), headView);
+      const auto left = compose_affine(leftView, floating);
+      const auto right = compose_affine(rightView, floating);
+      Check(Near(left.m0[3] - right.m0[3], 0.064f), "floating HUD keeps stereo eye separation");
+      hud.Reset();
+      floating = hud.Update(start, 1.f / 90.f);
+      Check(Near(floating.m0[3], start.m0[3]), "menu exit resets the floating HUD to the current head");
+    }
+    FloatingHud slow, fast;
+    const auto start = pose(1, 0.f, 0.f);
+    const auto target = pose(1, 2.f, 1.f);
+    slow.Update(start, 0.f);
+    fast.Update(start, 0.f);
+    Mat3x4<float> a{}, b{};
+    for (int frame = 0; frame < 30; ++frame) a = slow.Update(target, 1.f / 60.f);
+    for (int frame = 0; frame < 60; ++frame) b = fast.Update(target, 1.f / 120.f);
+    Check(Near(a.m0[3], b.m0[3]) && Near(a.m0[0], b.m0[0]), "floating HUD follows at the same speed at 60 and 120 Hz");
+    const auto before = pose(1, 3.1f, 0.f);
+    const auto after = pose(1, -3.1f, 0.f);
+    slow.Reset();
+    slow.Update(before, 0.f);
+    a = slow.Update(after, 1.f / 60.f);
+    Check(a.m0[0] < -0.99f, "crossing the rear heading does not spin the HUD around");
+    const float cant = 0.12f;
+    const auto head = pose(1, 1.f, 2.f);
+    const auto leftPose = compose_affine(head, pose(1, cant, -0.032f));
+    const auto rightPose = compose_affine(head, pose(1, -cant, 0.032f));
+    const auto centre = center_head_pose(inverse_rigid(leftPose), inverse_rigid(rightPose));
+    Check(Near(centre.m0[0], head.m0[0]) && Near(centre.m0[2], head.m0[2]),
+          "canted eye displays do not bias the HUD's facing toward one eye");
+    const auto expectedCentre = compose_affine(head, pose(1, 0.f, 0.f));
+    Check(Near(centre.m0[3], expectedCentre.m0[3]) && Near(centre.m2[3], expectedCentre.m2[3]),
+          "canted eye displays preserve the actual head centre");
   }
 
   std::puts("port_vr_stereo_tests: ok");

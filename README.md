@@ -18,18 +18,15 @@ ships no disc image, and neither does any package or release built from it.
 ## Features
 
 - Native OpenXR VR on PC and standalone Meta Quest.
-- Directional movement with a modern VR control scheme.
-- Head-tracked visors with hand gesture input.
+- Directional roomscale movement with a modern VR control scheme.
 - Controller-directed targeting and grapple controls.
 - 6DOF arm cannon tracking.
 - One-click height calibration and adjustable cannon position and rotation.
 - Cannon texture swapping through the launcher and in-headset menu.
 - In-headset settings for controls, calibration, graphics, and more.
-- Roomscale movement.
 - Memory card and settings transfer from the original PrimedGun.
-- Native-port extras, including save states, texture packs, randomizer, and
-  Archipelago multiworld support.
-- Left-hand support.
+- Native-port extras, including save states, texture packs, randomizer, and Archipelago multiworld support.
+- Left-handed support.
 
 ## Setup Notes
 

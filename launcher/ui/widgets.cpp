@@ -41,6 +41,7 @@ FloatRow::FloatRow(const QString& label, double min, double max, double step,
   text->setMaximumWidth(170);
   m_slider = new QSlider(Qt::Horizontal, this);
   m_spin = new QDoubleSpinBox(this);
+  m_spin->setButtonSymbols(QAbstractSpinBox::NoButtons);
   m_slider->installEventFilter(WheelBlocker::Instance());
   m_spin->installEventFilter(WheelBlocker::Instance());
   m_spin->setRange(min, max);

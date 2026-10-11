@@ -5556,6 +5556,36 @@ void DrawMods() {
 }
 } // namespace
 
+// PortVr: the headset's shader compilation toast (vr_menu.cpp), under the same setting and
+// rules as DrawShaderCompilationToast, whose ImGui window the headset never shows, but a second
+// into the compile, as PrimedGun's (Dolphin's WaitUntilCompletion) was: a warm start on a Quest 3
+// (about 1.3 s) would otherwise flash it.
+bool ShaderCompilationProgress(uint32_t& done, uint32_t& total) {
+  static double sQueuedSince = -1.0;
+  static uint32_t sBase = 0; // createdPipelines when the toast opened
+  static bool sStartupDone = false;
+  const AuroraStats* stats = aurora_get_stats();
+  if (stats != nullptr && stats->queuedPipelines == 0) {
+    sStartupDone = true;
+  }
+  if (!sShowShaderCompilation || stats == nullptr || sStartupDone || sBackgroundShadersHeld) {
+    sQueuedSince = -1.0;
+    return false;
+  }
+  const double now =
+      std::chrono::duration<double>(std::chrono::steady_clock::now().time_since_epoch()).count();
+  if (sQueuedSince < 0.0) {
+    sQueuedSince = now;
+    sBase = stats->createdPipelines;
+  }
+  if (now - sQueuedSince < 1.0) {
+    return false;
+  }
+  done = stats->createdPipelines >= sBase ? stats->createdPipelines - sBase : 0;
+  total = done + stats->queuedPipelines;
+  return true;
+}
+
 bool UpdateToastShowing() {
   std::lock_guard lock(sUpdateToastMutex);
   return sUpdateToastShowing;

@@ -1,3 +1,92 @@
+## VR: PrimedGun's own shader list, and the compile toast in the headset (2026-10-11)
+
+The PC compiles upstream's pipeline seed in the background at startup and
+shows ImGui's "Compiling shaders N / M" toast. The Quest shipped no seed (its
+rows are mono, indexed, MSAA 1 configs the fork never asks for), so it
+compiled each room's shaders on the first visit (up to 1.5 s stalls,
+skipped draws), and no ImGui window reaches the headset, so the toast was
+never seen there. PC VR got no eye pipelines from upstream's seed either.
+
+**The seed.** `assets/primedgun_pipeline_cache.db`, built by
+`tools/primedgun_seed.py` from the caches already saved on the dev PC (PC VR,
+PSVR2 on D3D12, MSAA 4) and the dev Quest 3 (pulled from a debuggable APK with
+`run-as`): alpha.2's cache, and the cache of a 16-minute session played with
+this change's first seed (1026 configs that seed lacked). 3173 GX rows, retail
+only, de-indexed only, at one sample, with the alpha.2 rows' hudSample cleared
+(407 Quest rows: world materials set it before ecf519cf, and the Quest cache
+held them at epoch 2 because alpha.2 ran after a HEAD build had already
+purged). Every MultiviewClip row has its EyeClipImmediate twin and the other
+way round, and every eye row its mono twin, so one file serves every device:
+1119 mono, 1019 MultiviewClip, 16 MultiviewFull, 1019 EyeClipImmediate. A
+Quest 3 keeps 2154 of them, a PC VR start or a Quest 2 2138, a flat start the
+1119 mono. Rows a cache only held because aurora had
+merged upstream's seed into it are dropped (the PC cache held all 2209); rows a
+device recorded stay even when they normalise to an upstream config. `check`
+is the ctest `port_primedgun_pipeline_seed`.
+
+**Aurora.** A second seed slot (`AuroraConfig::pipelineCacheExtraSeed*`),
+merged after upstream's: embedded in the PC executable, unpacked into
+`filesDir` by the Quest activity (the APK still carries no upstream seed). A
+seed whose SQLite `user_version` is not 0 is PrimedGun's: it must equal
+`PortGxLayoutEpoch` (else it is ignored with a warning), only current GX rows
+are taken, each takes the device's MSAA sample count (a shadow pass keeps one),
+and its key is hashed again (the file's hash column is a placeholder). Only
+the eye rows this device draws with are kept: MultiviewClip and MultiviewFull
+when multiview is supported, requested (`vr_multiview`, pushed before
+`aurora_initialize`) and MSAA is 1, EyeClipImmediate otherwise; none when the
+headset won't run (`MP_PIPELINE_SEED_EYES=1` takes them anyway, to check a new
+seed compiles on a desktop). Upstream's seed merges as before.
+
+**Rows of other settings stay out of the startup compile.** A cache keeps
+every config a player's settings ever produced, and aurora compiled all of
+them at every start: one Quest session at MSAA 4 would have added ~1100 rows
+compiled at every later start at MSAA 1, never drawn, never freed. The load
+now skips GX rows whose sample count isn't the device's (shadow passes keep
+one) and eye rows of the eye passes this device doesn't use (the same test as
+the seed's, `gx_row_drawn_here`). They stay in the file for when the setting
+comes back (then compiled when drawn; their Dawn blobs are pruned meanwhile).
+A flat PC start still compiles the eye rows of the player's own VR play, so
+they stay warm for the next VR start. This also stops upstream's 2209 rows
+(all MSAA 1) compiling for nothing on a PC at MSAA 4.
+
+**The headset toast.** PrimedGun v1's compile progress panel
+(`BuildCompileProgressPixels`: "COMPILING SHADERS", the bar, N / M, "THIS CAN
+TAKE A FEW MINUTES ON THE FIRST LAUNCH") on the VR menu's panel layer while
+the menu is closed, in the image's top 384 rows (`OpenXRPanelLayer::image_rows`
+crops the quad). It hangs across the top of the screen the game picture is on
+(55% of its width, 5% below its top edge, 5 mm in front), or, with no screen up
+(immersive play), 1.35 m ahead and 0.25 m up from where the head looked when it
+appeared, upright, and stays there (a recenter or a session restart re-latches
+it, as it re-places the virtual screen). Same setting and rules as the PC toast
+(`show_shader_compilation`; it ends when the startup queue first drains), but
+it waits a second instead of half, as v1 did, so a warm start does not flash
+it. The menu takes the layer over while open.
+
+Measured on the Quest 3 with the first seed (1635 rows; the Quest kept 1128,
+desk runs, front end): cold (empty pipeline and Dawn caches, as a fresh
+install) ready 64.6 s after startup on the 3-worker pool, 0 failures, slowest
+811 ms; warm 1.3-1.5 s. PSS at the front end 1145 MB against 1054 MB with no
+seed and an empty cache (native heap 214 against 134 MB): about 80 KB a
+pipeline. The final seed's 2154 Quest rows were not timed cold (the headset
+would not launch an immersive app unattended any more); by the same rates,
+about 2 minutes cold, 2-3 s warm and about +175 MB PSS on a fresh install. A
+player whose own cache already holds those configs pays that now anyway. PC
+(RTX 5070 Ti, D3D12, 8 workers): a flat start merges the 1119 mono rows and
+leaves the eye rows out; with the eye rows at MSAA 4, 2138 rows at 4x (upstream's
+2209 rows at 1x skipped at load), ready 10.3 s cold, 0 failures; a warm start
+with the first seed was ready in 0.63 s. A flat 1x start on that 4x cache skipped
+its 1117 rows at 4x.
+
+Not checked: the toast in a headset by eye (the user's 16-minute session logged
+it shown at 410 / 941 and hidden 1.4 s after startup; desk runs sat in a dark
+room with tracking lost), PC VR in a headset, a Quest 2, and how many
+first-visit stalls the seed removes in play (rooms the caches never saw still
+compile on the spot).
+
+Also: `quest/Build-Quest.ps1 -Configuration debug` failed at
+`preReleaseBuild` (a debug assemble configures the release variant too); the
+shared-key flag is now passed for both.
+
 ## VR: no multiview on an Adreno 6xx (Quest 2, Quest Pro) (2026-10-10)
 
 A Quest 2 player (alpha.1) saw green and red blocks among the particles of a
@@ -642,9 +731,9 @@ upstream's code was also checked against the fork where git merged silently.
   image-identical and not slower (`MP_STORAGE_CLAMP=1` through
   debug.mport.env). The APK does not ship upstream's seed: its rows are the
   phone's and desktop's mono configs, mostly indexed, which the headset never
-  asks for, at ~2249 background compiles per start. A seed recorded on the
-  headset can go in `quest/assets/initial_pipeline_cache.db`, which ships
-  when present; the activity deletes a stale unpacked seed. No pointer
+  asks for, at ~2249 background compiles per start. (Since 2026-10-11 the
+  APK ships PrimedGun's own seed, `assets/primedgun_pipeline_cache.db`, and
+  no longer reads `quest/assets/`: see "PrimedGun's own shader list".) No pointer
   capture on the Quest (a98aa72c is for phones' navigation bars).
 - **Update check.** Upstream's asks Odrannnn/MetroidPrimePort about
   upstream's versionName, so it would point PrimedGun players at the flat

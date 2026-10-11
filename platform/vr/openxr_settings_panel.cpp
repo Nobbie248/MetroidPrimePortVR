@@ -10,6 +10,7 @@ namespace PortVr {
 namespace settings_panel_bridge {
 
 std::atomic_bool g_open{false};
+std::atomic_bool g_compileToast{false};
 
 struct PublishedPointer {
     std::mutex mutex;
@@ -29,6 +30,14 @@ void OpenXRSetSettingsPanelOpen(bool open) noexcept {
 
 bool OpenXRSettingsPanelOpen() noexcept {
     return settings_panel_bridge::g_open.load(std::memory_order_acquire);
+}
+
+void OpenXRSetCompileToastShown(bool shown) noexcept {
+    settings_panel_bridge::g_compileToast.store(shown, std::memory_order_release);
+}
+
+bool OpenXRCompileToastShown() noexcept {
+    return settings_panel_bridge::g_compileToast.load(std::memory_order_acquire);
 }
 
 void OpenXRPublishSettingsPanelPointer(bool valid, float x, float y, bool clicked) noexcept {

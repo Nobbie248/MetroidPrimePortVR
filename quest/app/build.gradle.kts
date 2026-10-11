@@ -234,13 +234,14 @@ val syncPortAssets by tasks.registering(Sync::class) {
     from(File(portRoot, "textures")) {
         into("textures")
     }
-    // Not upstream's seed (assets/): its rows are the phone and desktop's mono configs,
-    // most of them with indexed attributes, which the headset (de-indexed vertices,
-    // multiview eye pipelines) never asks for, and it cost ~2249 background compiles at
-    // every start. A seed recorded on the Quest goes in quest/assets/ and ships when
-    // present; while that folder or file is missing, the APK has no seed.
-    from(File(portRoot, "quest/assets")) {
-        include("initial_pipeline_cache.db")
+    // Not upstream's seed (assets/initial_pipeline_cache.db): its rows are the phone and
+    // desktop's mono configs, most of them with indexed attributes, which the headset
+    // (de-indexed vertices, multiview eye pipelines) never asks for, and it cost ~2249
+    // background compiles at every start. PrimedGun's own seed (tools/primedgun_seed.py,
+    // built from the Quest's and the PC's caches) holds the configs the fork asks for;
+    // aurora keeps the eye pipelines this headset draws with.
+    from(File(portRoot, "assets")) {
+        include("primedgun_pipeline_cache.db")
     }
 }
 

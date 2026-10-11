@@ -217,6 +217,18 @@ typedef struct {
   size_t pipelineCacheSeedSize;
   /* Merge no initial pipeline cache at all (recording a new seed from an empty cache). */
   bool pipelineCacheNoSeed;
+  /*
+   * PrimedGun: a second seed, merged after the initial one, with the configs the fork's draws ask
+   * for (de-indexed vertices, the headset's eye pipelines). Held in memory when the data is set,
+   * else read from <resourcesPath>/<pipelineCacheExtraSeedName> when that is set. Its SQLite
+   * user_version must be the cache's GX layout epoch, or the seed is ignored. Its GX rows take the
+   * device's MSAA sample count, and only the eye pipelines this device draws with are kept.
+   */
+  const uint8_t* pipelineCacheExtraSeedData;
+  size_t pipelineCacheExtraSeedSize;
+  const char* pipelineCacheExtraSeedName;
+  /* The headset will run, so the extra seed's eye pipelines are wanted; without it they are left out. */
+  bool pipelineCacheExtraSeedStereo;
 
   /*
    * A directory (with a trailing slash) Dawn searches first for the Vulkan library, e.g. a shim

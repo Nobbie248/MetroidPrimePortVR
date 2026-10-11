@@ -61,6 +61,9 @@ struct OpenXRPanelLayer {
     XrPosef pose{{0.0f, 0.0f, 0.0f, 1.0f}, {0.0f, 0.0f, 0.0f}};
     float width_meters = 0.0f;
     float height_meters = 0.0f;
+    // The image rows the panel shows from the top: the menu's canvas, or the
+    // shader compilation toast's strip while the menu is closed.
+    int32_t image_rows = VrMenu::kMenuHeight;
     // The pointer hand's laser, from its aim pose to the menu (or 8 m out).
     bool laser = false;
     XrPosef laser_pose{{0.0f, 0.0f, 0.0f, 1.0f}, {0.0f, 0.0f, 0.0f}};
@@ -106,7 +109,7 @@ inline uint32_t OpenXRPanelQuadLayers(const OpenXRPanelLayer& panel, XrSpace spa
         return quad;
     };
     uint32_t count = 0;
-    quads[count++] = make(panel.pose, {0, 0, VrMenu::kWidth, VrMenu::kMenuHeight},
+    quads[count++] = make(panel.pose, {0, 0, VrMenu::kWidth, panel.image_rows},
                           {panel.width_meters, panel.height_meters});
     if (panel.laser) {
         quads[count++] = make(panel.laser_pose, VrMenu::kLaserRect, {VrMenu::kLaserWidth, panel.laser_length_meters});

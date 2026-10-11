@@ -4,6 +4,7 @@
 #include "fx_pipelines.hpp"
 #include "resources.hpp"
 #include "hash.hpp"
+#include "stereo_multiview.hpp"
 #include "../gx/pipeline.hpp"
 #include "../io.hpp"
 #ifdef AURORA_ENABLE_RMLUI
@@ -47,6 +48,8 @@ constexpr int PortGxLayoutEpoch = 2;
 constexpr const char* InitialPipelineCacheName = "initial_pipeline_cache.db";
 // The name the seed VFS maps to AuroraConfig::pipelineCacheSeedData instead of a file.
 constexpr const char* EmbeddedSeedName = ":embedded-initial-pipeline-cache:";
+// PrimedGun: and the one it maps to AuroraConfig::pipelineCacheExtraSeedData.
+constexpr const char* EmbeddedExtraSeedName = ":embedded-primedgun-pipeline-cache:";
 constexpr const char* SdlVfsName = "aurora_pipeline_cache_sdl_vfs";
 
 struct CachedPipeline {
@@ -229,6 +232,10 @@ static int sdl_vfs_open(sqlite3_vfs*, sqlite3_filename name, sqlite3_file* file,
   if (std::strcmp(name, EmbeddedSeedName) == 0) {
     vfsFile->io = g_config.pipelineCacheSeedData != nullptr
                       ? SDL_IOFromConstMem(g_config.pipelineCacheSeedData, g_config.pipelineCacheSeedSize)
+                      : nullptr;
+  } else if (std::strcmp(name, EmbeddedExtraSeedName) == 0) {
+    vfsFile->io = g_config.pipelineCacheExtraSeedData != nullptr
+                      ? SDL_IOFromConstMem(g_config.pipelineCacheExtraSeedData, g_config.pipelineCacheExtraSeedSize)
                       : nullptr;
   } else {
     vfsFile->io = SDL_IOFromFile(name, "rb");
@@ -723,15 +730,94 @@ static sqlite3* open_pipeline_cache_seed_db(const std::string& path) {
   return seedDb;
 }
 
-static void seed_pipeline_cache() {
-  if (g_config.pipelineCacheNoSeed || g_pipelineCacheBroken || g_pipelineCacheDb == nullptr ||
-      g_pipelineCacheUpsertStmt == nullptr) {
+// PrimedGun's seed (AuroraConfig::pipelineCacheExtraSeed*), or empty when there is none.
+static std::string extra_pipeline_cache_seed_path() {
+  if (g_config.pipelineCacheExtraSeedData != nullptr && g_config.pipelineCacheExtraSeedSize != 0) {
+    return EmbeddedExtraSeedName;
+  }
+  const char* name = g_config.pipelineCacheExtraSeedName;
+  if (name == nullptr || name[0] == '\0') {
+    return {};
+  }
+  if (g_config.resourcesPath == nullptr || g_config.resourcesPath[0] == '\0') {
+    return name;
+  }
+  std::string path{g_config.resourcesPath};
+  if (path.back() != '/' && path.back() != '\\') {
+    path += '/';
+  }
+  path += name;
+  return path;
+}
+
+enum class PortSeedRow { Keep, LeaveOut, Invalid };
+
+static uint32_t device_sample_count() { return std::max(webgpu::g_graphicsConfig.msaaSamples, 1u); }
+
+// PrimedGun: whether this device's frames draw with a GX config at its current settings. Every GX
+// pass takes the EFB's sample count but a shadow pass, which keeps one (command_processor's shadow
+// configs). Of the eye pipelines, a multiview device's eye passes use MultiviewClip and
+// MultiviewFull, a device that draws each eye in its own pass (PC VR, a Quest 2, or multiview off
+// or MSAA on) EyeClipImmediate. A cache keeps the rows of every MSAA and multiview setting a player
+// ever used; the others are left for a live switch to compile when drawn.
+static bool gx_row_drawn_here(const gx::PipelineConfig& config) {
+  const uint32_t samples = device_sample_count();
+  if (config.shadowPass == 0 && config.msaaSamples != samples) {
+    return false;
+  }
+  if (const uint8_t eyeMode = config.shaderConfig.multiview; eyeMode != gx::MultiviewNone) {
+    // As stereo_multiview::usable at frame begin, less the eye sizes, which aren't known yet.
+    const bool multiviewEyes = stereo_multiview::kApiAvailable && webgpu::g_multiviewSupported &&
+                               stereo_multiview::requested() && samples <= 1;
+    return eyeMode == gx::EyeClipImmediate ? !multiviewEyes : multiviewEyes;
+  }
+  return true;
+}
+
+// PrimedGun: a row of PrimedGun's seed (tools/primedgun_seed.py) as this device asks for it. The
+// seed holds GX rows only, recorded at one sample: they take the device's sample count, so their
+// key is hashed again. It holds every eye pipeline; only those this device draws with are kept
+// (gx_row_drawn_here), and none when the headset won't run.
+static PortSeedRow adapt_port_seed_row(PipelineCacheWrite& write) {
+  if (write.type != ShaderType::GX || write.configVersion != gx::GXPipelineConfigVersion ||
+      write.config.size() != sizeof(gx::PipelineConfig)) {
+    return PortSeedRow::Invalid;
+  }
+  gx::PipelineConfig config;
+  std::memcpy(&config, write.config.data(), sizeof(config));
+  if (config.version != gx::GXPipelineConfigVersion) {
+    return PortSeedRow::Invalid;
+  }
+  if (config.shadowPass == 0) {
+    config.msaaSamples = device_sample_count();
+  }
+  if ((config.shaderConfig.multiview != gx::MultiviewNone && !g_config.pipelineCacheExtraSeedStereo) ||
+      !gx_row_drawn_here(config) || !gx::pipeline_config_compatible(config, webgpu::g_lightmapBinding)) {
+    return PortSeedRow::LeaveOut;
+  }
+  std::memcpy(write.config.data(), &config, sizeof(config));
+  write.hash = xxh3_hash(config, static_cast<HashType>(ShaderType::GX));
+  return PortSeedRow::Keep;
+}
+
+static void merge_pipeline_cache_seed(const std::string& seedPath) {
+  sqlite3* seedDb = open_pipeline_cache_seed_db(seedPath);
+  if (seedDb == nullptr) {
     return;
   }
 
-  const auto seedPath = pipeline_cache_seed_path();
-  sqlite3* seedDb = open_pipeline_cache_seed_db(seedPath);
-  if (seedDb == nullptr) {
+  // PrimedGun: upstream's seed leaves user_version at 0, PrimedGun's holds the GX layout epoch it was
+  // built for. Another epoch's rows would be compiled at every start and never drawn with.
+  int seedEpoch = 0;
+  sqlite::exec(seedDb, "PRAGMA user_version;", [&seedEpoch](int count, char** values, char**) {
+    seedEpoch = count > 0 && values[0] != nullptr ? std::atoi(values[0]) : 0;
+  });
+  const bool portSeed = seedEpoch != 0;
+  if (portSeed && seedEpoch != PortGxLayoutEpoch) {
+    Log.warn("Ignoring pipeline cache seed '{}': built for GX layout epoch {}, this build is at {} "
+             "(tools/primedgun_seed.py build)",
+             seedPath, seedEpoch, PortGxLayoutEpoch);
+    sqlite3_close(seedDb);
     return;
   }
 
@@ -758,6 +844,7 @@ static void seed_pipeline_cache() {
   bool readFailed = false;
   uint32_t mergedRows = 0;
   uint32_t skippedRows = 0;
+  uint32_t leftOutRows = 0;
   {
     sqlite::Transaction tx(g_pipelineCacheDb, Log, true);
     if (!tx) {
@@ -793,6 +880,13 @@ static void seed_pipeline_cache() {
       if (configBlobSize > 0) {
         std::memcpy(write.config.data(), configBlob, static_cast<size_t>(configBlobSize));
       }
+      if (portSeed) {
+        const PortSeedRow row = adapt_port_seed_row(write);
+        if (row != PortSeedRow::Keep) {
+          ++(row == PortSeedRow::LeaveOut ? leftOutRows : skippedRows);
+          continue;
+        }
+      }
 
       if (!write_pipeline_cache_record(write)) {
         writeFailed = true;
@@ -818,8 +912,28 @@ static void seed_pipeline_cache() {
     return;
   }
 
-  if (!readFailed) {
+  if (readFailed) {
+    return;
+  }
+  if (portSeed) {
+    Log.info("Seeded pipeline cache from PrimedGun's '{}' ({} rows merged at {}x MSAA, {} eye rows this device "
+             "doesn't draw with left out, {} rows skipped)",
+             seedPath, mergedRows, std::max(webgpu::g_graphicsConfig.msaaSamples, 1u), leftOutRows, skippedRows);
+  } else {
     Log.info("Seeded pipeline cache from '{}' ({} rows merged, {} rows skipped)", seedPath, mergedRows, skippedRows);
+  }
+}
+
+static void seed_pipeline_cache() {
+  if (g_config.pipelineCacheNoSeed || g_pipelineCacheBroken || g_pipelineCacheDb == nullptr ||
+      g_pipelineCacheUpsertStmt == nullptr) {
+    return;
+  }
+
+  merge_pipeline_cache_seed(pipeline_cache_seed_path());
+  // PrimedGun: its own seed after upstream's (a failed merge has already given up on the cache).
+  if (const auto extraPath = extra_pipeline_cache_seed_path(); !extraPath.empty() && !g_pipelineCacheBroken) {
+    merge_pipeline_cache_seed(extraPath);
   }
 }
 
@@ -1237,6 +1351,7 @@ static size_t load_pipeline_cache_entries(ShaderType type, uint32_t configVersio
 
   size_t acceptedRows = 0;
   size_t skippedIncompatibleRows = 0;
+  size_t skippedOtherSettingsRows = 0;
   while ((ret = sqlite3_step(g_pipelineCacheLoadStmt)) == SQLITE_ROW) {
     const auto* configBlob = static_cast<const uint8_t*>(sqlite3_column_blob(g_pipelineCacheLoadStmt, 0));
     const auto configSize = sqlite3_column_bytes(g_pipelineCacheLoadStmt, 0);
@@ -1256,6 +1371,12 @@ static size_t load_pipeline_cache_entries(ShaderType type, uint32_t configVersio
         ++skippedIncompatibleRows;
         continue;
       }
+      // PrimedGun: not compiled at every start for nothing; the row stays for when the setting
+      // comes back. A flat start still compiles the eye rows of its own VR play.
+      if (!gx_row_drawn_here(config)) {
+        ++skippedOtherSettingsRows;
+        continue;
+      }
     }
 
     find_pipeline_impl(type, config, [=] { return create(config); }, PipelinePriority::Background, firstFrameUsed);
@@ -1271,6 +1392,8 @@ static size_t load_pipeline_cache_entries(ShaderType type, uint32_t configVersio
   sqlite3_clear_bindings(g_pipelineCacheLoadStmt);
   if constexpr (std::is_same_v<PipelineConfig, gx::PipelineConfig>) {
     Log.info("pipeline cache: skipped {} incompatible GX rows", skippedIncompatibleRows);
+    Log.info("pipeline cache: skipped {} GX rows of another MSAA or eye pass ({}x MSAA here)",
+             skippedOtherSettingsRows, device_sample_count());
   }
   return acceptedRows;
 }

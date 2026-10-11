@@ -1906,4 +1906,97 @@ inline Pose DotPose(const Pose& panel, const Pose& aim, float distance) noexcept
     return dot;
 }
 
+// --- The shader compilation toast ---
+//
+// PrimedGun's compile progress panel (PrimedGunOverlayCommon.h,
+// BuildCompileProgressPixels), shown while aurora compiles the pipelines its
+// cache and seeds queued at startup: the PC's ImGui toast only reaches the
+// desktop window. It uses the menu's panel layer while the menu is closed,
+// drawn in the image's top kToastHeight rows, which the layer then shows
+// alone: across the top of the virtual screen, or floating ahead of the head
+// when no screen is up.
+
+inline constexpr int kToastHeight = 384;
+// Its share of the screen's width, and the gap above it, of the screen's height.
+inline constexpr float kToastScreenWidth = 0.55f;
+inline constexpr float kToastScreenMargin = 0.05f;
+// In front of the screen, so the compositor never weighs the two quads' depth.
+inline constexpr float kToastLift = 0.005f;
+// No screen up: PrimedGun's 0.675 m wide panel 1.35 m ahead, raised clear of the centre of view.
+inline constexpr float kToastFloatingWidth = 0.675f;
+inline constexpr float kToastFloatingDistance = 1.35f;
+inline constexpr float kToastFloatingRaise = 0.25f;
+
+inline Pixels BuildCompileToastPixels(uint32_t done, uint32_t total) {
+    Pixels pixels(static_cast<size_t>(kWidth) * kImageHeight, 0u);
+    const int width = kWidth;
+    const int height = kImageHeight;
+    FillRect(pixels, width, height, 0, 0, kWidth, kToastHeight, 0xD0100804u);
+    FillRect(pixels, width, height, 0, 0, kWidth, 8, 0xE0FFB030u);
+    FillRect(pixels, width, height, 0, kToastHeight - 8, kWidth, 8, 0xE0FFB030u);
+
+    constexpr const char* title = "COMPILING SHADERS";
+    DrawString(pixels, width, height, title, (kWidth - TextWidth(title, 5)) / 2, 60, 5, 0xFFFFD8A0u);
+
+    constexpr int bar_x = 112;
+    constexpr int bar_y = 160;
+    constexpr int bar_w = 800;
+    constexpr int bar_h = 56;
+    FillRect(pixels, width, height, bar_x - 4, bar_y - 4, bar_w + 8, bar_h + 8, 0xE0FFB030u);
+    FillRect(pixels, width, height, bar_x, bar_y, bar_w, bar_h, 0xF0201810u);
+    done = std::min(done, total);
+    const int filled = total == 0 ? 0 : static_cast<int>(static_cast<uint64_t>(bar_w) * done / total);
+    if (filled > 0) {
+        FillRect(pixels, width, height, bar_x, bar_y, filled, bar_h, 0xFFFFB030u);
+    }
+
+    const std::string count = std::to_string(done) + " / " + std::to_string(total);
+    DrawString(pixels, width, height, count.c_str(), (kWidth - TextWidth(count.c_str(), 4)) / 2, 250, 4,
+               0xFFFFF0C8u);
+    constexpr const char* hint = "THIS CAN TAKE A FEW MINUTES ON THE FIRST LAUNCH";
+    DrawString(pixels, width, height, hint, (kWidth - TextWidth(hint, 2)) / 2, 320, 2, 0xFFD8C0A0u);
+    return pixels;
+}
+
+// Rebuild the image when this changes: PrimedGun's percent granularity, as the
+// count moves many times a second.
+inline uint32_t CompileToastKey(uint32_t done, uint32_t total) {
+    return total == 0 ? 0u : static_cast<uint32_t>(static_cast<uint64_t>(std::min(done, total)) * 100u / total) + 1u;
+}
+
+struct ToastPlacement {
+    Pose pose;
+    float width_meters = 0.0f;
+    float height_meters = 0.0f;
+};
+
+// Across the top of a screen whose centre is `screen` and whose picture is
+// 2 * half_width x 2 * half_height metres.
+inline ToastPlacement CompileToastOnScreen(const Pose& screen, float half_width, float half_height) noexcept {
+    ToastPlacement toast;
+    toast.width_meters = 2.0f * half_width * kToastScreenWidth;
+    toast.height_meters = toast.width_meters * static_cast<float>(kToastHeight) / static_cast<float>(kWidth);
+    const float up = half_height * (1.0f - 2.0f * kToastScreenMargin) - 0.5f * toast.height_meters;
+    toast.pose.orientation = screen.orientation;
+    toast.pose.position = Add(screen.position, screen_math::Rotate(screen.orientation, {0.0f, up, kToastLift}));
+    return toast;
+}
+
+// Upright, facing the head's horizontal forward, above its line of sight.
+// False when the head looks straight up or down.
+inline bool CompileToastFloating(const Pose& head, ToastPlacement& toast) noexcept {
+    const Vec3 forward = screen_math::Rotate(head.orientation, {0.0f, 0.0f, -1.0f});
+    const float horizontal = std::sqrt(forward[0] * forward[0] + forward[2] * forward[2]);
+    if (horizontal < 0.0001f) {
+        return false;
+    }
+    const float half_yaw = 0.5f * std::atan2(-forward[0] / horizontal, -forward[2] / horizontal);
+    toast.pose.orientation = {0.0f, std::sin(half_yaw), 0.0f, std::cos(half_yaw)};
+    toast.pose.position = Add(head.position, screen_math::Rotate(toast.pose.orientation,
+                                                                 {0.0f, kToastFloatingRaise, -kToastFloatingDistance}));
+    toast.width_meters = kToastFloatingWidth;
+    toast.height_meters = kToastFloatingWidth * static_cast<float>(kToastHeight) / static_cast<float>(kWidth);
+    return true;
+}
+
 } // namespace PortVr::VrMenu

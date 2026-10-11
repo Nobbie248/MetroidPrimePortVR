@@ -155,6 +155,17 @@ aurora bumps a pipeline config version, aurora ignores the seed and the
 `port_pipeline_seed` test fails. To record it again, run
 `python3 tools/pipeline_seed.py tour`, then `merge` (see the script's `--help`).
 
+PrimedGun also ships `assets/primedgun_pipeline_cache.db`, merged after upstream's
+seed: the configs the fork's draws ask for (de-indexed vertices, native world
+records) and the headset's eye pipelines, taken from caches saved on a PC VR
+install and on a Quest. The PC executable embeds it; the Quest APK packs it (the
+APK has no upstream seed). Aurora keeps only the eye pipelines the device draws
+with and gives the rows the device's MSAA. It is built for one GX layout epoch
+(`PortGxLayoutEpoch`): when that or `GXPipelineConfigVersion` changes, aurora
+ignores the seed and the `port_primedgun_pipeline_seed` test fails. Rebuild it
+from caches saved by the new build with `python3 tools/primedgun_seed.py build`
+(its docstring says where to pull them from).
+
 ## Runtime dependencies
 
 A Linux binary only runs where glibc and libstdc++ are at least as new as the

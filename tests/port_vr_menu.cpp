@@ -703,6 +703,46 @@ void TestControls() {
   Check(!open, "stays closed when not allowed");
 }
 
+void TestCompileToast() {
+  // PrimedGun's panel in the image's top strip, nothing below it; the bar fills with the count.
+  const Pixels half = BuildCompileToastPixels(50, 100);
+  Check(half.size() == static_cast<size_t>(kWidth) * kImageHeight, "toast image size");
+  Check(At(half, 0, 0) == 0xE0FFB030u && At(half, 0, kToastHeight - 1) == 0xE0FFB030u, "toast frame");
+  Check(At(half, 20, 100) == 0xD0100804u, "toast background");
+  Check(At(half, 20, kToastHeight) == 0u && At(half, kWidth - 1, kImageHeight - 1) == 0u, "transparent below");
+  Check(At(half, 112 + 399, 190) == 0xFFFFB030u && At(half, 112 + 401, 190) == 0xF0201810u, "half a bar");
+  const Pixels over = BuildCompileToastPixels(7, 3);
+  Check(At(over, 112 + 799, 190) == 0xFFFFB030u, "done is capped at the total");
+  Check(At(BuildCompileToastPixels(0, 0), 112, 190) == 0xF0201810u, "nothing to compile, empty bar");
+  Check(CompileToastKey(0, 0) == 0 && CompileToastKey(0, 10) == 1 && CompileToastKey(10, 10) == 101 &&
+            CompileToastKey(4, 1000) == CompileToastKey(9, 1000) && CompileToastKey(9, 1000) != CompileToastKey(10, 1000),
+        "toast redrawn per percent");
+
+  // Across the top of a 2 x 1.5 m screen 2 m ahead, turned to face +X: centred, 55% wide,
+  // its top edge 5% of the height below the screen's, just in front of it.
+  Pose screen{};
+  screen.position = {-2.0f, 1.5f, 0.0f};
+  screen.orientation = AxisAngle({0.0f, 1.0f, 0.0f}, 90.0f);
+  const ToastPlacement top = CompileToastOnScreen(screen, 1.0f, 0.75f);
+  Check(Near(top.width_meters, 1.1f) && Near(top.height_meters, 1.1f * kToastHeight / kWidth), "toast size on screen");
+  const float topEdge = top.pose.position[1] + 0.5f * top.height_meters;
+  Check(Near(topEdge, 1.5f + 0.75f - 0.075f), "toast below the screen's top edge");
+  Check(Near(top.pose.position[0], -2.0f + kToastLift) && Near(top.pose.position[2], 0.0f), "toast on the screen");
+  Check(Near(screen_math::Rotate(top.pose.orientation, {0.0f, 0.0f, 1.0f}), {1.0f, 0.0f, 0.0f}), "toast faces the head");
+
+  // No screen: 1.35 m ahead of a head looking left and down, upright and raised.
+  Pose head{};
+  head.position = {0.0f, 1.6f, 0.0f};
+  head.orientation = Multiply(AxisAngle({0.0f, 1.0f, 0.0f}, 90.0f), AxisAngle({1.0f, 0.0f, 0.0f}, -30.0f));
+  ToastPlacement floating;
+  Check(CompileToastFloating(head, floating), "floating toast");
+  Check(Near(floating.pose.position, {-kToastFloatingDistance, 1.6f + kToastFloatingRaise, 0.0f}), "floating toast position");
+  Check(Near(screen_math::Rotate(floating.pose.orientation, {0.0f, 1.0f, 0.0f}), {0.0f, 1.0f, 0.0f}), "floating toast upright");
+  Check(Near(floating.width_meters, kToastFloatingWidth), "floating toast width");
+  head.orientation = AxisAngle({1.0f, 0.0f, 0.0f}, 90.0f);
+  Check(!CompileToastFloating(head, floating), "no floating toast looking straight up");
+}
+
 } // namespace
 
 int main() {
@@ -716,6 +756,7 @@ int main() {
   TestScreenAnchor();
   TestCinemaCooldown();
   TestControls();
+  TestCompileToast();
   std::puts("vr menu tests passed");
   return 0;
 }

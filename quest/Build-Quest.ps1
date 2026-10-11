@@ -106,8 +106,9 @@ if (-not $StockDawn) {
     if (-not (Test-Path $dawnPackage)) { throw "Patched Dawn package missing: $dawnPackage" }
     $gradleArgs += "-PquestDawnPackage=$dawnPackage"
 }
-if ($Configuration -eq 'release' -and -not (Test-Path (Join-Path $root 'keystore.properties')) -and
-    -not $env:PRIMEDGUN_QUEST_KEYSTORE) {
+# A debug assemble configures the release variant too, and its preReleaseBuild guard refuses
+# the shared key unless this is passed.
+if (-not (Test-Path (Join-Path $root 'keystore.properties')) -and -not $env:PRIMEDGUN_QUEST_KEYSTORE) {
     Write-Host 'No release key configured: signing with the shared debug key, for sideloading.'
     $gradleArgs += '-PquestDebugSigning=true'
 }

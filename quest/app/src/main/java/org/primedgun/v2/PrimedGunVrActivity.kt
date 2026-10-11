@@ -141,7 +141,7 @@ class PrimedGunVrActivity : SDLActivity() {
     }
 
     /**
-     * The built-in textures and the initial pipeline cache the game reads from its
+     * The built-in textures and the pipeline cache seeds the game reads from its
      * private folder (platform/main.cpp), as upstream's MetroidPrimeActivity copies
      * them, but only once per installed build: the stamp holds the install time,
      * because a rebuilt APK sideloaded over the last one keeps its version.
@@ -158,14 +158,17 @@ class PrimedGunVrActivity : SDLActivity() {
             val textures = File(filesDir, "textures")
             textures.deleteRecursively()
             copyAssetTree("textures", textures)
-            // The APK carries a seed only once one is recorded on the Quest (see
-            // syncPortAssets in build.gradle.kts). Without one, an earlier build's
-            // copy goes, since aurora would keep merging its rows at every start.
-            val seed = File(filesDir, "initial_pipeline_cache.db")
-            if (assets.list("")?.contains("initial_pipeline_cache.db") == true) {
-                copyAsset("initial_pipeline_cache.db", seed)
-            } else {
-                seed.delete()
+            // The APK carries PrimedGun's seed and not upstream's (see syncPortAssets
+            // in build.gradle.kts). A seed the APK doesn't carry goes, since aurora
+            // would keep merging an earlier build's rows at every start.
+            val packed = assets.list("")?.toSet() ?: emptySet()
+            for (name in listOf("initial_pipeline_cache.db", "primedgun_pipeline_cache.db")) {
+                val seed = File(filesDir, name)
+                if (name in packed) {
+                    copyAsset(name, seed)
+                } else {
+                    seed.delete()
+                }
             }
             stamp.writeText(expected)
             Log.i(TAG, "Unpacked the game's resources into ${filesDir.absolutePath}")

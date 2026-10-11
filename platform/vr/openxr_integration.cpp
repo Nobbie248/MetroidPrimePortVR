@@ -1011,10 +1011,12 @@ private:
                 !immersive && passthrough_.load(std::memory_order_relaxed);
             // PrimedGun's VR menu gets compositor layers of its own while it is
             // open. A backend that could not make them cannot show it, and the
-            // menu then never opens.
+            // menu then never opens. While it is closed, the shader compilation
+            // toast borrows the first.
             const bool panel_layer = backend_->PanelLayerAvailable();
             aurora_set_stereo_panel_layer(panel_layer);
-            presentation.panel.requested = panel_layer && OpenXRSettingsPanelOpen();
+            presentation.panel.requested =
+                panel_layer && (OpenXRSettingsPanelOpen() || OpenXRCompileToastShown());
 
             // Pipeline caches are stored where their stall is least visible: once when a race
             // ends, and by the compiler itself while the headset shows the virtual screen. Never
@@ -1099,14 +1101,14 @@ private:
             // before FinishFrame submits a layer built from it.
             ServiceRecenterRequest();
             UpdateVirtualScreenPose(frame, policy);
+            // After the screen is placed, so the pointer aims at this frame's
+            // screen rather than the previous one's.
+            const OpenXRPointerScreen screen = PointerScreen(frame, policy, immersive);
             if (input_ != nullptr) {
                 const diagnostics::ScopedStage input_timer(diagnostics::Stage::InputSync);
-                // After the screen is placed, so the pointer aims at this
-                // frame's screen rather than the previous one's.
-                input_->Sync(frame.xr_frame.predicted_display_time, PointerScreen(frame, policy, immersive),
-                             panel_layer);
+                input_->Sync(frame.xr_frame.predicted_display_time, screen, panel_layer);
             }
-            PlacePanelLayer(frame);
+            PlacePanelLayer(frame, screen);
 
             if (!frame.expects_gpu_submission) {
                 if (!backend_->FinishFrame(frame, false)) {
@@ -1293,12 +1295,12 @@ private:
         // The head pose this packet was located with places the screens and aims the pointer.
         ServiceRecenterRequest();
         UpdateVirtualScreenPose(packet, policy);
+        const OpenXRPointerScreen screen = PointerScreen(packet, policy, immersive);
         if (input_ != nullptr) {
             const diagnostics::ScopedStage input_timer(diagnostics::Stage::InputSync);
-            input_->Sync(packet.xr_frame.predicted_display_time, PointerScreen(packet, policy, immersive),
-                         backend_->PanelLayerAvailable());
+            input_->Sync(packet.xr_frame.predicted_display_time, screen, backend_->PanelLayerAvailable());
         }
-        PlacePanelLayer(packet);
+        PlacePanelLayer(packet, screen);
         if (!packet.expects_gpu_submission) {
             // Nothing to render (no rendering requested or no tracking): keep the compositor fed.
             return KeepAlive();
@@ -1429,12 +1431,12 @@ private:
         // The head pose this packet was located with places the screens and aims the pointer.
         ServiceRecenterRequest();
         UpdateVirtualScreenPose(packet, policy);
+        const OpenXRPointerScreen screen = PointerScreen(packet, policy, immersive);
         if (input_ != nullptr) {
             const diagnostics::ScopedStage input_timer(diagnostics::Stage::InputSync);
-            input_->Sync(packet.xr_frame.predicted_display_time, PointerScreen(packet, policy, immersive),
-                         backend_->PanelLayerAvailable());
+            input_->Sync(packet.xr_frame.predicted_display_time, screen, backend_->PanelLayerAvailable());
         }
-        PlacePanelLayer(packet);
+        PlacePanelLayer(packet, screen);
         {
             const diagnostics::ScopedStage publish_timer(diagnostics::Stage::Publish);
             std::lock_guard lock(published_mutex_);
@@ -1770,9 +1772,16 @@ private:
 
     // The VR menu's layers hang where the input layer placed the menu this
     // frame (on the off hand, or floating) and aimed the laser, the same poses
-    // its pointer hits were tested against.
-    void PlacePanelLayer(OpenXRBackendFrame& frame) const noexcept {
+    // its pointer hits were tested against. While the menu is closed the
+    // shader compilation toast may have the first layer (PlaceCompileToast).
+    void PlacePanelLayer(OpenXRBackendFrame& frame, const OpenXRPointerScreen& screen) noexcept {
         OpenXRPanelLayer& panel = frame.presentation.panel;
+        panel.image_rows = VrMenu::kMenuHeight;
+        if (panel.requested && !OpenXRSettingsPanelOpen() && OpenXRCompileToastShown()) {
+            PlaceCompileToast(frame, screen);
+            return;
+        }
+        toast_floating_valid_ = false;
         const OpenXRMenuPlacement menu = input_ != nullptr ? input_->MenuPlacement() : OpenXRMenuPlacement{};
         panel.placed = panel.requested && menu.placed;
         if (!panel.placed) {
@@ -1787,6 +1796,56 @@ private:
         panel.laser_length_meters = menu.laser_length_meters;
         panel.dot = menu.dot;
         panel.dot_pose = menu.dot_pose;
+    }
+
+    // PrimedGun's compile progress panel, the image's top VrMenu::kToastHeight
+    // rows: across the top of the screen the game picture is on (the virtual
+    // screen, or the immersive window). With none up (immersive play) it floats
+    // ahead of where the head looked when it appeared, upright, and stays there.
+    void PlaceCompileToast(OpenXRBackendFrame& frame, const OpenXRPointerScreen& screen) noexcept {
+        OpenXRPanelLayer& panel = frame.presentation.panel;
+        panel.laser = panel.dot = false;
+        panel.image_rows = VrMenu::kToastHeight;
+        VrMenu::ToastPlacement toast;
+        if (screen.valid) {
+            toast_floating_valid_ = false;
+            screen_math::Pose screen_pose;
+            screen_pose.position = {screen.pose.position.x, screen.pose.position.y, screen.pose.position.z};
+            screen_pose.orientation = {screen.pose.orientation.x, screen.pose.orientation.y,
+                                       screen.pose.orientation.z, screen.pose.orientation.w};
+            toast = VrMenu::CompileToastOnScreen(screen_pose, screen.half_width_meters, screen.half_height_meters);
+        } else if (frame.presentation.mode == OpenXRFrameMode::VirtualScreen) {
+            // The menu screen whose picture isn't sized yet (the first frames): wait for it
+            // rather than float and then jump onto it.
+            panel.placed = false;
+            return;
+        } else {
+            if (!toast_floating_valid_) {
+                constexpr XrViewStateFlags kPoseUsable =
+                    XR_VIEW_STATE_ORIENTATION_VALID_BIT | XR_VIEW_STATE_POSITION_VALID_BIT;
+                const OpenXRFrame& xr_frame = frame.xr_frame;
+                if (!xr_frame.views_valid || (xr_frame.view_state_flags & kPoseUsable) != kPoseUsable) {
+                    panel.placed = false;
+                    return;
+                }
+                screen_math::Pose head;
+                head.position = CenterPosition(xr_frame);
+                const auto& q = xr_frame.views[0].pose.orientation;
+                head.orientation = {q.x, q.y, q.z, q.w};
+                if (!VrMenu::CompileToastFloating(head, toast_floating_)) {
+                    panel.placed = false;
+                    return;
+                }
+                toast_floating_valid_ = true;
+            }
+            toast = toast_floating_;
+        }
+        panel.placed = true;
+        panel.pose.position = {toast.pose.position[0], toast.pose.position[1], toast.pose.position[2]};
+        panel.pose.orientation = {toast.pose.orientation[0], toast.pose.orientation[1], toast.pose.orientation[2],
+                                  toast.pose.orientation[3]};
+        panel.width_meters = toast.width_meters;
+        panel.height_meters = toast.height_meters;
     }
 
     // Centre of the race's 2D screen. ViewFromBase maps a point p of the
@@ -1900,6 +1959,8 @@ private:
         // The anchored menu screen is placed in the same space, so it is stale
         // for exactly the same reasons and is re-placed on the next frame.
         virtual_screen_anchor_.Reset();
+        // And so is the floating compile toast.
+        toast_floating_valid_ = false;
     }
 
     void SetInterpolationActive(bool active) noexcept {
@@ -2116,6 +2177,9 @@ private:
     std::array<float, 3> base_position_{};
     bool base_position_valid_ = false;
     VirtualScreenAnchor virtual_screen_anchor_{};
+    // The shader compilation toast's floating pose (PlaceCompileToast), latched while no screen is up.
+    VrMenu::ToastPlacement toast_floating_{};
+    bool toast_floating_valid_ = false;
     bool last_immersive_ = false;
     uint64_t applied_session_run_serial_ = 0;
     bool session_was_active_ = false;

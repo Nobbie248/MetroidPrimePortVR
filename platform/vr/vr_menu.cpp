@@ -204,7 +204,38 @@ struct Menu {
     // DEBUG's readouts, sampled twice a second so the image is not redrawn every frame.
     VrMenu::View readouts;
     double readouts_at = 0.0;
+    // The shader compilation toast has the panel's image (it shows while the menu is
+    // closed), at this VrMenu::CompileToastKey.
+    bool toast_shown = false;
+    uint32_t toast_key = 0;
 };
+
+// The startup compile's progress (PortDebug::ShaderCompilationProgress) on the panel layer,
+// which the menu has while it is open. The image is rebuilt only when the percent changes.
+void UpdateCompileToast(Menu& menu, bool compiling, uint32_t done, uint32_t total) noexcept {
+    if (!compiling || OpenXRSettingsPanelOpen()) {
+        if (menu.toast_shown) {
+            menu.toast_shown = false;
+            OpenXRSetCompileToastShown(false);
+            PORTVR_LOG() << "shader compilation toast hidden" << (compiling ? " (VR menu open)" : "") << std::endl;
+            if (!OpenXRSettingsPanelOpen()) {
+                aurora_set_stereo_panel_image(nullptr, 0, 0);
+            }
+        }
+        return;
+    }
+    const uint32_t key = VrMenu::CompileToastKey(done, total);
+    if (!menu.toast_shown || key != menu.toast_key) {
+        const VrMenu::Pixels pixels = VrMenu::BuildCompileToastPixels(done, total);
+        aurora_set_stereo_panel_image(pixels.data(), VrMenu::kWidth, VrMenu::kImageHeight);
+        menu.toast_key = key;
+    }
+    if (!menu.toast_shown) {
+        menu.toast_shown = true;
+        OpenXRSetCompileToastShown(true);
+        PORTVR_LOG() << "shader compilation toast shown: " << done << " / " << total << std::endl;
+    }
+}
 
 // What the menu shows besides its own state and the settings.
 VrMenu::View BuildView(Menu& menu, const PortVrSettings& settings, double now) {
@@ -252,6 +283,11 @@ void VrMenuUpdate() noexcept {
     const double now = NowSeconds();
     // Every game frame, so the rate is current when the menu opens.
     menu.rate.Tick(now);
+    // Every game frame too, as the PC's toast is, so the startup compile ends when its queue
+    // first drains even while the menu is open.
+    uint32_t compiled = 0;
+    uint32_t toCompile = 0;
+    const bool compiling = PortDebug::ShaderCompilationProgress(compiled, toCompile) && OpenXRIsRunning();
     if (!OpenXRIsRunning() || !OpenXRSettingsPanelOpen()) {
         if (menu.was_open) {
             menu.was_open = false;
@@ -259,8 +295,11 @@ void VrMenuUpdate() noexcept {
             menu.shown.clear();
             aurora_set_stereo_panel_image(nullptr, 0, 0);
         }
+        UpdateCompileToast(menu, compiling, compiled, toCompile);
         return;
     }
+    // The menu takes the panel's image over.
+    UpdateCompileToast(menu, false, 0, 0);
     if (!menu.was_open) {
         menu.was_open = true;
         VrMenu::Open(menu.state);

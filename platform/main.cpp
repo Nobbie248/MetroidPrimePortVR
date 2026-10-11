@@ -1008,6 +1008,10 @@ int main(int argc, char** argv) {
     }
 #endif
     const std::span<const uint8_t> embeddedSeed = PortEmbedded::Find("initial_pipeline_cache.db");
+    // PortVr: PrimedGun's own seed (tools/primedgun_seed.py), merged after upstream's: the configs
+    // the fork's draws ask for and the headset's eye pipelines. Embedded on desktop; the Quest
+    // activity unpacks it into the resources folder.
+    const std::span<const uint8_t> embeddedPrimedGunSeed = PortEmbedded::Find("primedgun_pipeline_cache.db");
 #if !defined(__ANDROID__)
     // The window icon, for a bare binary that no desktop entry describes.
     // Android takes its icon from the APK.
@@ -1060,6 +1064,11 @@ int main(int argc, char** argv) {
         .pipelineCacheSeedSize = embeddedSeed.size(),
         // MP_PIPELINE_SEED=0: start from an empty cache (tools/pipeline_seed.py tour records with it).
         .pipelineCacheNoSeed = !port::EnvFlag("MP_PIPELINE_SEED", true),
+        .pipelineCacheExtraSeedData = embeddedPrimedGunSeed.data(),
+        .pipelineCacheExtraSeedSize = embeddedPrimedGunSeed.size(),
+        .pipelineCacheExtraSeedName = "primedgun_pipeline_cache.db",
+        // Set below once OpenXR says whether the headset will run.
+        .pipelineCacheExtraSeedStereo = false,
         // Set below when a custom Vulkan driver (port_gpu_driver.h) is loaded.
         .vulkanLibraryDir = nullptr,
         // Aurora's Null backend draws nothing: the game would play its sound behind
@@ -1127,6 +1136,10 @@ int main(int argc, char** argv) {
     PortVr::ApplyVrEnvironmentOverrides();
     PortVr::PushVrSettingsToAurora();
     const PortVr::OpenXRStartupResult vrStartup = PortVr::OpenXRPrepareAurora(config);
+    // A flat start compiles no eye pipelines from PrimedGun's seed. MP_PIPELINE_SEED_EYES=1 takes
+    // them anyway, to check on a desktop that every row of a new seed compiles.
+    config.pipelineCacheExtraSeedStereo =
+        vrStartup == PortVr::OpenXRStartupResult::Prepared || port::EnvFlag("MP_PIPELINE_SEED_EYES", false);
     if (vrStartup == PortVr::OpenXRStartupResult::Unavailable) {
         PortLog::Write("port: OpenXR unavailable: %s\n", PortVr::OpenXRLastError().c_str());
         // PortVr: a Quest has no desktop to fall back to.

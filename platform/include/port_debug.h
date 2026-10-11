@@ -514,6 +514,10 @@ unsigned MouseHeldButtons();
 // opens the release page (on the next frame; true if it hit). Thread-safe.
 bool UpdateToastShowing();
 bool TapUpdateToast(float x, float y);
+// PortVr: while the headset's "Compiling shaders" toast shows (show_shader_compilation, a
+// second into the startup compile, until its queue first drains), the pipelines built since
+// it opened and the total. The headset draws its own (vr_menu.cpp). Game thread.
+bool ShaderCompilationProgress(uint32_t& done, uint32_t& total);
 // Called during simulation, using the effective unbobbed camera direction.
 bool UpdateMouseAim(bool active, bool locked, float x, float y, float z);
 void SynchronizeMouseAim(float x, float y, float z);

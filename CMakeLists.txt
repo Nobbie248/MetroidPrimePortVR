@@ -505,6 +505,8 @@ if(MP_EMBED_RESOURCES)
     file(GLOB_RECURSE MP_EMBED_INPUTS CONFIGURE_DEPENDS
         "${CMAKE_CURRENT_SOURCE_DIR}/textures/*")
     set(MP_EMBED_SEED "${CMAKE_CURRENT_SOURCE_DIR}/assets/initial_pipeline_cache.db")
+    # PrimedGun's own seed (tools/primedgun_seed.py), merged after upstream's.
+    set(MP_EMBED_PRIMEDGUN_SEED "${CMAKE_CURRENT_SOURCE_DIR}/assets/primedgun_pipeline_cache.db")
     set(MP_EMBED_SOURCE "${CMAKE_CURRENT_BINARY_DIR}/generated/port_embedded_data.cpp")
     add_custom_command(
         OUTPUT "${MP_EMBED_SOURCE}"
@@ -513,7 +515,8 @@ if(MP_EMBED_RESOURCES)
             "${MP_EMBED_SOURCE}"
             --dir "${CMAKE_CURRENT_SOURCE_DIR}/textures" textures
             --file "${MP_EMBED_SEED}" initial_pipeline_cache.db
-        DEPENDS ${MP_EMBED_INPUTS} "${MP_EMBED_SEED}"
+            --file "${MP_EMBED_PRIMEDGUN_SEED}" primedgun_pipeline_cache.db
+        DEPENDS ${MP_EMBED_INPUTS} "${MP_EMBED_SEED}" "${MP_EMBED_PRIMEDGUN_SEED}"
             "${CMAKE_CURRENT_SOURCE_DIR}/tools/embed_resources.py"
         COMMENT "Embedding textures and the pipeline cache seed"
         VERBATIM)
@@ -571,7 +574,10 @@ if(NOT MP_EMBED_RESOURCES)
     add_custom_command(TARGET metroid_prime_port POST_BUILD
         COMMAND ${CMAKE_COMMAND} -E copy_if_different
             ${CMAKE_CURRENT_SOURCE_DIR}/assets/initial_pipeline_cache.db
-            $<TARGET_FILE_DIR:metroid_prime_port>/initial_pipeline_cache.db)
+            $<TARGET_FILE_DIR:metroid_prime_port>/initial_pipeline_cache.db
+        COMMAND ${CMAKE_COMMAND} -E copy_if_different
+            ${CMAKE_CURRENT_SOURCE_DIR}/assets/primedgun_pipeline_cache.db
+            $<TARGET_FILE_DIR:metroid_prime_port>/primedgun_pipeline_cache.db)
 endif()
 
 # Install rules. Without these a `cmake --install` installs nothing at all, which
@@ -589,6 +595,7 @@ if(NOT MP_EMBED_RESOURCES)
     install(DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}/textures/
         DESTINATION ${CMAKE_INSTALL_BINDIR}/textures)
     install(FILES ${CMAKE_CURRENT_SOURCE_DIR}/assets/initial_pipeline_cache.db
+        ${CMAKE_CURRENT_SOURCE_DIR}/assets/primedgun_pipeline_cache.db
         DESTINATION ${CMAKE_INSTALL_BINDIR})
 endif()
 install(FILES ${CMAKE_CURRENT_SOURCE_DIR}/packaging/io.github.odrannnn.metroidprimeport.desktop
@@ -935,5 +942,10 @@ if(MP_BUILD_TESTS)
         add_test(NAME port_pipeline_seed
             COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/tools/pipeline_seed.py check)
         set_tests_properties(port_pipeline_seed PROPERTIES TIMEOUT 60 LABELS port)
+        # PrimedGun's seed: at the current config version and GX layout epoch, retail,
+        # one sample, every eye row with its twins (tools/primedgun_seed.py rebuilds it).
+        add_test(NAME port_primedgun_pipeline_seed
+            COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/tools/primedgun_seed.py check)
+        set_tests_properties(port_primedgun_pipeline_seed PROPERTIES TIMEOUT 60 LABELS port)
     endif()
 endif()

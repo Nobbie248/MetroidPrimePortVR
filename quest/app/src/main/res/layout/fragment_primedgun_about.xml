@@ -102,12 +102,28 @@
             android:text="@string/primedgun_about_github" />
 
         <Button
+            android:id="@+id/about_legacy_github"
+            style="@style/PrimedGunButton"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="8dp"
+            android:text="@string/primedgun_about_legacy_github" />
+
+        <Button
             android:id="@+id/about_discord"
             style="@style/PrimedGunButton"
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
             android:layout_marginTop="8dp"
             android:text="@string/primedgun_about_discord" />
+
+        <Button
+            android:id="@+id/about_flat2vr_discord"
+            style="@style/PrimedGunButton"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="8dp"
+            android:text="@string/primedgun_about_flat2vr_discord" />
 
         <TextView
             style="@style/PrimedGunMutedLabel"

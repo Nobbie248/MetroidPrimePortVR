@@ -12,7 +12,6 @@
 
 #include <QDesktopServices>
 #include <QDir>
-#include <QHBoxLayout>
 #include <QLabel>
 #include <QPushButton>
 #include <QTabWidget>
@@ -81,41 +80,57 @@ void BuildAboutTab(TabContext& ctx, QTabWidget* tabs) {
 
   layout->addSpacing(8);
   layout->addWidget(ctx.Section(QObject::tr("Links")));
-  auto* links = new QHBoxLayout;
-  auto* github = new QPushButton(QObject::tr("PrimedGun on GitHub"));
+  auto* links = new QVBoxLayout;
+  auto* github = new QPushButton(QObject::tr("PrimedGun 2.0 — iChris4"));
+  auto* legacyGithub = new QPushButton(QObject::tr("PrimedGun Legacy — Nobbie"));
   auto* discord = new QPushButton(QObject::tr("Dolphin VR Discord"));
-  links->addWidget(github);
-  links->addWidget(discord);
-  links->addStretch();
+  auto* flat2vrDiscord = new QPushButton(QObject::tr("Flat2VR Modding Discord"));
+  links->addWidget(github, 0, Qt::AlignLeft);
+  links->addWidget(legacyGithub, 0, Qt::AlignLeft);
+  links->addWidget(discord, 0, Qt::AlignLeft);
+  links->addWidget(flat2vrDiscord, 0, Qt::AlignLeft);
   layout->addLayout(links);
   layout->addWidget(Paragraph(
-      QObject::tr("For further enhancements to your VR experience, join the Dolphin VR Discord."),
+      QObject::tr("Join the Discord communities for VR modding discussions and support."),
       true));
   QObject::connect(github, &QPushButton::clicked, github, [] {
+    QDesktopServices::openUrl(QUrl(QStringLiteral("https://github.com/iChris4/MetroidPrimePortVR")));
+  });
+  QObject::connect(legacyGithub, &QPushButton::clicked, legacyGithub, [] {
     QDesktopServices::openUrl(QUrl(QStringLiteral("https://github.com/Nobbie248/PrimedGun")));
   });
   QObject::connect(discord, &QPushButton::clicked, discord, [] {
     QDesktopServices::openUrl(QUrl(QStringLiteral("https://discord.gg/GdmffzCTrh")));
   });
+  QObject::connect(flat2vrDiscord, &QPushButton::clicked, flat2vrDiscord, [] {
+    QDesktopServices::openUrl(QUrl(QStringLiteral("https://discord.gg/flat2vr")));
+  });
 
   layout->addSpacing(8);
   layout->addWidget(ctx.Section(QObject::tr("Credits")));
-  layout->addWidget(Paragraph(Bullets({
-      QObject::tr("Created by Nobbie."),
-      QObject::tr("Huge thank you to iChris4, who made Dolphin ReduX for PC and Quest, ported "
-                  "PrimedGun to the Quest, and early on helped fix the visor effects and ported the "
-                  "Metroid Prime override from the old Dolphin Hydra."),
-      QObject::tr("Thank you to the Metroid Prime modding community for the resources and research "
-                  "that helped make this possible."),
-      QObject::tr("Development references include the Metroid Prime decompilation project, "
-                  "Metaforce, and PrimeHack. Codex was used to assist with debugging, system "
-                  "integration, and iterative development."),
-      QObject::tr("Thank you to the Dolphin team."),
-      QObject::tr("Thank you to the early testers: GeekyGami, Lucaspec72, TorchRing, detective_yoshi, "
-                  "PHA3ESH1FTGAMES, retrovideogamer, Samevi, Mochu, VideoGameEsoterica and VRified "
-                  "Games."),
-      QObject::tr("Thank you to budwheizzah for helping test the Quest version."),
-  })));
+  const auto addCredit = [layout](const QString& role, const QString& credit) {
+    layout->addWidget(Paragraph(QStringLiteral("<b>%1</b><br>%2")
+                                    .arg(role.toHtmlEscaped(), credit.toHtmlEscaped())
+                                    .replace(QLatin1Char('\n'), QStringLiteral("<br>"))));
+    layout->addSpacing(6);
+  };
+  addCredit(QObject::tr("Created by"), QObject::tr("Nobbie and iChris4"));
+  addCredit(QObject::tr("Quest Port & Early VR Development"),
+            QObject::tr("iChris4\n"
+                        "Creator of Dolphin ReduX for PC and Quest. Ported PrimedGun to Quest, "
+                        "contributed early visor effect fixes, and ported the Metroid Prime override "
+                        "from Dolphin Hydra."));
+  addCredit(QObject::tr("Development References"),
+            QObject::tr("Metroid Prime decompilation project\nMetaforce\nPrimeHack"));
+  addCredit(QObject::tr("Development Assistance"),
+            QObject::tr("Codex — debugging, system integration, and iterative development."));
+  addCredit(QObject::tr("Early Playtesting"),
+            QObject::tr("GeekyGami\nLucaspec72\nTorchRing\ndetective_yoshi\nPHA3ESH1FTGAMES\n"
+                        "retrovideogamer\nSamevi\nMochu\nVideoGameEsoterica\nVRified Games"));
+  addCredit(QObject::tr("Quest Playtesting"), QObject::tr("budwheizzah"));
+  addCredit(QObject::tr("Special Thanks"),
+            QObject::tr("The Metroid Prime modding community, for the resources and research "
+                        "that helped make PrimedGun possible.\nThe Dolphin team."));
 
   layout->addSpacing(8);
   layout->addWidget(ctx.Section(QObject::tr("Native Port")));

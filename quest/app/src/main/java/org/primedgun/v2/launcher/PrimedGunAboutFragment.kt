@@ -24,8 +24,10 @@ import org.primedgun.v2.databinding.FragmentPrimedgunAboutBinding
 class PrimedGunAboutFragment : Fragment() {
 
     companion object {
-        private const val GITHUB_URL = "https://github.com/Nobbie248/PrimedGun"
+        private const val GITHUB_URL = "https://github.com/iChris4/MetroidPrimePortVR"
+        private const val LEGACY_GITHUB_URL = "https://github.com/Nobbie248/PrimedGun"
         private const val DISCORD_URL = "https://discord.gg/GdmffzCTrh"
+        private const val FLAT2VR_DISCORD_URL = "https://discord.gg/flat2vr"
     }
 
     private var binding: FragmentPrimedgunAboutBinding? = null
@@ -43,7 +45,9 @@ class PrimedGunAboutFragment : Fragment() {
         b.aboutBuild.text = getString(R.string.primedgun_about_build, BuildConfig.BUILD_TYPE, LauncherNative.buildRevision())
         b.aboutUserFolder.text = getString(R.string.primedgun_about_user_folder, QuestStorage.userFolder(requireContext()).path)
         b.aboutGithub.setOnClickListener { openLink(GITHUB_URL) }
+        b.aboutLegacyGithub.setOnClickListener { openLink(LEGACY_GITHUB_URL) }
         b.aboutDiscord.setOnClickListener { openLink(DISCORD_URL) }
+        b.aboutFlat2vrDiscord.setOnClickListener { openLink(FLAT2VR_DISCORD_URL) }
     }
 
     override fun onDestroyView() {

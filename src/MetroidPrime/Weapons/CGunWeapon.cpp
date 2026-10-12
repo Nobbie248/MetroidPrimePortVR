@@ -14,6 +14,7 @@
 #include "MetroidPrime/Weapons/GunController/CGunController.hpp"
 
 #ifdef TARGET_PC
+#include "MetroidPrime/CRumbleManager.hpp"
 #include "vr/vr_view.h"
 #endif
 
@@ -437,7 +438,9 @@ void CGunWeapon::Fire(const bool underwater, const float dt,
   if (chargeState != CPlayerState::kCS_Normal) {
     x218_25_enableCharge = true;
 #ifdef TARGET_PC
-    if (!PortVr::VrImmersive())
+    if (PortVr::VrImmersive())
+      mgr.GetRumbleManager()->PortRecoilRumble(mgr);
+    else
 #endif
       mgr.CameraManager()->AddCameraShaker(CCameraShakeData::skSoftRecoil, false);
   }

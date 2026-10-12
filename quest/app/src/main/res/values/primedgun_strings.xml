@@ -126,6 +126,8 @@
     <string name="primedgun_section_rumble_grip">Rumble / Grip Inputs</string>
     <string name="primedgun_rumble">Rumble</string>
     <string name="primedgun_rumble_target">Rumble target</string>
+    <string name="primedgun_rumble_split">Split (cannon on gun hand)</string>
+    <string name="primedgun_rumble_split_note">Split: the arm cannon (charge, missiles, recoil) rumbles the gun hand, the grapple the off hand, everything else both.</string>
     <string name="primedgun_rumble_both">Both</string>
     <string name="primedgun_rumble_left_only">Left only</string>
     <string name="primedgun_rumble_right_only">Right only</string>

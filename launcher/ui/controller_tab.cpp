@@ -10,6 +10,7 @@
 #include "tab_context.h"
 #include "widgets.h"
 
+#include <QLabel>
 #include <QPushButton>
 #include <QTabWidget>
 #include <QVBoxLayout>
@@ -36,9 +37,16 @@ void BuildControllerTab(TabContext& ctx, QTabWidget* tabs) {
   layout->addWidget(ctx.Section(QObject::tr("Rumble / Grip Inputs")));
   ctx.Check(layout, QObject::tr("Rumble"), "vr_rumble_enabled");
   ctx.Combo(layout, QObject::tr("Rumble target"), "vr_rumble_hand",
-            {{QObject::tr("Both"), QStringLiteral("both")},
+            {{QObject::tr("Split (cannon on gun hand)"), QStringLiteral("split")},
+             {QObject::tr("Both"), QStringLiteral("both")},
              {QObject::tr("Left only"), QStringLiteral("left")},
              {QObject::tr("Right only"), QStringLiteral("right")}});
+  auto* rumbleNote =
+      new QLabel(QObject::tr("Split: the arm cannon (charge, missiles, recoil) rumbles the gun hand, "
+                             "the grapple the off hand, everything else both."));
+  rumbleNote->setWordWrap(true);
+  rumbleNote->setObjectName(QStringLiteral("PrimedGunMuted"));
+  layout->addWidget(rumbleNote);
   ctx.Check(layout, QObject::tr("Use grip input"), "vr_grip_inputs_enabled");
   ctx.Check(layout, QObject::tr("Use touchpad for PrimedGun grip inputs (Index users)"),
             "vr_grip_inputs_use_trackpad",

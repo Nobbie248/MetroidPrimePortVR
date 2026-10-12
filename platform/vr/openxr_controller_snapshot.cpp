@@ -18,9 +18,9 @@ OpenXRInputSnapshot& Stored() {
     return snapshot;
 }
 
-std::atomic<float>& Rumble() {
-    static std::atomic<float> amplitude{0.0f};
-    return amplitude;
+std::array<std::atomic<float>, kRumbleChannelCount>& Rumble() {
+    static std::array<std::atomic<float>, kRumbleChannelCount> amplitudes{};
+    return amplitudes;
 }
 
 } // namespace
@@ -35,13 +35,24 @@ OpenXRInputSnapshot OpenXRGetInputSnapshot() noexcept {
     return Stored();
 }
 
-void OpenXRSetRumble(float amplitude) noexcept {
-    Rumble().store(amplitude < 0.0f ? 0.0f : amplitude > 1.0f ? 1.0f : amplitude, std::memory_order_relaxed);
+void OpenXRSetRumble(float amplitude, RumbleChannel channel) noexcept {
+    Rumble()[static_cast<size_t>(channel)].store(amplitude < 0.0f ? 0.0f : amplitude > 1.0f ? 1.0f : amplitude,
+                                                 std::memory_order_relaxed);
+}
+
+void OpenXRClearRumble() noexcept {
+    for (std::atomic<float>& amplitude : Rumble()) {
+        amplitude.store(0.0f, std::memory_order_relaxed);
+    }
 }
 
 // Not cleared on read: a held rumble keeps pulsing until the game sets 0.
-float OpenXRTakeRumble() noexcept {
-    return Rumble().load(std::memory_order_relaxed);
+RumbleLevels OpenXRTakeRumble() noexcept {
+    RumbleLevels levels{};
+    for (size_t i = 0; i < kRumbleChannelCount; ++i) {
+        levels[i] = Rumble()[i].load(std::memory_order_relaxed);
+    }
+    return levels;
 }
 
 } // namespace PortVr

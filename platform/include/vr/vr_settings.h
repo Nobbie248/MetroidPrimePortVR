@@ -18,7 +18,9 @@ namespace PortVr {
 
 enum class MirrorView : uint8_t { Normal, Both, Left, Right, None };
 enum class ControllerModeSetting : uint8_t { PrimedGun, Gamepad, None };
-enum class RumbleHand : uint8_t { Both, Left, Right };
+// Split: the arm cannon on the gun hand, the grapple arm on the off hand, the
+// rest on both (vr_rumble.h). The others play everything on their hand(s).
+enum class RumbleHand : uint8_t { Both, Left, Right, Split };
 // aurora_set_stereo_foveation's levels, in order.
 enum class FoveationLevel : uint8_t { Off, Low, Medium, High };
 
@@ -98,7 +100,7 @@ struct PortVrSettings {
     float world_scale = 1.50f;         // game units per metre (PrimedGun GFX_VR_UNITS_PER_METER)
     bool rumble_enabled = true;
     float rumble_intensity = 1.0f;
-    RumbleHand rumble_hand = RumbleHand::Right;
+    RumbleHand rumble_hand = RumbleHand::Split;
     bool grip_inputs_enabled = true;
     bool grip_inputs_use_trackpad = false;
     float trackpad_press_threshold = 0.5f;

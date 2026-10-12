@@ -15,6 +15,7 @@
 #include "rstl/math.hpp"
 
 #ifdef TARGET_PC
+#include "MetroidPrime/CRumbleManager.hpp"
 #include "vr/vr_view.h"
 #endif
 
@@ -102,7 +103,9 @@ void CPlasmaBeam::Fire(const bool underwater, const float dt,
   } else {
     CGunWeapon::Fire(underwater, dt, chargeState, xf, mgr, homingTarget, chargeFactor1, 1.f);
 #ifdef TARGET_PC
-    if (!PortVr::VrImmersive())
+    if (PortVr::VrImmersive())
+      mgr.GetRumbleManager()->PortRecoilRumble(mgr);
+    else
 #endif
       mgr.CameraManager()->AddCameraShaker(CameraShaker, false);
     x238_lightingResetDelayTimer = 0.65f;

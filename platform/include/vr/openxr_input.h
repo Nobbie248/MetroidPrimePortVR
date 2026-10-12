@@ -78,8 +78,9 @@ OpenXRControllerMode OpenXRGetControllerMode() noexcept;
 // controllers: the laser and the triggers belong to the menu.
 //
 // Haptics: the game's rumble request (OpenXRSetRumble, from the PrimedGun pad's
-// port 0 motor or the virtual gamepad's rumble) is applied every frame to the
-// hand(s) the settings name, scaled by the rumble intensity.
+// port 0-2 motors or the virtual gamepad's rumble) is applied every frame to the
+// hand(s) the settings name, scaled by the rumble intensity; the split target
+// puts the arm cannon's on the gun hand and the grapple's on the off hand.
 //
 // Lifetime: Create after the session exists (attaches the action set, which
 // OpenXR permits once per session), Sync once per xrWaitFrame, Idle while the

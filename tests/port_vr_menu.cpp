@@ -252,11 +252,15 @@ void TestClicks() {
             !v.vr_menu_floating,
         "reset all");
 
-  // Control: RUMBLE TARGET cycles BOTH -> LEFT -> RIGHT.
+  // Control: RUMBLE TARGET cycles SPLIT -> BOTH -> LEFT -> RIGHT.
   Click(s, v, view, TabX(kControlTab), kTabY, now, actions);
-  Check(v.rumble_hand == RumbleHand::Right, "rumble default");
+  Check(v.rumble_hand == RumbleHand::Split, "rumble default");
   Click(s, v, view, kLabelX, RowY(kControlTab, 2), now, actions);
   Check(v.rumble_hand == RumbleHand::Both, "rumble cycles");
+  v.rumble_hand = RumbleHand::Right;
+  Click(s, v, view, kLabelX, RowY(kControlTab, 2), now, actions);
+  Check(v.rumble_hand == RumbleHand::Split, "rumble cycles back to split");
+  v.rumble_hand = RumbleHand::Both;
   // The control tab's second page: VISOR GESTURE, then back.
   Click(s, v, view, kNextX, kPageY, now, actions);
   Click(s, v, view, kLabelX, RowY(kControlTab, 2), now, actions);

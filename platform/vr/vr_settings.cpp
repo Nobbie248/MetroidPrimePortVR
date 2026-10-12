@@ -105,6 +105,7 @@ const char* RumbleHandName(RumbleHand hand) {
     switch (hand) {
     case RumbleHand::Both: return "both";
     case RumbleHand::Left: return "left";
+    case RumbleHand::Split: return "split";
     case RumbleHand::Right: break;
     }
     return "right";
@@ -115,6 +116,7 @@ bool ParseRumbleHand(const std::string& value, RumbleHand& out) {
     if (name == "both") out = RumbleHand::Both;
     else if (name == "left") out = RumbleHand::Left;
     else if (name == "right") out = RumbleHand::Right;
+    else if (name == "split") out = RumbleHand::Split;
     else return false;
     return true;
 }

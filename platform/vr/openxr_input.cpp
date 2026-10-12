@@ -1081,18 +1081,18 @@ void OpenXRInput::PublishSnapshot(XrTime input_time, const std::array<HandInputs
 
 // PrimedGun's rumble: the game's requested amplitude, scaled by the intensity
 // setting, re-applied every frame on the chosen hand(s) while it is non-zero.
+// The split target gives each hand its own (vr_rumble.h).
 void OpenXRInput::UpdateRumble() {
     const PortVrSettings settings = GetVrSettings();
-    const float amplitude = settings.rumble_enabled ? OpenXRTakeRumble() * settings.rumble_intensity : 0.0f;
-    if (!(amplitude > 0.0f)) {
+    if (!settings.rumble_enabled) {
         StopRumble();
         return;
     }
+    const std::array<float, 2> amplitudes =
+        RumbleHandAmplitudes(settings.rumble_hand, settings.use_right_hand, OpenXRTakeRumble());
     for (uint32_t hand = 0; hand < kHandCount; ++hand) {
-        const bool wanted = settings.rumble_hand == RumbleHand::Both ||
-                            (settings.rumble_hand == RumbleHand::Left && hand == 0) ||
-                            (settings.rumble_hand == RumbleHand::Right && hand == 1);
-        if (wanted) {
+        const float amplitude = amplitudes[hand] * settings.rumble_intensity;
+        if (amplitude > 0.0f) {
             ApplyHaptic(hand, amplitude, kRumblePulseNs);
             m_haptics_active[hand] = true;
         } else if (m_haptics_active[hand]) {

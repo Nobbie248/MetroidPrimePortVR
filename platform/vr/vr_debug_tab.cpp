@@ -264,6 +264,13 @@ void DrawVrDebugTab() {
   ImGui::TextWrapped("PrimedGun: the headset controllers drive pad 1 with PrimedGun's layout. "
                      "Gamepad: they act as a plain gamepad. None: a real pad plays.");
   changed |= ImGui::Checkbox("Rumble", &s.rumble_enabled);
+  int rumbleHand = static_cast< int >(s.rumble_hand);
+  if (ImGui::Combo("Rumble target", &rumbleHand, "Both\0Left only\0Right only\0Split\0")) {
+    s.rumble_hand = static_cast< RumbleHand >(rumbleHand);
+    changed = true;
+  }
+  ImGui::TextWrapped("Split: the arm cannon (charge, missiles, recoil) rumbles the gun hand, the grapple "
+                     "the off hand, everything else both. PrimedGun controller mode only.");
   changed |= ImGui::SliderFloat("Rumble intensity", &s.rumble_intensity, 0.f, 1.f, "%.2f");
   changed |= ImGui::Checkbox("Grip inputs", &s.grip_inputs_enabled);
   changed |= ImGui::Checkbox("Jump with the primary button", &s.combat_jump_use_primary_button);

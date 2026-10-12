@@ -139,7 +139,12 @@ void CWaveBuster::SetNewTarget(TUniqueId uid, CStateManager& mgr) {
     x3a0_bezierBlend = 0.f;
     CSfxManager::AddEmitter(0x6ff, GetTranslation(), CVector3f::Zero(), true, false,
                             CSfxManager::kMaxPriority, CSfxManager::kAllAreas);
+#ifdef TARGET_PC
+    mgr.GetRumbleManager()->PortRumble(mgr, kRFX_PlayerBump, 0.5f, kRP_Three,
+                                       CRumbleManager::kPRS_ArmCannon);
+#else
     mgr.GetRumbleManager()->Rumble(mgr, kRFX_PlayerBump, 0.5f, kRP_Three);
+#endif
   } else {
     x3d0_26_trackingTarget = false;
   }

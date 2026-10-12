@@ -7,6 +7,7 @@
 #include "vr/openxr_screen_math.h"
 #include "vr/vr_beam_wheel.h"
 #include "vr/vr_directional_move.h"
+#include "vr/vr_rumble.h"
 #include "vr/vr_settings.h"
 #include "vr/vr_snap_turn.h"
 #include "vr/vr_visor_dpad.h"
@@ -84,12 +85,16 @@ std::atomic<bool> g_owns_motor{false}; // port 0's rumble goes to the headset co
 
 // PADControlMotor's hook. While the headset controllers own port 0, its motor
 // drives their haptics, on or off as PrimedGun's GCPad::SetOutput fed them,
-// instead of the physical pad assigned to that port.
-BOOL ClaimPortZeroMotor(u32 chan, u32 cmd) {
-    if (chan != 0 || !g_owns_motor.load(std::memory_order_relaxed)) {
+// instead of the physical pad assigned to that port. Ports 1 and 2 carry the
+// arm cannon's and the grapple arm's rumble meanwhile (vr_rumble.h). The game
+// rumbles no other port, so those two never reach a real pad, not even when
+// the controllers let go in the middle of an effect.
+BOOL ClaimRumbleMotors(u32 chan, u32 cmd) {
+    const bool owns = g_owns_motor.load(std::memory_order_relaxed);
+    if (chan >= kRumbleChannelCount || (chan == 0 && !owns)) {
         return FALSE;
     }
-    OpenXRSetRumble(cmd == PAD_MOTOR_RUMBLE ? 1.0f : 0.0f);
+    OpenXRSetRumble(owns && cmd == PAD_MOTOR_RUMBLE ? 1.0f : 0.0f, static_cast<RumbleChannel>(chan));
     return TRUE;
 }
 
@@ -316,7 +321,7 @@ void VrPadUpdate(const CStateManager* mgr) noexcept {
             PADClearVirtualStatus(0);
             // The motor goes back to port 0's pad, and the headset stops.
             g_owns_motor.store(false, std::memory_order_relaxed);
-            OpenXRSetRumble(0.0f);
+            OpenXRClearRumble();
             g_was_active = false;
         }
         std::lock_guard lock(g_mutex);
@@ -333,8 +338,8 @@ void VrPadUpdate(const CStateManager* mgr) noexcept {
         // The pad that had port 0 may be mid-pulse, and its stop would now
         // reach the headset instead: stop it before the controllers take over.
         PADControlMotor(0, PAD_MOTOR_STOP_HARD);
-        OpenXRSetRumble(0.0f);
-        PADSetMotorCallback(ClaimPortZeroMotor);
+        OpenXRClearRumble();
+        PADSetMotorCallback(ClaimRumbleMotors);
         g_owns_motor.store(true, std::memory_order_relaxed);
     }
     g_was_active = true;

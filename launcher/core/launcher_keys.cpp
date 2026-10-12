@@ -61,7 +61,7 @@ constexpr KeyInfo kKeys[] = {
     {"vr_combat_jump_use_primary_button", K::Bool, "0"},
     {"vr_beam_wheel_hud_highlight", K::Bool, "1"},
     {"vr_rumble_enabled", K::Bool, "1"},
-    {"vr_rumble_hand", K::Choice, "right", 0, 0, 0, true, true, "both,left,right"},
+    {"vr_rumble_hand", K::Choice, "split", 0, 0, 0, true, true, "both,left,right,split"},
     {"vr_grip_inputs_enabled", K::Bool, "1"},
     {"vr_grip_inputs_use_trackpad", K::Bool, "0"},
     {"vr_trackpad_press_threshold", K::Float, "0.5", 0.05f, 1.0f, 0.05f},

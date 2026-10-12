@@ -1,3 +1,44 @@
+## VR: the rumble split by source, cannon on the gun hand (2026-10-12)
+
+The user asked for the charge shot to rumble only the gun hand's controller
+while landings and damage rumble both. The VR side could not tell them apart:
+`CRumbleGenerator` mixes every effect on port 0 into one pulsed motor, and the
+PADControlMotor hook only saw on/off.
+
+- `CRumbleManager::Rumble` is the only place that knows the effect. On
+  TARGET_PC it goes through `PortRumble(..., EPortRumbleSource)`: while the VR
+  pad owns port 0 (`PortVr::VrPadOwnsPort0`), the arm cannon's effects play on
+  the generator's port 1 voices and the grapple arm's on port 2, each pulsed on
+  its own; a pad, or the headset in Gamepad mode, gets everything on port 0 as
+  before. Arm cannon: `kRFX_PlayerGunCharge`, `kRFX_PlayerMissileFire`, the
+  Wave Buster's lock bump (`kRFX_PlayerBump`, named at its call site). Grapple
+  arm: `kRFX_PlayerGrappleFire`, `kRFX_PlayerGrappleSwoosh`. Everything else is
+  the body. The port rides in the handle's bits 4-5 (CRumbleVoice's handles are
+  `owner << 8 | channel 0-3`), so `StopRumble` stops the effect where it plays.
+- The recoil of charged shots, charged Plasma, Super Missiles, the Flamethrower
+  and the Wave Buster rumbled through their camera shake
+  (`CCameraManager::Update`: `kRFX_CameraShake`, gain 1, priority 2). The
+  headset skips those shakes, so it had no rumble on them at all;
+  `CRumbleManager::PortRecoilRumble` now plays that same pulse from the arm
+  cannon where the shake is skipped.
+- `vr_pad.cpp`'s motor hook (`ClaimRumbleMotors`, was `ClaimPortZeroMotor`)
+  takes ports 0-2 and feeds three channels (`OpenXRSetRumble(amplitude,
+  RumbleChannel)`; `OpenXRClearRumble` stops them all). Ports 1 and 2 are always
+  claimed once the hook is in: the game rumbles no other port, so an effect
+  left playing there when the controllers let go never reaches a real pad.
+- `OpenXRInput::UpdateRumble` gives each hand `RumbleHandAmplitudes`
+  (header-only `platform/include/vr/vr_rumble.h`, test `port_vr_rumble_tests`):
+  new target `split` = body on both, cannon on the gun hand
+  (`vr_use_right_hand`), grapple on the off hand, each hand the stronger of
+  its two. `both` / `left` / `right` play the strongest channel on their
+  hand(s), as before.
+- `vr_rumble_hand=split` is the new default (`PortVrSettings`, launcher keys,
+  the VR menu's Reset Controller). The VR menu cycles SPLIT -> BOTH -> LEFT ->
+  RIGHT; the F1 VR tab has a Rumble target combo now; PC launcher and Quest
+  panel list it first, with a note. A port_settings.ini that already holds
+  `vr_rumble_hand` keeps its value. Importing a PrimedGun config still maps its
+  rumble_hand_mode 0/1/2 to both/left/right.
+
 ## VR: PrimedGun's own shader list, and the compile toast in the headset (2026-10-11)
 
 The PC compiles upstream's pipeline seed in the background at startup and

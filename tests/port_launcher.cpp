@@ -167,7 +167,10 @@ void TestDefaultsMatchGame() {
                                                         : "primedgun";
   };
   auto hand = [](PortVr::RumbleHand h) {
-    return h == PortVr::RumbleHand::Both ? "both" : h == PortVr::RumbleHand::Left ? "left" : "right";
+    return h == PortVr::RumbleHand::Both    ? "both"
+           : h == PortVr::RumbleHand::Left  ? "left"
+           : h == PortVr::RumbleHand::Split ? "split"
+                                            : "right";
   };
   auto foveation = [](PortVr::FoveationLevel f) {
     return f == PortVr::FoveationLevel::Low      ? "low"

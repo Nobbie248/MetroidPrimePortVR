@@ -585,6 +585,8 @@ inline const char* RumbleHandText(RumbleHand hand) {
         return "LEFT";
     case RumbleHand::Right:
         return "RIGHT";
+    case RumbleHand::Split:
+        return "SPLIT";
     case RumbleHand::Both:
         break;
     }
@@ -1124,7 +1126,7 @@ inline void ResetController(PortVrSettings& v) {
     v.use_right_hand = true;
     v.rumble_enabled = true;
     v.rumble_intensity = 1.0f;
-    v.rumble_hand = RumbleHand::Right;
+    v.rumble_hand = RumbleHand::Split;
     v.grip_inputs_enabled = true;
     v.grip_inputs_use_trackpad = false;
     v.trackpad_press_threshold = 0.5f;
@@ -1476,10 +1478,11 @@ inline void Activate(State& s, PortVrSettings& v, const View& view, double now, 
         case 1:
             v.rumble_enabled = !v.rumble_enabled;
             break;
-        case 2: // BOTH -> LEFT -> RIGHT, PrimedGun's rumble_hand_mode 0, 1, 2
-            v.rumble_hand = v.rumble_hand == RumbleHand::Both   ? RumbleHand::Left
+        case 2: // SPLIT -> BOTH -> LEFT -> RIGHT: the default, then PrimedGun's rumble_hand_mode 0, 1, 2
+            v.rumble_hand = v.rumble_hand == RumbleHand::Split  ? RumbleHand::Both
+                            : v.rumble_hand == RumbleHand::Both ? RumbleHand::Left
                             : v.rumble_hand == RumbleHand::Left ? RumbleHand::Right
-                                                                : RumbleHand::Both;
+                                                                : RumbleHand::Split;
             break;
         case 4:
             v.grip_inputs_enabled = !v.grip_inputs_enabled;

@@ -249,7 +249,9 @@ void CAuxWeapon::LaunchMissile(float dt, const bool underwater, bool charged, in
         ->SetCameraShake(CCameraShakeData::HardVertShakeDistance(
             0.25f, 0.75f, 50.f, static_cast< CEnergyProjectile* >(projectile)->GetTranslation()));
 #ifdef TARGET_PC
-    if (!PortVr::VrImmersive())
+    if (PortVr::VrImmersive())
+      mgr.GetRumbleManager()->PortRecoilRumble(mgr);
+    else
 #endif
       mgr.CameraManager()->AddCameraShaker(CCameraShakeData::skHardRecoil, false);
   } else {
@@ -282,7 +284,9 @@ void CAuxWeapon::CreateFlameThrower(const CTransform4f& xf, CStateManager& mgr, 
   x24_muzzleFxGen = rs_new CElementGen(xc_flameMuzzle);
   x7c_comboSfx = NWeaponTypes::play_sfx(SFXsam_a_placofir_lp_00, false, true, 0x4a);
 #ifdef TARGET_PC
-  if (!PortVr::VrImmersive())
+  if (PortVr::VrImmersive())
+    mgr.GetRumbleManager()->PortRecoilRumble(mgr);
+  else
 #endif
     mgr.CameraManager()->AddCameraShaker(CCameraShakeData::skHardRecoil, false);
   mgr.PlayerState()->SetFiringComboBeam(true);
@@ -305,7 +309,9 @@ void CAuxWeapon::CreateWaveBusterBeam(uint attribs, TUniqueId target, const CTra
   x24_muzzleFxGen = rs_new CElementGen(x18_busterMuzzle);
   x7c_comboSfx = NWeaponTypes::play_sfx(SFXsam_a_wavcofir_lp_00, false, true, 0x4a);
 #ifdef TARGET_PC
-  if (!PortVr::VrImmersive())
+  if (PortVr::VrImmersive())
+    mgr.GetRumbleManager()->PortRecoilRumble(mgr);
+  else
 #endif
     mgr.CameraManager()->AddCameraShaker(CCameraShakeData::skSoftRecoil, false);
   mgr.PlayerState()->SetFiringComboBeam(true);

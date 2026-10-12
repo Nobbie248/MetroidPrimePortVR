@@ -100,12 +100,14 @@ object PrimedGunTabs {
             choice(
                 context, R.string.primedgun_rumble_target, "vr_rumble_hand",
                 listOf(
+                    R.string.primedgun_rumble_split to "split",
                     R.string.primedgun_rumble_both to "both",
                     R.string.primedgun_rumble_left_only to "left",
                     R.string.primedgun_rumble_right_only to "right",
                 )
             )
         )
+        add(PrimedGunItem.Note(context.getString(R.string.primedgun_rumble_split_note)))
         add(switch(context, R.string.primedgun_grip_inputs_enabled, "vr_grip_inputs_enabled"))
         add(switch(context, R.string.primedgun_grip_inputs_use_trackpad, "vr_grip_inputs_use_trackpad"))
         add(PrimedGunItem.Note(context.getString(R.string.primedgun_grip_inputs_use_trackpad_note)))

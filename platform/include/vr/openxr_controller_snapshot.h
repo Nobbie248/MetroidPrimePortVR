@@ -9,6 +9,8 @@
 
 #pragma once
 
+#include "vr/vr_rumble.h"
+
 #include <array>
 #include <cstdint>
 #include <string>
@@ -58,11 +60,13 @@ struct OpenXRInputSnapshot {
 void OpenXRPublishInputSnapshot(const OpenXRInputSnapshot& snapshot) noexcept;
 OpenXRInputSnapshot OpenXRGetInputSnapshot() noexcept;
 
-// Game thread -> pacing thread: the game's rumble, from port 0's motor while
-// the VR pad owns that port (vr_pad.cpp, on or off) or from the virtual
-// gamepad's rumble in Gamepad mode. The pacing thread plays it on the hand(s)
-// the settings name, scaled by the rumble intensity. amplitude 0 stops it.
-void OpenXRSetRumble(float amplitude) noexcept;
-float OpenXRTakeRumble() noexcept;
+// Game thread -> pacing thread: the game's rumble on one channel (vr_rumble.h),
+// from ports 0-2's motors while the VR pad owns port 0 (vr_pad.cpp, on or off)
+// or from the virtual gamepad's rumble in Gamepad mode (the body channel). The
+// pacing thread plays the channels on the hand(s) the settings name, scaled by
+// the rumble intensity. amplitude 0 stops a channel; the clear stops them all.
+void OpenXRSetRumble(float amplitude, RumbleChannel channel = RumbleChannel::Body) noexcept;
+void OpenXRClearRumble() noexcept;
+RumbleLevels OpenXRTakeRumble() noexcept;
 
 } // namespace PortVr

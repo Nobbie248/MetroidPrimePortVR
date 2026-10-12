@@ -120,6 +120,20 @@ typedef enum AuroraStereoDrawRoute {
   AURORA_STEREO_ROUTE_SKY = 7,
   // Detached 2D plane that gently follows the full headset pose (morph-ball HUD).
   AURORA_STEREO_ROUTE_FLOATING_HUD = 8,
+  // Laid on a plane of the virtual screen's size and distance like AURORA_STEREO_ROUTE_FLOATING_HUD, but the
+  // plane stays where it was placed: upright ahead of the head's facing, at the head's position, on the first
+  // immersive frame after aurora_set_stereo_screen_anchor holds it, until it is released (Metroid Prime's
+  // message boxes and fixed morph ball HUD). With no plane placed, drawn like AURORA_STEREO_ROUTE_SCREEN_2D.
+  AURORA_STEREO_ROUTE_ANCHORED_SCREEN = 9,
+  // A camera-space draw (perspective) placed in the held anchor's space instead of the game camera's: as if the
+  // camera stood where AURORA_STEREO_ROUTE_ANCHORED_SCREEN's plane was placed, looking along its facing. True depth
+  // and parallax, held still while the head looks around it (Metroid Prime's map in the headset). With no anchor
+  // placed, drawn like WORLD. AuroraSetStereoPlacement3D (dolphin/gx/GXAurora.h) can scale and move the
+  // draw's camera space within the anchor's first.
+  AURORA_STEREO_ROUTE_ANCHORED_3D = 10,
+  // AURORA_STEREO_ROUTE_ANCHORED_3D through AURORA_STEREO_ROUTE_FLOATING_HUD's easing pose instead of the held
+  // anchor (a 3D model standing on the floating plane's screen).
+  AURORA_STEREO_ROUTE_FLOATING_3D = 11,
 } AuroraStereoDrawRoute;
 // AURORA_STEREO_ROUTE_HEAD_LOCKED draws are scaled about the camera origin
 // before the eye offset: sizeScale sets their angular size, distanceScale
@@ -130,6 +144,10 @@ void aurora_set_stereo_head_locked(float sizeScale, float distanceScale);
 // ahead of the game camera, its height following the picture's aspect, the game drawing unitsPerMeter units to
 // the metre. A zero turns it off. Read at frame begin.
 void aurora_set_stereo_screen_2d(float widthMeters, float distanceMeters, float unitsPerMeter);
+// Holds AURORA_STEREO_ROUTE_ANCHORED_SCREEN's plane: while held, the first immersive frame places it ahead of the
+// head and later frames keep it there; released, or on a frame that is not immersive, it is dropped, and the
+// next hold places it again. Read at frame begin.
+void aurora_set_stereo_screen_anchor(bool held);
 // Whether immersive packets are replayed per eye (default true). Off, they are
 // shown as the mono image on the virtual screen, which is the fail-safe path.
 void aurora_set_stereo_immersive_replay(bool enabled);

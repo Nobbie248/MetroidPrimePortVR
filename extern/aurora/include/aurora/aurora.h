@@ -129,6 +129,9 @@ typedef struct {
   uint64_t contentTag;
   // Predicted display time converted to std::chrono::steady_clock nanoseconds.
   uint64_t displayTimeNanos;
+  // Changes whenever the eyes' centre space is set again (a recentre, a height set, a new reference space):
+  // a held screen anchor (aurora_set_stereo_screen_anchor) is placed again in the new space.
+  uint64_t originGeneration;
   // Immersive replay only: each eye keeps what it sees through the 2D layer's
   // screen and is transparent elsewhere (not ported yet; must be false).
   bool window;

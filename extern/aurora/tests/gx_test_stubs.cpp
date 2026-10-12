@@ -204,6 +204,8 @@ void set_stereo_draw_route(uint8_t route) noexcept {}
 uint8_t stereo_draw_route() noexcept { return 0; }
 void set_stereo_head_locked_plane(float tanHalfWidth, float tanHalfHeight, float distance) noexcept {}
 stereo_replay::HeadLockedPlane stereo_head_locked_plane() noexcept { return {}; }
+void set_stereo_placement_3d(const StereoPlacement3D&) noexcept {}
+StereoPlacement3D stereo_placement_3d() noexcept { return {}; }
 void set_stereo_screen_tex_mtx(uint8_t texSlot, uint8_t pnSlot) noexcept {}
 StereoScreenTexMtx stereo_screen_tex_mtx() noexcept { return {}; }
 namespace stereo_shadow {

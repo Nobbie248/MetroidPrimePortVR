@@ -6,6 +6,7 @@
 #include <aurora/phase.hpp>
 
 #include "encoding.hpp"
+#include "floating_hud.hpp"
 #include "frame.hpp"
 #include "geometry_buffer.hpp"
 #include "resource_cache.hpp"
@@ -66,7 +67,7 @@ struct FrameRecorder {
   uint32_t drawCallCount = 0;
   // Draws recorded under each stereo route this frame (AURORA_STEREO_ROUTE_*), for the
   // diagnostics line (log_stereo_frame_stats).
-  std::array<uint32_t, 9> routeDrawCounts{};
+  std::array<uint32_t, 12> routeDrawCounts{};
   uint32_t mergedDrawCallCount = 0;
   uint32_t renderPassCount = 0;
   bool inOffscreen = false;
@@ -81,6 +82,7 @@ struct FrameRecorder {
   uint8_t stereoRoute = AURORA_STEREO_ROUTE_WORLD;
   bool finalPassMonoUnneeded = false;
   stereo_replay::HeadLockedPlane headLockedPlane;
+  StereoPlacement3D placement3D;
   StereoScreenTexMtx stereoScreenTexMtx;
   uint8_t multiviewMode = 0; // gx::MultiviewMode of the last stage_stereo_uniforms
   // DepthAfter::IfUnread's sealed pass and task, whose ops aren't handed to the render worker yet,
@@ -909,6 +911,7 @@ void begin_recording(FramePacket& packet, size_t frameSlot) {
   g_recorder.suspendedEfbPass.reset();
   g_recorder.stereoRoute = AURORA_STEREO_ROUTE_WORLD;
   g_recorder.stereoScreenTexMtx = {};
+  g_recorder.placement3D = {};
 
   current_render_passes().emplace_back();
   auto& pass = current_render_passes()[0];
@@ -1235,6 +1238,10 @@ void set_stereo_head_locked_plane(float tanHalfWidth, float tanHalfHeight, float
 
 stereo_replay::HeadLockedPlane stereo_head_locked_plane() noexcept { return g_recorder.headLockedPlane; }
 
+void set_stereo_placement_3d(const StereoPlacement3D& placement) noexcept { g_recorder.placement3D = placement; }
+
+StereoPlacement3D stereo_placement_3d() noexcept { return g_recorder.placement3D; }
+
 void set_stereo_screen_tex_mtx(uint8_t texSlot, uint8_t pnSlot) noexcept {
   g_recorder.stereoScreenTexMtx = {texSlot, pnSlot};
 }
@@ -1318,7 +1325,8 @@ std::array<uint32_t, 2> stage_stereo_uniforms(const uint8_t* mono, Range monoRan
   // picture's aspect, and the draw's viewport keeps its place in that picture.
   stereo_replay::HudScreen screen{};
   stereo_replay::HudNdcRemap screenNdc{};
-  const bool screenRoute = route == AURORA_STEREO_ROUTE_SCREEN_2D || route == AURORA_STEREO_ROUTE_FLOATING_HUD;
+  const bool screenRoute = route == AURORA_STEREO_ROUTE_SCREEN_2D || route == AURORA_STEREO_ROUTE_FLOATING_HUD ||
+                           route == AURORA_STEREO_ROUTE_ANCHORED_SCREEN;
   if (screenRoute && monoSize.width != 0 && monoSize.height != 0) {
     const float width = static_cast<float>(monoSize.width);
     const float height = static_cast<float>(monoSize.height);
@@ -1351,6 +1359,28 @@ std::array<uint32_t, 2> stage_stereo_uniforms(const uint8_t* mono, Range monoRan
                                                         state.headLockedScaleZ)
               : stereo_replay::HudScreen{};
   const bool headLocked = route == AURORA_STEREO_ROUTE_HEAD_LOCKED || route == AURORA_STEREO_ROUTE_HEAD_LOCKED_2D;
+  // A 3D draw in the held anchor's (or floating pose's) space: its camera space scaled and moved there
+  // first (AuroraSetStereoPlacement3D), then seen through that pose.
+  const bool placed3D = route == AURORA_STEREO_ROUTE_ANCHORED_3D || route == AURORA_STEREO_ROUTE_FLOATING_3D;
+  const StereoPlacement3D placement = g_recorder.placement3D;
+  const auto placedView = [&](const StereoEyeParams& params) {
+    const Mat3x4<float>& poseView = route == AURORA_STEREO_ROUTE_FLOATING_3D ? params.floatingHudViewFromCenter
+                                                                             : params.anchoredScreenViewFromCenter;
+    Mat3x4<float> offset{};
+    offset.m0 = {1.0f, 0.0f, 0.0f, placement.x};
+    offset.m1 = {0.0f, 1.0f, 0.0f, placement.y};
+    offset.m2 = {0.0f, 0.0f, 1.0f, placement.z};
+    if (placement.follow != 0.0f) {
+      // Part of the way into the head's own space (the head-locked HUD's),
+      // moved and turned about the point.
+      const std::array<float, 3> pivot{placement.headX, placement.headY, placement.headZ};
+      offset = stereo_replay::compose_affine(
+          stereo_replay::follow_head(poseView, params.headLockedViewFromCenter, pivot, placement.follow), offset);
+    }
+    return stereo_replay::compose_affine(poseView, offset);
+  };
+  const float positionScaleXY = headLocked ? state.headLockedScaleXY : placed3D ? placement.scale : 1.0f;
+  const float positionScaleZ = headLocked ? state.headLockedScaleZ : placed3D ? placement.scale : 1.0f;
   // A screen-projecting texture matrix (AuroraSetStereoScreenTexMtx) differs per eye:
   // under multiview such a draw takes the full eye copies (MultiviewFull).
   const auto screenTexMtx = g_recorder.stereoScreenTexMtx;
@@ -1360,20 +1390,21 @@ std::array<uint32_t, 2> stage_stereo_uniforms(const uint8_t* mono, Range monoRan
     for (uint32_t eye = 0; eye < AURORA_STEREO_EYE_COUNT; ++eye) {
       const auto& params = state.eyes[eye];
       if (onScreen) {
-        const auto& screenView = route == AURORA_STEREO_ROUTE_FLOATING_HUD ? params.floatingHudViewFromCenter
-                                                                         : params.viewFromCenter;
+        const auto& screenView = route == AURORA_STEREO_ROUTE_FLOATING_HUD    ? params.floatingHudViewFromCenter
+                                 : route == AURORA_STEREO_ROUTE_ANCHORED_SCREEN ? params.anchoredScreenViewFromCenter
+                                                                               : params.viewFromCenter;
         clips[eye] = stereo_replay::compose_screen_2d_projection(params.projection, screenView, screen,
                                                                  monoProjection, screenNdc);
       } else if (onPlane) {
         clips[eye] = stereo_replay::compose_head_locked_2d_projection(
             params.projection, params.headLockedViewFromCenter, plane, monoProjection);
       } else {
+        const Mat3x4<float> placedViewFromCenter = placed3D ? placedView(params) : params.viewFromCenter;
         const Mat3x4<float>& viewFromCenter = headLocked                            ? params.headLockedViewFromCenter
                                               : route == AURORA_STEREO_ROUTE_SKY ? params.skyViewFromCenter
-                                                                                 : params.viewFromCenter;
+                                                                                 : placedViewFromCenter;
         clips[eye] = compose_eye_clip(stereo_replay::compose_projection(params.projection, monoProjection),
-                                      viewFromCenter, headLocked ? state.headLockedScaleXY : 1.0f,
-                                      headLocked ? state.headLockedScaleZ : 1.0f);
+                                      viewFromCenter, positionScaleXY, positionScaleZ);
       }
     }
     return stage_eye_clips(clips, true);
@@ -1412,8 +1443,9 @@ std::array<uint32_t, 2> stage_stereo_uniforms(const uint8_t* mono, Range monoRan
     const float renderScaleY =
         monoSize.height != 0 ? static_cast<float>(params.height) / static_cast<float>(monoSize.height) : 1.0f;
     if (onScreen) {
-      const auto& screenView = route == AURORA_STEREO_ROUTE_FLOATING_HUD ? params.floatingHudViewFromCenter
-                                                                       : params.viewFromCenter;
+      const auto& screenView = route == AURORA_STEREO_ROUTE_FLOATING_HUD    ? params.floatingHudViewFromCenter
+                               : route == AURORA_STEREO_ROUTE_ANCHORED_SCREEN ? params.anchoredScreenViewFromCenter
+                                                                             : params.viewFromCenter;
       compose_stereo_screen_2d_uniform(scratch.data(), layout,
                                        StereoEyeScreenCompose{
                                            .projection = &params.projection,
@@ -1433,17 +1465,19 @@ std::array<uint32_t, 2> stage_stereo_uniforms(const uint8_t* mono, Range monoRan
                                     .renderScaleY = renderScaleY,
                                 });
     } else {
-      // A sky draw (AURORA_STEREO_ROUTE_SKY) takes the eye's rotation only.
+      // A sky draw (AURORA_STEREO_ROUTE_SKY) takes the eye's rotation only; an
+      // anchored 3D draw (AURORA_STEREO_ROUTE_ANCHORED_3D) the eye's view from the held anchor.
+      const Mat3x4<float> placedViewFromCenter = placed3D ? placedView(params) : params.viewFromCenter;
       const Mat3x4<float>* viewFromCenter = headLocked                            ? &params.headLockedViewFromCenter
                                             : route == AURORA_STEREO_ROUTE_SKY ? &params.skyViewFromCenter
-                                                                               : &params.viewFromCenter;
+                                                                               : &placedViewFromCenter;
       compose_stereo_uniform(
           scratch.data(), eyeLayout,
           StereoEyeCompose{
               .projection = &params.projection,
               .viewFromCenter = viewFromCenter,
-              .positionScaleXY = headLocked ? state.headLockedScaleXY : 1.0f,
-              .positionScaleZ = headLocked ? state.headLockedScaleZ : 1.0f,
+              .positionScaleXY = positionScaleXY,
+              .positionScaleZ = positionScaleZ,
               .renderScaleX = renderScaleX,
               .renderScaleY = renderScaleY,
           });

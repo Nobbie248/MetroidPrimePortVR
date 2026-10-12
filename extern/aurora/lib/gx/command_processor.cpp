@@ -198,6 +198,7 @@ struct DrawCache {
   ByteBuffer uniformBytes;
   u8 uniformRoute = 0;
   gfx::stereo_replay::HeadLockedPlane uniformPlane{};
+  gfx::StereoPlacement3D uniformPlacement{};
   gfx::StereoScreenTexMtx uniformScreenTexMtx{};
   std::array<uint32_t, 2> stereoUniformOffsets{UINT32_MAX, UINT32_MAX};
   std::array<gfx::BindGroupRef, 2> stereoBindGroups{};
@@ -1088,6 +1089,7 @@ static void push_gx_draw(GXPrimitive prim, GXVtxFmt fmt, u32 vtxCount, gfx::Rang
     }
     cache.uniformRoute = gfx::stereo_draw_route();
     cache.uniformPlane = gfx::stereo_head_locked_plane();
+    cache.uniformPlacement = gfx::stereo_placement_3d();
     cache.uniformScreenTexMtx = gfx::stereo_screen_tex_mtx();
     cache.multiviewMode = staged_multiview_mode(cache);
     state.dirty &= ~DirtyUniform;
@@ -1234,7 +1236,8 @@ static void reconcile_merge_state(GXPrimitive prim, GXVtxFmt fmt) noexcept {
   if (cache.uniformRoute != gfx::stereo_draw_route() ||
       cache.uniformPlane.tanHalfWidth != plane.tanHalfWidth ||
       cache.uniformPlane.tanHalfHeight != plane.tanHalfHeight || cache.uniformPlane.distance != plane.distance ||
-      cache.uniformScreenTexMtx.texSlot != screen.texSlot || cache.uniformScreenTexMtx.pnSlot != screen.pnSlot) {
+      cache.uniformScreenTexMtx.texSlot != screen.texSlot || cache.uniformScreenTexMtx.pnSlot != screen.pnSlot ||
+      !(cache.uniformPlacement == gfx::stereo_placement_3d())) {
     state.dirty |= DirtyUniform;
     return;
   }
@@ -1895,6 +1898,7 @@ static constexpr bool aurora_subcommand_ids_unique() noexcept {
       // PrimedGun's
       GX_AURORA_STEREO_DRAW_ROUTE,        GX_AURORA_STEREO_HEAD_LOCKED_PLANE, GX_AURORA_STEREO_SCREEN_TEX_MTX,
       GX_AURORA_MAP_BATCH,                GX_AURORA_CALL_CACHED_DL,           GX_AURORA_FREE_GEOMETRY_SET,
+      GX_AURORA_STEREO_PLACEMENT_3D,
   };
   constexpr size_t count = sizeof(ids) / sizeof(ids[0]);
   for (size_t i = 0; i < count; ++i) {
@@ -1918,6 +1922,7 @@ static constexpr bool primedgun_aurora_subcommands_in_block() noexcept {
   constexpr u16 ids[] = {
       GX_AURORA_STEREO_DRAW_ROUTE, GX_AURORA_STEREO_HEAD_LOCKED_PLANE, GX_AURORA_STEREO_SCREEN_TEX_MTX,
       GX_AURORA_MAP_BATCH,         GX_AURORA_CALL_CACHED_DL,           GX_AURORA_FREE_GEOMETRY_SET,
+      GX_AURORA_STEREO_PLACEMENT_3D,
   };
   for (const u16 id : ids) {
     if (id < PRIMEDGUN_AURORA_SUBCMD_FIRST || id > PRIMEDGUN_AURORA_SUBCMD_LAST) {
@@ -1990,6 +1995,21 @@ void handle_aurora(ByteReader& reader) noexcept {
       // The eye copies of a 2D draw on the plane depend on it.
       g_gxState.dirty |= DirtyUniform;
       gfx::set_stereo_head_locked_plane(tanHalfWidth, tanHalfHeight, distance);
+    }
+  } else if (subCmd == GX_AURORA_STEREO_PLACEMENT_3D) {
+    gfx::StereoPlacement3D placement;
+    placement.scale = reader.read<f32>();
+    placement.x = reader.read<f32>();
+    placement.y = reader.read<f32>();
+    placement.z = reader.read<f32>();
+    placement.headX = reader.read<f32>();
+    placement.headY = reader.read<f32>();
+    placement.headZ = reader.read<f32>();
+    placement.follow = reader.read<f32>();
+    if (!(placement == gfx::stereo_placement_3d())) {
+      // The eye copies of an anchored or floating 3D draw depend on it.
+      g_gxState.dirty |= DirtyUniform;
+      gfx::set_stereo_placement_3d(placement);
     }
   } else if (subCmd == GX_AURORA_STEREO_SCREEN_TEX_MTX) {
     const u8 texSlot = reader.read<u8>();

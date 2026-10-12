@@ -56,6 +56,8 @@ std::atomic<float> g_headLockedDistance{1.0f};
 // AURORA_STEREO_ROUTE_SCREEN_2D's virtual screen, in the recorded space's units.
 std::atomic<float> g_screen2DHalfWidth{0.0f};
 std::atomic<float> g_screen2DDistance{0.0f};
+// AURORA_STEREO_ROUTE_ANCHORED_SCREEN's plane is held (aurora_set_stereo_screen_anchor).
+std::atomic_bool g_screenAnchorHeld{false};
 
 // --- the scene anchor the producer publishes per frame (latched by end_frame) ---
 std::mutex g_anchorMutex;
@@ -161,6 +163,10 @@ gfx::StereoFrameState begin_frame(uint64_t contentTag) noexcept {
   static gfx::stereo_replay::FloatingHud floatingHud;
   static uint64_t floatingTime = 0;
   static uint64_t floatingTag = 0;
+  static bool screenAnchorPlaced = false;
+  static uint64_t screenAnchorTag = 0;
+  static uint64_t screenAnchorOrigin = 0;
+  static decltype(gfx::StereoEyeParams::viewFromCenter) screenAnchor{};
   gfx::StereoFrameState state{};
   if (g_provider == nullptr || g_sink == nullptr) {
     return state;
@@ -214,10 +220,12 @@ gfx::StereoFrameState begin_frame(uint64_t contentTag) noexcept {
   // looks from the camera's centre, so the sky has no disparity.
   for (uint32_t eye = 0; eye < AURORA_STEREO_EYE_COUNT; ++eye) {
     state.eyes[eye].skyViewFromCenter = gfx::stereo_replay::without_translation(state.eyes[eye].viewFromCenter);
+    state.eyes[eye].anchoredScreenViewFromCenter = state.eyes[eye].viewFromCenter;
   }
   if (packet.mode != AURORA_STEREO_FRAME_IMMERSIVE_REPLAY) {
     floatingHud.Reset();
     floatingTime = 0;
+    screenAnchorPlaced = false;
     return state;
   }
   if (!g_immersiveReplay.load(std::memory_order_relaxed)) {
@@ -248,6 +256,24 @@ gfx::StereoFrameState begin_frame(uint64_t contentTag) noexcept {
   floatingTag = packet.contentTag;
   for (auto& eye : state.eyes) {
     eye.floatingHudViewFromCenter = gfx::stereo_replay::compose_affine(eye.viewFromCenter, floatingPose);
+  }
+  // The held screen: placed once, upright ahead of the head, on the first immersive frame of a hold,
+  // then kept still while the head looks around it; the eyes keep their own positions (disparity).
+  // A recentre or a height set gives the eyes a new centre space, so the screen is placed again.
+  const bool anchorHeld = g_screenAnchorHeld.load(std::memory_order_relaxed);
+  if (!anchorHeld || screenAnchorTag != packet.contentTag || screenAnchorOrigin != packet.originGeneration) {
+    screenAnchorPlaced = false;
+  }
+  if (anchorHeld && !screenAnchorPlaced) {
+    screenAnchor = gfx::stereo_replay::upright_screen_anchor(headPose);
+    screenAnchorPlaced = true;
+    screenAnchorTag = packet.contentTag;
+    screenAnchorOrigin = packet.originGeneration;
+  }
+  if (screenAnchorPlaced) {
+    for (auto& eye : state.eyes) {
+      eye.anchoredScreenViewFromCenter = gfx::stereo_replay::compose_affine(eye.viewFromCenter, screenAnchor);
+    }
   }
   // Both eyes in one render pass when the device and the frame allow it
   // (gfx/stereo_multiview.hpp).
@@ -547,6 +573,8 @@ void aurora_set_stereo_screen_2d(float widthMeters, float distanceMeters, float 
   g_screen2DHalfWidth.store(valid ? 0.5f * widthMeters * unitsPerMeter : 0.0f, std::memory_order_relaxed);
   g_screen2DDistance.store(valid ? distanceMeters * unitsPerMeter : 0.0f, std::memory_order_relaxed);
 }
+
+void aurora_set_stereo_screen_anchor(bool held) { g_screenAnchorHeld.store(held, std::memory_order_relaxed); }
 
 void aurora_set_stereo_immersive_replay(bool enabled) { g_immersiveReplay.store(enabled, std::memory_order_relaxed); }
 

@@ -115,6 +115,23 @@ void AuroraSetStereoHeadLockedPlane(f32 tanHalfWidth, f32 tanHalfHeight, f32 dis
   GX_WRITE_F32(distance);
 }
 
+void AuroraSetStereoPlacement3D(f32 scale, f32 x, f32 y, f32 z) {
+  AuroraSetStereoPlacement3DFollowHead(scale, x, y, z, 0.f, 0.f, 0.f, 0.f);
+}
+
+void AuroraSetStereoPlacement3DFollowHead(f32 scale, f32 x, f32 y, f32 z, f32 headX, f32 headY, f32 headZ,
+                                          f32 follow) {
+  GX_WRITE_AURORA(GX_AURORA_STEREO_PLACEMENT_3D);
+  GX_WRITE_F32(scale);
+  GX_WRITE_F32(x);
+  GX_WRITE_F32(y);
+  GX_WRITE_F32(z);
+  GX_WRITE_F32(headX);
+  GX_WRITE_F32(headY);
+  GX_WRITE_F32(headZ);
+  GX_WRITE_F32(follow);
+}
+
 void AuroraSetStereoScreenTexMtx(u32 texMtx, u32 pnMtx) {
   GX_WRITE_AURORA(GX_AURORA_STEREO_SCREEN_TEX_MTX);
   // GX_TEXMTXn = GX_TEXMTX0 + 3n, GX_PNMTXn = 3n; anything else (GX_IDENTITY) ends it.

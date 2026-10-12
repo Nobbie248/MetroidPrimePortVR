@@ -381,6 +381,12 @@ extern "C" {
  * kept for the set.
  */
 #define GX_AURORA_FREE_GEOMETRY_SET 0xF005
+/**
+ * Where AURORA_STEREO_ROUTE_ANCHORED_3D / FLOATING_3D place the camera-space draws that follow
+ * (AuroraSetStereoPlacement3D, AuroraSetStereoPlacement3DFollowHead). Must be followed by eight f32:
+ * scale, the offset's x, y, z, then the head point's x, y, z and how far it follows the head.
+ */
+#define GX_AURORA_STEREO_PLACEMENT_3D 0xF006
 
 
 /*
@@ -466,6 +472,27 @@ void AuroraSetStereoHeadLockedPlane(f32 tanHalfWidth, f32 tanHalfHeight, f32 dis
  * every frame begin.
  */
 void AuroraSetStereoScreenTexMtx(u32 texMtx, u32 pnMtx);
+
+/**
+ * Places the camera-space draws that follow on AURORA_STEREO_ROUTE_ANCHORED_3D or FLOATING_3D: each
+ * position p of the draw's camera space (GX: x right, y up, looking down -z) is taken as scale * p + offset
+ * in the anchor's (or floating plane's) space before the eye's view. A 3D model drawn through its own
+ * camera can so stand where its flat picture would on the virtual screen, at its size, with its depth.
+ * Ordered with the draws through the FIFO; resets to (1, 0, 0, 0) at every frame begin.
+ */
+void AuroraSetStereoPlacement3D(f32 scale, f32 x, f32 y, f32 z);
+
+/**
+ * AuroraSetStereoPlacement3D with a point of the placed space (headX, headY, headZ, after the scale and
+ * offset) that belongs where the head's own space has it, AURORA_STEREO_ROUTE_HEAD_LOCKED's (the head-locked
+ * HUD's camera space as that route scales it): the placed space is moved `follow` of the way into the head's,
+ * the point along a straight line and the rest turned about it by that share of the turn, as the head
+ * stands in the frame shown (1: exactly as the head-locked route). A draw can so grow out of a head-locked HUD element
+ * (follow 1, the point at the element) into the anchor's space (follow 0) and shrink back into it,
+ * whichever way the head has turned since the anchor was placed.
+ */
+void AuroraSetStereoPlacement3DFollowHead(f32 scale, f32 x, f32 y, f32 z, f32 headX, f32 headY, f32 headZ,
+                                          f32 follow);
 
 /**
  * Sets the actual render scissor in native framebuffer coordinates.

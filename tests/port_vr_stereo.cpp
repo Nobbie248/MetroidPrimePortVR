@@ -513,6 +513,88 @@ int main() {
     for (int frame = 0; frame < 30; ++frame) a = slow.Update(target, 1.f / 60.f);
     for (int frame = 0; frame < 60; ++frame) b = fast.Update(target, 1.f / 120.f);
     Check(Near(a.m0[3], b.m0[3]) && Near(a.m0[0], b.m0[0]), "floating HUD follows at the same speed at 60 and 120 Hz");
+
+    {
+      // The held screen (AURORA_STEREO_ROUTE_ANCHORED_SCREEN): upright, ahead of the head's facing, at its position.
+      const auto headAt = [](float yaw, float pitch, float roll) {
+        // R = Ry(yaw) * Rx(pitch) * Rz(roll), the head at (0.3, 1.6, -0.4); the head looks along -Z.
+        const float cy = std::cos(yaw), sy = std::sin(yaw), cp = std::cos(pitch), sp = std::sin(pitch);
+        const float cr = std::cos(roll), sr = std::sin(roll);
+        const float ry[3][3] = {{cy, 0, sy}, {0, 1, 0}, {-sy, 0, cy}};
+        const float rx[3][3] = {{1, 0, 0}, {0, cp, -sp}, {0, sp, cp}};
+        const float rz[3][3] = {{cr, -sr, 0}, {sr, cr, 0}, {0, 0, 1}};
+        float t[3][3]{}, r[3][3]{};
+        for (int i = 0; i < 3; ++i)
+          for (int j = 0; j < 3; ++j)
+            for (int k = 0; k < 3; ++k) t[i][j] += ry[i][k] * rx[k][j];
+        for (int i = 0; i < 3; ++i)
+          for (int j = 0; j < 3; ++j)
+            for (int k = 0; k < 3; ++k) r[i][j] += t[i][k] * rz[k][j];
+        return Affine(r[0][0], r[0][1], r[0][2], 0.3f, r[1][0], r[1][1], r[1][2], 1.6f, r[2][0], r[2][1], r[2][2], -0.4f);
+      };
+      const auto forwardOf = [](const Mat3x4<float>& m) {
+        return std::array<float, 3>{-m.m0[2], -m.m1[2], -m.m2[2]};
+      };
+      for (const float yaw : {0.f, 1.2f, -2.5f, 3.1f}) {
+        const auto anchor = upright_screen_anchor(headAt(yaw, 0.6f, 0.4f));
+        const auto level = forwardOf(headAt(yaw, 0.f, 0.f));
+        const auto f = forwardOf(anchor);
+        Check(Near(f[0], level[0]) && Near(f[1], 0.f) && Near(f[2], level[2]),
+              "the held screen faces the head's yaw, without its pitch");
+        Check(Near(anchor.m0[1], 0.f) && Near(anchor.m1[1], 1.f) && Near(anchor.m2[1], 0.f),
+              "the held screen stays upright whatever the head's roll");
+        Check(Near(anchor.m0[3], 0.3f) && Near(anchor.m1[3], 1.6f) && Near(anchor.m2[3], -0.4f),
+              "the held screen is placed from the head's position");
+        const auto right = std::array<float, 3>{anchor.m0[0], anchor.m1[0], anchor.m2[0]};
+        const auto back = std::array<float, 3>{anchor.m0[2], anchor.m1[2], anchor.m2[2]};
+        Check(Near(right[0] * back[0] + right[2] * back[2], 0.f) &&
+                  Near(right[0] * right[0] + right[2] * right[2], 1.f),
+              "the held screen's axes stay orthonormal");
+      }
+      // Looking straight down or up, the head's up (or down) gives the facing.
+      const auto down = upright_screen_anchor(headAt(0.9f, -1.5707963f, 0.f));
+      const auto level = forwardOf(headAt(0.9f, 0.f, 0.f));
+      Check(Near(forwardOf(down)[0], level[0]) && Near(forwardOf(down)[2], level[2]),
+            "looking straight down, the held screen goes ahead of the body's facing");
+      const auto up = upright_screen_anchor(headAt(0.9f, 1.5707963f, 0.f));
+      Check(Near(forwardOf(up)[0], level[0]) && Near(forwardOf(up)[2], level[2]),
+            "looking straight up, the held screen goes ahead too");
+      // A point of the head's own space (the head-locked HUD's minimap) found in the held anchor's
+      // space after the head turned away from where the anchor was placed (AuroraSetStereoPlacement3DFollowHead).
+      const auto anchor = upright_screen_anchor(headAt(0.f, 0.f, 0.f));
+      const auto turned = headAt(1.1f, 0.3f, 0.2f);
+      const auto eyeFromHead = Affine(1, 0, 0, -0.032f, 0, 1, 0, 0, 0, 0, 1, 0);
+      const auto eyeFromAnchor = compose_affine(compose_affine(eyeFromHead, inverse_rigid(turned)), anchor);
+      const std::array<float, 3> point{0.5f, 0.3f, -2.f};
+      const auto anchorFromHead = compose_affine(inverse_rigid(anchor), turned);
+      const auto apply = [](const Mat3x4<float>& m, const std::array<float, 3>& p) {
+        std::array<float, 3> out{};
+        for (int row = 0; row < 3; ++row) {
+          const auto& r = *(&m.m0 + row);
+          out[row] = r[0] * p[0] + r[1] * p[1] + r[2] * p[2] + r[3];
+        }
+        return out;
+      };
+      const auto near3 = [](const std::array<float, 3>& a, const std::array<float, 3>& b) {
+        return std::fabs(a[0] - b[0]) < 0.001f && std::fabs(a[1] - b[1]) < 0.001f && std::fabs(a[2] - b[2]) < 0.001f;
+      };
+      const std::array<float, 3> other{-0.4f, 0.9f, -1.3f};
+      const auto all = follow_head(eyeFromAnchor, eyeFromHead, point, 1.f);
+      Check(near3(apply(all, point), apply(anchorFromHead, point)) &&
+                near3(apply(all, other), apply(anchorFromHead, other)),
+            "followed all the way, a draw stands as the head-locked route has it");
+      const auto none = follow_head(eyeFromAnchor, eyeFromHead, point, 0.f);
+      Check(near3(apply(none, other), other), "not followed, a draw stays in the held anchor's space");
+      const auto half = follow_head(eyeFromAnchor, eyeFromHead, point, 0.5f);
+      const auto there = apply(anchorFromHead, point);
+      const auto mid = apply(half, point);
+      Check(near3(mid, {0.5f * (point[0] + there[0]), 0.5f * (point[1] + there[1]), 0.5f * (point[2] + there[2])}),
+            "half followed, the point is half way to where the head has it");
+      const auto twice = compose_affine(half, half);
+      const auto fullTrace = anchorFromHead.m0[0] + anchorFromHead.m1[1] + anchorFromHead.m2[2];
+      Check(std::fabs(twice.m0[0] + twice.m1[1] + twice.m2[2] - fullTrace) < 0.001f,
+            "half followed, the draw has turned half of the head's turn");
+    }
     const auto before = pose(1, 3.1f, 0.f);
     const auto after = pose(1, -3.1f, 0.f);
     slow.Reset();

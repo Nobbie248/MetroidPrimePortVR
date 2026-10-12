@@ -173,6 +173,26 @@ uint8_t stereo_draw_route() noexcept;
 // last set it; kept until set again.
 void set_stereo_head_locked_plane(float tanHalfWidth, float tanHalfHeight, float distance) noexcept;
 stereo_replay::HeadLockedPlane stereo_head_locked_plane() noexcept;
+// Where AURORA_STEREO_ROUTE_ANCHORED_3D / FLOATING_3D place a draw's camera space
+// (AuroraSetStereoPlacement3D): scale, then offset, in the anchor's space. Resets at
+// frame begin.
+struct StereoPlacement3D {
+  float scale = 1.0f;
+  float x = 0.0f;
+  float y = 0.0f;
+  float z = 0.0f;
+  // A point of the placed space that belongs where the head's own space has it
+  // (AuroraSetStereoPlacement3DFollowHead), and how much of the way the placed
+  // space is moved and turned about it into the head's, as the head stands this
+  // frame (stereo_replay::follow_head).
+  float headX = 0.0f;
+  float headY = 0.0f;
+  float headZ = 0.0f;
+  float follow = 0.0f;
+  bool operator==(const StereoPlacement3D&) const = default;
+};
+void set_stereo_placement_3d(const StereoPlacement3D& placement) noexcept;
+StereoPlacement3D stereo_placement_3d() noexcept;
 // A texture matrix the GX FIFO marked as a screen projection
 // (AuroraSetStereoScreenTexMtx): every eye copy of a perspective draw's
 // uniform gets texture matrix `texSlot` derived again from that eye's

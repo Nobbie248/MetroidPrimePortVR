@@ -48,6 +48,9 @@ struct StereoEyeParams {
   // infinity (AURORA_STEREO_ROUTE_SKY).
   Mat3x4<float> skyViewFromCenter{};
   Mat3x4<float> floatingHudViewFromCenter{};
+  // viewFromCenter composed with the held screen anchor (AURORA_STEREO_ROUTE_ANCHORED_SCREEN), or
+  // viewFromCenter itself while no anchor is placed.
+  Mat3x4<float> anchoredScreenViewFromCenter{};
 };
 
 // The finished eye image for the sink, as ref-counted handles so a frame in

@@ -1048,10 +1048,12 @@ private:
             // Pipelined render-first pacing (vr_pipelined_rendering, PipelinedCycle), on a
             // backend that supports it. A new render scale (the eyes are rebuilt with no packet
             // pending), the setting going off or a switch to frame-first pacing first drains
-            // the packet in flight with one plain cycle.
+            // the packet in flight with one plain cycle; a new scale then keeps the cycles
+            // plain until both swapchain pairs have it (one is rebuilt at a time).
             const float scale = render_scale_.load(std::memory_order_relaxed);
             const bool pipelined = render_first && GetVrSettings().pipelined_rendering &&
-                                   backend_->SupportsPipelining() && scale == pipelined_scale_;
+                                   backend_->SupportsPipelining() && scale == pipelined_scale_ &&
+                                   !backend_->EyesResizing();
             pipelined_scale_ = scale;
             const int pacing_mode = !render_first ? 0 : pipelined ? 2 : 1;
             if (last_pacing_mode != pacing_mode) {

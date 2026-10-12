@@ -107,6 +107,9 @@ public:
                                    uint32_t periods_ahead);
     OpenXRBeginStatus ArmPacket(OpenXRBackendFrame& packet);
     bool SupportsPipelining() const;
+    // A new render resolution still waits for one of the two eye swapchain pairs, which is
+    // only rebuilt with no packet in flight: pipelined pacing waits (vr/openxr_eye_resize.h).
+    bool EyesResizing() const;
 
     // Call on the XR owner thread after Aurora's worker is idle and before
     // aurora_shutdown(). Safe to repeat. False means a submitted D3D12 command

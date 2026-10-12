@@ -63,6 +63,8 @@ public:
                                    uint32_t periods_ahead);
     OpenXRBeginStatus ArmPacket(OpenXRBackendFrame& packet);
     bool SupportsPipelining() const;
+    // No pipelining here: every cycle may rebuild a pair (openxr_d3d12.h).
+    bool EyesResizing() const;
 
     // Call on the XR owner thread after Aurora's worker is idle and before aurora_shutdown().
     // False means Dawn's queue could not be drained: the caller retains the backend and runtime.
@@ -114,6 +116,8 @@ public:
                                    uint32_t periods_ahead);
     OpenXRBeginStatus ArmPacket(OpenXRBackendFrame& packet);
     bool SupportsPipelining() const;
+    // No pipelining here: every cycle may rebuild a pair (openxr_d3d12.h).
+    bool EyesResizing() const;
     bool Shutdown();
 
     bool IsBound() const;

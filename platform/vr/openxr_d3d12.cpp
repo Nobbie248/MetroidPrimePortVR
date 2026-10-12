@@ -10,6 +10,7 @@
 
 #include "vr/openxr_d3d12.h"
 #include "vr/openxr_diagnostics.h"
+#include "vr/openxr_eye_resize.h"
 
 #include <aurora/d3d12_interop.h>
 
@@ -244,6 +245,7 @@ public:
         if (requested != requested_eye_size_) {
             requested_eye_size_ = requested;
             eye_size_ = requested;
+            eye_resize_gate_.Requested();
         }
     }
 
@@ -461,6 +463,18 @@ public:
     }
 
     bool SupportsPipelining() const { return true; }
+
+    // A new size still waits for a pair (vr/openxr_eye_resize.h): pipelined pacing stays
+    // paused meanwhile, since a pair is only rebuilt with no packet in flight.
+    bool EyesResizing() const {
+        bool differ = false;
+        for (uint32_t eye = 0; eye < kOpenXREyeCount; ++eye) {
+            const OpenXREyeSize written{eye_swapchains_[eye].width, eye_swapchains_[eye].height};
+            const OpenXREyeSize shown{retained_swapchains_[eye].width, retained_swapchains_[eye].height};
+            differ = differ || written != eye_size_[eye] || shown != eye_size_[eye];
+        }
+        return differ && eye_resize_gate_.Pending();
+    }
 
     bool TryCancelPendingPacket(OpenXRBackendFrame& packet) {
         const uint64_t serial = packet.xr_frame.serial;
@@ -937,6 +951,11 @@ private:
         if (current == eye_size_) {
             return true;
         }
+        // Not while a replaced pair lives on, nor after this request was refused twice
+        // (vr/openxr_eye_resize.h).
+        if (!eye_resize_gate_.MayRebuild(!retired_pairs_.empty())) {
+            return true;
+        }
         std::array<EyeSwapchain, kOpenXREyeCount> replacement{};
         if (!CreateSwapchainPair(replacement)) {
             DestroySwapchainPair(replacement);
@@ -948,6 +967,7 @@ private:
             ClearError();
             // Back to this pair's size, which also returns the other pair to it if it was rebuilt.
             eye_size_ = current;
+            eye_resize_gate_.Refused();
             return true;
         }
         // The compositor may still be reading the old pair (kOpenXRRetiredSwapchainCycles).
@@ -1267,6 +1287,7 @@ private:
         uint32_t cycles_left;
     };
     std::vector<RetiredPair> retired_pairs_;
+    OpenXREyeResizeGate eye_resize_gate_;
     // The settings panel's layer: written like the eyes into panel_swapchain_,
     // shown from retained_panel_swapchain_ (see FinishFrame).
     EyeSwapchain panel_swapchain_{};
@@ -1368,6 +1389,7 @@ OpenXRBeginStatus OpenXRD3D12Backend::LocatePacket(const OpenXRPresentation& pre
 }
 OpenXRBeginStatus OpenXRD3D12Backend::ArmPacket(OpenXRBackendFrame& packet) { return m_impl->ArmPacket(packet); }
 bool OpenXRD3D12Backend::SupportsPipelining() const { return m_impl->SupportsPipelining(); }
+bool OpenXRD3D12Backend::EyesResizing() const { return m_impl->EyesResizing(); }
 
 bool OpenXRD3D12Backend::Shutdown() { return m_impl->Shutdown(); }
 

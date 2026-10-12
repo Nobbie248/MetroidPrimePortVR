@@ -1,3 +1,30 @@
+## VR: a render scale change no longer leaves the eyes swapping sizes (2026-10-12)
+
+The user lowered `vr_render_scale` in game (PSVR2 on SteamVR, RTX 3090, eyes
+4808x4904 at scale 1 with 4x MSAA) and the frame rate got worse, not better.
+The log had ~5,000 pairs of "Stereo eye N replay target" lines alternating
+between two sizes: Aurora made both eyes' targets again every frame.
+
+- The backends' two eye swapchain pairs take turns (one shown, one written),
+  and `ResizeWritablePair` rebuilds only the written one, only with no packet
+  in flight. Pipelined pacing (D3D12 only) drained one cycle per new scale:
+  one pair was rebuilt, the other kept its size until the pipeline next
+  drained, and the packets alternated sizes every frame meanwhile. The
+  integration now keeps the cycles plain while `EyesResizing()` (a pair not
+  at the size aimed for, rebuilds still allowed).
+- A slider's drag also ran into SteamVR's swapchain cap
+  (`XR_ERROR_LIMIT_REACHED`, -10): each rebuild keeps the replaced pair alive
+  for `kOpenXRRetiredSwapchainCycles`, and a refusal aims back at the refused
+  pair's size, which the other pair may have to be rebuilt to again.
+  `vr/openxr_eye_resize.h`'s `OpenXREyeResizeGate`, in all three backends:
+  no rebuild while a retired pair lives (the session holds the two pairs in
+  use plus the one being made), and after two refusals of one request no
+  more until another. The packets still alternate for about eight frames per
+  change while the first pair's old images are kept.
+- Tests: `port_vr_eye_resize_tests` models the pairs, the retired delay, the
+  runtime's cap and pipelined pacing (the old rules reproduce the endless
+  swap; a change, a drag, a refused size and a refusal both ways settle).
+
 ## VR: the rumble split by source, cannon on the gun hand (2026-10-12)
 
 The user asked for the charge shot to rumble only the gun hand's controller

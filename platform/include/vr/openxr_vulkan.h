@@ -81,6 +81,8 @@ public:
                                    uint32_t periods_ahead);
     OpenXRBeginStatus ArmPacket(OpenXRBackendFrame& packet);
     bool SupportsPipelining() const;
+    // No pipelining here: every cycle may rebuild a pair (openxr_d3d12.h).
+    bool EyesResizing() const;
 
     // Drains this backend's own queue before tearing down. Returns false only
     // when the private device could not be waited on, in which case the caller

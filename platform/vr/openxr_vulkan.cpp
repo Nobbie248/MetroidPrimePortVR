@@ -9,6 +9,7 @@
 
 #include "vr/openxr_vulkan.h"
 #include "vr/openxr_diagnostics.h"
+#include "vr/openxr_eye_resize.h"
 #include "vr/openxr_passthrough.h"
 
 #include <aurora/vulkan_interop.h>
@@ -349,6 +350,7 @@ public:
         if (requested != requested_eye_size_) {
             requested_eye_size_ = requested;
             eye_size_ = requested;
+            eye_resize_gate_.Requested();
         }
     }
 
@@ -1862,6 +1864,11 @@ private:
         if (current == eye_size_) {
             return true;
         }
+        // Not while a replaced pair lives on, nor after this request was refused twice
+        // (vr/openxr_eye_resize.h).
+        if (!eye_resize_gate_.MayRebuild(!retired_pairs_.empty())) {
+            return true;
+        }
         const auto keep_current = [&](const char* what) {
             std::ostringstream message;
             message << "OpenXR Vulkan eyes stay " << current[0].width << 'x' << current[0].height
@@ -1871,6 +1878,7 @@ private:
             ClearError();
             // Back to this pair's size, which also returns the other pair to it if it was rebuilt.
             eye_size_ = current;
+            eye_resize_gate_.Refused();
         };
         std::array<EyeSwapchain, kOpenXREyeCount> replacement{};
         if (!CreateSwapchainPair(replacement)) {
@@ -2213,6 +2221,7 @@ private:
         uint32_t cycles_left;
     };
     std::vector<RetiredPair> retired_pairs_;
+    OpenXREyeResizeGate eye_resize_gate_;
     // The settings panel's layer: written like the eyes into panel_swapchain_,
     // shown from retained_panel_swapchain_ (see FinishFrame).
     EyeSwapchain panel_swapchain_{};
@@ -2325,6 +2334,7 @@ OpenXRBeginStatus OpenXRVulkanBackend::LocatePacket(const OpenXRPresentation& pr
 }
 OpenXRBeginStatus OpenXRVulkanBackend::ArmPacket(OpenXRBackendFrame&) { return OpenXRBeginStatus::Ready; }
 bool OpenXRVulkanBackend::SupportsPipelining() const { return false; }
+bool OpenXRVulkanBackend::EyesResizing() const { return false; }
 
 bool OpenXRVulkanBackend::TryCancelPendingFrame(OpenXRBackendFrame& frame) {
     return m_impl->TryCancelPendingFrame(frame);

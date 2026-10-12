@@ -9,6 +9,7 @@
 
 #include "vr/openxr_vulkan_direct.h"
 #include "vr/openxr_diagnostics.h"
+#include "vr/openxr_eye_resize.h"
 #include "vr/openxr_passthrough.h"
 #include "vr/vr_settings.h"
 
@@ -348,6 +349,7 @@ public:
         if (requested != requested_eye_size_) {
             requested_eye_size_ = requested;
             eye_size_ = requested;
+            eye_resize_gate_.Requested();
         }
     }
 
@@ -978,6 +980,11 @@ private:
         if (current == eye_size_) {
             return true;
         }
+        // Not while a replaced pair lives on, nor after this request was refused twice
+        // (vr/openxr_eye_resize.h).
+        if (!eye_resize_gate_.MayRebuild(!retired_pairs_.empty())) {
+            return true;
+        }
         std::array<EyeSwapchain, kOpenXREyeCount> replacement{};
         if (!CreateSwapchainPair(replacement)) {
             DestroySwapchainPair(replacement);
@@ -989,6 +996,7 @@ private:
             ClearError();
             // Back to this pair's size, which also returns the other pair to it if it was rebuilt.
             eye_size_ = current;
+            eye_resize_gate_.Refused();
             return true;
         }
         // The compositor may still be reading the old pair (kOpenXRRetiredSwapchainCycles).
@@ -1288,6 +1296,7 @@ private:
         uint32_t cycles_left;
     };
     std::vector<RetiredPair> retired_pairs_;
+    OpenXREyeResizeGate eye_resize_gate_;
     // The settings panel's layer: written like the eyes into panel_swapchain_, shown from
     // retained_panel_swapchain_ (see FinishFrame).
     EyeSwapchain panel_swapchain_{};
@@ -1376,6 +1385,7 @@ OpenXRBeginStatus OpenXRVulkanDirectBackend::LocatePacket(const OpenXRPresentati
 }
 OpenXRBeginStatus OpenXRVulkanDirectBackend::ArmPacket(OpenXRBackendFrame&) { return OpenXRBeginStatus::Ready; }
 bool OpenXRVulkanDirectBackend::SupportsPipelining() const { return false; }
+bool OpenXRVulkanDirectBackend::EyesResizing() const { return false; }
 bool OpenXRVulkanDirectBackend::Shutdown() { return m_impl->Shutdown(); }
 bool OpenXRVulkanDirectBackend::IsBound() const { return m_impl->IsBound(); }
 bool OpenXRVulkanDirectBackend::PanelLayerAvailable() const { return m_impl->PanelLayerAvailable(); }
@@ -1467,6 +1477,7 @@ OpenXRBeginStatus OpenXRQuestVulkanBackend::ArmPacket(OpenXRBackendFrame& packet
     return PG_QUEST_BACKEND_CALL(ArmPacket(packet), OpenXRBeginStatus::Error);
 }
 bool OpenXRQuestVulkanBackend::SupportsPipelining() const { return PG_QUEST_BACKEND_CALL(SupportsPipelining(), false); }
+bool OpenXRQuestVulkanBackend::EyesResizing() const { return PG_QUEST_BACKEND_CALL(EyesResizing(), false); }
 bool OpenXRQuestVulkanBackend::Shutdown() { return PG_QUEST_BACKEND_CALL(Shutdown(), true); }
 bool OpenXRQuestVulkanBackend::IsBound() const { return PG_QUEST_BACKEND_CALL(IsBound(), false); }
 bool OpenXRQuestVulkanBackend::PanelLayerAvailable() const {

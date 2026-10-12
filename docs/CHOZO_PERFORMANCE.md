@@ -478,3 +478,32 @@ The orange and green spikes radiating from the centre in desk screenshots are
 the arm cannon drawn from asleep controllers, not a map or minimap problem:
 they stay with `hide_minimap=1`, `vr_deindex_vertices=0`, `vr_multiview=0` and
 a cold pipeline cache with `MP_PIPELINE_SEED=0`.
+
+## Resident HUD and helmet models: tried, not kept (2026-10-12)
+
+The HUD's and helmet's model widgets (CSamusHud's base, selected and helmet
+frames) were given geometry sets of their own, like the world's area models:
+`CGuiModel::Draw` kept a frame's models resident (`CCubeModel` owning a set,
+freed in its destructor), so their surfaces drew as cached geometry with
+native vertex input on the Quest. Same APK, `MP_HUD_RESIDENT=0` for the other
+half, Chozo plaza during gameplay, GPU level 5 and CPU level 3 pinned
+(`debug.oculus.gpuLevel` / `cpuLevel`, cleared afterwards), two interleaved
+rounds of 30 s:
+
+| HUD models | FPS / 90 | App GPU | FIFO | Vertex uploads |
+| --- | ---: | ---: | ---: | ---: |
+| Resident, round 1 | 72 | 5.42 ms | 7.37 ms | 877 KB |
+| Resident, round 2 | 70 | 5.56 ms | 7.62 ms | 879 KB |
+| Plain, round 1 | 83 | 5.00 ms | 6.71 ms | 983 KB |
+| Plain, round 2 | 85 | 4.99 ms | 6.62 ms | 981 KB |
+
+It did what it should (about 100 KB less uploaded a frame, the HUD's surfaces
+hitting the cache, 60 more native-input draws) and cost more than it saved:
+the draw count stayed 83 head-locked (each widget has its own uniforms, so
+nothing merges), the FIFO's measured buckets were unchanged while its total
+rose by about 0.7 ms, and the GPU by about 0.5 ms. The HUD's models are small
+and interleaved with its plain quads and text, so the cached draws switch
+between the native and storage vertex paths at nearly every HUD draw (the
+cost the native-input follow-up above already saw between world draws),
+which outweighs decoding a few small meshes. Reverted; residency pays for
+large static surfaces drawn in runs, as the world's are.

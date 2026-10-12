@@ -441,9 +441,16 @@ void CMapWorld::DrawAreas(const CMapWorldDrawParms& parms, int selArea,
     int lastArea = -1;
     CMapArea::CMapAreaSurface::SetupGXMaterial();
 #ifdef TARGET_PC
-    // Port: only the HUD minimap; interactive full-map rendering keeps its path.
-    const bool batchEnabled = !inMapScreen && PortMapBatch::Enabled();
-    PortMapBatch::Geometry batch;
+    // Port: the HUD minimap and the map screen. The full map drew a GX draw per room
+    // surface, outline and door face, ~5,000 at the Chozo Ruins plaza: 36 FPS on the
+    // Quest 3 on the virtual screen, far less as the 3D map in the headset's view.
+    const bool batchEnabled =
+        inMapScreen ? PortMapBatch::EnabledInMapScreen() : PortMapBatch::Enabled();
+    // Kept across frames (game thread): the full map's ~5 MB of records made again in a
+    // fresh vector each frame grew it by copies and gave the memory back to the system,
+    // page faults and all, nearly half the Quest's game thread.
+    static PortMapBatch::Geometry sBatch;
+    PortMapBatch::Geometry& batch = sBatch;
     bool batchPending = false;
     const auto flushBatch = [&] {
       if (!batchPending) { return; }

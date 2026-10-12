@@ -426,3 +426,55 @@ storage 9.80 / 9.82 ms App GPU at 599 MHz, FIFO 5.94 / 5.86 ms; native
 6.41 / 6.37 ms at 492 MHz, FIFO 6.35 / 6.39 ms. The FIFO overhead is down to
 about +0.47 ms; what remains is likely the pipeline switching between native
 cached draws and plain draws.
+
+## Map screen batch (2026-10-12)
+
+The full map screen kept one GX draw per room surface, outline and door face
+when the HUD minimap's ordered batch was added (`CMapWorld::DrawAreas`,
+`!inMapScreen`). At the plaza save state that was 5,251 draws a frame on the
+virtual screen and about 5,880 for the 3D map in the headset's view, which
+also draws the live world under the pause blur. Quest 3, 90 Hz, render scale 1,
+multiview, the game PID's `VrApi` lines (other processes, such as the
+screenshot service, log `VrApi` too), headset on a desk; the map opened with
+the console's `maptap` (`press z` does not reach the game while the VR
+controllers own port 0):
+
+| Map | Draws | FPS / 90 | App GPU |
+| --- | ---: | ---: | ---: |
+| Gameplay at the plaza, for reference | 714 | 68-70 | 6.5-6.7 ms |
+| Virtual screen, unbatched | 5,251 | 36 | 20.9 ms (640 MHz, 90% busy) |
+| In view, unbatched, multiview off | ~5,880 | 11 | 50 ms |
+| In view, unbatched, multiview on | ~5,880 | about 1 | up to 2,000 ms |
+| Virtual screen, batched | 82 | 49 | 2.0 ms |
+| In view, batched | 710 | 44 | 10.7 ms |
+| Virtual screen, batched, bulk records | 82 | 90 | 1.9 ms |
+| In view, batched, bulk records | 710 | 66 | 10.2 ms |
+
+The batch now covers the map screen (`PortMapBatch::EnabledInMapScreen`,
+`MP_MAP_SCREEN_BATCH=0` keeps the old path, also a Quest launch extra). With
+the GPU idle, `simpleperf` (`simpleperf record --app org.primedgun.v2
+--call-graph fp`, symbols from the unstripped
+`quest/app/build/intermediates/cxx/RelWithDebInfo/*/obj/arm64-v8a` library
+through the NDK's `binary_cache_builder.py`) put 86% of the cycles on the game
+thread: the batch's records (~140,000 vertices, 5 MB) went into a vector made
+fresh each frame, which grew by copies and returned its memory to the system
+(page faults and `madvise`, about 45%), then out through four GX calls per
+vertex (about 25%). The vector and the per-surface point list are now kept
+across frames, and `PortMapBatch::Draw` hands the records to the FIFO as one
+display list of big-endian `GX_TRIANGLES` draws (`CGX::CallDisplayList`), the
+same bytes the GX calls wrote. The HUD minimap takes the same path.
+
+The map screen on the virtual screen now holds 90 FPS with the GPU at 1.9 ms;
+the 3D map runs at the rate of gameplay at that spot, which the world's FIFO
+processing limits there. What the batch still costs: the game thread makes the
+records again every frame (the sort, area transforms, outline quads) and the
+frame uploads ~5-6 MB of vertices. Keeping the rooms' records resident, as the
+world's cached display lists are, would remove that, but needs the fill shading
+(the map camera's direction against each surface's normal) moved into the
+shader and per-frame colours (the current room's pulse, the selected room's
+hint flash, fades) kept out of the cached records.
+
+The orange and green spikes radiating from the centre in desk screenshots are
+the arm cannon drawn from asleep controllers, not a map or minimap problem:
+they stay with `hide_minimap=1`, `vr_deindex_vertices=0`, `vr_multiview=0` and
+a cold pipeline cache with `MP_PIPELINE_SEED=0`.

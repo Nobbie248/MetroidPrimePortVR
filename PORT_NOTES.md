@@ -1,3 +1,17 @@
+## The map screen draws its rooms in one batch (2026-10-12)
+
+On the Quest 3 the map screen was the slowest screen in the game: one GX draw
+per room surface, outline and door face, about 5,250 at the Chozo Ruins plaza.
+On the virtual screen it ran at 36 FPS of 90; the 3D map in the headset's view
+(which draws the live world too) stalled at about 1 FPS with multiview. The HUD
+minimap's ordered batch (`PortMapBatch`) now covers the map screen
+(`MP_MAP_SCREEN_BATCH=0` keeps the old path), its records are kept across
+frames and handed to the FIFO as one display list instead of four GX calls per
+vertex. The virtual-screen map now holds 90 FPS (82 draws, 1.9 ms of GPU) and
+the 3D map runs at gameplay's rate there (66 FPS, 710 draws). Measurements,
+the profile and what remains in `docs/CHOZO_PERFORMANCE.md` ("Map screen
+batch").
+
 ## VR: a render scale change no longer leaves the eyes swapping sizes (2026-10-12)
 
 The user lowered `vr_render_scale` in game (PSVR2 on SteamVR, RTX 3090, eyes

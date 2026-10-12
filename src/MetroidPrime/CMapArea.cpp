@@ -254,7 +254,7 @@ bool CMapArea::CMapAreaSurface::AppendToBatch(
     const GXColor gx = color.GetGXColor();
     return PortMapBatch::Color{gx.r, gx.g, gx.b, gx.a};
   };
-  std::vector<PortMapBatch::Position> points;
+  static std::vector<PortMapBatch::Position> points; // game thread, kept across calls
   const auto readPoints = [&](const int*& cursor, int count) {
     const uchar* indices = reinterpret_cast<const uchar*>(cursor);
     points.clear();

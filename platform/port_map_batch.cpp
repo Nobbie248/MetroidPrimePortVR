@@ -7,6 +7,8 @@
 #include <dolphin/gx/GXGet.h>
 
 #include <cstdlib>
+#include <cstring>
+#include <vector>
 
 namespace PortMapBatch {
 bool Enabled() {
@@ -15,6 +17,14 @@ bool Enabled() {
     return value == nullptr || value[0] != '0';
   }();
   return enabled;
+}
+
+bool EnabledInMapScreen() {
+  static const bool enabled = [] {
+    const char* value = std::getenv("MP_MAP_SCREEN_BATCH");
+    return value == nullptr || value[0] != '0';
+  }();
+  return enabled && Enabled();
 }
 
 void Draw(const Geometry& geometry, const CTransform4f& model) {
@@ -40,18 +50,33 @@ void Draw(const Geometry& geometry, const CTransform4f& model) {
     CGX::SetTevAlphaIn(GX_TEVSTAGE0, GX_CA_ZERO, GX_CA_ZERO, GX_CA_ZERO, GX_CA_RASA);
     CGraphics::SetModelMatrix(model);
     AuroraSetMapBatch(GX_TRUE);
+    // One display list of GX_TRIANGLES draws, the GX FIFO's big-endian records, copied
+    // into the FIFO at once: the full map's ~140,000 vertices as four GX calls each were
+    // a quarter of the Quest's game thread. The records are the Vertex layout (position,
+    // second position, colour bytes, width, endpoint), every float byte-swapped.
+    static std::vector<uint8_t> sList; // game thread; the FIFO copies it
+    const size_t draws = (vertices.size() + kDrawVertices - 1) / kDrawVertices;
+    sList.resize(draws * 3 + vertices.size() * sizeof(Vertex));
+    uint8_t* out = sList.data();
     for (size_t first = 0; first < vertices.size(); first += kDrawVertices) {
       const size_t count = std::min(kDrawVertices, vertices.size() - first);
-      CGX::Begin(GX_TRIANGLES, format, static_cast<ushort>(count));
+      *out++ = static_cast<uint8_t>(GX_TRIANGLES | format);
+      *out++ = static_cast<uint8_t>(count >> 8);
+      *out++ = static_cast<uint8_t>(count);
       for (size_t i = first; i < first + count; ++i) {
-        const auto& vertex = vertices[i];
-        GXPosition3f32(vertex.first[0], vertex.first[1], vertex.first[2]);
-        GXNormal3f32(vertex.second[0], vertex.second[1], vertex.second[2]);
-        GXColor4u8(vertex.color[0], vertex.color[1], vertex.color[2], vertex.color[3]);
-        GXTexCoord2f32(vertex.signedWidth, vertex.endpoint);
+        uint32_t words[sizeof(Vertex) / 4];
+        std::memcpy(words, &vertices[i], sizeof(words));
+        for (size_t w = 0; w < std::size(words); ++w) {
+          // Word 6 is the colour's bytes, already in GX order.
+          if (w != offsetof(Vertex, color) / 4) {
+            words[w] = __builtin_bswap32(words[w]);
+          }
+        }
+        std::memcpy(out, words, sizeof(words));
+        out += sizeof(words);
       }
-      CGX::End();
     }
+    CGX::CallDisplayList(sList.data(), sList.size());
     AuroraSetMapBatch(GX_FALSE);
     for (const auto& attr : saved) {
       GXSetVtxAttrFmt(format, attr.attr, attr.cnt, attr.type, attr.frac);

@@ -46,6 +46,8 @@ VRPresentationMode SelectPresentation(const State& state) noexcept {
         return VRPresentationMode::Immersive;
     case VRGameMode::Paused:
         return state.config.game_menu_screen ? VRPresentationMode::VirtualScreen : VRPresentationMode::Immersive;
+    case VRGameMode::Message:
+        return state.config.message_box_immersive ? VRPresentationMode::Immersive : VRPresentationMode::VirtualScreen;
     case VRGameMode::Cinematic:
         return state.config.cinematic_screen ? VRPresentationMode::VirtualScreen : VRPresentationMode::Immersive;
     case VRGameMode::Unknown:
@@ -95,7 +97,8 @@ void PrimeVRPolicyConfigure(const PrimeVRPolicyConfig& config) noexcept {
     const bool safety_changed = state.config.enabled != config.enabled ||
                                 state.config.immersive != config.immersive ||
                                 state.config.cinematic_screen != config.cinematic_screen ||
-                                state.config.game_menu_screen != config.game_menu_screen;
+                                state.config.game_menu_screen != config.game_menu_screen ||
+                                state.config.message_box_immersive != config.message_box_immersive;
     state.config = config;
     if (safety_changed) {
         // A configuration change is a new safety state even when it lands on
@@ -122,10 +125,11 @@ void PrimeVRPolicyPublishGameMode(VRGameMode mode, uint64_t game_frame) noexcept
     State& state = Stored();
     state.game_frame = game_frame;
     // Leaving the world for the front end or a transition only counts once it
-    // persists; the pause screen, a cinematic and any return to the world
-    // switch at once, as does anything while not in the world.
+    // persists; the pause screen, a message box, a cinematic and any return to
+    // the world switch at once, as does anything while not in the world.
     const bool immediate = mode == VRGameMode::InGame || mode == VRGameMode::Paused ||
-                           mode == VRGameMode::Cinematic || state.game_mode != VRGameMode::InGame;
+                           mode == VRGameMode::Message || mode == VRGameMode::Cinematic ||
+                           state.game_mode != VRGameMode::InGame;
     if (immediate) {
         state.game_mode = mode;
         state.pending_mode = mode;
@@ -144,6 +148,13 @@ void PrimeVRPolicyPublishGameMode(VRGameMode mode, uint64_t game_frame) noexcept
 PrimeVRPolicySnapshot PrimeVRPolicyGetSnapshot() noexcept {
     std::lock_guard lock(Mutex());
     return Snapshot(Stored());
+}
+
+VRPresentationMode PrimeVRPolicyPresentationFor(VRGameMode mode) noexcept {
+    std::lock_guard lock(Mutex());
+    State probe = Stored();
+    probe.game_mode = mode;
+    return SelectPresentation(probe);
 }
 
 uint64_t PrimeVRPolicyContentTag() noexcept {

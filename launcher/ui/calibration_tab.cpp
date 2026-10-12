@@ -54,6 +54,12 @@ void BuildCalibrationTab(TabContext& ctx, QTabWidget* tabs) {
   ctx.Check(layout, QObject::tr("Detach VR menu from hand"), "vr_vr_menu_floating");
   ctx.Check(layout, QObject::tr("Detach game menu and map from view"),
             "vr_game_menu_screen_enabled");
+  ctx.Check(layout, QObject::tr("Keep message boxes in view"), "vr_message_box_immersive", {},
+            QObject::tr("Item pickup and save messages stay over the blurred world in the "
+                        "headset; off, they show on the cinema screen"));
+  ctx.Check(layout, QObject::tr("Floating HUD"), "vr_floating_hud", {},
+            QObject::tr("The morph ball HUD and message boxes ease toward the headset; off, they "
+                        "stay fixed"));
   ctx.Check(layout, QObject::tr("Enable visor helmet"), "vr_visor_helmet_enabled", {},
             QObject::tr("Allows user to turn helmet back on in the pause menu"));
   ctx.Check(layout, QObject::tr("Show floor position marker"), "vr_position_marker_enabled");

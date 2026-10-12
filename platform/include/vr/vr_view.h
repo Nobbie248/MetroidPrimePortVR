@@ -92,6 +92,74 @@ bool VrHideSpaceWarp() noexcept;
 // Immersive and the settings turn the scan window's zoom off: the window's
 // copy is the pane's own size (CPlayerVisor::DrawScanEffect).
 bool VrScanWindowNoZoom() noexcept;
+// A modal message box or the in-game save prompt (kIGGS_PauseHUDMessage,
+// kIGGS_PauseSaveGame), opening, open or closing. Game thread, at the end of
+// every CInGameGuiManager::Update (and false from its destructor): `open`,
+// and whether a cinematic camera is current, which then decides the frame.
+void VrNoteMessageBox(bool open, bool cinematic) noexcept;
+// The note, for the frame's game mode (main.cpp): Message, or Cinematic when
+// the box was opened under a cinematic camera.
+bool VrMessageBoxOpen() noexcept;
+bool VrMessageBoxCinematic() noexcept;
+// The noted box is shown in the immersive view: the headset runs and the
+// policy would show its frame immersively (vr_message_box_immersive). The world
+// then keeps being drawn under the pause blur, which each eye takes from its
+// own image every frame (CPauseScreenBlur), and the box and the prompt are laid
+// on a screen of the morph ball HUD's size and distance, placed ahead of the
+// head when the box opens and held still (CInGameGuiManager::Draw).
+bool VrMessageBoxInView() noexcept;
+// The vr_floating_hud setting: the morph ball's HUD and the message boxes go on
+// the easing plane (AURORA_STEREO_ROUTE_FLOATING_HUD) instead of the held
+// screen (ANCHORED_SCREEN).
+bool VrFloatingHud() noexcept;
+// The pause menu, the logbook or the map screen (kIGGS_PauseGame,
+// kIGGS_PauseLogBook, kIGGS_MapScreen), opening, open or closing. Game thread,
+// at the end of every CInGameGuiManager::Update (and false from its destructor).
+void VrNoteGameMenu(bool open) noexcept;
+// The note, for the frame's game mode (main.cpp: Paused).
+bool VrGameMenuOpen() noexcept;
+// The noted menu is shown in the immersive view: the headset runs and the
+// policy would show a Paused frame immersively (vr_game_menu_screen_enabled
+// off). The world then keeps being drawn under the pause blur, as for a box.
+bool VrGameMenuInView() noexcept;
+// The map screen's 3D map in the headset (AURORA_STEREO_ROUTE_ANCHORED_3D): its
+// centre `distance` game units ahead of the held anchor, the map camera's view
+// half-height scaled to `halfHeight` units, how near its near side may come
+// (`clearance`: its depth is compressed beyond that) and the near plane.
+void VrMapHologram(float& distance, float& halfHeight, float& clearance, float& nearPlane) noexcept;
+// The head-locked route's scales (vr_metroid_hud_size, vr_metroid_hud_distance):
+// a HUD position's x and z (Prime camera space) by `xy`, its depth (y) by `depth`.
+void VrHeadLockedScales(float& xy, float& depth) noexcept;
+// Every eye's depth back to the far plane (an orthographic quad through a
+// far-only depth window, depth written, no colour), keeping the projection,
+// view and model. Draw it on a route that covers the whole eye (WORLD).
+void VrResetEyeDepth() noexcept;
+// The virtual screen the screen routes lay the mono picture on
+// (aurora_set_stereo_screen_2d), in game units: half its width, half its
+// height (the viewport's aspect) and its distance ahead of its anchor.
+void VrScreenPlane(float& halfWidth, float& halfHeight, float& distance) noexcept;
+// The screen route the pause menu is drawn on in the headset's view
+// (CInGameGuiManager::Draw: AURORA_STEREO_ROUTE_ANCHORED_SCREEN or FLOATING_HUD),
+// 0 when it is not.
+void VrSetPauseScreenRoute(unsigned route) noexcept;
+// A 3D model of the pause menu (the inventory's Samus, the logbook's artifacts,
+// the options' GameCube), constructed right after its own perspective camera is
+// set: on the pause menu's screen in the headset view, the model is drawn in 3D
+// (AURORA_STEREO_ROUTE_ANCHORED_3D / FLOATING_3D) where its flat picture would
+// stand, at that size, a little in front of the screen, over every eye's depth
+// reset; the destructor goes back to the screen. Nothing otherwise.
+class VrPauseModel3D {
+public:
+    VrPauseModel3D() noexcept;
+    ~VrPauseModel3D() noexcept;
+    VrPauseModel3D(const VrPauseModel3D&) = delete;
+    VrPauseModel3D& operator=(const VrPauseModel3D&) = delete;
+    // The model is being drawn in 3D.
+    bool Active() const noexcept { return active_; }
+
+private:
+    bool active_ = false;
+};
 // The beam wheel's hover, for the HUD's beam menu (CHudVisorBeamMenu): the
 // beam the aim ray points at while the weapon hand's B holds the wheel open
 // (vr_pad.cpp), as CPlayerState::EBeamId (0 Power, 1 Ice, 2 Wave, 3 Plasma),

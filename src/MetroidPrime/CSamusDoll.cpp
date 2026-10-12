@@ -1,4 +1,7 @@
 #include "MetroidPrime/Cameras/CGameCamera.hpp"
+#ifdef TARGET_PC
+#include "vr/vr_view.h"
+#endif
 #include "MetroidPrime/CSamusDoll.hpp"
 
 #include "MetroidPrime/CActorLights.hpp"
@@ -390,6 +393,10 @@ void CSamusDoll::Draw(const CStateManager& mgr, float alpha) {
                            static_cast< float >(CGraphics::GetViewportHeight()), 0.2f, 4096.f);
   CGraphics::SetViewPointMatrix(xb0_userRot.BuildTransform4f(xa4_offset) *
                                 CTransform4f::Translate(0.f, xc0_userZoom, 0.f));
+#ifdef TARGET_PC
+  // PortVr: in the headset's view the doll stands in 3D on the pause menu's screen.
+  const PortVr::VrPauseModel3D vrModel3D;
+#endif
   const CTransform4f scale = CTransform4f::Scale(skDefaultScale);
   const CTransform4f gunXf =
       xc8_suitModel0->GetScaledLocatorTransform(rstl::string_l(kGunLocator)) * scale;
@@ -513,7 +520,14 @@ void CSamusDoll::Draw(const CStateManager& mgr, float alpha) {
                 .UseShaderSet(x1e4_glassMatIdx));
       }
     }
-    if (phazonSuit && drawAlpha > 0.1f) {
+#ifdef TARGET_PC
+    // PortVr: the shimmer is a pass over the whole viewport through a mask of
+    // the doll's pixels, which a doll drawn in 3D in the headset has not got.
+    const bool phazonPass = !vrModel3D.Active();
+#else
+    const bool phazonPass = true;
+#endif
+    if (phazonSuit && drawAlpha > 0.1f && phazonPass) {
       CCubeRenderer* const renderer = gpRender;
       const float radius = CMath::Clamp(
           0.2f, (10.f - (xc0_userZoom >= 0.f ? xc0_userZoom : -xc0_userZoom)) / 20.f, 1.f);

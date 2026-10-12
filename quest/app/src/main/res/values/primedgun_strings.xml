@@ -168,6 +168,10 @@
     <string name="primedgun_cinematic_screen_enabled">Show cutscenes on cinema screen</string>
     <string name="primedgun_vr_menu_floating">Detach VR menu from hand</string>
     <string name="primedgun_game_menu_screen_enabled">Detach game menu and map from view</string>
+    <string name="primedgun_message_box_immersive">Keep message boxes in view</string>
+    <string name="primedgun_floating_hud">Floating HUD</string>
+    <string name="primedgun_floating_hud_note">The morph ball HUD and message boxes ease toward the headset; off, they stay fixed</string>
+    <string name="primedgun_message_box_immersive_note">Item pickup and save messages stay over the blurred world in the headset; off, they show on the cinema screen</string>
     <string name="primedgun_visor_helmet_enabled">Enable visor helmet</string>
     <string name="primedgun_visor_helmet_note">Allows user to turn helmet back on in the pause menu</string>
     <string name="primedgun_position_marker_enabled">Show floor position marker</string>

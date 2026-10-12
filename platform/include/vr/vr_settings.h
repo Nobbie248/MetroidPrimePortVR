@@ -78,7 +78,23 @@ struct PortVrSettings {
     float screen_distance_meters = 1.5f;  // PrimedGun ScreenDistance
     float screen_width_meters = 2.0f;     // PrimedGun ScreenSize: 1.5 m tall at 4:3
     bool cinematic_screen_enabled = true; // cutscenes on the virtual screen
-    bool game_menu_screen_enabled = true; // pause / map / logbook / save detached onto it
+    // The pause menu, logbook and map on the virtual screen. Off (default), they
+    // stay in the immersive view like the message boxes: the world keeps head
+    // tracking under the pause blur, the menus sit on the held (or floating)
+    // screen and the map becomes a 3D map held in front of the player.
+    bool game_menu_screen_enabled = false;
+    // Message boxes (item pickups, "Game has been saved", scan log unlocks) and
+    // the in-game save prompt stay in the immersive view: the world keeps head
+    // tracking under the pause blur, which each eye takes from its own image, and
+    // the box sits on a screen placed ahead of the head when it opens. Off, they
+    // show on the virtual screen with the TV's frozen picture.
+    bool message_box_immersive = true;
+    // The morph ball's HUD and those message boxes float: a screen of the virtual
+    // screen's size and distance that eases toward the headset's position and
+    // facing (AURORA_STEREO_ROUTE_FLOATING_HUD). Off, both are fixed: placed
+    // where the head faces when the ball's HUD comes up or a box opens, then held
+    // (ANCHORED_SCREEN; the ball's HUD stays with the ball's camera).
+    bool floating_hud = false;
 
     // --- PrimedGun RuntimeSettings (NativeRuntime.h:14-87) ---
     bool builtin_patches_enabled = true;

@@ -326,10 +326,20 @@ void DrawVrDebugTab() {
   ImGui::SeparatorText("Virtual screen (menus, cinematics, morph ball HUD)");
   changed |= ImGui::SliderFloat("Screen distance", &s.screen_distance_meters, 0.5f, 5.f, "%.2f m");
   changed |= ImGui::SliderFloat("Screen width", &s.screen_width_meters, 0.5f, 6.f, "%.2f m");
-  ImGui::TextWrapped("The morph-ball HUD uses this size and distance, floating toward the headset's "
-                     "position and facing with a gentle delay.");
+  changed |= ImGui::Checkbox("Floating HUD", &s.floating_hud);
+  ImGui::TextWrapped("The morph-ball HUD and the message boxes use this size and distance. Floating, they "
+                     "ease toward the headset's position and facing with a gentle delay; fixed, they stay "
+                     "where the head faced when the morph-ball HUD came up or the box opened.");
   changed |= ImGui::Checkbox("Cinematics on the screen", &s.cinematic_screen_enabled);
   changed |= ImGui::Checkbox("Pause, map and logbook on the screen", &s.game_menu_screen_enabled);
+  ImGui::TextWrapped("Off, they stay in the headset view like the message boxes: the world keeps "
+                     "following the head under the pause blur, the menus sit on the held screen and the "
+                     "map is a 3D map held in front of you.");
+  changed |= ImGui::Checkbox("Message boxes in the headset view", &s.message_box_immersive);
+  ImGui::TextWrapped("Item pickup and save messages, and the save prompt: the world keeps following the head "
+                     "under the pause blur, drawn per eye, and the box stays on a screen placed ahead of the "
+                     "head when it opens (or floats, with Floating HUD). "
+                     "Off, they show on the screen with the frozen picture.");
 
   ImGui::SeparatorText("VR menu (PrimedGun's settings in the headset)");
   changed |= ImGui::Checkbox("VR menu", &s.vr_overlays_enabled);

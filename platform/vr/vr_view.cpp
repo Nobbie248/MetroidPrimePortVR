@@ -11,7 +11,11 @@
 #include "vr/vr_room_scale.h"
 #include "port_surface_culling_math.h"
 
+#include "Kyoto/Graphics/CGraphics.hpp"
 #include "Kyoto/Math/CFrustumPlanes.hpp"
+#include "MetaRender/CCubeRenderer.hpp"
+#include "aurora/gfx.h"
+#include "dolphin/gx/GXAurora.h"
 #include "Kyoto/Math/CQuaternion.hpp"
 #include "MetroidPrime/CStateManager.hpp"
 #include "MetroidPrime/CGameCollision.hpp"
@@ -382,6 +386,159 @@ bool VrSkyAtInfinity() noexcept { return OpenXRIsRunning() && GetVrSettings().sk
 bool VrHideSpaceWarp() noexcept { return OpenXRIsRunning() && !GetVrSettings().space_warp; }
 
 bool VrScanWindowNoZoom() noexcept { return ImmersiveNow() && !GetVrSettings().scan_zoom; }
+
+namespace {
+// Game thread only, like vr_pad.cpp's in-game menu note.
+bool s_messageBoxOpen = false;
+bool s_messageBoxCinematic = false;
+} // namespace
+
+void VrNoteMessageBox(bool open, bool cinematic) noexcept {
+    s_messageBoxOpen = open;
+    s_messageBoxCinematic = open && cinematic;
+}
+
+bool VrMessageBoxOpen() noexcept { return s_messageBoxOpen; }
+
+bool VrMessageBoxCinematic() noexcept { return s_messageBoxCinematic; }
+
+bool VrFloatingHud() noexcept { return GetVrSettings().floating_hud; }
+
+namespace {
+bool s_gameMenuOpen = false; // game thread only, like the message box note
+// The 3D map: its centre 1.2 m ahead, the map camera's view 0.45 m above and
+// below it (about the angle the TV's map fills), nothing nearer than 0.3 m.
+constexpr float kMapHologramDistanceMeters = 1.2f;
+constexpr float kMapHologramHalfHeightMeters = 0.45f;
+constexpr float kMapHologramClearanceMeters = 0.5f;
+constexpr float kMapHologramNearMeters = 0.3f;
+} // namespace
+
+void VrNoteGameMenu(bool open) noexcept { s_gameMenuOpen = open; }
+
+bool VrGameMenuOpen() noexcept { return s_gameMenuOpen; }
+
+bool VrGameMenuInView() noexcept {
+    return s_gameMenuOpen && OpenXRIsRunning() &&
+           PrimeVRPolicyPresentationFor(VRGameMode::Paused) == VRPresentationMode::Immersive;
+}
+
+namespace {
+unsigned s_pauseScreenRoute = 0; // game thread (CInGameGuiManager::Draw)
+// A pause model stands this far in front of the pause menu's screen.
+constexpr float kPauseModelAheadMeters = 0.15f;
+} // namespace
+
+void VrHeadLockedScales(float& xy, float& depth) noexcept {
+    const PortVrSettings& settings = GetVrSettings();
+    depth = settings.metroid_hud_distance;
+    xy = settings.metroid_hud_size * settings.metroid_hud_distance;
+}
+
+void VrResetEyeDepth() noexcept {
+    const CGraphics::CProjectionState projection = CGraphics::GetProjectionState();
+    const CTransform4f viewPoint = CGraphics::GetViewMatrix();
+    const CTransform4f model = CGraphics::GetModelMatrix();
+    const float depthNear = CGraphics::GetDepthNear();
+    const float depthFar = CGraphics::GetDepthFar();
+    const rstl::pair< CVector2f, CVector2f > vp = gpRender->SetViewportOrtho(true, -4096.f, 4096.f);
+    const CVector2f& lt = vp.first;
+    const CVector2f& rb = vp.second;
+    CGraphics::SetDepthRange(1.f, 1.f);
+    gpRender->SetModelMatrix(CTransform4f::Identity());
+    gpRender->SetBlendMode_NoColorWrite();
+    CGraphics::SetDepthWriteMode(true, kE_Always, true);
+    gpRender->BeginTriangleStrip(4);
+    gpRender->PrimColor(CColor::White());
+    gpRender->PrimVertex(CVector3f(lt.GetX() - 1.f, 0.f, 1.f + rb.GetY()));
+    gpRender->PrimVertex(CVector3f(lt.GetX() - 1.f, 0.f, lt.GetY() - 1.f));
+    gpRender->PrimVertex(CVector3f(1.f + rb.GetX(), 0.f, 1.f + rb.GetY()));
+    gpRender->PrimVertex(CVector3f(1.f + rb.GetX(), 0.f, lt.GetY() - 1.f));
+    gpRender->EndPrimitive();
+    CGraphics::SetDepthWriteMode(true, kE_LEqual, true);
+    gpRender->SetBlendMode_AlphaBlended();
+    CGraphics::SetDepthRange(depthNear, depthFar);
+    gpRender->SetModelMatrix(model);
+    CGraphics::SetViewPointMatrix(viewPoint);
+    CGraphics::SetProjectionState(projection);
+}
+
+void VrScreenPlane(float& halfWidth, float& halfHeight, float& distance) noexcept {
+    const PortVrSettings& settings = GetVrSettings();
+    const float unitsPerMeter = settings.world_scale;
+    const CViewport& viewport = CGraphics::GetViewport();
+    halfWidth = 0.5f * settings.screen_width_meters * unitsPerMeter;
+    halfHeight = viewport.mWidth > 0 ? halfWidth * static_cast< float >(viewport.mHeight) /
+                                           static_cast< float >(viewport.mWidth)
+                                     : 0.f;
+    distance = settings.screen_distance_meters * unitsPerMeter;
+}
+
+void VrSetPauseScreenRoute(unsigned route) noexcept { s_pauseScreenRoute = route; }
+
+VrPauseModel3D::VrPauseModel3D() noexcept {
+    if (s_pauseScreenRoute == 0) {
+        return;
+    }
+    // The model's own camera: its vertical focal term and how far ahead the
+    // model's origin (where the dolls stand) lies.
+    const CGraphics::CProjectionState& projection = CGraphics::GetProjectionState();
+    const float height = std::fabs(projection.GetTop() - projection.GetBottom());
+    const float depth = (CGraphics::GetViewMatrix().GetQuickInverse() * CVector3f::Zero()).GetY();
+    // The pause menu's screen: the mono picture fills it, so a point of the
+    // model's camera space at the origin's depth lands at
+    // (x, y) * halfHeight * focalY / depth on it.
+    float halfWidth = 0.f;
+    float halfHeight = 0.f;
+    float distance = 0.f;
+    VrScreenPlane(halfWidth, halfHeight, distance);
+    if (!projection.IsPerspective() || height <= 0.f || depth <= projection.GetNear() ||
+        halfHeight <= 0.f || distance <= 0.f) {
+        return;
+    }
+    const float focalY = 2.f * projection.GetNear() / height;
+    const float unitsPerMeter = GetVrSettings().world_scale;
+    // A little in front of the screen, at the same angular size: scale and
+    // distance shrink together.
+    const float ahead = std::max(0.5f * distance, distance - kPauseModelAheadMeters * unitsPerMeter);
+    const float scale = halfHeight * focalY / depth * (ahead / distance);
+    // GX camera space looks down -z: the origin, at -depth, goes to -ahead.
+    const float offsetZ = scale * depth - ahead;
+    // Its own depth over whatever the screen's panels wrote: the reset quad
+    // must cover each whole eye, so on WORLD.
+    AuroraSetStereoDrawRoute(AURORA_STEREO_ROUTE_WORLD);
+    VrResetEyeDepth();
+    AuroraSetStereoDrawRoute(s_pauseScreenRoute == AURORA_STEREO_ROUTE_FLOATING_HUD ? AURORA_STEREO_ROUTE_FLOATING_3D
+                                                                                 : AURORA_STEREO_ROUTE_ANCHORED_3D);
+    AuroraSetStereoPlacement3D(scale, 0.f, 0.f, offsetZ);
+    active_ = true;
+}
+
+VrPauseModel3D::~VrPauseModel3D() noexcept {
+    if (!active_) {
+        return;
+    }
+    AuroraSetStereoPlacement3D(1.f, 0.f, 0.f, 0.f);
+    AuroraSetStereoDrawRoute(s_pauseScreenRoute);
+}
+
+void VrMapHologram(float& distance, float& halfHeight, float& clearance, float& nearPlane) noexcept {
+    const float unitsPerMeter = GetVrSettings().world_scale;
+    distance = kMapHologramDistanceMeters * unitsPerMeter;
+    halfHeight = kMapHologramHalfHeightMeters * unitsPerMeter;
+    clearance = kMapHologramClearanceMeters * unitsPerMeter;
+    nearPlane = kMapHologramNearMeters * unitsPerMeter;
+}
+
+bool VrMessageBoxInView() noexcept {
+    if (!s_messageBoxOpen || !OpenXRIsRunning()) {
+        return false;
+    }
+    // The mode main.cpp publishes for this box, asked before the frame is drawn
+    // (the current presentation is still the previous frame's).
+    const VRGameMode mode = s_messageBoxCinematic ? VRGameMode::Cinematic : VRGameMode::Message;
+    return PrimeVRPolicyPresentationFor(mode) == VRPresentationMode::Immersive;
+}
 
 int VrBeamWheelHoverBeam() noexcept {
     if (!GetVrSettings().beam_wheel_hud_highlight) {

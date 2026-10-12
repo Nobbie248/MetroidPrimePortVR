@@ -87,7 +87,9 @@ void BuildControllerTab(TabContext& ctx, QTabWidget* tabs) {
     for (const char* key :
          {"vr_use_right_hand", "vr_vr_overlays_enabled", "vr_vr_menu_hold_left_stick",
           "vr_vr_menu_requires_head_zone", "vr_vr_menu_floating", "vr_cinematic_screen_enabled",
-          "vr_game_menu_screen_enabled", "vr_rumble_enabled", "vr_rumble_intensity",
+          "vr_game_menu_screen_enabled", "vr_message_box_immersive", "vr_floating_hud",
+          "vr_rumble_enabled",
+          "vr_rumble_intensity",
           "vr_rumble_hand", "vr_xr_dpad_enabled", "vr_combat_jump_use_primary_button",
           "vr_beam_wheel_hud_highlight",
           "vr_grip_inputs_enabled", "vr_grip_inputs_use_trackpad", "vr_trackpad_press_threshold",

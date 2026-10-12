@@ -361,11 +361,13 @@ enum class PortItem : uint8_t {
     LookLockNoCameraTurn,
     BeamWheelHighlight,
     RoomScale,
+    MessageBoxInView,
+    FloatingHud,
     Reset,
 };
 
 struct PortList {
-    std::array<PortItem, 28> items{};
+    std::array<PortItem, 32> items{};
     uint32_t count = 0;
 };
 
@@ -405,6 +407,8 @@ inline PortList PortItems(const View& view) {
     add(PortItem::LookLockNoCameraTurn);
     add(PortItem::BeamWheelHighlight);
     add(PortItem::RoomScale);
+    add(PortItem::MessageBoxInView);
+    add(PortItem::FloatingHud);
     add(PortItem::Reset);
     return list;
 }
@@ -706,6 +710,10 @@ inline Row PortRow(const State& s, const PortVrSettings& v, const View& view, Po
         return {"BEAM WHEEL HUD HIGHLIGHT", OnOff(v.beam_wheel_hud_highlight)};
     case PortItem::RoomScale:
         return {"ROOM SCALE", OnOff(v.room_scale)};
+    case PortItem::MessageBoxInView:
+        return {"MESSAGE BOX IN VIEW", OnOff(v.message_box_immersive)};
+    case PortItem::FloatingHud:
+        return {"FLOATING HUD", OnOff(v.floating_hud)};
     case PortItem::Reset:
         return {"RESET CONFIG", ConfirmText(s, kResetPortConfig)};
     }
@@ -1135,7 +1143,9 @@ inline void ResetController(PortVrSettings& v) {
     v.vr_menu_hold_left_stick = false;
     v.vr_menu_requires_head_zone = false;
     v.vr_menu_floating = false;
-    v.game_menu_screen_enabled = true;
+    v.game_menu_screen_enabled = false;
+    v.message_box_immersive = true;
+    v.floating_hud = false;
     v.xr_dpad_enabled = true;
     v.xr_dpad_head_radius = 0.28f;
     v.xr_dpad_head_y_below = 0.02f;
@@ -1191,6 +1201,8 @@ inline void ResetAll(PortVrSettings& v) {
     v.vr_menu_floating = d.vr_menu_floating;
     v.cinematic_screen_enabled = d.cinematic_screen_enabled;
     v.game_menu_screen_enabled = d.game_menu_screen_enabled;
+    v.message_box_immersive = d.message_box_immersive;
+    v.floating_hud = d.floating_hud;
     v.frustum_culling_enabled = d.frustum_culling_enabled;
     v.frustum_culling_degrees = d.frustum_culling_degrees;
     v.metroid_hud_distance = d.metroid_hud_distance;
@@ -1239,6 +1251,8 @@ inline void ResetPortConfig(PortVrSettings& v) {
     v.look_lock_no_camera_turn = d.look_lock_no_camera_turn;
     v.beam_wheel_hud_highlight = d.beam_wheel_hud_highlight;
     v.room_scale = d.room_scale;
+    v.message_box_immersive = d.message_box_immersive;
+    v.floating_hud = d.floating_hud;
 }
 
 // A CONFIG choice one step on: -1 or +1, clamped at the ends for the
@@ -1630,6 +1644,12 @@ inline void Activate(State& s, PortVrSettings& v, const View& view, double now, 
             break;
         case PortItem::RoomScale:
             v.room_scale = !v.room_scale;
+            break;
+        case PortItem::MessageBoxInView:
+            v.message_box_immersive = !v.message_box_immersive;
+            break;
+        case PortItem::FloatingHud:
+            v.floating_hud = !v.floating_hud;
             break;
         case PortItem::Reset:
             if (ConfirmReset(s, reset_action, now)) {

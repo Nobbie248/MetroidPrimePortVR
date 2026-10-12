@@ -27,9 +27,16 @@ enum class VRGameMode : uint8_t {
     Unknown,     // nothing reported yet: virtual screen
     FrontEnd,    // CFrontEndUI, splash, credits, NES
     InGame,      // CStateManager drawing the world, first person or morph ball
-    Paused,      // CInGameGuiManager pause / map / logbook / save / message screens
+    // The pause menu, logbook or map screen (CInGameGuiManager's note, and
+    // CStateManager::GetInMapScreen), opening, open or closing.
+    Paused,
     Cinematic,   // a cinematic camera is active
     Transition,  // world / area transition screens
+    // A modal message box (CMessageScreen: item pickups, "Game has been
+    // saved", scan log unlocks) or the in-game save prompt (CSaveGameScreen),
+    // opening, open or closing; reported whether or not the world was drawn.
+    // Appended so the values logged as numbers keep their meaning.
+    Message,
 };
 
 struct PrimeVRPolicyConfig {
@@ -37,7 +44,10 @@ struct PrimeVRPolicyConfig {
     // False keeps everything on the virtual screen (PrimedGun's "flat screen").
     bool immersive = true;
     bool cinematic_screen = true;   // cinematics on the virtual screen rather than immersive
-    bool game_menu_screen = true;   // pause/map/logbook/save on the virtual screen
+    bool game_menu_screen = false;  // pause/map/logbook on the virtual screen (else in view)
+    // Message boxes and the save prompt stay in the immersive view, over the
+    // live world blurred per eye; false shows them on the virtual screen.
+    bool message_box_immersive = true;
     float world_units_per_meter = 1.5f;
     float screen_distance_meters = 1.5f;
     float screen_width_meters = 2.0f;
@@ -66,6 +76,9 @@ void PrimeVRPolicyConfigure(const PrimeVRPolicyConfig& config) noexcept;
 void PrimeVRPolicySetSessionActive(bool active) noexcept;
 void PrimeVRPolicyPublishGameMode(VRGameMode mode, uint64_t game_frame) noexcept;
 PrimeVRPolicySnapshot PrimeVRPolicyGetSnapshot() noexcept;
+// What the current config and session would show for `mode`, without
+// publishing it: the game thread asks before it draws a frame for that mode.
+VRPresentationMode PrimeVRPolicyPresentationFor(VRGameMode mode) noexcept;
 // The tag to seal the frame being drawn with (aurora_end_frame_tagged).
 uint64_t PrimeVRPolicyContentTag() noexcept;
 

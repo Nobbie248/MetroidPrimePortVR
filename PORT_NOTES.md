@@ -39,6 +39,231 @@ PADControlMotor hook only saw on/off.
   `vr_rumble_hand` keeps its value. Importing a PrimedGun config still maps its
   rumble_hand_mode 0/1/2 to both/left/right.
 
+## VR: the pause menu, logbook and map stay in the headset view (2026-10-12)
+
+The user asked for the message boxes' immersive treatment (previous entry) on
+the pause menu and the map screen too, through PrimedGun's existing "Detach
+game menu and map from view" (`vr_game_menu_screen_enabled`), off by default
+now (launchers, VR menu, Reset Controller). Saved settings keep their value, so
+a port_settings.ini written before still detaches them until it is unticked.
+
+- `CInGameGuiManager::Update` notes the pause menu, logbook and map
+  (`PortVr::VrNoteGameMenu`, kIGGS_PauseGame / PauseLogBook / MapScreen,
+  opening, open or closing) and main.cpp publishes `VRGameMode::Paused` for
+  them from the note, whether or not the world was drawn. Detached, they reach
+  the virtual screen on their first frame (the pause menu and logbook used to
+  wait out the 45-frame FrontEnd debounce over a frozen blur quad); in view
+  (`PortVr::VrGameMenuInView`), the pause blur keeps the world live as for a
+  box (`CPauseScreenBlur::PortVrSetLiveWorld` now takes every paused state).
+- The area texture dump is skipped in view: from gameplay, these three
+  screens defer their state change until the world stops being drawn, then
+  dump up to 1 MB of the room's textures (the GameCube's memory budget) and
+  make the screen (`EnsureStates`). With the world live, `EnsureStates` makes
+  the screen at once and keeps the textures. Brought into view after a dump
+  (the setting unticked mid-menu, the headset put on), the textures are
+  reloaded first and the world goes live once they all are
+  (`PortVrRefreshPausedScreens`, renamed from `PortVrRefreshMessageBox`);
+  meanwhile main.cpp publishes FrontEnd, so the menu waits on the virtual
+  screen rather than as a frozen picture over each eye.
+- The pause menu and logbook go on the boxes' screen (held, or floating with
+  `vr_floating_hud`). Every eye's depth is first reset to the far plane
+  (`PortVr::VrResetEyeDepth`: an orthographic quad through a (1, 1) depth
+  window, compare always, depth write only).
+- Their 3D models (the inventory's Samus, the logbook's artifacts, the
+  options' GameCube) stand in 3D on that screen rather than flat on it:
+  `PortVr::VrPauseModel3D`, constructed in `CSamusDoll`, `CArtifactDoll` and
+  `CGameCubeDoll::Draw` right after their own camera is set, resets the
+  eyes' depth again (over the screen's panels) and draws the model through
+  `AURORA_STEREO_ROUTE_ANCHORED_3D` (or the new `FLOATING_3D` with
+  `vr_floating_hud`) with a placement (new FIFO command
+  `GX_AURORA_STEREO_PLACEMENT_3D`, `AuroraSetStereoPlacement3D(scale, x, y,
+  z)`: the draw's camera space scaled and moved in the anchor's space) that
+  puts the model's origin 0.15 m in front of the screen at the angular size
+  its flat picture had (from the model camera's vertical focal term and the
+  origin's depth), so it keeps its place in the menu's layout with real
+  depth. Their lights are directional, so the per-eye lights need no scale.
+  The Phazon Suit's shimmer on the inventory's Samus is skipped then: it is
+  a pass over the whole viewport through a mask of the doll's pixels.
+- The head-locked HUD (frames, reticles, minimap) is not left blurred in front
+  of the eyes: it dissolves out with the game's own HUD static
+  (`CSamusHud::Draw`'s alpha) as the pause blur comes up, and back in as it
+  lifts (`vrHudFade` = 1 - blur amount while the world is live under the
+  blur); the targeting reticles are dropped while it fades. The copy taken
+  when the live view ends mid-box keeps the HUD, as the TV's does.
+- The map screen is a 3D map held in front of the player. The TV map is the
+  map camera's orthographic view squashed onto a plane in the HUD's space
+  (depth scaled by 0.001, then 0). In view, `CAutoMapper::PortVrSetHologram`
+  makes `CAutoMapper::Draw` build `planeXf` as the map camera's space scaled
+  alike in every axis (its view's half-height to 0.45 m) and set 1.2 m ahead,
+  drawn through the new `AURORA_STEREO_ROUTE_ANCHORED_3D` (perspective draws
+  composed through the held anchor: true depth and parallax, held still; the
+  anchor is held for the map even with `vr_floating_hud`). Perspective with a
+  0.3 m near plane, no depth test (the map draws back to front as on the TV)
+  and no minimap mask; the player icon's depth compare is off with it. The
+  map screen's frame (legend, area name) and compass go on the screen behind
+  and are drawn first (`CAutoMapper::PortVrDrawFrame`), so the map draws over
+  them as their depths say. The map is bounded: zoomed in on a large world
+  its nearest areas would reach the face or pass behind the head, so its
+  depth alone is compressed until the near side of the visible areas'
+  volume (`CMapWorld::PortWorldVolume`, what `RecalculateWorldSphere`
+  measures; measured here too while the map opens and closes, as the game
+  only measures it once open) stays 0.5 m ahead, eased out and back in
+  through the universe map. The 3D map follows the map state
+  (`PortVrMapInView`), not the blur's live flag: the map's own opening and
+  closing outlast the 0.5 s blur, and it hands back to the HUD's minimap
+  once the automapper is back in its minimap state.
+  Sizes in `platform/vr/vr_view.cpp` (`kMapHologram*`).
+- The 3D map grows out of the HUD's minimap and shrinks back into it, as the
+  TV map does, instead of appearing at the centre: the manager takes the
+  minimap's place in the HUD camera's space (with the HUD spread) at the
+  head-locked route's scales and its view's half-height there, and
+  `CAutoMapper::PortVrSetHologram` moves the map's centre and size between
+  that and its own with the automapper's interpolation, its depth flattened
+  to nothing at the minimap. The held anchor was placed where the head faced
+  when the map opened, so the start is matched to where the head has the
+  minimap now: `AuroraSetStereoPlacement3DFollowHead` (same command, four more
+  floats) moves and turns each eye's placement that share of the way into
+  the head's own space as the head-locked route has it, the point along a
+  straight line and the rest about it (`stereo_replay::follow_head`, a
+  quaternion share of the anchor-to-head turn), so turned away while the map
+  is open, it still shrinks into the minimap where it is, facing the eyes.
+  In the morph ball the minimap is on the ball HUD's screen, which the map's
+  anchor holds: the map starts there instead (where the HUD camera's picture
+  puts the minimap on `PortVr::VrScreenPlane`), without following the head.
+- Tests: `port_vr_policy_tests` (Paused in view by default, detached at once,
+  the content tag through a menu in view); `port_vr_stereo_tests` (a point of
+  the head-locked space followed into the held anchor's after the head turned: all, none, half).
+
+## VR: message boxes stay in the headset view (2026-10-11)
+
+A modal message box (`CMessageScreen`: item pickups, "Game has been saved.
+Energy fully replenished.", scan log unlocks, the 100 % items box) and the
+in-game save prompt (`CSaveGameScreen`) turned the headset's view into the
+virtual screen with a still picture. The user asked for the immersive view to
+stay, with the head still tracked, the pause blur and the CRT scan lines over
+the whole view, and the box on the 2D screen.
+
+How it switched: not through `VRGameMode::Paused`. Nothing ever assigns
+`CStateManager::kGS_Paused`, so main.cpp's Paused branch only sees the map
+screen. For a box, `CPauseScreenBlur::Draw` takes one persistent copy of the
+framebuffer (after the HUD and the minimap) and then clears `x50_25_gameDraw`.
+`CMFGame::Draw` stops drawing the world, main.cpp publishes FrontEnd, and the
+policy shows the virtual screen after its 45-frame debounce (the eyes showed the
+stale blur quad meanwhile). The pause menu and the logbook still go that way, so
+`vr_game_menu_screen_enabled` only ever governed the map screen.
+
+- `VRGameMode::Message` (appended, the log prints the value as a number) and
+  `PrimeVRPolicyConfig::message_box_immersive`: Immersive when on, the virtual
+  screen when off, at once either way (no debounce). The flag is a safety
+  change like its siblings. `PrimeVRPolicyPresentationFor(mode)` answers what
+  a mode would show without publishing it.
+- `CInGameGuiManager::Update` notes the box at its end
+  (`PortVr::VrNoteMessageBox`: kIGGS_PauseHUDMessage or kIGGS_PauseSaveGame,
+  opening, open or closing, and whether a cinematic camera is current); the
+  destructor clears it. main.cpp publishes Message from the note whether or
+  not the world was drawn, or Cinematic for a box under a cinematic camera, so
+  that one follows `vr_cinematic_screen_enabled`.
+- `PortVr::VrMessageBoxInView()`: the note, the headset running, and the policy
+  answering Immersive for the box's mode. Then `CPauseScreenBlur` keeps the
+  world drawn (`PortVrSetLiveWorld`, only in its message and save states, so
+  the map, pause and logbook screens still dump the area textures once the
+  world stops) and calls `CCameraBlurPass::FreePersistentFbTexture` before
+  each draw. That only drops the "already copied" flag, so the blur copies the
+  frame again with its persistent, opaque look. The copy is made under the
+  WORLD route, so aurora takes it from each eye (the RGB565 conversion is the
+  X-ray visor's path), and the blur quad, the tint and the scan lines are
+  orthographic draws replayed identically into both eyes. Drawing the world
+  while `CMFGame` is paused is safe: `PreRender` and
+  `DrawWorld` only read state, and the world's clock is the simulation's.
+- `CInGameGuiManager::Draw` keeps `drawVisor` on while the world is live, so
+  the visor, the HUD and the minimap stay under the blur as the TV's still
+  shows them (otherwise they vanished once the blur was up). The save prompt
+  and the box go on the new `AURORA_STEREO_ROUTE_ANCHORED_SCREEN`: a plane of
+  the menu screen's size and distance, as the morph ball HUD's, but held
+  still. The first immersive frame after `aurora_set_stereo_screen_anchor`
+  holds it places it upright ahead of the head's facing, at the head's
+  position (`stereo_replay::upright_screen_anchor`: the head pose without its
+  pitch and roll; looking straight down or up, the head's up gives the
+  facing); the head then looks around it. `PortVrRefreshPausedScreens` holds it
+  while the world is live, so each box and each save prompt is placed where
+  the head faces when it opens; a release, or a frame that is not immersive,
+  drops it, and with none placed the route draws like `SCREEN_2D`. A recentre
+  or a height set while it is up places it again: the stereo packet now
+  carries the tracking origin's generation (`AuroraStereoFrame::originGeneration`,
+  set after `BuildPublishedFrame`'s base latch), so it is placed in the same
+  centre space as the eyes that draw it. The user
+  first had the morph ball HUD's easing plane (`FLOATING_HUD`) and asked for
+  a fixed one. Either screen route lays the draw's mono picture on the plane,
+  so the save prompt's frame (its camera 4.7 units from the text, znear 1)
+  needs nothing, where a head-locked route would have put it inside the near
+  plane at the default HUD distance. Their depth window is (0, 0), the
+  automapper frame's: the world,
+  the HUD and the minimap's depth mask are drawn in the same frame now. The
+  box's panels are flat at one depth and its video band is masked to them by
+  a GEQUAL test, so a single depth keeps the TV's layering (checked from the
+  CMDL bounds: every panel at y 0, the band 1.68 units behind).
+- The save prompt's `model_corners` sit above its picture, where the TV never
+  shows them. The held plane does not crop at the picture's edges, so
+  `CSaveGameScreen::Draw` hides them while the box is in view.
+- Changes while a box is up: main.cpp hands the in-view answer to the blur
+  before every presented frame (`CInGameGuiManager::PortVrRefreshPausedScreens`),
+  since the setting or the session can change between game ticks (90 or 120 Hz
+  frames, 60 Hz ticks). Leaving the live view with the box up takes one fresh
+  copy after that frame's world and then stops the world, as the TV does: the
+  world's own copies (refracting particles, glass, the space warp) reuse the
+  spare buffer at other sizes, so the copy last taken cannot stand in. The
+  visor and the HUD are drawn for that copy (`PortVrHudUnderBlur`), as the
+  TV's copy holds them. With
+  the setting off, main.cpp keeps the box's mode for the frame it closes on
+  (it draws the world after a frame that did not), so the screen does not
+  re-anchor at the head for one frame.
+- Input is unchanged: `VrNoteInGameMenu` keeps the classic layout, where the
+  right controller's primary button is GameCube A.
+- Dismissing a box no longer recentres the view: the presentation never leaves
+  Immersive, so the origin is not latched again.
+- Setting `vr_message_box_immersive`, default on: F1 VR tab ("Message boxes in
+  the headset view", virtual screen section), VR menu CONFIG "MESSAGE BOX IN
+  VIEW" before RESET CONFIG (the calibration pages are full), both launchers'
+  Calibration tab ("Keep message boxes in view") and their Reset Controller
+  lists, with RESET CONFIG and the VR menu's resets.
+- Tests: new `port_vr_policy_tests` (the policy had none: each mode's
+  presentation, the immediate switch, the constant content tag through a box,
+  the front-end debounce); `port_vr_menu_tests` (the new row, the reset row
+  moved to 11, the screen anchor with a Message frame); `port_launcher_tests`
+  (the key's default).
+- Setting `vr_floating_hud`, default off, for the morph ball HUD and the
+  boxes together: on, both use `FLOATING_HUD` (Nobbie248's easing plane, the
+  ball HUD's only placement until now); off, both go on the held screen
+  (`ANCHORED_SCREEN`), placed where the head faces when the ball's HUD comes
+  up or a box opens; a box opened in the morph ball shares the ball HUD's
+  screen, which stays with the ball's camera. Not `SCREEN_2D`, the ball HUD's
+  placement confirmed on 2026-10-07: since the ball camera's entry yaw
+  (10-09) and room scale (10-11) the centre space is turned by the head's
+  yaw at morph time and shifted by the walked offset, so a screen fixed in it
+  sits off to the side or too close. With the setting on, the screen is not
+  held. F1 VR tab (virtual screen section),
+  VR menu CONFIG "FLOATING HUD" (the PC's CONFIG tab now has three pages,
+  RESET CONFIG alone on the third), both launchers' Calibration tab and
+  Reset Controller lists. Read at draw time, so it applies at once.
+- Scan lines fixed in the world: while the world is live the blur's
+  `kFS_ScanLinesEven` filter (lines in 480-line picture units, so glued to
+  each eye's view and moving with the head) is replaced by dark bands at
+  fixed elevations on a sphere around the camera, routed
+  `AURORA_STEREO_ROUTE_SKY` (the head's rotation only: they stay put, at
+  infinity, without disparity). 0.8 degree pitch with the TV's half dark,
+  half gap, from 88 degrees below the horizon to 88 above, the same
+  0xc0c0c0 multiply faded in with the blur (`PortVrDrawWorldScanLines` in
+  CPauseScreenBlur.cpp). Each band is a strip of 48 flat sides, turned half
+  a side so none has a corner straight ahead: a first try with 12 sides
+  sagged up to a degree between corners and showed the lines as chevrons.
+- No vignette in the headset: the blur's quarters filter multiplies the view
+  by `TXTR_MapLightQuarter` (white at the centre, about a quarter as bright
+  at the corners) tinted toward `PauseBlurFilterColor`. While the world is
+  live it is replaced by a full-screen multiply by the tint alone, which is
+  what the picture's centre gets; the virtual screen keeps the TV's filter.
+- Known looks to judge in the headset: the copy is half size, RGB565 and
+  sampled nearest, as on the TV, so the view softens for the box's duration.
+
 ## VR: PrimedGun's own shader list, and the compile toast in the headset (2026-10-11)
 
 The PC compiles upstream's pipeline seed in the background at startup and

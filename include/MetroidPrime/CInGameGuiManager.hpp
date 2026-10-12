@@ -74,6 +74,21 @@ public:
   void PortDrawScanZoomReticles(const CStateManager& mgr) const;
   // Whether Draw would draw the player visor this frame (same prerequisites).
   bool PortPlayerVisorDrawn(const CStateManager& mgr) const;
+#ifdef TARGET_PC
+  // PortVr: whether a noted message box or game menu is shown in the headset's
+  // immersive view, handed to the pause blur (CPauseScreenBlur::PortVrSetLiveWorld)
+  // with the held screen's anchor. At the end of every Update, and from
+  // main.cpp before every presented frame, since the setting or the session
+  // can change between game ticks.
+  void PortVrRefreshPausedScreens() const;
+  // PortVr: the map screen is the held 3D map: shown in view, the area textures
+  // in place, and the automapper out of (or leaving, entering) its minimap. Not
+  // the blur's live flag: the map's own opening and closing outlast the blur.
+  bool PortVrMapInView() const;
+  // PortVr: area textures dumped for a paused screen are not all back yet
+  // (main.cpp keeps a menu brought into view on the virtual screen meanwhile).
+  bool PortVrAreaTexturesDumped() const { return !x12c_dumpedTextures.empty(); }
+#endif
   bool IsInSaveUI() const { return x1f8_27_inSaveUI; }
 
 private:

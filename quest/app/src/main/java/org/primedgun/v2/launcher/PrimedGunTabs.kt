@@ -45,7 +45,9 @@ object PrimedGunTabs {
     private val CONTROLLER_KEYS = arrayOf(
         "vr_use_right_hand", "vr_vr_overlays_enabled", "vr_vr_menu_hold_left_stick",
         "vr_vr_menu_requires_head_zone", "vr_vr_menu_floating", "vr_cinematic_screen_enabled",
-        "vr_game_menu_screen_enabled", "vr_rumble_enabled", "vr_rumble_intensity",
+        "vr_game_menu_screen_enabled", "vr_message_box_immersive", "vr_floating_hud",
+        "vr_rumble_enabled",
+        "vr_rumble_intensity",
         "vr_rumble_hand", "vr_xr_dpad_enabled", "vr_combat_jump_use_primary_button",
         "vr_beam_wheel_hud_highlight",
         "vr_grip_inputs_enabled", "vr_grip_inputs_use_trackpad", "vr_trackpad_press_threshold",
@@ -170,6 +172,18 @@ object PrimedGunTabs {
         add(switch(context, R.string.primedgun_cinematic_screen_enabled, "vr_cinematic_screen_enabled"))
         add(switch(context, R.string.primedgun_vr_menu_floating, "vr_vr_menu_floating"))
         add(switch(context, R.string.primedgun_game_menu_screen_enabled, "vr_game_menu_screen_enabled"))
+        add(
+            switch(
+                context, R.string.primedgun_message_box_immersive, "vr_message_box_immersive",
+                R.string.primedgun_message_box_immersive_note
+            )
+        )
+        add(
+            switch(
+                context, R.string.primedgun_floating_hud, "vr_floating_hud",
+                R.string.primedgun_floating_hud_note
+            )
+        )
         add(switch(context, R.string.primedgun_visor_helmet_enabled, "vr_visor_helmet_enabled"))
         add(PrimedGunItem.Note(context.getString(R.string.primedgun_visor_helmet_note)))
         add(switch(context, R.string.primedgun_position_marker_enabled, "vr_position_marker_enabled"))

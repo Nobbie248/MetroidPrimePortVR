@@ -165,6 +165,23 @@ public:
   void LeaveMapScreenState();
   void ProcessMapScreenInput(const CFinalInput& input, const CStateManager& mgr);
   static CQuaternion GetMiniMapCameraOrientation(const CStateManager& stateMgr);
+#ifdef TARGET_PC
+  // PortVr: the next Draws build the map as a 3D map held in the headset's view
+  // (the caller routes them AURORA_STEREO_ROUTE_ANCHORED_3D with a view point
+  // of identity): its centre `distance` game units ahead, the map camera's view
+  // half-height scaled to `halfHeight` units in every axis, so the map keeps
+  // its depth, which is compressed only so far that the visible areas'
+  // near side stays `clearance` units ahead. They leave out the map screen's
+  // frame and compass, which PortVrDrawFrame draws. While the map opens or
+  // closes (`grow` 0 at the minimap, 1 opened) it moves between the HUD
+  // minimap's place in front of the head (`start`, its view's half-height
+  // `startHalfHeight`, flat) and its own. A distance of 0 turns it off.
+  static void PortVrSetHologram(float distance, float halfHeight, float clearance,
+                                const CVector3f& start, float startHalfHeight, float grow);
+  // PortVr: the map screen's frame (legend, area name) and compass alone, as the
+  // end of Draw draws them, for the 3D map's screen behind it.
+  void PortVrDrawFrame(float alpha) const;
+#endif
   CVector3f GetAreaPointOfInterest(const CStateManager& mgr, int aid) const;
 
   int FindClosestVisibleArea(const CVector3f& point, const CUnitVector3f& camDir,

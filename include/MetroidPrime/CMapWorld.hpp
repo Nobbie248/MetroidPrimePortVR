@@ -147,6 +147,15 @@ public:
 #endif
   void RecalculateWorldSphere(const CMapWorldInfo& mwInfo, const IWorld& wld) const;
   CVector3f ConstrainToWorldVolume(const CVector3f& point, const CVector3f& lookVec) const;
+#ifdef TARGET_PC
+  // Port: the volume RecalculateWorldSphere last measured around the visible areas (a
+  // vertical cylinder: centre, radius, half its height), for the headset's 3D map.
+  void PortWorldVolume(CVector3f& center, float& radius, float& halfDepth) const {
+    center = x30_worldSpherePoint;
+    radius = x3c_worldSphereRadius;
+    halfDepth = x40_worldSphereHalfDepth;
+  }
+#endif
   void ClearTraversedFlags() const;
   bool IsMapAreasStreaming() const;
 };

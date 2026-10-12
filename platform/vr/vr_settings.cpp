@@ -203,6 +203,8 @@ const Field kFields[] = {
     VR_FLOAT(screen_width_meters, 0.25f, 10.0f),
     VR_BOOL(cinematic_screen_enabled),
     VR_BOOL(game_menu_screen_enabled),
+    VR_BOOL(message_box_immersive),
+    VR_BOOL(floating_hud),
     // PrimedGun runtime settings
     VR_BOOL(builtin_patches_enabled),
     VR_BOOL(patch_no_idle_sway),
@@ -328,6 +330,7 @@ void PushVrSettingsToAurora() noexcept {
     policy.immersive = settings.immersive_replay;
     policy.cinematic_screen = settings.cinematic_screen_enabled;
     policy.game_menu_screen = settings.game_menu_screen_enabled;
+    policy.message_box_immersive = settings.message_box_immersive;
     policy.world_units_per_meter = settings.world_scale;
     policy.screen_distance_meters = settings.screen_distance_meters;
     policy.screen_width_meters = settings.screen_width_meters;

@@ -234,6 +234,8 @@ void TestDefaultsMatchGame() {
       {"vr_cinematic_screen_enabled", FormatBool(s.cinematic_screen_enabled)},
       {"vr_vr_menu_floating", FormatBool(s.vr_menu_floating)},
       {"vr_game_menu_screen_enabled", FormatBool(s.game_menu_screen_enabled)},
+      {"vr_message_box_immersive", FormatBool(s.message_box_immersive)},
+      {"vr_floating_hud", FormatBool(s.floating_hud)},
       {"vr_visor_helmet_enabled", FormatBool(s.visor_helmet_enabled)},
       {"vr_position_marker_enabled", FormatBool(s.position_marker_enabled)},
       {"vr_frustum_culling_enabled", FormatBool(s.frustum_culling_enabled)},

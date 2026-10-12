@@ -51,10 +51,37 @@
 #include "port_map_icons.h"
 
 #ifdef TARGET_PC
+#include "aurora/gfx.h"
+#include "dolphin/gx/GXAurora.h"
 #include "vr/vr_view.h"
 #endif
 
 static const char* const skFRME_MapScreen = "FRME_MapScreen";
+
+#ifdef TARGET_PC
+namespace {
+// PortVr: CAutoMapper::PortVrSetHologram.
+float sPortVrHologramDistance = 0.f;
+float sPortVrHologramHalfHeight = 0.f;
+float sPortVrHologramClearance = 0.f;
+CVector3f sPortVrHologramStart = CVector3f::Zero();
+float sPortVrHologramStartHalfHeight = 0.f;
+float sPortVrHologramGrow = 1.f;
+// The last world map's depth compression (depth scale over scale), eased out
+// and back in through a world/universe transition.
+float sPortVrHologramDepthRatio = 1.f;
+} // namespace
+
+void CAutoMapper::PortVrSetHologram(float distance, float halfHeight, float clearance,
+                                    const CVector3f& start, float startHalfHeight, float grow) {
+  sPortVrHologramDistance = distance;
+  sPortVrHologramHalfHeight = halfHeight;
+  sPortVrHologramClearance = clearance;
+  sPortVrHologramStart = start;
+  sPortVrHologramStartHalfHeight = startHalfHeight;
+  sPortVrHologramGrow = CMath::Clamp(0.f, grow, 1.f);
+}
+#endif
 
 static inline const rstl::vector< CGameHintInfo::CGameHint >& GetGameHints() {
   return gpMemoryCard->GetHints();
@@ -1109,6 +1136,73 @@ void CAutoMapper::Draw(const CStateManager& mgr, const CTransform4f& xf, float a
                                                 gpTweakAutoMapper->xc8_mapPlaneScaleZ);
 
   CTransform4f planeXf = xf * tweakScale * distScale * camXf.GetQuickInverse();
+#ifdef TARGET_PC
+  // PortVr: the 3D map in the headset. The TV squashes the map camera's
+  // orthographic view onto the HUD's plane (depth scaled to nothing); here the
+  // map camera's space is scaled alike in every axis (the view's half-height
+  // to the hologram's; only the depth compressed where the map would reach
+  // the face) and set ahead of the held anchor: seen as the map camera sees
+  // it, with its depth.
+  const bool portVrHologram = sPortVrHologramDistance > 0.f && yScale > 0.f;
+  if (portVrHologram) {
+    // Between the HUD minimap's place (flat) and the 3D map's while it opens
+    // or closes.
+    const float grow = sPortVrHologramGrow;
+    const CVector3f center =
+        sPortVrHologramStart +
+        (CVector3f(0.f, sPortVrHologramDistance, 0.f) - sPortVrHologramStart) * grow;
+    const float half = sPortVrHologramStartHalfHeight +
+                       (sPortVrHologramHalfHeight - sPortVrHologramStartHalfHeight) * grow;
+    const float scale = half / yScale;
+    float depthScale = scale;
+    // Zoomed in on a large world, the areas nearest the map camera would reach
+    // the player's face or pass behind the head: compress the depth (only that)
+    // so the near side of the visible areas' volume stays ahead.
+    const bool universe =
+        x1bc_state == kAMS_MapScreenUniverse || x1c0_nextState == kAMS_MapScreenUniverse;
+    if (!universe && x24_world != NULL) {
+      const CMapWorld* mapWorld = x24_world->IGetMapWorld();
+      // The game measures the volume once the map has opened; while it opens
+      // (from the minimap's closest view) or closes, measure it here, from the
+      // loaded, visible areas, as drawn.
+      if (!IsFullyOutOfMiniMapState()) {
+        const CMapWorldInfo& mwInfo =
+            *gpGameState->StateForWorld(x24_world->IGetWorldAssetId()).GetMapWorldInfo().GetPtr();
+        mapWorld->RecalculateWorldSphere(mwInfo, *x24_world);
+      }
+      CVector3f volumeCenter = CVector3f::Zero();
+      float radius = 0.f;
+      float halfDepth = 0.f;
+      mapWorld->PortWorldVolume(volumeCenter, radius, halfDepth);
+      if (radius > 0.f) {
+        const CVector3f forward = camXf.GetForward();
+        const float extent =
+            radius * sqrtf(forward.GetX() * forward.GetX() + forward.GetY() * forward.GetY()) +
+            halfDepth * CMath::AbsF(forward.GetZ());
+        const float nearSide = (camXf.GetQuickInverse() * volumeCenter).GetY() - extent;
+        const float room = center.GetY() - sPortVrHologramClearance;
+        if (nearSide < 0.f && room > 0.f) {
+          depthScale = rstl::min_val(scale, room / -nearSide);
+        }
+      }
+      sPortVrHologramDepthRatio = depthScale / scale;
+    } else if (universe) {
+      // The universe map needs none: ease the world's compression out as it
+      // opens and back in as it closes, rather than drop it at once.
+      float t = 1.f;
+      if (x1bc_state != kAMS_MapScreenUniverse) {
+        t = GetInterp();
+      } else if (x1c0_nextState != kAMS_MapScreenUniverse) {
+        t = 1.f - GetInterp();
+      }
+      depthScale = scale * (sPortVrHologramDepthRatio + (1.f - sPortVrHologramDepthRatio) * t);
+    }
+    planeXf = CTransform4f::Translate(center) * CTransform4f::Scale(scale, depthScale * grow, scale) *
+              camXf.GetQuickInverse();
+  }
+#else
+  const bool portVrHologram = false;
+#endif
 
   float universeInterp = 0.f;
   if (x1c0_nextState == kAMS_MapScreenUniverse) {
@@ -1263,7 +1357,8 @@ void CAutoMapper::Draw(const CStateManager& mgr, const CTransform4f& xf, float a
                             gpTweakAutoMapper->xf0_miniMapSamusModColor.WithAlphaModulatedBy(
                                 colorAlpha * mapAlpha))
                             .DepthBackwards()
-                            .DepthCompareUpdate(true, false));
+                            // PortVr: no minimap mask to test against in the 3D map.
+                            .DepthCompareUpdate(!portVrHologram, false));
     }
 
     if (IsInMapperState(kAMS_MapScreen)) {
@@ -1324,7 +1419,8 @@ void CAutoMapper::Draw(const CStateManager& mgr, const CTransform4f& xf, float a
   gpRender->SetAmbientColor(CColor::White());
   CGraphics::DisableAllLights();
 
-  if (x2c_frmeInitialized != NULL) {
+  // PortVr: the 3D map's frame was drawn first, on its screen behind it.
+  if (x2c_frmeInitialized != NULL && !portVrHologram) {
     if (IsFullyOutOfMiniMapState()) {
       drawAlpha = 1.f;
     } else if (x1c0_nextState != kAMS_MiniMap) {
@@ -1345,6 +1441,34 @@ void CAutoMapper::Draw(const CStateManager& mgr, const CTransform4f& xf, float a
     CGraphics::SetDepthRange(0.f, 1.f / 512.f);
   }
 }
+
+#ifdef TARGET_PC
+void CAutoMapper::PortVrDrawFrame(float alpha) const {
+  // The end of Draw, for the frame alone.
+  if (x2c_frmeInitialized == NULL) {
+    return;
+  }
+  float drawAlpha = alpha * gpGameState->GameOptions().GetHudAlpha();
+  if (IsFullyOutOfMiniMapState()) {
+    drawAlpha = 1.f;
+  } else if (x1c0_nextState != kAMS_MiniMap) {
+    float interpDur = x1c4_interpDur;
+    drawAlpha = 0.f;
+    if (interpDur > 0.f)
+      drawAlpha = x1c8_interpTime / interpDur;
+  } else {
+    drawAlpha = 1.f - GetInterp();
+  }
+  gpRender->SetDepthReadWrite(false, false);
+  gpRender->SetAmbientColor(CColor::White());
+  CGraphics::DisableAllLights();
+  CGraphics::SetDepthRange(0.f, 0.f);
+  x2c_frmeInitialized->Draw(CGuiWidgetDrawParms(drawAlpha, CVector3f::Zero()));
+  if (!IsInMapperState(kAMS_MiniMap))
+    DrawCompass(drawAlpha * x318_leftPanePos);
+  CGraphics::SetDepthRange(0.f, 1.f / 512.f);
+}
+#endif
 
 // Remastered's compass (UpdateCompass in its executable): in a 16x9 screen it sits
 // at (-6.4, 2.25) at 0.8 scale, the disc tilted with the map camera's pitch and the

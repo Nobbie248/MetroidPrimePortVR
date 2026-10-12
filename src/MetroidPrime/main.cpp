@@ -1,5 +1,6 @@
 #include "MetroidPrime/CActor.hpp"
 #include "MetroidPrime/CMain.hpp"
+#include "MetroidPrime/CInGameGuiManager.hpp"
 
 // Port: Aurora owns the application/window/GPU loop; the game entry is renamed
 // and driven by platform/main.cpp.
@@ -21,6 +22,7 @@
 #include "vr/openxr_integration.h"
 #include "vr/prime_vr_policy.h"
 #include "vr/vr_pad.h"
+#include "vr/vr_view.h"
 #include "port_crash.h"
 #include "port_watchdog.h"
 
@@ -1129,6 +1131,43 @@ int CMain::RsMain(int argc, const char* const* argv) {
             vrGameMode = PortVr::VRGameMode::Paused;
           }
         }
+      }
+      // PortVr: a message box or the save prompt reports itself whether or not
+      // the world was drawn: shown on the virtual screen, the world stops being
+      // drawn after the pause blur's first copy (CPauseScreenBlur). Its mode is
+      // kept for the frame it closes on, which draws the world again but
+      // follows one that did not: a FrontEnd frame there would re-anchor the
+      // virtual screen at the head for one frame. A few frames at most, should
+      // the closing frame not be drawn.
+      // The pause menu, the logbook and the map screen report Paused the same
+      // way (vr_game_menu_screen_enabled decides where they show).
+      static PortVr::VRGameMode sVrBoxMode = PortVr::VRGameMode::Message;
+      static int sVrBoxHoldFrames = 0;
+      // A menu brought into view after its room's textures were dumped stays
+      // on the virtual screen (FrontEnd, at once from Paused) until they are
+      // back and the world can be drawn under it.
+      const CInGameGuiManager* vrMenuGui = CInGameGuiManager::PortCurrent();
+      const bool vrMenuWaits = !PortVr::VrMessageBoxOpen() && PortVr::VrGameMenuInView() &&
+                               vrMenuGui != nullptr && vrMenuGui->PortVrAreaTexturesDumped();
+      if (PortVr::VrMessageBoxOpen() || PortVr::VrGameMenuOpen()) {
+        vrGameMode = vrMenuWaits                        ? PortVr::VRGameMode::FrontEnd
+                     : !PortVr::VrMessageBoxOpen()        ? PortVr::VRGameMode::Paused
+                     : PortVr::VrMessageBoxCinematic() ? PortVr::VRGameMode::Cinematic
+                                                       : PortVr::VRGameMode::Message;
+        sVrBoxMode = vrGameMode;
+        sVrBoxHoldFrames = 8;
+      } else if (sVrBoxHoldFrames > 0 && !sVrLastGameFrameDrawn &&
+                 CInGameGuiManager::PortCurrent() != nullptr) {
+        vrGameMode = sVrBoxMode;
+        --sVrBoxHoldFrames;
+      } else {
+        sVrBoxHoldFrames = 0;
+      }
+      // PortVr: whether a box or a menu is shown in the immersive view decides
+      // what this frame draws (the live world under the blur, the held screen).
+      // The setting or the session may have changed since the last game tick.
+      if (const CInGameGuiManager* vrGui = CInGameGuiManager::PortCurrent()) {
+        vrGui->PortVrRefreshPausedScreens();
       }
       PortVr::PrimeVRPolicyPublishGameMode(vrGameMode,
                                            static_cast< uint64_t >(archSupport->GetFramesDrawn()));

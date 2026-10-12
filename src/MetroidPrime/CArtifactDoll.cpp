@@ -1,4 +1,7 @@
 #include "MetroidPrime/Cameras/CGameCamera.hpp"
+#ifdef TARGET_PC
+#include "vr/vr_view.h"
+#endif
 #include "MetroidPrime/CArtifactDoll.hpp"
 #include "Kyoto/CSimplePool.hpp"
 #include "Kyoto/Graphics/CModel.hpp"
@@ -140,6 +143,10 @@ void CArtifactDoll::Draw(float alpha, const CStateManager& mgr, const bool inArt
       CGraphics::GetViewportWidth(), CGraphics::GetViewportHeight(),
                           0.2f, 4096.f);
   CGraphics::SetViewPointMatrix(CTransform4f::Translate(0.f, -10.f, 0.f));
+#ifdef TARGET_PC
+  // PortVr: in the headset's view the artifacts stand in 3D on the pause menu's screen.
+  const PortVr::VrPauseModel3D vrModel3D;
+#endif
   mActorLights->ActivateLights();
   const float angle = CGraphics::GetSecondsMod900() * M_PIF * 2.f * 0.25f;
   const float xAngle = 8.f * CMath::SlowSineR(angle);

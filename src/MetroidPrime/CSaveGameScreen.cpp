@@ -16,6 +16,7 @@
 #include "MetroidPrime/Player/CGameState.hpp"
 #include "port_apclient.h"
 #include "port_gci.h"
+#include "vr/vr_view.h"
 #endif
 #ifdef MP_ENABLE_SMOKE_DRIVER
 #include "port_smoke.h"
@@ -443,6 +444,15 @@ void CSaveGameScreen::ContinueWithoutSaving() {
 
 void CSaveGameScreen::Draw() const {
   if (x50_loadedFrame != nullptr) {
+#ifdef TARGET_PC
+    // PortVr: the frame's corner brackets sit above its picture, where the TV
+    // never shows them. Laid on the headset's held screen, which does not
+    // crop at the picture's edges (CInGameGuiManager::Draw), they would hang
+    // above the prompt.
+    if (CGuiWidget* corners = x50_loadedFrame->FindWidget("model_corners")) {
+      corners->SetIsVisible(!PortVr::VrMessageBoxInView());
+    }
+#endif
     x50_loadedFrame->Draw(CGuiWidgetDrawParms::Default());
   }
 }

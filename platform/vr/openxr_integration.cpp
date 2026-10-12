@@ -74,6 +74,7 @@ void ConfigurePolicy(bool enabled) noexcept {
     config.immersive = settings.immersive_replay;
     config.cinematic_screen = settings.cinematic_screen_enabled;
     config.game_menu_screen = settings.game_menu_screen_enabled;
+    config.message_box_immersive = settings.message_box_immersive;
     config.world_units_per_meter = settings.world_scale;
     config.screen_distance_meters = settings.screen_distance_meters;
     config.screen_width_meters = settings.screen_width_meters;
@@ -1675,6 +1676,8 @@ private:
             ++tracking_origin_generation_;
         }
         last_immersive_ = true;
+        // With the eyes' centre space it belongs to, after this frame's latch.
+        destination.originGeneration = tracking_origin_generation_;
         // Read once so both eyes are built from the same angle even if the
         // settings slider moves between them.
         const float lean_back_radians =

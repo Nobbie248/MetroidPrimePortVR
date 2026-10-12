@@ -340,7 +340,7 @@ void TestConfig() {
   Check(!has(quest, PortItem::MirrorView) && has(quest, PortItem::Foveation) &&
             has(quest, PortItem::PerformanceLevel) && has(quest, PortItem::DirectPresent),
         "Quest rows");
-  Check(PageCount(kPortConfigTab, pc) == 2 && PageCount(kPortConfigTab, quest) == 3, "two pages, three on the Quest");
+  Check(PageCount(kPortConfigTab, pc) == 3 && PageCount(kPortConfigTab, quest) == 3, "three pages");
 
   State s{};
   Click(s, v, pc, TabX(kPortConfigTab), kTabY, now, actions);
@@ -375,9 +375,9 @@ void TestConfig() {
   Click(s, v, pc, kLabelX, RowY(kPortConfigTab, 5), now, actions);
   Check(!v.remove_cinematic_bars, "cinematic bars switch");
 
-  // Page 2 includes room scale before reset.
+  // Page 2 includes room scale and the message box switch before reset.
   Click(s, v, pc, kNextX, kPageY, now, actions);
-  Check(s.port_page == 1 && ItemCount(s, pc) == 11, "config page 2");
+  Check(s.port_page == 1 && ItemCount(s, pc) == 12, "config page 2");
   // LOOK TO LOCK-ON, LOOK TO GRAPPLE and NO CAMERA TURN ON LOCK follow LOOK TO SCAN.
   Check(BuildRows(s, v, pc)[4].label == std::string("CANNON TARGETING") &&
             BuildRows(s, v, pc)[5].label == std::string("LOOK TO LOCK-ON") &&
@@ -409,12 +409,26 @@ void TestConfig() {
   Click(s, v, pc, kLabelX, RowY(kPortConfigTab, 9), now, actions);
   Check(v.room_scale, "room scale toggles on");
   v.room_scale = false;
+  Check(v.message_box_immersive, "message boxes stay in view by default");
   Click(s, v, pc, kLabelX, RowY(kPortConfigTab, 10), now, actions);
+  Check(!v.message_box_immersive && BuildRows(s, v, pc)[10].label == std::string("MESSAGE BOX IN VIEW") &&
+            BuildRows(s, v, pc)[10].value == "OFF",
+        "message box switch");
+  Check(!v.floating_hud, "the morph ball HUD and the message boxes are fixed by default");
+  Click(s, v, pc, kLabelX, RowY(kPortConfigTab, 11), now, actions);
+  Check(v.floating_hud && BuildRows(s, v, pc)[11].label == std::string("FLOATING HUD") &&
+            BuildRows(s, v, pc)[11].value == "ON",
+        "floating HUD switch");
+  // Page 3: reset.
+  Click(s, v, pc, kNextX, kPageY, now, actions);
+  Check(s.port_page == 2 && ItemCount(s, pc) == 1, "config page 3");
+  Click(s, v, pc, kLabelX, RowY(kPortConfigTab, 0), now, actions);
   Check(s.reset_confirm == kResetPortConfig && Near(v.render_scale, kVrRenderScaleMax), "reset config armed");
-  Click(s, v, pc, kLabelX, RowY(kPortConfigTab, 10), now, actions);
+  Click(s, v, pc, kLabelX, RowY(kPortConfigTab, 0), now, actions);
   Check(Near(v.render_scale, PortVrSettings{}.render_scale) && v.display_refresh_rate == 0.0f &&
             v.remove_cinematic_bars && v.look_to_lock_on && v.look_to_grapple && !v.look_lock_no_camera_turn &&
-            v.cannon_targeting && v.room_scale && Near(v.metroid_hud_size, 2.0f),
+            v.cannon_targeting && v.room_scale && v.message_box_immersive && !v.floating_hud &&
+            Near(v.metroid_hud_size, 2.0f),
         "reset config");
 
   // The Quest: foveation waits for the next start without density maps.
@@ -581,6 +595,16 @@ void TestScreenAnchor() {
   Check(Near(anchor.Pose().position, {3.f, 1.8f, 2.f}) &&
             Near(screen_math::Rotate(anchor.Pose().orientation, {0.f, 1.f, 0.f}), {0.f, 1.f, 0.f}),
         "screen remains upright when captured with head pitch");
+
+  // A message box: in the immersive view there is no screen; shown on the
+  // screen, it captures its own facing (it is no cinema continuation).
+  anchor.Update(VRPresentationMode::Immersive, VRGameMode::Message, &head, 2.f, 0);
+  Check(!anchor.Valid(), "a message box in the immersive view keeps no screen anchor");
+  head.orientation = {0.f, 0.f, 0.f, 1.f};
+  head.position = {0.f, 1.6f, 0.f};
+  anchor.Update(VRPresentationMode::VirtualScreen, VRGameMode::Message, &head, 2.f, 0);
+  Check(anchor.Valid() && Near(anchor.Pose().position, {0.f, 1.6f, -2.f}),
+        "a message box on the screen captures its own facing");
 }
 
 void TestCinemaCooldown() {

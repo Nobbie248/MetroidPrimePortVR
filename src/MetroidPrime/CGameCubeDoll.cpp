@@ -1,4 +1,7 @@
 #include "MetroidPrime/Cameras/CGameCamera.hpp"
+#ifdef TARGET_PC
+#include "vr/vr_view.h"
+#endif
 #include "MetroidPrime/CGameCubeDoll.hpp"
 
 #include "MetroidPrime/CActorLights.hpp"
@@ -75,6 +78,10 @@ void CGameCubeDoll::Draw(float alpha) {
                            0.2f, 4096.f);
 
   CGraphics::SetViewPointMatrix(CTransform4f::Translate(0.f, -2.f, 0.f));
+#ifdef TARGET_PC
+  // PortVr: in the headset's view the GameCube stands in 3D on the pause menu's screen.
+  const PortVr::VrPauseModel3D vrModel3D;
+#endif
   x18_actorLights->ActivateLights();
 
   float f = (CGraphics::GetSecondsMod900() * 360.f) * 0.25f;

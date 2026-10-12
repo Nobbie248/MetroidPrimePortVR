@@ -109,6 +109,7 @@ CInGameGuiManager::TPauseScreenDGRPs CInGameGuiManager::LockPauseScreenDependenc
 
 const CInGameGuiManager* CInGameGuiManager::sPortCurrent = nullptr;
 
+
 CInGameGuiManager::CInGameGuiManager(const CStateManager& mgr, CArchitectureQueue& queue)
 : x0_iggmPreLoad(gpSimplePool->GetObj("PreLoadIGGM_DGRP"))
 , x18_loadPhase(kLP_LoadDepsGroup)
@@ -163,6 +164,13 @@ CInGameGuiManager::CInGameGuiManager(const CStateManager& mgr, CArchitectureQueu
 CInGameGuiManager::~CInGameGuiManager() {
   if (sPortCurrent == this) {
     sPortCurrent = nullptr;
+#ifdef TARGET_PC
+    // PortVr: no message box outlives the game (main.cpp would keep
+    // publishing it, and the box's screen would stay held).
+    PortVr::VrNoteMessageBox(false, false);
+    PortVr::VrNoteGameMenu(false);
+    aurora_set_stereo_screen_anchor(false);
+#endif
   }
 }
 
@@ -373,7 +381,26 @@ void CInGameGuiManager::Draw(const CStateManager& mgr) const {
     staticAlpha = CMath::Clamp(0.f, deathTime / (0.3f * gkFirstPersonDeathTime), 1.f);
   }
   const bool notInCine = !mgr.GetCameraManager()->IsInCinematicCamera();
-  const bool drawVisor = notInCine && IsInOrTransitioningToOrFromState(kIGGS_InGame);
+#ifdef TARGET_PC
+  // PortVr: while a message box or the save prompt blurs the live world in the
+  // headset (CPauseScreenBlur::PortVrLiveWorld), the visor and the HUD keep
+  // being drawn under the blur, as the TV's frozen copy holds them; otherwise
+  // they would vanish once the blur is up and come back as it lifts. So too on
+  // the frame that takes the copy kept when the live view ends mid-box.
+  const bool vrLiveWorld = x3c_pauseScreenBlur->PortVrLiveWorld();
+  const bool vrHudUnderBlur = x3c_pauseScreenBlur->PortVrHudUnderBlur();
+  // PortVr: in the headset the head-locked HUD (its frames, reticles and the
+  // minimap) is not left blurred in front of the eyes: it dissolves out with the
+  // game's own HUD static as the pause blur comes up, and back in as it lifts.
+  // The copy taken when the live view ends mid-box keeps it, as the TV's does.
+  const float vrHudFade = vrLiveWorld ? 1.f - x3c_pauseScreenBlur->GetBlurAmt() : 1.f;
+#else
+  const bool vrLiveWorld = false;
+  const bool vrHudUnderBlur = false;
+  const float vrHudFade = 1.f;
+#endif
+  const bool drawVisor =
+      notInCine && (IsInOrTransitioningToOrFromState(kIGGS_InGame) || vrHudUnderBlur);
   {
     static int sLastKey = -1;
     const int key = static_cast< int >(x1e0_helmetVisMode) | (x1f0_enablePlayerVisor << 8) |
@@ -402,7 +429,9 @@ void CInGameGuiManager::Draw(const CStateManager& mgr) const {
   };
 #endif
   if (x3c_pauseScreenBlur->IsGameDraw()) {
-    x34_samusHud->GetTargetingManager().Draw(mgr, true);
+    if (vrHudFade >= 1.f) {
+      x34_samusHud->GetTargetingManager().Draw(mgr, true);
+    }
 #ifdef TARGET_PC
     drawsSince();
     // PortVr: the visor, helmet and HUD are drawn in the GUI camera's own space,
@@ -449,8 +478,10 @@ void CInGameGuiManager::Draw(const CStateManager& mgr) const {
                                       CCameraFilterPass::kFS_RandomStatic,
                                       CColor::White().WithAlphaOf(staticAlpha), nullptr, 1.f);
       }
-      x34_samusHud->Draw(mgr, x1f4_visorStaticAlpha * (1.f - staticAlpha), x1e0_helmetVisMode,
-                         hudVis, targeting && !scanVisor);
+      if (vrHudFade > 0.f) {
+        x34_samusHud->Draw(mgr, x1f4_visorStaticAlpha * (1.f - staticAlpha) * vrHudFade,
+                           x1e0_helmetVisMode, hudVis, targeting && !scanVisor && vrHudFade >= 1.f);
+      }
     }
 #ifdef TARGET_PC
     drawsHud = drawsSince();
@@ -487,47 +518,137 @@ void CInGameGuiManager::Draw(const CStateManager& mgr) const {
 #ifdef TARGET_PC
     // PortVr: the minimap and its depth mask are drawn in the HUD frame
     // camera's space, so the headset keeps them in front of the head too.
-    // With the morph ball's HUD they go on the floating plane with it
+    // With the morph ball's HUD they go on its screen with it
     // (CSamusHud::Draw), where they keep their place in its layout.
-    AuroraSetStereoDrawRoute(x34_samusHud->PortVrBallHudShown() ? AURORA_STEREO_ROUTE_FLOATING_HUD
+    const uint vrBallRoute = PortVr::VrFloatingHud() ? AURORA_STEREO_ROUTE_FLOATING_HUD
+                                                     : AURORA_STEREO_ROUTE_ANCHORED_SCREEN;
+    AuroraSetStereoDrawRoute(x34_samusHud->PortVrBallHudShown() ? vrBallRoute
                                                                  : AURORA_STEREO_ROUTE_HEAD_LOCKED);
     drawsSince();
-#endif
-    CGuiCamera* camera = x34_samusHud->GetBaseHudFrame()->GetFrameCamera();
-    camera->Draw(CGuiWidgetDrawParms(0.f, CVector3f::Zero()));
-    CGraphics::SetDepthRange(0.f, 1.f / 512.f);
-    // The minimap and its depth mask are drawn outside CGuiFrame. Spread both
-    // with one rigid transform so the contents stay registered with the mask.
-    // Its interpolated anchor approaches the view axis on entering the map screen,
-    // and the HUD scale fades out on the way.
-    CTransform4f mapSpread = CTransform4f::Identity();
-    if (!x38_autoMapper->IsFullyOutOfMiniMapState()) {
-      float mapT = 0.f;
-      if (!x38_autoMapper->IsFullyInMiniMapState()) {
-        mapT = x38_autoMapper->GetNextState() != CAutoMapper::kAMS_MiniMap
-                   ? x38_autoMapper->GetInterp()
-                   : 1.f - x38_autoMapper->GetInterp();
+    // PortVr: the map screen in the headset's immersive view is a 3D map held
+    // in front of the player (AURORA_STEREO_ROUTE_ANCHORED_3D, through the held
+    // screen's anchor): CAutoMapper::Draw builds it with real depth in the
+    // anchor's space instead of flattening it onto the HUD's plane, and lays
+    // its frame and compass on the screen. No depth mask (it clipped the map to
+    // the minimap's frame) and no depth test: the map draws back to front.
+    const bool vrMap = PortVrMapInView();
+    const CGraphics::CProjectionState vrProjection = CGraphics::GetProjectionState();
+    const CTransform4f vrViewPoint = CGraphics::GetViewMatrix();
+    if (vrMap) {
+      float distance = 0.f;
+      float halfHeight = 0.f;
+      float clearance = 0.f;
+      float nearPlane = 0.f;
+      PortVr::VrMapHologram(distance, halfHeight, clearance, nearPlane);
+      // The frame (legend, area name) and the compass first, on the screen
+      // behind the map, which then draws over them.
+      AuroraSetStereoDrawRoute(PortVr::VrFloatingHud() ? AURORA_STEREO_ROUTE_FLOATING_HUD
+                                                       : AURORA_STEREO_ROUTE_ANCHORED_SCREEN);
+      x38_autoMapper->PortVrDrawFrame(mapAlpha * (x1f4_visorStaticAlpha * t));
+      AuroraSetStereoDrawRoute(AURORA_STEREO_ROUTE_ANCHORED_3D);
+      // It grows out of the HUD's minimap and shrinks back into it, from where
+      // the minimap stands on the head-locked HUD (its place in the HUD camera's
+      // space at the head-locked route's scales) at its view's half-height
+      // there: drawn there in the mono picture, and in each eye moved and
+      // turned to where the head has the minimap this frame, less so as it
+      // opens (grow 0 to 1), whichever way the head turned since the map's
+      // anchor was placed.
+      float mapGrow = 1.f;
+      if (!x38_autoMapper->IsFullyOutOfMiniMapState()) {
+        mapGrow = x38_autoMapper->GetNextState() != CAutoMapper::kAMS_MiniMap
+                      ? x38_autoMapper->GetInterp()
+                      : 1.f - x38_autoMapper->GetInterp();
       }
-      mapSpread = camera->GetHudTransform(x18c_mapCamXf.GetTranslation(), 1.f - mapT);
+      const CTransform4f miniSpread = x14c_basehud_camera->GetHudTransform(x164_automapperOffset, 1.f);
+      const CVector3f miniCamera =
+          x14c_basehud_camera->GetWorldTransform().GetQuickInverse() * (miniSpread * x164_automapperOffset);
+      float hudScaleXY = 1.f;
+      float hudScaleDepth = 1.f;
+      PortVr::VrHeadLockedScales(hudScaleXY, hudScaleDepth);
+      const float miniHalfHud = gpTweakAutoMapper->xc8_mapPlaneScaleZ * miniSpread.GetUp().Magnitude();
+      CVector3f miniStart(miniCamera.GetX() * hudScaleXY, miniCamera.GetY() * hudScaleDepth,
+                          miniCamera.GetZ() * hudScaleXY);
+      float miniHalfHeight = miniHalfHud * hudScaleXY;
+      float miniFollow = 1.f - mapGrow;
+      float screenHalfWidth = 0.f;
+      float screenHalfHeight = 0.f;
+      float screenDistance = 0.f;
+      PortVr::VrScreenPlane(screenHalfWidth, screenHalfHeight, screenDistance);
+      const float tanHalfWidth = x14c_basehud_camera->GetDrawTanHalfWidth();
+      const float tanHalfHeight = x14c_basehud_camera->GetDrawTanHalfHeight();
+      if (x34_samusHud->PortVrBallHudShown() && miniCamera.GetY() > 0.f && tanHalfWidth > 0.f &&
+          tanHalfHeight > 0.f && screenHalfHeight > 0.f) {
+        // The morph ball's HUD lays the minimap on its screen, the one the map's
+        // anchor holds (with vr_floating_hud, about where that screen eased to):
+        // where the HUD camera's picture has it on that screen.
+        const float perDepth = 1.f / miniCamera.GetY();
+        miniStart = CVector3f(miniCamera.GetX() * perDepth / tanHalfWidth * screenHalfWidth, screenDistance,
+                              miniCamera.GetZ() * perDepth / tanHalfHeight * screenHalfHeight);
+        miniHalfHeight = miniHalfHud * perDepth / tanHalfHeight * screenHalfHeight;
+        miniFollow = 0.f;
+      }
+      CAutoMapper::PortVrSetHologram(distance, halfHeight, clearance, miniStart, miniHalfHeight, mapGrow);
+      // The placement takes GX camera axes: x right, y up, looking down -z.
+      AuroraSetStereoPlacement3DFollowHead(1.f, 0.f, 0.f, 0.f, miniStart.GetX(), miniStart.GetZ(),
+                                           -miniStart.GetY(), miniFollow);
+      // The mono picture (the desktop mirror) through a plain perspective;
+      // each eye puts its own frustum in its place.
+      CGraphics::SetPerspective(55.f,
+                                static_cast< float >(CGraphics::GetViewportWidth()) /
+                                    static_cast< float >(CGraphics::GetViewportHeight()),
+                                nearPlane, 100.f * distance);
+      CGraphics::SetViewPointMatrix(CTransform4f::Identity());
+      CGraphics::SetDepthRange(0.f, 1.f / 512.f);
+      CGraphics::SetDepthWriteMode(false, kE_LEqual, false);
+      x38_autoMapper->Draw(mgr, CTransform4f::Identity(), mapAlpha * (x1f4_visorStaticAlpha * t));
+      CAutoMapper::PortVrSetHologram(0.f, 0.f, 0.f, CVector3f::Zero(), 0.f, 1.f);
+      AuroraSetStereoPlacement3D(1.f, 0.f, 0.f, 0.f);
+      CGraphics::SetDepthWriteMode(true, kE_LEqual, true);
+      CGraphics::SetProjectionState(vrProjection);
+      CGraphics::SetViewPointMatrix(vrViewPoint);
+      drawsMap = drawsSince();
+      AuroraSetStereoDrawRoute(AURORA_STEREO_ROUTE_WORLD);
     }
-    x148_model_automapper->SetIsVisible(true);
-    x148_model_automapper->DrawWithWorldTransform(
-        CGuiWidgetDrawParms(1.f, CVector3f::Zero()),
-        mapSpread * x148_model_automapper->GetWorldTransform());
-    PublishMinimapRect(drawVisor && x38_autoMapper->IsFullyInMiniMapState() &&
-                           x3c_pauseScreenBlur->IsGameDraw() &&
-                           x1ec_hudVisMode != CTweakGui::kHud_Zero,
-                       mapAlpha > 0.f && t > 0.f,
-                       mapSpread * x148_model_automapper->GetWorldTransform());
-    CGraphics::SetDepthWriteMode(true, kE_GEqual, false);
-    x38_autoMapper->Draw(mgr, mapSpread * CTransform4f::Translate(0.f, 0.02f, 0.f) * x18c_mapCamXf,
-                         mapAlpha * (x1f4_visorStaticAlpha * t));
-    CGraphics::SetDepthWriteMode(true, kE_LEqual, true);
-    x148_model_automapper->SetIsVisible(false);
-#ifdef TARGET_PC
-    drawsMap = drawsSince();
-    AuroraSetStereoDrawRoute(AURORA_STEREO_ROUTE_WORLD);
+#else
+    const bool vrMap = false;
 #endif
+    if (!vrMap) {
+      CGuiCamera* camera = x34_samusHud->GetBaseHudFrame()->GetFrameCamera();
+      camera->Draw(CGuiWidgetDrawParms(0.f, CVector3f::Zero()));
+      CGraphics::SetDepthRange(0.f, 1.f / 512.f);
+      // The minimap and its depth mask are drawn outside CGuiFrame. Spread both
+      // with one rigid transform so the contents stay registered with the mask.
+      // Its interpolated anchor approaches the view axis on entering the map screen,
+      // and the HUD scale fades out on the way.
+      CTransform4f mapSpread = CTransform4f::Identity();
+      if (!x38_autoMapper->IsFullyOutOfMiniMapState()) {
+        float mapT = 0.f;
+        if (!x38_autoMapper->IsFullyInMiniMapState()) {
+          mapT = x38_autoMapper->GetNextState() != CAutoMapper::kAMS_MiniMap
+                     ? x38_autoMapper->GetInterp()
+                     : 1.f - x38_autoMapper->GetInterp();
+        }
+        mapSpread = camera->GetHudTransform(x18c_mapCamXf.GetTranslation(), 1.f - mapT);
+      }
+      x148_model_automapper->SetIsVisible(true);
+      x148_model_automapper->DrawWithWorldTransform(
+          CGuiWidgetDrawParms(vrHudFade, CVector3f::Zero()),
+          mapSpread * x148_model_automapper->GetWorldTransform());
+      PublishMinimapRect(drawVisor && x38_autoMapper->IsFullyInMiniMapState() &&
+                             x3c_pauseScreenBlur->IsGameDraw() &&
+                             x1ec_hudVisMode != CTweakGui::kHud_Zero,
+                         mapAlpha > 0.f && t > 0.f,
+                         mapSpread * x148_model_automapper->GetWorldTransform());
+      CGraphics::SetDepthWriteMode(true, kE_GEqual, false);
+      x38_autoMapper->Draw(mgr, mapSpread * CTransform4f::Translate(0.f, 0.02f, 0.f) * x18c_mapCamXf,
+                           mapAlpha * (x1f4_visorStaticAlpha * t) * vrHudFade);
+      CGraphics::SetDepthWriteMode(true, kE_LEqual, true);
+      x148_model_automapper->SetIsVisible(false);
+#ifdef TARGET_PC
+      drawsMap = drawsSince();
+      AuroraSetStereoDrawRoute(AURORA_STEREO_ROUTE_WORLD);
+#endif
+    }
   }
   if (!preDrawBlur) {
     x3c_pauseScreenBlur->Draw(mgr);
@@ -548,15 +669,64 @@ void CInGameGuiManager::Draw(const CStateManager& mgr) const {
 #ifdef TARGET_PC
   PortVr::PortVrNoteHudDraws(drawsVisor, drawsHud, drawsMap, drawsHelmet);
 #endif
+#ifdef TARGET_PC
+  // PortVr: in the headset's immersive view the save prompt and the message box
+  // are laid on a 2D screen of the morph ball HUD's size and distance, placed
+  // ahead of the head when the box opens and then held still while the head
+  // looks around (AURORA_STEREO_ROUTE_ANCHORED_SCREEN, held by
+  // PortVrRefreshPausedScreens), or with vr_floating_hud on the morph ball HUD's
+  // easing plane, over the live world the blur covers. Their depth window
+  // is the nearest there is, as the automapper's frame uses (CAutoMapper::Draw):
+  // the world, the HUD and the minimap's depth mask were all drawn this frame,
+  // and the frames set no window of their own. The box's panels are coplanar
+  // and its video band, behind them, is masked to them by a GEQUAL test, so a
+  // single depth keeps its layering.
+  const bool vrFloatScreens = vrLiveWorld && (!x4c_saveUI.null() || !x44_messageScreen.null());
+  const float vrDepthNear = CGraphics::GetDepthNear();
+  const float vrDepthFar = CGraphics::GetDepthFar();
+  if (vrFloatScreens) {
+    AuroraSetStereoDrawRoute(PortVr::VrFloatingHud() ? AURORA_STEREO_ROUTE_FLOATING_HUD
+                                                     : AURORA_STEREO_ROUTE_ANCHORED_SCREEN);
+    CGraphics::SetDepthRange(0.f, 0.f);
+  }
+#endif
   if (!x4c_saveUI.null()) {
     x4c_saveUI->Draw();
   }
   if (!x44_messageScreen.null()) {
     x44_messageScreen->Draw();
   }
+#ifdef TARGET_PC
+  if (vrFloatScreens) {
+    CGraphics::SetDepthRange(vrDepthNear, vrDepthFar);
+    AuroraSetStereoDrawRoute(AURORA_STEREO_ROUTE_WORLD);
+  }
+#endif
+#ifdef TARGET_PC
+  // PortVr: in the headset's immersive view the pause menu and logbook go on
+  // the same screen as the message boxes (held, or floating with
+  // vr_floating_hud), over every eye's depth reset to the far plane so their
+  // 3D models keep their own depth against the live world under the blur.
+  const bool vrPauseScreen = vrLiveWorld && !x48_pauseScreen.null();
+  if (vrPauseScreen) {
+    PortVr::VrResetEyeDepth();
+    const uint route = PortVr::VrFloatingHud() ? AURORA_STEREO_ROUTE_FLOATING_HUD
+                                               : AURORA_STEREO_ROUTE_ANCHORED_SCREEN;
+    AuroraSetStereoDrawRoute(route);
+    // Its 3D models (CSamusDoll, CArtifactDoll, CGameCubeDoll) stand on this
+    // screen in 3D (PortVr::VrPauseModel3D).
+    PortVr::VrSetPauseScreenRoute(route);
+  }
+#endif
   if (!x48_pauseScreen.null()) {
     x48_pauseScreen->Draw();
   }
+#ifdef TARGET_PC
+  if (vrPauseScreen) {
+    PortVr::VrSetPauseScreenRoute(0);
+    AuroraSetStereoDrawRoute(AURORA_STEREO_ROUTE_WORLD);
+  }
+#endif
   xf8_camFilter.Draw();
 
   if (deathTime > 0.f) {
@@ -764,9 +934,57 @@ void CInGameGuiManager::Update(const CStateManager& mgr, float dt, CArchitecture
     mgr.SetViewportScaleX(1.f);
     mgr.SetViewportScaleY(1.f);
   }
+  // PortVr: a message box or the save prompt, noted after this tick's state
+  // changes so the frame drawn next is published with it (main.cpp). Shown in
+  // the immersive view (vr_message_box_immersive), the world keeps being drawn
+  // under the pause blur and the blur is taken from each eye's live image.
+  PortVr::VrNoteMessageBox(IsInOrTransitioningToOrFromState(kIGGS_PauseHUDMessage) ||
+                               IsInOrTransitioningToOrFromState(kIGGS_PauseSaveGame),
+                           mgr.GetCameraManager()->IsInCinematicCamera());
+  // The pause menu, the logbook and the map the same way
+  // (vr_game_menu_screen_enabled off). Brought into view after the area
+  // textures were dumped (the setting turned off mid-menu), they come back
+  // first: the world is not drawn without them (PortVrRefreshPausedScreens).
+  PortVr::VrNoteGameMenu(IsInOrTransitioningToOrFromState(kIGGS_MapScreen) ||
+                         IsInOrTransitioningToOrFromState(kIGGS_PauseGame) ||
+                         IsInOrTransitioningToOrFromState(kIGGS_PauseLogBook));
+  if ((PortVr::VrMessageBoxInView() || PortVr::VrGameMenuInView()) &&
+      !x12c_dumpedTextures.empty()) {
+    TryReloadAreaTextures();
+  }
+  PortVrRefreshPausedScreens();
 #endif
   x1f8_25_playerAlive = mgr.GetPlayerState()->IsAlive();
 }
+
+#ifdef TARGET_PC
+void CInGameGuiManager::PortVrRefreshPausedScreens() const {
+  // main.cpp calls this from the manager's construction on, before
+  // CheckLoadComplete has made the blur and the HUD.
+  if (x3c_pauseScreenBlur.null()) {
+    return;
+  }
+  x3c_pauseScreenBlur->PortVrSetLiveWorld(
+      (PortVr::VrMessageBoxInView() || PortVr::VrGameMenuInView()) && x12c_dumpedTextures.empty());
+  // The held screen (AURORA_STEREO_ROUTE_ANCHORED_SCREEN), unless they float
+  // (vr_floating_hud): placed where the head faces when a box comes into view
+  // or the morph ball's HUD comes up, and held while either stays (read at the
+  // next frame's begin). A box opened in the morph ball shares the ball HUD's
+  // screen. Switching to fixed mid-box, the screen is placed when it comes back.
+  const bool ballHud = !x34_samusHud.null() && x34_samusHud->PortVrBallHudShown();
+  // The 3D map is held still even with vr_floating_hud, so the head can look
+  // around it.
+  const bool live = x3c_pauseScreenBlur->PortVrLiveWorld();
+  aurora_set_stereo_screen_anchor(PortVrMapInView() ||
+                                  (!PortVr::VrFloatingHud() && (live || ballHud)));
+}
+
+bool CInGameGuiManager::PortVrMapInView() const {
+  return !x38_autoMapper.null() && PortVr::VrGameMenuInView() && x12c_dumpedTextures.empty() &&
+         IsInOrTransitioningToOrFromState(kIGGS_MapScreen) &&
+         !x38_autoMapper->IsFullyInMiniMapState();
+}
+#endif
 
 void CInGameGuiManager::UpdateAutoMapper(const CStateManager& mgr, float dt) {
   x38_autoMapper->Update(dt, mgr);
@@ -957,6 +1175,16 @@ void CInGameGuiManager::DoStateTransition(const CStateManager& mgr) {
 }
 
 void CInGameGuiManager::EnsureStates(const CStateManager& mgr) {
+#ifdef TARGET_PC
+  // PortVr: the pause menu, logbook or map shown in the headset's view keeps
+  // the world drawn under the blur, so its area textures stay (the PC has the
+  // memory the GameCube freed here) and the screen is made at once.
+  if (x1f8_26_deferTransition && x3c_pauseScreenBlur->PortVrLiveWorld()) {
+    x1f8_26_deferTransition = false;
+    DoStateTransition(mgr);
+    return;
+  }
+#endif
   if (x1f8_26_deferTransition && !x3c_pauseScreenBlur->IsGameDraw()) {
     DestroyAreaTextures(mgr);
     x1f8_26_deferTransition = false;

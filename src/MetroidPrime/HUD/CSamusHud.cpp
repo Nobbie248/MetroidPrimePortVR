@@ -1668,10 +1668,14 @@ void CSamusHud::Draw(const CStateManager& mgr, float alpha, uint helmetVis, bool
       // frame camera is orthographic), so head-locked it would cover each
       // eye's image and put its gauges at the edges of the lenses. The headset
       // lays it, and the base frame drawn with it (hint messages), on a
-      // detached plane that eases toward the headset's full pose instead.
+      // screen ahead instead: placed where the head faces when the ball's
+      // HUD comes up and then held with the ball's camera (held by
+      // CInGameGuiManager::PortVrRefreshPausedScreens), or with vr_floating_hud
+      // a detached plane that eases toward the headset's full pose.
       const bool vrBallScreen = PortVrBallHudShown();
       if (vrBallScreen) {
-        AuroraSetStereoDrawRoute(AURORA_STEREO_ROUTE_FLOATING_HUD);
+        AuroraSetStereoDrawRoute(PortVr::VrFloatingHud() ? AURORA_STEREO_ROUTE_FLOATING_HUD
+                                                         : AURORA_STEREO_ROUTE_ANCHORED_SCREEN);
       }
 #endif
       if (x288_loadedSelectedHud != nullptr) {

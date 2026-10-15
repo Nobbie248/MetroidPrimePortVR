@@ -1754,10 +1754,11 @@ void CPlayer::TransitionFromMorphBallState(float dt, CStateManager& mgr) {
     }
   }
 #ifdef TARGET_PC
-  // Keep the body/first-person base on the view's starting yaw, including
-  // when retail's movement or nearby-object hints chose a different exit yaw.
+  // Face the stand-up model toward the headset rather than retail's movement
+  // or nearby-object hints. The unmorph render camera keeps its separate base.
   if (PortVr::VrImmersive()) {
-    SetTransform(PortVr::VrUnmorphCameraBase(GetTransform()));
+    SetTransform(PortVr::VrUnmorphFacingTransform(GetTransform()));
+    PortSnapshotRenderTransform();
   }
 #endif
   ForceGunOrientation(GetTransform(), mgr);
@@ -1827,6 +1828,12 @@ void CPlayer::EnterMorphBallState(CStateManager& mgr) {
 
 void CPlayer::LeaveMorphBallState(CStateManager& mgr) {
 #ifdef TARGET_PC
+  if (PortVr::VrImmersive() && x2f8_morphBallState == kMS_Unmorphing) {
+    // The stand-up model is now hidden. Restore the camera basis before
+    // first-person tracking adds the HMD rotation, preserving the exit view.
+    SetTransform(PortVr::VrUnmorphCameraBase(GetTransform()));
+    PortSnapshotRenderTransform();
+  }
   // Only the end of a Fast Morph unmorph keeps velocity, not a scripted one.
   const bool keepVelocity =
       x2f8_morphBallState == kMS_Unmorphing && IsFastMorphTransition();

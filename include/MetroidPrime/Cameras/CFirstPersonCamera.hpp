@@ -2,6 +2,9 @@
 #define _CFIRSTPERSONCAMERA
 
 #include "MetroidPrime/Cameras/CGameCamera.hpp"
+#ifdef TARGET_PC
+#include "vr/vr_action_view.h"
+#endif
 
 class CFirstPersonCamera : public CGameCamera {
 public:
@@ -38,6 +41,9 @@ private:
   bool x1c6_24_deferBallTransitionProcessing : 1;
   CVector3f x1c8_closeInVec;
   float x1d4_closeInTimer;
+#ifdef TARGET_PC
+  PortVr::ActionView::State portVrActionView;
+#endif
 };
 CHECK_SIZEOF(CFirstPersonCamera, (VERSION >= VERSION_GM8P_00 ? 0x1e8 : 0x1d8))
 

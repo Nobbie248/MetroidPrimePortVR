@@ -117,8 +117,7 @@ CPlayer::EOrbitValidationResult CPlayer::ValidateCurrentOrbitTargetId(CStateMana
     }
   }
 #ifdef TARGET_PC
-  // PortVr: the body keeps its facing during a lock the head picked
-  // (vr_view.h), so how far that facing is from the target says nothing.
+  // Scan locks hold the body, so its facing does not constrain scan targets.
   if (PortVr::VrLookHoldsFacing(mgr, *this)) {
     return kOVR_OK;
   }
@@ -287,10 +286,8 @@ void CPlayer::UpdateOrbitOrientation(CStateManager& mgr) {
     return;
   }
 #ifdef TARGET_PC
-  // PortVr: look to scan / lock-on / grapple: the head picked the target, so
-  // the body keeps its facing rather than turning the world toward it
-  // (vr_view.h), and a turn under way stops, as the lock's own facing would
-  // stop it: nothing else damps it during a lock.
+  // Scan locks hold the body. Combat and grapple keep target-facing physics;
+  // their view offset is handled independently by CFirstPersonCamera.
   if (PortVr::VrLookHoldsFacing(mgr, *this)) {
     if (x304_orbitState == kOS_OrbitObject) {
       SetAngularVelocityOR(CAxisAngle::Identity());
@@ -309,7 +306,13 @@ void CPlayer::UpdateOrbitOrientation(CStateManager& mgr) {
   case kOS_OrbitCarcass:
   case kOS_ForcedOrbitObject: {
     CVector3f playerToPoint = x314_orbitPoint - GetTranslation();
-    if (!x374_orbitLockEstablished) {
+    // The VR view has a separate acquisition offset. Point the simulation
+    // body at the target immediately instead of chasing that view's heading.
+    if (!x374_orbitLockEstablished
+#ifdef TARGET_PC
+        && !PortVr::VrImmersive()
+#endif
+    ) {
       playerToPoint = mgr.GetCameraManager()->GetFirstPersonCamera()->GetTransform().GetForward();
     }
     playerToPoint.SetZ(0.f);

@@ -214,16 +214,19 @@ void UpdateWeaponWheel(const OpenXRControllerState& weapon, bool modifier, bool 
 // Classic: menus, the map, cutscenes, the morph ball. The plain GameCube
 // layout on the two controllers.
 void ApplyClassic(const OpenXRControllerState& left, const OpenXRControllerState& right, uint32_t weapon_hand,
-                  const PortVrSettings& settings, const std::array<std::string, 2>& profiles, PADStatus& pad) {
+                  bool morph_ball, const PortVrSettings& settings,
+                  const std::array<std::string, 2>& profiles, PADStatus& pad) {
     const OpenXRControllerState& weapon = weapon_hand == 1 ? right : left;
     const OpenXRControllerState& off = weapon_hand == 1 ? left : right;
     pad.stickX = ToStick(left.thumbstick_x);
     pad.stickY = ToStick(left.thumbstick_y);
     pad.substickX = ToStick(right.thumbstick_x);
     pad.substickY = ToStick(right.thumbstick_y);
-    if (left.primary) pad.button |= PAD_BUTTON_X;
+    // In Morph Ball, the weapon hand drops bombs and the off hand unmorphs.
+    // This is independent of primary-button jump; menu bindings stay fixed.
+    if (morph_ball ? off.primary : left.primary) pad.button |= PAD_BUTTON_X;
     if (left.secondary) pad.button |= PAD_BUTTON_START;
-    if (right.primary) pad.button |= PAD_BUTTON_A;
+    if (morph_ball ? weapon.primary : right.primary) pad.button |= PAD_BUTTON_A;
     if (right.secondary) pad.button |= PAD_BUTTON_B;
     if (Pressed(off.trigger_value) || off.trigger_click) {
         pad.button |= PAD_TRIGGER_L;
@@ -272,7 +275,8 @@ void ApplyGameplay(const OpenXRControllerState& left, const OpenXRControllerStat
         }
         pad.stickX = ToStick(turn);
     }
-    // Jump: the look stick pushed up, or A when the option says so.
+    // Jump: the look stick pushed up, or the weapon hand's primary button
+    // when enabled (A right-handed, X left-handed).
     const bool jump = a_jump ? weapon.primary : (look.thumbstick_y > kJumpStickThreshold && !modifier);
     if (jump) {
         pad.button |= PAD_BUTTON_B;
@@ -288,12 +292,9 @@ void ApplyGameplay(const OpenXRControllerState& left, const OpenXRControllerStat
         pad.button |= PAD_TRIGGER_L;
         pad.triggerLeft = kTriggerFull;
     }
-    // Morph ball on the off hand's X; with A-jump the off X is the jump instead.
-    if (!a_jump && off.primary) pad.button |= PAD_BUTTON_X;
-    if (a_jump && off.primary) {
-        pad.button |= PAD_BUTTON_B;
-        pad.analogB = kTriggerFull;
-    }
+    // Morph ball stays on the off hand's primary button (X right-handed,
+    // A left-handed), even when the weapon hand's primary button jumps.
+    if (off.primary) pad.button |= PAD_BUTTON_X;
     // Start on the off hand's Y, unless that hand is busy with the menu button
     // or the weapon modifier is held.
     if (off.secondary && !off.menu && !modifier) pad.button |= PAD_BUTTON_START;
@@ -346,6 +347,7 @@ void VrPadUpdate(const CStateManager* mgr) noexcept {
 
     // The mapping, from the game's own state.
     bool gameplay = false;
+    bool morph_ball = false;
     bool orbit = false;
     bool grapple = false;
     bool visor_press_accepted = false;
@@ -356,6 +358,8 @@ void VrPadUpdate(const CStateManager* mgr) noexcept {
         const bool unmorphed = player->GetMorphballTransitionState() == CPlayer::kMS_Unmorphed;
         const bool cinematic = mgr->GetCameraManager() != nullptr && mgr->GetCameraManager()->IsInCinematicCamera();
         gameplay = first_person && unmorphed && !cinematic && !mgr->GetInMapScreen() && !g_in_game_menu;
+        morph_ball = player->GetMorphballTransitionState() == CPlayer::kMS_Morphed &&
+                     !cinematic && !mgr->GetInMapScreen() && !g_in_game_menu;
         if (gameplay) {
             const CPlayer::EPlayerOrbitState state = player->GetOrbitState();
             orbit = state == CPlayer::kOS_OrbitObject || state == CPlayer::kOS_ForcedOrbitObject ||
@@ -469,7 +473,7 @@ void VrPadUpdate(const CStateManager* mgr) noexcept {
         ApplyGameplay(left, right, weapon_hand, orbit, grapple, grips_ready, settings, snapshot.interaction_profiles,
                       pad);
     } else {
-        ApplyClassic(left, right, weapon_hand, settings, snapshot.interaction_profiles, pad);
+        ApplyClassic(left, right, weapon_hand, morph_ball, settings, snapshot.interaction_profiles, pad);
     }
     // The beam wheel owns the weapon hand's B while it is held; the orbit lock
     // keeps its L (the game does the locking) and the pad's C-stick is free.

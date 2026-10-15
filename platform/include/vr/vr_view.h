@@ -75,6 +75,9 @@ CTransform4f VrBallCameraBaseTransform(const CTransform4f& camera, float weight 
 // Unmorphing preserves the current render-base yaw and translates to eye height.
 void VrBeginUnmorphCamera(const CTransform4f& camera, const CVector3f& eyePosition) noexcept;
 CTransform4f VrUnmorphCameraBase(const CTransform4f& camera) noexcept;
+// The stand-up model faces the HMD's captured horizontal heading, separately
+// from the render base so the view does not apply head rotation twice.
+CTransform4f VrUnmorphFacingTransform(const CTransform4f& player) noexcept;
 CTransform4f VrUnmorphCameraTransform(const CVector3f& eyePosition, float progress) noexcept;
 bool VrNoCameraBob() noexcept;
 bool VrNoArmCannonFidget() noexcept;
@@ -211,13 +214,9 @@ const TUniqueId* VrLookToScanNearby(const CStateManager& mgr, int& count) noexce
 // choice) if that is of a kind the head does not pick, or none.
 // CPlayer::FindOrbitTargetId returns it.
 bool VrLookToLockTarget(const CStateManager& mgr, TUniqueId gamePick, TUniqueId& id) noexcept;
-// The body keeps its facing while look to scan is active, and, with
-// vr_look_lock_no_camera_turn, during an orbit lock on a target of a kind the
-// head picks (look to lock-on, look to grapple): the lock does not turn the
-// camera and the player toward it, which would swing the whole world around
-// the headset and take the target out from under the gaze
-// (CFirstPersonCamera::UpdateTransform, CPlayer::UpdateOrbitOrientation), nor
-// break when the body's facing drifts off it (CPlayer::ValidateCurrentOrbitTargetId).
+// Scan locks hold the body's facing. Combat locks and grapples keep native
+// target-facing physics; CFirstPersonCamera separately preserves the view's
+// acquisition angle, without feeding tracked head turns back into the body.
 bool VrLookHoldsFacing(const CStateManager& mgr, const CPlayer& player) noexcept;
 // The rendered model's offset from the tracked pose (PrimedGun's model offset
 // and its base forward offset), in world units; zero when not tracked.

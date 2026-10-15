@@ -20,6 +20,9 @@
 #include "MetroidPrime/Cameras/CFirstPersonCamera.hpp"
 #include "MetroidPrime/Cameras/CGameCamera.hpp"
 #include "MetroidPrime/Cameras/CInterpolationCamera.hpp"
+#ifdef TARGET_PC
+#include "vr/vr_camera_transition.h"
+#endif
 #include "MetroidPrime/Cameras/CPathCamera.hpp"
 #include "MetroidPrime/Player/CPlayer.hpp"
 #include "MetroidPrime/Player/CPlayerGun.hpp"
@@ -670,6 +673,22 @@ void CCameraManager::UseCameraHint(const CScriptCameraHint& hint, CStateManager&
   xa8_hintPriority = hint.GetPriority();
 
   CTransform4f camXf = GetCurrentCameraTransform(mgr);
+#ifdef TARGET_PC
+  const bool vrSmoothHint = PortVr::VrImmersive() && !IsInCinematicCamera() &&
+      (mgr.GetPlayer()->GetMorphballTransitionState() == CPlayer::kMS_Morphed ||
+       mgr.GetPlayer()->GetMorphballTransitionState() == CPlayer::kMS_Morphing) &&
+      (hint.GetOverrideFlags() & 0x2000) == 0 &&
+      (hint.GetBehaviourType() != CBallCamera::kBCB_Default ||
+       (oldHint && oldHint->GetBehaviourType() != CBallCamera::kBCB_Default) ||
+       (hint.GetOverrideFlags() & 0x20) != 0);
+  if (vrSmoothHint) {
+    // Interpolation cameras store simulation transforms. The presentation
+    // path levels the result and removes the captured HMD yaw exactly once.
+    camXf = GetSimulationCameraTransform(mgr);
+  }
+#else
+  const bool vrSmoothHint = false;
+#endif
   x80_ballCamera->OverrideCameraInfo(mgr);
 
   if (hint.GetOverrideFlags() & 0x20) {
@@ -696,7 +715,13 @@ void CCameraManager::UseCameraHint(const CScriptCameraHint& hint, CStateManager&
 
   x80_ballCamera->UpdateLookAtPosition(0.f, mgr);
 
-  if ((hint.GetOverrideFlags() & 0x20) == 0 &&
+  if (vrSmoothHint) {
+#ifdef TARGET_PC
+    SetupInterpolation(camXf, x80_ballCamera->GetUniqueId(), x80_ballCamera->GetLookAtPosition(),
+                       PortVr::CameraTransition::Duration(hint.GetInfo().GetInterpolateTime()),
+                       hint.GetInfo().GetClampVelRange(), hint.GetInfo().GetClampRotRange(), true, mgr);
+#endif
+  } else if ((hint.GetOverrideFlags() & 0x20) == 0 &&
       (hint.GetBehaviourType() != CBallCamera::kBCB_Default ||
        (oldHint && (!oldHint || oldHint->GetBehaviourType() != CBallCamera::kBCB_Default)))) {
     const CVector3f& lookAtPos = x80_ballCamera->GetLookAtPosition();
@@ -710,6 +735,16 @@ void CCameraManager::UseCameraHint(const CScriptCameraHint& hint, CStateManager&
 void CCameraManager::NoCameraHintsLeft(CStateManager& mgr) {
   CScriptCameraHint* hint = TCastToPtr< CScriptCameraHint >(mgr.ObjectById(xa6_camHintId));
   CTransform4f ballCamXf = x80_ballCamera->GetTransform();
+#ifdef TARGET_PC
+  const bool vrSmoothHint = PortVr::VrImmersive() && !IsInCinematicCamera() &&
+      mgr.GetPlayer()->GetMorphballTransitionState() == CPlayer::kMS_Morphed;
+  if (vrSmoothHint) {
+    // A hint can end while its incoming transition is still running.
+    ballCamXf = GetSimulationCameraTransform(mgr);
+  }
+#else
+  const bool vrSmoothHint = false;
+#endif
 
   xa6_camHintId = kInvalidUniqueId;
   xa8_hintPriority = 1000;
@@ -730,7 +765,15 @@ void CCameraManager::NoCameraHintsLeft(CStateManager& mgr) {
   x80_ballCamera->UpdateLookAtPosition(0.f, mgr);
   if (!mgr.GetPlayer()->IsMorphBallTransitioning() &&
       hint->GetInfo().GetBehaviourType() != CBallCamera::kBCB_Default) {
-    if ((hint->GetInfo().GetOverrideFlags() & 0x1000) != 0) {
+    if (vrSmoothHint) {
+#ifdef TARGET_PC
+      x80_ballCamera->TeleportCamera(x80_ballCamera->FindDesiredTransform(camToPlayerFlat, mgr), mgr);
+      SetupInterpolation(ballCamXf, x80_ballCamera->GetUniqueId(),
+                         x80_ballCamera->GetLookAtPosition(),
+                         PortVr::CameraTransition::Duration(hint->GetInfo().GetClampVelTime()),
+                         hint->GetInfo().GetClampVelRange(), hint->GetInfo().GetClampRotRange(), true, mgr);
+#endif
+    } else if ((hint->GetInfo().GetOverrideFlags() & 0x1000) != 0) {
       x80_ballCamera->SetClampVelRange(hint->GetInfo().GetClampVelRange());
       x80_ballCamera->SetClampVelTimer(hint->GetInfo().GetClampVelTime());
     } else {

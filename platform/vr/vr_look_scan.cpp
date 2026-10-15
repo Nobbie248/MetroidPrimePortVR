@@ -19,12 +19,12 @@
 // Look to lock-on and look to grapple do the same in the other visors for the
 // orbit target (the L lock), each for its own kind of object: grapple points,
 // and everything else that can be locked. PrimedGun picked those with the
-// cannon's aim ray; here the head picks, with the scan target's cone and
+// cannon's aim ray; the configured cannon or head ray picks, with the scan target's cone and
 // FindBestOrbitableObject's rules (not the current target, the Grapple Beam
 // and the orbit distance for a grapple point, a swing-locked point only from
-// its swing plane, line of sight). With vr_look_lock_no_camera_turn the body
-// keeps its facing during a lock the head picked, as during a scan lock;
-// otherwise it turns to the target as on the TV.
+// its swing plane, line of sight). Combat and grapple retain native body
+// physics. CFirstPersonCamera keeps a separate acquisition offset for the
+// view; vr_look_lock_no_camera_turn freezes that view heading when enabled.
 
 #include "vr/vr_look_scan.h"
 #include "vr/vr_settings.h"
@@ -84,7 +84,6 @@ struct LookState {
     bool lockActive = false;
     bool lockOn = false;
     bool grapple = false;
-    bool noCameraTurn = false;
     TUniqueId lockTarget = kInvalidUniqueId;
 };
 LookState s_look;
@@ -368,7 +367,6 @@ void VrLookTargetUpdate(CStateManager& mgr, const CPlayer& player) noexcept {
     s_look.lockActive = !scanVisor;
     s_look.lockOn = cannonTargeting || settings.look_to_lock_on;
     s_look.grapple = cannonTargeting || settings.look_to_grapple;
-    s_look.noCameraTurn = cannonTargeting || settings.look_lock_no_camera_turn;
     // Orbit disable sources (CPlayer::UpdateOrbitableObjects): nothing to target.
     if (player.CheckOrbitDisableSourceList()) {
         return;
@@ -428,12 +426,10 @@ bool VrLookToLockTarget(const CStateManager& mgr, TUniqueId gamePick, TUniqueId&
     return true;
 }
 
-bool VrLookHoldsFacing(const CStateManager& mgr, const CPlayer& player) noexcept {
-    if (Fresh(mgr)) {
-        return true;
-    }
-    return FreshLock(mgr) && s_look.noCameraTurn && player.GetOrbitState() == CPlayer::kOS_OrbitObject &&
-           player.GetOrbitTargetId() != kInvalidUniqueId && HeadPicks(mgr, player.GetOrbitTargetId());
+bool VrLookHoldsFacing(const CStateManager& mgr, const CPlayer&) noexcept {
+    // Only scan locks freeze the body. Combat orbit and grapple physics must
+    // keep their target-facing basis, independently of the headset view.
+    return Fresh(mgr);
 }
 
 } // namespace PortVr

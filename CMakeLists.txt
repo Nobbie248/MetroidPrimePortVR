@@ -746,6 +746,14 @@ if(MP_BUILD_TESTS)
     # (platform/include/vr/vr_snap_turn.h): header-only, no game types.
     add_executable(port_vr_snap_turn_tests tests/port_vr_snap_turn.cpp)
     target_include_directories(port_vr_snap_turn_tests PRIVATE platform/include)
+    add_executable(port_vr_action_view_tests tests/port_vr_action_view.cpp)
+    target_include_directories(port_vr_action_view_tests PRIVATE platform/include)
+    add_test(NAME port_vr_action_view_tests COMMAND port_vr_action_view_tests)
+    set_tests_properties(port_vr_action_view_tests PROPERTIES TIMEOUT 15 LABELS port)
+    add_executable(port_vr_camera_transition_tests tests/port_vr_camera_transition.cpp)
+    target_include_directories(port_vr_camera_transition_tests PRIVATE platform/include)
+    add_test(NAME port_vr_camera_transition_tests COMMAND port_vr_camera_transition_tests)
+    set_tests_properties(port_vr_camera_transition_tests PROPERTIES TIMEOUT 15 LABELS port)
     # The rumble's hands by source, the split target's gun and off hand
     # (platform/include/vr/vr_rumble.h): header-only, no game types.
     add_executable(port_vr_rumble_tests tests/port_vr_rumble.cpp)

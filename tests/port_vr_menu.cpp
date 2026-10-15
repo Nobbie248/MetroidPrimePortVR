@@ -641,7 +641,7 @@ void TestControls() {
   using settings_panel::ToggleOptions;
   std::array<HandInputs, 2> hands{};
   ToggleOptions options;
-  options.panel_hand = 0;
+  options.pointing_hand = 1;
   Controls controls;
   bool open = false;
   const auto step = [&](float dt = 1.0f / 90.0f) {
@@ -680,19 +680,29 @@ void TestControls() {
   frame = step();
   Check(!frame.withheld, "controllers back");
 
-  // Left-handed: the right stick opens it and the left hand points.
-  options.panel_hand = 1;
+  // Left-handed: stick clicks stay fixed, while the left hand points.
+  options.pointing_hand = 0;
   hands[1].thumbstick_click = true;
   frame = step();
-  Check(open && frame.pointing_hand == 0, "left-handed opens with the right stick");
+  Check(!open, "left-handed right click remains height calibration, not the menu");
   hands[1].thumbstick_click = false;
+  step();
+  hands[0].thumbstick_click = true;
+  frame = step();
+  Check(open && frame.pointing_hand == 0, "left-handed opens with the left stick and points with the left hand");
+  hands[0].thumbstick_click = false;
   step();
   hands[1].thumbstick_click = true;
   step();
+  Check(open, "left-handed right click cannot close the menu");
   hands[1].thumbstick_click = false;
   step();
+  hands[0].thumbstick_click = true;
+  step();
+  hands[0].thumbstick_click = false;
+  step();
   Check(!open, "left-handed closes");
-  options.panel_hand = 0;
+  options.pointing_hand = 1;
 
   // A one-second press opens it; one press closes it.
   options.long_press = true;

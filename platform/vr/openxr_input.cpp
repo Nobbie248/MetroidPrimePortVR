@@ -867,17 +867,17 @@ void OpenXRInput::Sync(XrTime predicted_display_time, const OpenXRPointerScreen&
     const PortVrSettings settings = GetVrSettings();
     settings_panel::ToggleOptions options;
     options.allowed = panel_available && settings.vr_overlays_enabled;
-    options.panel_hand = settings.use_right_hand ? 0u : 1u;
+    options.pointing_hand = settings.use_right_hand ? 1u : 0u;
     options.long_press = settings.vr_menu_hold_left_stick;
     options.needs_head_zone = settings.vr_menu_requires_head_zone;
     if (options.needs_head_zone && !was_open) {
-        // PrimedGun's LeftControllerNearHead: the panel hand's aim pose in the
+        // PrimedGun's LeftControllerNearHead: the physical left hand's aim pose in the
         // visor gesture's zone.
         screen_math::Pose head{};
         screen_math::Pose hand{};
         options.hand_near_head =
             Locate(m_runtime->ViewSpace(), input_time, head) &&
-            Locate(m_aim_spaces[options.panel_hand], input_time, hand) &&
+            Locate(m_aim_spaces[0], input_time, hand) &&
             VisorDpad::HandNearHead(hand.position, head.position, settings.xr_dpad_head_radius,
                                     settings.xr_dpad_head_y_below);
     }

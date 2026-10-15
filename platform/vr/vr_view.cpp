@@ -19,6 +19,7 @@
 #include "Kyoto/Math/CQuaternion.hpp"
 #include "MetroidPrime/CStateManager.hpp"
 #include "MetroidPrime/CGameCollision.hpp"
+#include "MetroidPrime/CGroundMovement.hpp"
 #include "Collision/CCollisionInfo.hpp"
 #include "Collision/CCollisionPrimitive.hpp"
 #include "WorldFormat/CMetroidAreaCollider.hpp"
@@ -53,6 +54,7 @@ CannonState s_cannon;
 float s_ballEntryYaw = 0.f;
 CVector3f s_ballEntryDirection(0.f, 1.f, 0.f);
 CTransform4f s_unmorphBase = CTransform4f::Identity();
+CTransform4f s_unmorphFacing = CTransform4f::Identity();
 CVector3f s_unmorphOffset = CVector3f::Zero();
 RoomScale::State s_roomScale;
 
@@ -154,6 +156,20 @@ void VrRoomScaleUpdate(CStateManager& mgr, CPlayer& player, float dt) noexcept {
     if (!remaining.CanBeNormalized()) {
         return;
     }
+    if (player.GetPlayerMovementState() == NPlayer::kMS_OnGround &&
+        player.GetMaterialList().HasMaterial(kMT_GroundCollider) && !player.IsStandardCollider()) {
+        // Reuse the same quarter/full-height step attempts, ceiling checks,
+        // step-down, floor messages and platform contacts as stick walking.
+        RoomScale::MoveGroundedDisplacement(player, remaining, dt, [&] {
+            if (gkUseNewPlayerMovement) {
+                CGroundMovement::MoveGroundCollider_New(mgr, player, dt, nullptr);
+            } else {
+                CGroundMovement::MoveGroundCollider(mgr, player, dt, nullptr);
+            }
+        });
+        mgr.UpdateActorInSortedLists(player);
+        return;
+    }
     const CCollisionPrimitive& prim = *player.GetCollisionPrimitive();
     CAABox bounds = prim.CalculateAABox(player.GetPrimitiveTransform());
     bounds.AccumulateBounds(bounds.GetMinPoint() + remaining);
@@ -192,6 +208,7 @@ void VrRoomScaleUpdate(CStateManager& mgr, CPlayer& player, float dt) noexcept {
         }
         remaining -= normal * intoWall;
     }
+    mgr.UpdateActorInSortedLists(player);
 }
 
 CTransform4f VrHeadFacingTransform(const CTransform4f& cameraXf) noexcept {
@@ -315,6 +332,17 @@ CTransform4f VrBallCameraBaseTransform(const CTransform4f& camera, float weight)
 
 void VrBeginUnmorphCamera(const CTransform4f& camera, const CVector3f& eyePosition) noexcept {
     s_unmorphBase = camera.GetRotation();
+    // The visible stand-up animation faces the HMD, while the render base
+    // stays unchanged: stereo replay still adds the tracked head rotation.
+    CVector3f facing = VrHeadViewRotation(camera).GetColumn(kDY);
+    facing.SetZ(0.f);
+    if (!facing.CanBeNormalized()) {
+        facing = camera.GetForward();
+        facing.SetZ(0.f);
+    }
+    s_unmorphFacing = facing.CanBeNormalized()
+        ? CTransform4f::LookAt(CVector3f::Zero(), facing, CVector3f::Up())
+        : s_unmorphBase;
     OpenXRFrameRequest request{};
     const CVector3f consumed = OpenXRLatestFrameRequest(request) ? camera.Rotate(RoomScaleOffset(request))
                                                                : CVector3f::Zero();
@@ -325,6 +353,12 @@ CTransform4f VrUnmorphCameraBase(const CTransform4f& camera) noexcept {
     CTransform4f view = s_unmorphBase;
     view.SetTranslation(camera.GetTranslation());
     return view;
+}
+
+CTransform4f VrUnmorphFacingTransform(const CTransform4f& player) noexcept {
+    CTransform4f facing = s_unmorphFacing;
+    facing.SetTranslation(player.GetTranslation());
+    return facing;
 }
 
 CTransform4f VrUnmorphCameraTransform(const CVector3f& eyePosition, float progress) noexcept {
@@ -653,6 +687,12 @@ bool VrCannonTransform(const CStateManager& mgr, const CPlayer& player, const CT
 }
 
 bool VrCannonTracked() noexcept { return s_cannon.tracked; }
+
+bool VrMirrorWeaponModels() noexcept { return ImmersiveNow() && !GetVrSettings().use_right_hand; }
+
+CTransform4f VrWeaponModelTransform(const CTransform4f& pose) noexcept {
+    return VrMirrorWeaponModels() ? pose * CTransform4f::Scale(-1.f, 1.f, 1.f) : pose;
+}
 
 void VrResetCannonSmoothing() noexcept { s_cannon.smoothValid = false; }
 

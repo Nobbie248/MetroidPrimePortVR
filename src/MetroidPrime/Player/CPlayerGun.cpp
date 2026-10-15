@@ -4,6 +4,7 @@
 #include "port_synthetic_effect.h"
 #ifdef TARGET_PC
 #include "vr/vr_view.h"
+#include "vr/vr_model_mirror.h"
 #endif
 #ifdef MP_ENABLE_SMOKE_DRIVER
 #include "port_smoke.h"
@@ -461,6 +462,10 @@ static void CopyScreenTex() {
 }
 
 void DrawScreenTex(float z) {
+#ifdef TARGET_PC
+  // This screen-space wipe quad is not part of the reflected weapon model.
+  const PortVr::ModelMirrorScope screenScope(false);
+#endif
   const CTransform4f backupViewMtx(CGraphics::GetViewMatrix());
   const CGraphics::CProjectionState backupProjectionState(CGraphics::GetProjectionState());
   int left, top, width, height;
@@ -653,9 +658,17 @@ void CPlayerGun::Render(const CStateManager& mgr, const CVector3f& pos,
 #else
   CTransform4f offsetWorldXf(CTransform4f::Translate(pos) * GetGunMotionTransform());
 #endif
-  CTransform4f elbowOffsetXf(offsetWorldXf * x508_elbowLocalXf);
+#ifdef TARGET_PC
+  CTransform4f modelWorldXf = PortVr::VrWeaponModelTransform(offsetWorldXf);
+#else
+  const CTransform4f& modelWorldXf = offsetWorldXf;
+#endif
+  CTransform4f elbowOffsetXf(modelWorldXf * x508_elbowLocalXf);
   if (x32c_chargePhase != kCP_NotCharging && !IsWeaponStateSet(0x10)) {
     offsetWorldXf.AddTranslation(CVector3f(x34c_shakeX, 0.f, x350_shakeZ));
+#ifdef TARGET_PC
+    modelWorldXf.AddTranslation(CVector3f(x34c_shakeX, 0.f, x350_shakeZ));
+#endif
   }
 
   const CGunMorph::EGunState gunState = x678_morph.GetGunState();
@@ -686,12 +699,16 @@ void CPlayerGun::Render(const CStateManager& mgr, const CVector3f& pos,
   x72c_currentBeam->PreRenderGunFx(mgr, offsetWorldXf);
   const bool drawSuitArm = !x740_grappleArm->IsGrappling() &&
                            mgr.GetPlayer()->GetGunHolsterState() == CPlayer::kGH_Drawn;
-  x73c_gunMotion->Draw(mgr, offsetWorldXf);
+  {
+#ifdef TARGET_PC
+  const PortVr::ModelMirrorScope mirrorScope;
+#endif
+  x73c_gunMotion->Draw(mgr, modelWorldXf);
 
   switch (gunState) {
   case CGunMorph::kGS_OutWipeDone:
     if (x0_lights.HasShadowLight()) {
-      x82c_shadow->EnableModelProjectedShadow(offsetWorldXf, x0_lights.GetShadowLightArrIndex(),
+      x82c_shadow->EnableModelProjectedShadow(modelWorldXf, x0_lights.GetShadowLightArrIndex(),
                                               2.15f);
     }
     if (visor == CPlayerState::kPV_XRay) {
@@ -700,7 +717,7 @@ void CPlayerGun::Render(const CStateManager& mgr, const CVector3f& pos,
                                  thermalVisor ? kHandThermalFlag : kHandHoloFlag);
     }
     DrawArm(mgr, pos, flags);
-    x72c_currentBeam->Draw(drawSuitArm, mgr, offsetWorldXf, beamFlags, &x0_lights);
+    x72c_currentBeam->Draw(drawSuitArm, mgr, modelWorldXf, beamFlags, &x0_lights);
     x82c_shadow->DisableModelProjectedShadow();
     break;
   case CGunMorph::kGS_InWipeDone:
@@ -713,23 +730,23 @@ void CPlayerGun::Render(const CStateManager& mgr, const CVector3f& pos,
       CopyScreenTex();
       x6e0_rightHandModel.Render(mgr, handXf, &x0_lights,
                                  thermalVisor ? kHandThermalFlag : kHandHoloFlag);
-      x72c_currentBeam->DrawHologram(mgr, offsetWorldXf, CModelFlags::Normal());
+      x72c_currentBeam->DrawHologram(mgr, modelWorldXf, CModelFlags::Normal());
       DrawScreenTex(ConvertToScreenSpace(morphXf.GetTranslation(), cam).GetZ());
       if (x0_lights.HasShadowLight()) {
-        x82c_shadow->EnableModelProjectedShadow(offsetWorldXf, x0_lights.GetShadowLightArrIndex(),
+        x82c_shadow->EnableModelProjectedShadow(modelWorldXf, x0_lights.GetShadowLightArrIndex(),
                                                 2.15f);
       }
       gpRender->SetModelMatrix(morphXf);
       DrawClipCube(x6c8_hologramClipCube);
-      x72c_currentBeam->Draw(drawSuitArm, mgr, offsetWorldXf, beamFlags, &x0_lights);
+      x72c_currentBeam->Draw(drawSuitArm, mgr, modelWorldXf, beamFlags, &x0_lights);
       DrawArm(mgr, pos, flags);
       x82c_shadow->DisableModelProjectedShadow();
     } else {
       x6e0_rightHandModel.Render(mgr, handXf, &x0_lights,
                                  thermalVisor ? kHandThermalFlag : kHandHoloFlag);
-      x72c_currentBeam->DrawHologram(mgr, offsetWorldXf, CModelFlags::Normal());
+      x72c_currentBeam->DrawHologram(mgr, modelWorldXf, CModelFlags::Normal());
       if (x0_lights.HasShadowLight()) {
-        x82c_shadow->EnableModelProjectedShadow(offsetWorldXf, x0_lights.GetShadowLightArrIndex(),
+        x82c_shadow->EnableModelProjectedShadow(modelWorldXf, x0_lights.GetShadowLightArrIndex(),
                                                 2.15f);
       }
       DrawArm(mgr, pos, flags);
@@ -739,6 +756,7 @@ void CPlayerGun::Render(const CStateManager& mgr, const CVector3f& pos,
   }
   }
 
+  } // Reflected model draws; muzzle/world effects keep their regular culling.
   CTransform4f oldViewMtx2(CGraphics::GetViewMatrix());
   CGraphics::SetViewPointMatrix(offsetWorldXf.GetInverse() * oldViewMtx2);
   gpRender->SetModelMatrix(CTransform4f::Identity());

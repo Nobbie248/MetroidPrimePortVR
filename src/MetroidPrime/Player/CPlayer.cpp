@@ -1843,15 +1843,16 @@ void CPlayer::AdjustEyeOffset(CStateManager& mgr) {
 }
 
 void CPlayer::Think(float dt, CStateManager& mgr) {
+  PortVrSnapTurn(mgr);
+#ifdef TARGET_PC
+  // Include physical step-up/down in the normal eye-height smoothing below.
+  PortVr::VrRoomScaleUpdate(mgr, *this, dt);
+#endif
   UpdateStepCameraZBias(dt);
   AdjustEyeOffset(mgr);
   UpdateEnvironmentDamageCameraShake(dt, mgr);
   UpdatePhazonDamage(dt, mgr);
   PublishWheelState(*this, mgr);
-  PortVrSnapTurn(mgr);
-#ifdef TARGET_PC
-  PortVr::VrRoomScaleUpdate(mgr, *this, dt);
-#endif
   if (!MouseControlsAllowed(mgr)) {
     UpdateTouchLook(dt, mgr);
     UpdateFreeLook(dt);

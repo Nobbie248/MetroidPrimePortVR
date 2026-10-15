@@ -1,4 +1,8 @@
 #include "MetroidPrime/Cameras/CInterpolationCamera.hpp"
+#ifdef TARGET_PC
+#include "vr/vr_camera_transition.h"
+#include "vr/vr_view.h"
+#endif
 
 #include "MetroidPrime/CStateManager.hpp"
 #include "MetroidPrime/Cameras/CBallCamera.hpp"
@@ -160,6 +164,13 @@ void CInterpolationCamera::SetInterpolation(const CTransform4f& xf, CVector3f lo
   x188_targetId = targetId;
   x1d8_24_sinusoidal = sinusoidal;
   x190_maxTime = maxTime;
+#ifdef TARGET_PC
+  if (PortVr::VrImmersive() &&
+      (mgr.GetPlayer()->GetMorphballTransitionState() == CPlayer::kMS_Morphed ||
+       mgr.GetPlayer()->GetMorphballTransitionState() == CPlayer::kMS_Morphing)) {
+    x190_maxTime = PortVr::CameraTransition::Duration(maxTime);
+  }
+#endif
   x1d0_positionSpeed = positionSpeed;
   x1d4_rotationSpeed = rotationSpeed;
   x1dc_closeInAngle = M_2PIF;
@@ -196,6 +207,24 @@ void CInterpolationCamera::Think(float dt, CStateManager& mgr) {
     return;
   }
   const CVector3f targetOrigin = cam->GetTranslation();
+#ifdef TARGET_PC
+  if (PortVr::VrImmersive() && !mgr.GetCameraManager()->IsInCinematicCamera() &&
+      (mgr.GetPlayer()->GetMorphballTransitionState() == CPlayer::kMS_Morphed ||
+       mgr.GetPlayer()->GetMorphballTransitionState() == CPlayer::kMS_Morphing)) {
+    // Blend to the actual hint camera transform, rather than reconstructing
+    // its rotation from a look-at point that fixed/path cameras need not use.
+    // The exact endpoint avoids a second cut when the interpolation ends.
+    const float blend = PortVr::CameraTransition::Blend(x18c_time, x190_maxTime);
+    const CQuaternion rotation = CQuaternion::SlerpLocal(
+        CQuaternion::FromMatrix(x194_startTransform), CQuaternion::FromMatrix(cam->GetTransform()), blend);
+    const CVector3f origin = x194_startTransform.GetTranslation() * (1.f - blend) + targetOrigin * blend;
+    SetTransform(rotation.BuildTransform4f(origin));
+    if (blend >= 1.f) {
+      EndInterpolation(mgr);
+    }
+    return;
+  }
+#endif
   CVector3f ballLookPos = mgr.GetCameraManager()->GetBallCamera()->GetLookAtPosition();
   switch (mgr.GetCameraManager()->GetBallCamera()->GetBehaviourType()) {
   case CBallCamera::kBCB_SpindleCamera:

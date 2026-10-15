@@ -1,6 +1,11 @@
 #include "gx.hpp"
 #include "__gx.h"
 
+namespace {
+bool sCullMirrored = false;
+GXCullMode sRequestedCullMode = GX_CULL_BACK;
+}
+
 extern "C" {
 
 void GXSetScissor(u32 left, u32 top, u32 width, u32 height) {
@@ -22,6 +27,11 @@ void GXSetScissor(u32 left, u32 top, u32 width, u32 height) {
 // TODO GXSetScissorBoxOffset
 
 void GXSetCullMode(GXCullMode mode) {
+  sRequestedCullMode = mode;
+  if (sCullMirrored) {
+    if (mode == GX_CULL_FRONT) mode = GX_CULL_BACK;
+    else if (mode == GX_CULL_BACK) mode = GX_CULL_FRONT;
+  }
   // Swap front/back to match hardware convention
   GXCullMode hwMode;
   switch (mode) {
@@ -37,6 +47,15 @@ void GXSetCullMode(GXCullMode mode) {
   }
   SET_REG_FIELD(0, __gx->genMode, 2, 14, hwMode);
   __gx->dirtyState |= 4; // gen mode dirty
+}
+
+u8 AuroraSetCullMirrored(u8 mirrored) {
+  const bool previous = sCullMirrored;
+  if (previous != (mirrored != GX_FALSE)) {
+    sCullMirrored = mirrored != GX_FALSE;
+    GXSetCullMode(sRequestedCullMode);
+  }
+  return previous ? GX_TRUE : GX_FALSE;
 }
 
 void GXSetClipMode(GXClipMode mode) {

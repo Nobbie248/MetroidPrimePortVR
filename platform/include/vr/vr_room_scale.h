@@ -6,6 +6,30 @@
 #include <cstdint>
 
 namespace PortVr::RoomScale {
+// Run the game's ground solver for an extra tracked displacement, without
+// integrating stick velocity/gravity twice or retaining artificial walking
+// velocity. Keep its resolved position and floor/contact bookkeeping.
+template <class Actor, class Vector, class GroundSolver>
+void MoveGroundedDisplacement(Actor& actor, const Vector& displacement, float dt,
+                             GroundSolver&& solve) {
+    if (!(dt > 0.f) || !std::isfinite(dt)) {
+        return;
+    }
+    auto physics = actor.GetPhysicsState();
+    auto lastSafe = actor.GetLastNonCollidingState();
+    const auto primitiveOffset = actor.GetPrimitiveOffset();
+    actor.ClearForcesAndTorques();
+    actor.SetMomentumWR(displacement * 0.f);
+    actor.SetAngularMomentumWR(actor.GetAngularMomentumWR() * 0.f);
+    actor.SetVelocityWR(displacement * (1.f / dt));
+    solve();
+    physics.SetTranslation(actor.GetTranslation());
+    lastSafe.SetTranslation(actor.GetLastNonCollidingState().GetTranslation());
+    actor.SetPhysicsState(physics);
+    actor.SetLastNonCollidingState(lastSafe);
+    actor.MoveCollisionPrimitive(primitiveOffset);
+}
+
 // Game-thread tracking history. Distances here are metres in OpenXR space.
 // Consume blocked movement too: pushing against a wall must not accumulate
 // a displacement that launches the player when they turn away from it.

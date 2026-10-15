@@ -3,6 +3,7 @@
 #include "Kyoto/Animation/CSkinnedModel.hpp"
 #ifdef TARGET_PC
 #include "port_room_env.h"
+#include "vr/vr_model_mirror.h"
 #endif
 #include "Kyoto/Animation/CVertexMorphEffect.hpp"
 #include "Kyoto/Audio/CSfxManager.hpp"
@@ -155,7 +156,13 @@ void CGrappleArm::Render(const CStateManager& mgr, const CVector3f& pos, const C
     const float probeXyz[3] = {probePos.GetX(), probePos.GetY(), probePos.GetZ()};
     const PortRoomEnv::ProbeOverrideScope probeScope(probeXyz);
 #endif
+#ifdef TARGET_PC
+    const PortVr::ModelMirrorScope mirrorScope;
+    const CTransform4f xf = CTransform4f::Translate(pos) *
+                            PortVr::VrWeaponModelTransform(x220_xf) * x2e0_auxXf;
+#else
     const CTransform4f xf = CTransform4f::Translate(pos) * x220_xf * x2e0_auxXf;
+#endif
     if (x50_grappleArmSkeletonModel) {
       RenderXRayModel(mgr, xf, flags);
     }
@@ -180,7 +187,11 @@ void CGrappleArm::Render(const CStateManager& mgr, const CVector3f& pos, const C
 
 void CGrappleArm::RenderGrappleBeam(const CStateManager& mgr, const CVector3f& pos) const {
   if (CanRender()) {
+#ifdef TARGET_PC
+    const CTransform4f xf = CTransform4f::Translate(pos) * PortVr::VrWeaponModelTransform(x220_xf);
+#else
     const CTransform4f xf = CTransform4f::Translate(pos) * x220_xf;
+#endif
     if (x3b2_25_beamActive) {
       if (x3b2_26_grappleHit) {
         x398_grappleHitGen->Render();
@@ -189,6 +200,9 @@ void CGrappleArm::RenderGrappleBeam(const CStateManager& mgr, const CVector3f& p
       x3a0_grappleSwooshGen->Render();
       x390_grappleSegmentGen->Render();
       const CTransform4f viewMatrix = CGraphics::GetViewMatrix();
+#ifdef TARGET_PC
+      const PortVr::ModelMirrorScope mirrorScope;
+#endif
       CGraphics::SetViewPointMatrix(xf.GetInverse() * viewMatrix);
       gpRender->SetModelMatrix(CTransform4f::Identity());
       x39c_grappleMuzzleGen->Render();
@@ -319,7 +333,11 @@ const bool CGrappleArm::UpdateGrappleBeam(float dt, const CTransform4f& beamLoc,
   const TUniqueId targetId = mgr.GetPlayer()->GetOrbitTargetId();
   const CActor* actor = TCastToConstPtr< CActor >(mgr.GetObjectById(targetId));
   x310_grapplePointPos = actor ? actor->GetTranslation() : x220_xf.GetTranslation();
+#ifdef TARGET_PC
+  const CVector3f beamGunPos = (PortVr::VrWeaponModelTransform(x220_xf) * beamLoc).GetTranslation();
+#else
   const CVector3f beamGunPos = (x220_xf * beamLoc).GetTranslation();
+#endif
   const CVector3f beamAirPos = CVector3f::Lerp(beamGunPos, x310_grapplePointPos, x338_beamT);
   switch (x334_animState) {
   case kAS_Five:

@@ -163,10 +163,9 @@ struct PortVrSettings {
     // picked by the body's screen box, as on the TV (platform/vr/vr_look_scan.cpp).
     bool look_to_lock_on = true;
     bool look_to_grapple = true;
-    // No camera turn on lock: during a lock the head picked, the body and the
-    // camera keep their facing instead of turning to the target, as during a
-    // scan lock. Off (the default), they turn as on the TV, which boss fights
-    // need: the target stays ahead while strafing circles it.
+    // No camera turn on lock: hold the view's acquisition heading throughout
+    // the action. Off, follow subsequent target/swing rotation with the initial
+    // view offset preserved. Body physics always keeps its target-facing basis.
     bool look_lock_no_camera_turn = false;
     float frustum_culling_degrees = 115.0f;
     float metroid_hud_distance = 0.10f;

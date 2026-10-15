@@ -178,6 +178,9 @@ bool VrCannonTransform(const CStateManager& mgr, const CPlayer& player, const CT
                        CTransform4f& gunXf) noexcept;
 // Whether the last VrCannonTransform placed the cannon.
 bool VrCannonTracked() noexcept;
+// Reflect only model geometry; tracked poses and projectile aim stay rigid.
+bool VrMirrorWeaponModels() noexcept;
+CTransform4f VrWeaponModelTransform(const CTransform4f& pose) noexcept;
 // The selected cannon controller's calibrated world-space aim, without
 // advancing model smoothing. False when the controller is not tracked.
 bool VrCannonAim(const CPlayer& player, const CTransform4f& cameraXf,

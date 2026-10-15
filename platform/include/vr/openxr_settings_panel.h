@@ -61,12 +61,12 @@ struct ToggleOptions {
     // Whether the menu can be shown at all: the VR overlays are on and the
     // backend has a layer for it. Off, it closes and stays closed.
     bool allowed = true;
-    // PrimedGun: the hand without the cannon (left unless left-handed).
-    uint32_t panel_hand = 0;
+    // PrimedGun points with the cannon hand, independently of menu activation.
+    uint32_t pointing_hand = 1;
     // "LONGER HELD PRESS FOR VR MENU": opening takes kLongPressSeconds of
     // holding; closing is still one press.
     bool long_press = false;
-    // "MENU REQUIRES HAND NEAR HEAD": opening also needs the panel hand in the
+    // "MENU REQUIRES HAND NEAR HEAD": opening also needs the physical left hand in the
     // visor gesture's zone beside the head (VisorDpad::HandNearHead).
     bool needs_head_zone = false;
     bool hand_near_head = false;
@@ -82,15 +82,14 @@ struct Frame {
 };
 
 // Whether the button that opens and closes the menu is held. PrimedGun: the
-// panel hand's thumbstick click or menu button (the other stick's click is
-// "SET HEIGHT"). As a gamepad every button means something to the game, so
+// physical left thumbstick click or menu button (right stick click is always
+// "SET HEIGHT", regardless of handedness). As a gamepad every button means something to the game, so
 // both thumbsticks clicked together stand in for it; with the controllers
 // nothing to the game it is left Y.
-inline bool ToggleHeld(const std::array<HandInputs, 2>& hands, OpenXRControllerMode mode,
-                       uint32_t panel_hand) noexcept {
+inline bool ToggleHeld(const std::array<HandInputs, 2>& hands, OpenXRControllerMode mode) noexcept {
     switch (mode) {
     case OpenXRControllerMode::PrimedGun:
-        return hands[panel_hand & 1u].thumbstick_click || hands[panel_hand & 1u].menu;
+        return hands[0].thumbstick_click || hands[0].menu;
     case OpenXRControllerMode::Gamepad:
         return hands[0].thumbstick_click && hands[1].thumbstick_click;
     case OpenXRControllerMode::None:
@@ -116,7 +115,7 @@ public:
     Frame Update(const std::array<HandInputs, 2>& hands, bool& open, float dt_seconds, OpenXRControllerMode mode,
                  const ToggleOptions& options) noexcept {
         const bool primedgun = mode == OpenXRControllerMode::PrimedGun;
-        const bool toggle = ToggleHeld(hands, mode, options.panel_hand) &&
+        const bool toggle = ToggleHeld(hands, mode) &&
                             (!options.needs_head_zone || open || options.hand_near_head || !primedgun);
         if (!options.allowed) {
             open = false;
@@ -157,7 +156,7 @@ public:
             }
             m_trigger_held[hand] = pulled;
         }
-        const uint32_t pointing = primedgun ? 1u - (options.panel_hand & 1u) : m_last_trigger_hand;
+        const uint32_t pointing = primedgun ? (options.pointing_hand & 1u) : m_last_trigger_hand;
 
         if (open != m_was_open) {
             // Whatever is held across the change belongs to that change.

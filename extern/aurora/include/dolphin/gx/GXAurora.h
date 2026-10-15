@@ -7,6 +7,10 @@
 extern "C" {
 #endif
 
+// Invert front/back culling while drawing reflected model geometry. Returns
+// the previous setting so nested model-draw scopes can restore it.
+u8 AuroraSetCullMirrored(u8 mirrored);
+
 //
 // Subcommands for GX_AURORA.
 //

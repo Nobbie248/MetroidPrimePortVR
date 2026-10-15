@@ -688,6 +688,12 @@ bool VrCannonTransform(const CStateManager& mgr, const CPlayer& player, const CT
 
 bool VrCannonTracked() noexcept { return s_cannon.tracked; }
 
+bool VrMirrorWeaponModels() noexcept { return ImmersiveNow() && !GetVrSettings().use_right_hand; }
+
+CTransform4f VrWeaponModelTransform(const CTransform4f& pose) noexcept {
+    return VrMirrorWeaponModels() ? pose * CTransform4f::Scale(-1.f, 1.f, 1.f) : pose;
+}
+
 void VrResetCannonSmoothing() noexcept { s_cannon.smoothValid = false; }
 
 CVector3f VrCannonModelOffsetWorld() noexcept {

@@ -1,6 +1,8 @@
 #pragma once
 
+#include <cstddef>
 #include <cstdint>
+#include <string>
 
 #include <webgpu/webgpu_cpp.h>
 
@@ -44,4 +46,11 @@ bool record(const Params& params);
 const wgpu::TextureView& froxel_view();
 const wgpu::Sampler& sampler();
 void shutdown();
+
+// The scene the fog applies to: the display-encoded EFB (Ldr) or the RGBA16F exposed linear scene
+// (Hdr, set_scene_hdr). Each has its own apply pipeline and frame copy.
+enum class Domain : uint32_t { Ldr, Hdr };
+constexpr size_t DomainCount = 2;
+// The apply pass's WGSL for a domain and a sample count (exposed for the tests).
+std::string apply_source(Domain domain, uint32_t samples);
 } // namespace aurora::gfx::volfog

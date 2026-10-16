@@ -30,6 +30,8 @@
 #include "GuiSys/CGuiModel.hpp"
 #include "port_debug.h"
 #include "port_map_pickups.h"
+#include "port_photo.h"
+#include "port_pointer_menu.h"
 #include "port_skip_cutscenes.h"
 #include <math.h>
 #endif
@@ -205,6 +207,7 @@ enum EPortOption {
   kPO_ElevatorRide,
   kPO_RapidCharge,
   kPO_OriginalExperience,
+  kPO_PhotoMode,
 };
 #define PORT_OPTION(opt) static_cast< EGameOption >(opt)
 
@@ -228,7 +231,7 @@ static const SGameOption skPortVisorOptions[] = {
     {PORT_OPTION(kPO_HideHelmet), -1, 0.f, 1.f, 1.f, kOT_DoubleEnum},
     {PORT_OPTION(kPO_HideVisorEffects), -1, 0.f, 1.f, 1.f, kOT_DoubleEnum},
     {PORT_OPTION(kPO_RevealMap), -1, 0.f, 1.f, 1.f, kOT_DoubleEnum},
-    {PORT_OPTION(kPO_MapPickups), -1, 0.f, 1.f, 1.f, kOT_DoubleEnum},
+    {PORT_OPTION(kPO_MapPickups), -1, 0.f, 2.f, 1.f, kOT_TripleEnum},
     {PORT_OPTION(kPO_SkippableCutscenes), -1, 0.f, 1.f, 1.f, kOT_DoubleEnum},
     {PORT_OPTION(kPO_ElevatorRide), -1, 0.f, 2.f, 1.f, kOT_TripleEnum},
     {kGO_RestoreDefaults, 35, 0.f, 1.f, 1.f, kOT_RestoreDefaults},
@@ -245,6 +248,7 @@ static const SGameOption skPortDisplayOptions[] = {
     {PORT_OPTION(kPO_Fov), -1, PortDebug::kFovMin, PortDebug::kFovMax, 1.f, kOT_Float},
     {PORT_OPTION(kPO_AntiAliasing), -1, 0.f, 1.f, 1.f, kOT_DoubleEnum},
     {PORT_OPTION(kPO_SpeedrunTimer), -1, 0.f, 1.f, 1.f, kOT_DoubleEnum},
+    {PORT_OPTION(kPO_PhotoMode), -1, 0.f, 1.f, 1.f, kOT_DoubleEnum},
     {kGO_RestoreDefaults, 35, 0.f, 1.f, 1.f, kOT_RestoreDefaults},
 };
 static const SGameOption skPortControllerOptions[] = {
@@ -325,6 +329,8 @@ static const wchar_t* PortOptionTitle(EGameOption option) {
     return L"Elevator Ride";
   case kPO_OriginalExperience:
     return L"Original Experience";
+  case kPO_PhotoMode:
+    return L"Photo Mode";
   default:
     return L"";
   }
@@ -363,8 +369,16 @@ static int GetPortOption(EGameOption option) {
   case kPO_RevealMap:
     return PortDebug::RevealMap() ? 1 : 0;
   case kPO_MapPickups:
-    // Randomized games force it on; show what is in effect.
-    return PortMapPickups::Active() ? 1 : 0;
+    // Row order Off, Seen, third (Rooms when that is the mode, else All).
+    switch (PortDebug::MapPickups()) {
+    case PortDebug::kMapPickups_Seen:
+      return 1;
+    case PortDebug::kMapPickups_Rooms:
+    case PortDebug::kMapPickups_All:
+      return 2;
+    default:
+      return 0;
+    }
   case kPO_SkippableCutscenes:
     // Randomized games force it on; show what is in effect.
     return PortSkipCutscenes::Active() ? 1 : 0;
@@ -443,6 +457,12 @@ static void SetPortOption(EGameOption option, int value) {
   case kPO_AntiAliasing:
     PortDebug::SetMsaa(value > 0 ? 4 : 1);
     break;
+  case kPO_PhotoMode:
+    // The pause screen closes, then photo mode starts when play resumes.
+    if (value > 0) {
+      PortPhoto::RequestEnterAfterPause();
+    }
+    break;
   case kPO_HudScale:
     PortDebug::SetHudScale(value);
     break;
@@ -459,7 +479,12 @@ static void SetPortOption(EGameOption option, int value) {
     PortDebug::SetRevealMap(value > 0);
     break;
   case kPO_MapPickups:
-    PortDebug::SetMapPickups(value > 0);
+    // The row has three cells; F1 and the console reach every mode.
+    PortDebug::SetMapPickups(value == 0 ? PortDebug::kMapPickups_Off
+                             : value == 1 ? PortDebug::kMapPickups_Seen
+                             : PortDebug::MapPickups() == PortDebug::kMapPickups_Rooms
+                                 ? PortDebug::kMapPickups_Rooms
+                                 : PortDebug::kMapPickups_All);
     break;
   case kPO_SkippableCutscenes:
     PortDebug::SetSkippableCutscenes(value > 0);
@@ -638,7 +663,7 @@ void CGameOptions::TryRestoreDefaults(const CFinalInput& input, int category, in
         PortDebug::SetHideHelmet(true);
         PortDebug::SetHideVisorEffects(false);
         PortDebug::SetRevealMap(false);
-        PortDebug::SetMapPickups(false);
+        PortDebug::SetMapPickups(PortDebug::kMapPickups_Off);
         PortDebug::SetSkippableCutscenes(false);
         PortDebug::SetElevatorRide(PortDebug::kElevatorRide_Original);
         break;
@@ -769,6 +794,24 @@ void COptionsScreen::ProcessInput(const CFinalInput& input) {
     x19c_quitGame->ProcessUserInput(input);
   }
 }
+
+#ifdef TARGET_PC
+void COptionsScreen::PortPointerInput(CFinalInput& input) {
+  if (!x19c_quitGame.null()) {
+    PortPointerMenu::Table(x19c_quitGame->PortTable());
+    if (PortPointerMenu::TakeBack()) {
+      PortPointerMenu::PressB(input);
+    }
+    return;
+  }
+  // The slider and value rows set the option; the rest is the shared tables.
+  if (!PortPointerMenu::Slider(x18c_slidergroup_slider)) {
+    PortPointerMenu::Table(x190_tablegroup_double, false, false);
+    PortPointerMenu::Table(x194_tablegroup_triple, false, false);
+  }
+  CPauseScreenBase::PortPointerInput(input);
+}
+#endif
 
 void COptionsScreen::Draw(float transInterp, float totalAlpha, float yOff) const {
   CPauseScreenBase::Draw(transInterp, totalAlpha, yOff);
@@ -942,10 +985,15 @@ void COptionsScreen::UpdateOptionView() {
       CGuiTextPane* label =
           static_cast< CGuiTextPane* >(x194_tablegroup_triple->GetWorkerWidget(i));
       static const wchar_t* const kElevatorLabels[] = {L"Original", L"Fast", L"Skip"};
+      static const wchar_t* const kPickupLabels[] = {L"Off", L"Seen", L"All"};
       if (opt.option == PORT_OPTION(kPO_AspectRatio)) {
         label->TextSupport().SetText(rstl::wstring_l(kAspectLabels[i]));
       } else if (opt.option == PORT_OPTION(kPO_ElevatorRide)) {
         label->TextSupport().SetText(rstl::wstring_l(kElevatorLabels[i]));
+      } else if (opt.option == PORT_OPTION(kPO_MapPickups)) {
+        label->TextSupport().SetText(rstl::wstring_l(
+            i == 2 && PortDebug::MapPickups() == PortDebug::kMapPickups_Rooms ? L"Rooms"
+                                                                              : kPickupLabels[i]));
       } else {
         label->TextSupport().SetText(rstl::wstring_l(xc_pauseStrg.GetString(96 + i)));
       }
@@ -1249,6 +1297,30 @@ bool SOptionsFrontEndFrame::ProcessUserInput(const CFinalInput& input, CSaveGame
     saveUI->ProcessUserInput(input);
   }
   if (x1c_loadedFrame != nullptr && x134_24_visible) {
+#ifdef TARGET_PC
+    // Pointer: the slider drags, enum values select on click only (hovering
+    // must not change a setting), a click on a category while the options
+    // are open returns to it, back = B.
+    CFinalInput pointerInput = input;
+    if (PortPointerMenu::Begin()) {
+      // Selecting a right row is what opens its value, so its Advance needs
+      // no A.
+      if (!PortPointerMenu::Slider(x34_slidergroup_slider)) {
+        PortPointerMenu::Table(x2c_tablegroup_double, false, false);
+        PortPointerMenu::Table(x30_tablegroup_triple, false, false);
+        if (x28_tablegroup_rightmenu->GetIsActive() &&
+            PortPointerMenu::PeekClickRow(x24_tablegroup_leftmenu) >= 0) {
+          x28_tablegroup_rightmenu->PortCancel();
+        }
+        PortPointerMenu::Table(x28_tablegroup_rightmenu, false);
+        PortPointerMenu::Table(x24_tablegroup_leftmenu);
+      }
+      if (PortPointerMenu::TakeBack()) {
+        PortPointerMenu::PressB(pointerInput);
+      }
+    }
+    const CFinalInput& input = pointerInput;
+#endif
     if (input.PB() && x24_tablegroup_leftmenu->GetIsActive()) {
       x134_25_exitOptions = true;
       CSfxManager::SfxStart(0x446, 0x7f, 0x40, false, CSfxManager::kMedPriority, false,

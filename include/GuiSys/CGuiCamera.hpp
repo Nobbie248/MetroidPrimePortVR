@@ -63,24 +63,33 @@ public:
     height = mClipHeight;
     return mClipHeight > 0;
   }
-  CTransform4f GetAspectSpreadTransform(const CVector3f& worldAnchor) const;
+  // `weight` scales the horizontal spread (CGuiFrame::SetSpreadWeightTree); 1 is the full spread.
+  CTransform4f GetAspectSpreadTransform(const CVector3f& worldAnchor, float weight = 1.f) const;
   // The horizontal spread about the eye warps the screen in slices, in screen tangents (view X
   // over depth): up to `inner` it is left as authored, from `inner` to `outer` it stretches, and
   // past `outer` it slides by the whole spread. False unless that spread is active.
   // `curved` is the smooth variant for the helmet's arcs: a wider band with an eased stretch.
   bool GetAspectSlices(float& inner, float& outer, bool curved = false) const;
-  // How far that warp moves the image at screen tangent `tangent`, for a warp centred on screen
-  // tangent `center` (GetSliceCenter).
-  float GetAspectSliceOffset(float tangent, bool curved = false, float center = 0.f) const;
+  // How far that warp moves the image at authored (unlagged) screen tangent `tangent`.
+  float GetAspectSliceOffset(float tangent, bool curved = false) const;
   // HUD lag moves the frame's content on screen. `idleToView` maps the frame's view space without
-  // lag onto the one drawn (identity at rest), so the warp's slices follow the content instead of
-  // staying put while it moves through them.
-  void SetSpreadLag(const CTransform4f& idleToView) { mSpreadLag = idleToView; }
+  // lag onto the one drawn (identity at rest). The warp is applied in the unlagged space and then
+  // carried through the lag, so the content keeps its shape while it lags: warping lagged screen
+  // tangents instead made the lag's perspective (it is mostly a turn) slide content through the
+  // stretch band, which a wide band (thermal, X-ray) amplified into visible swimming.
+  void SetSpreadLag(const CTransform4f& idleToView) {
+    mSpreadLag = idleToView;
+    mSpreadLagInv = idleToView.GetInverse();
+  }
   // Places a HUD camera at `xf` (CSamusHud::BuildFinalCameraTransform) whose unlagged pose is
   // unrotated at `idlePos`, and sets the spread lag to match.
   void SetHudO2WTransform(const CTransform4f& xf, const CVector3f& idlePos);
-  // Where the lagged content's screen centre is, as a screen tangent at view depth `depth`.
-  float GetSliceCenter(float depth) const;
+  // The drawn screen tangent of unlagged screen tangent `tangent` at view depth `depth` (on the
+  // horizon), i.e. where the lag puts it.
+  float GetLaggedTangent(float tangent, float depth) const;
+  // How far the warp moves the image at view-space point `eye`, as a drawn screen tangent: the
+  // point is taken back through the lag, warped there, and lagged again.
+  float GetLaggedSliceOffset(const CVector3f& eye, bool curved = false, float weight = 1.f) const;
   // Where the curved warp's band ends, as a fraction of the authored half width.
   static constexpr float kCurveOuter = 0.85f;
   // A frame whose centre piece is wider than the combat HUD's energy bar (the thermal and X-ray
@@ -103,18 +112,24 @@ public:
   // set up spans across and up (after the aspect match); zero for an
   // orthographic camera or before the first Draw. The headset lays the HUD's
   // 2D draws on a plane spanning the same angles (CInGameGuiManager::Draw).
-  float GetDrawTanHalfWidth() const { return mDrawTanHalfWidth; }
-  float GetDrawTanHalfHeight() const { return mDrawTanHalfHeight; }
+  float GetDrawTanHalfWidth() const { return mDrawTanX; }
+  float GetDrawTanHalfHeight() const { return mDrawTanY; }
   // The HUD scale alone, as a world-space transform; scaleWeight fades it
   // (0 = identity).
   CTransform4f GetHudScaleTransform(float scaleWeight = 1.f) const;
   // The widescreen spread followed by the HUD scale for a widget anchored at
   // worldAnchor.
-  CTransform4f GetHudTransform(const CVector3f& worldAnchor, float scaleWeight = 1.f) const;
+  CTransform4f GetHudTransform(const CVector3f& worldAnchor, float scaleWeight = 1.f,
+                               float spreadWeight = 1.f) const;
 
   FourCC GetWidgetTypeID() const override { return 'CAMR'; }
 
   CVector3f ConvertToScreenSpace(const CVector3f& point) const;
+  // Port: where CGuiFrame::Draw puts a rigid widget's `point` on screen, in [-1, 1] (x right, y
+  // up), with the render aspect, the spread (weighted by `spreadWeight`), the HUD scale and the lag
+  // of the last Draw. ConvertToScreenSpace projects with the authored 4:3 camera instead. Falls
+  // back to it before the first Draw and for orthographic cameras.
+  CVector3f ConvertToDrawnScreenSpace(const CVector3f& point, float spreadWeight = 1.f) const;
 
 public:
   EProjection xb8_projection;
@@ -135,13 +150,14 @@ public:
   float mSliceInner = 0.f;
   float mSliceOuter = 0.f;
   CTransform4f mSpreadLag = CTransform4f::Identity();
+  CTransform4f mSpreadLagInv = CTransform4f::Identity();
   // Camera-to-world transform used by the last Draw.
   mutable CTransform4f mSpreadView = CTransform4f::Identity();
   bool mHudScaled = false;
   mutable float mHudScale = 1.f;
-  // PortVr: see GetDrawTanHalfWidth.
-  mutable float mDrawTanHalfWidth = 0.f;
-  mutable float mDrawTanHalfHeight = 0.f;
+  // The perspective half-extents (tangents) drawn by the last Draw; 0 before it or orthographic.
+  mutable float mDrawTanX = 0.f;
+  mutable float mDrawTanY = 0.f;
   // The view centre drawn by the last Draw (orthographic cameras may be offset).
   mutable float mCenterX = 0.f;
   mutable float mCenterZ = 0.f;

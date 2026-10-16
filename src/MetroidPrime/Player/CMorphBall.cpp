@@ -2445,10 +2445,17 @@ void CMorphBall::Render(const CStateManager& mgr, const CActorLights* lights) co
     }
   }
 
-  x19cc_wallSparkGen->Render();
-  x1bc8_wakeEffectGens[7]->Render();
-  if (x1c0c_wakeEffectIdx != -1) {
-    x1bc8_wakeEffectGens[x1c0c_wakeEffectIdx]->Render();
+  {
+#ifdef TARGET_PC
+    // Sparks and wakes are emitted at world points (contacts, the ball's last tick
+    // position), so they blend themselves and must not ride the player's shift.
+    CPortRenderScopeSuspend portWorldFx(true);
+#endif
+    x19cc_wallSparkGen->Render();
+    x1bc8_wakeEffectGens[7]->Render();
+    if (x1c0c_wakeEffectIdx != -1) {
+      x1bc8_wakeEffectGens[x1c0c_wakeEffectIdx]->Render();
+    }
   }
 
   PortGlowGen()->SetModulationColor(GetBallInnerGlowColor(x8_ballGlowColorIdx));
@@ -3505,8 +3512,14 @@ void CMorphBall::RenderToShadowTex(CStateManager& mgr) {
 
   const float ballRadius = xc_radius;
   CVector3f primitiveOffset = x0_player.GetPrimitiveOffset();
+#ifdef TARGET_PC
+  // Cast from the presented ball so the shadow doesn't step behind it at the tick rate.
+  const CVector3f center = x0_player.PortPresentedPoint(
+      x0_player.GetTranslation() + primitiveOffset + CVector3f(0.f, 0.f, ballRadius));
+#else
   const CVector3f center =
       x0_player.GetTranslation() + primitiveOffset + CVector3f(0.f, 0.f, ballRadius);
+#endif
   const float extent = 1.25f * xc_radius;
   const CAABox aabb(CVector3f(center.GetX() - extent, center.GetY() - extent, center.GetZ() - 10.f),
                     CVector3f(center.GetX() + extent, center.GetY() + extent, center.GetZ()));

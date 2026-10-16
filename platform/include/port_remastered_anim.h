@@ -32,16 +32,20 @@ struct Key {
 struct Bone {
   std::string name;
   int parent = -1;  // bone index, -1 for a root
+  // The abs op that places the bone: 4/5 plain, 6 inverse parent scale (SkinPose applies
+  // it), 7-9 base / extract-inverse-scale forms (not applied), 0 unknown.
+  uint8_t absOp = 0;
+  bool invScale = false;
   Key bind;         // the bind pose relative to the parent (scale = the matrix column lengths)
 };
 
 struct Anim {
   std::string name;
   uint32_t id = 0;  // the record id in the file
-  // Frames per second: 30 times the header float, the rate the exe's CTimeState moves
-  // the frame count by (its callers scale it). 30 makes Remastered's floating-debris and
-  // hologram loops last as long as retail's: 749 frames at 1.0 are 24.9 s, twice retail's
-  // 12.458 s spin; 240 are 8.0 s, twice its 4.0 s.
+  // Frames per second: 60 times the header float. The exe advances the frame count by
+  // skNativeRate32 (60.0, 0x1d1f308) times the header float per second (CAnimCompStreamInst
+  // Advance, CChar::AdvanceAnim). That makes the 749-frame debris/hologram loops last
+  // 12.5 s, retail's 12.458 s spin; 240 frames are 4.0 s, retail's 4.0 s.
   float fps = 0.0f;
   uint32_t frames = 0;
   // bones[b][frame] for every frame 0..frames-1, sampled at integer frame times.

@@ -81,6 +81,23 @@ struct EffectNode {
 bool ParseEffect(const uint8_t* data, size_t size, EffectNode& out, std::string& error,
                  size_t* failOffset = nullptr);
 
+// Walks a WPSM or CRSM resource's top-level DESC properties using only the
+// form-specific factory allowlist (global property names are not sufficient).
+// `data` may also include FOOT/metadata bytes appended by Pak::ReadAsset; only
+// the length-checked RFRM/DESC form is parsed. The root walk is iterative and
+// capped at 1024 properties; typed expressions are capped at depth 64 and 4096
+// value nodes. Nested child/property payloads are not exposed as role fields.
+bool ParseRemasteredRoleAsset(const uint8_t* data, size_t size, uint32_t expectedForm, EffectNode& out,
+                             std::string& error);
+
+// Walks a retail WPSC/WPSM or CRSC/CRSM tagged-field stream using the field
+// value schemas consumed by the corresponding game factories. Returns the
+// unique top-level asset id for `field`; malformed, truncated, unknown, or
+// ambiguous streams fail closed. As in the factories, bytes after _END are
+// outside the tagged-field stream and are not inspected.
+bool ReadRetailRoleAssetId(const uint8_t* data, size_t size, uint32_t expectedClass, uint32_t field,
+                           uint32_t& out, std::string* error = nullptr);
+
 // A KSSM spawn table: the child systems to start on given frames. Retail has
 // one table; Remastered may hold several, each behind a selector element.
 struct EffectSpawnTable {

@@ -5,7 +5,7 @@
     mprig.py cmd t1 status 'roomenv info'          # one console command per argument
     mprig.py shot t1 /tmp/a.png 'roomenv bloom off'
     mprig.py ab t1 /tmp/x --a 'roomenv bloom off' --b 'roomenv bloom on'
-    mprig.py stop --all
+    mprig.py stop --all t                          # your runs whose name starts with "t"
 
 State lives in build/rig/ (git-ignored): build/rig/<name>/{run.json,game.log,user/,shots/}.
 Defaults (disc, real user dir, build) come from build/rig.ini [rig], overridden by env
@@ -667,7 +667,7 @@ def start_run(a):
         "DISPLAY": f":{display}", "XDG_RUNTIME_DIR": f"/run/user/{os.getuid()}", "SDL_AUDIO_DRIVER": "dummy",
         "MESA_VK_WSI_DEBUG": "sw", "SDL_VIDEODRIVER": "x11",  # RADV on Xvfb has no DRI3
         "MP_USER_PATH": str(user), "MP_CACHE_PATH": str(CACHE), "MP_MODS": str(mods),
-        "MP_FAST_BOOT": "1", "MP_DISABLE_AI_AUDIO": "1", "MP_UPDATE_CHECK": "0", "MP_ASPECT": "16:9", "MP_CONSOLE": str(port),
+        "MP_FAST_BOOT": "0" if getattr(a, "front", False) else "1", "MP_DISABLE_AI_AUDIO": "1", "MP_UPDATE_CHECK": "0", "MP_ASPECT": "16:9", "MP_CONSOLE": str(port),
         "ASAN_OPTIONS": "detect_leaks=0:abort_on_error=1",
     })
     if a.room:
@@ -697,7 +697,13 @@ def start_run(a):
         if game.poll() is not None:
             break
         try:
-            if not legacy:
+            if getattr(a, "front", False):
+                # the front end has no game state for `status`; `pointer where` needs none
+                res = console(port, ["pointer where"], timeout=10)
+                if res and res[0][1]:
+                    ready = True
+                    break
+            elif not legacy:
                 res = console(port, ["status --json"], timeout=10)
                 if res and not res[0][1] and "unknown" in res[0][2][-1].lower():
                     legacy = True
@@ -754,15 +760,20 @@ def stop_run(run, quiet=False):
 
 
 def cmd_stop(a):
-    if a.all:
-        runs = [r for r in all_runs() if game_alive(r) or xvfb_alive(r)]
+    if a.all is not None or a.everyone:
+        # Other sessions share build/rig/: a bulk stop is scoped to the caller's own name prefix.
+        if a.all is not None and not a.all:
+            die("--all needs the prefix of your own run names (e.g. --all emucard-); --everyone stops every session's runs")
+        runs = [r for r in all_runs() if (game_alive(r) or xvfb_alive(r)) and (a.everyone or r["name"].startswith(a.all))]
         if not runs:
             print("no live runs")
+        if a.everyone and runs:
+            print("stopping every session's runs: " + " ".join(r["name"] for r in runs), file=sys.stderr)
         for r in runs:
             stop_run(r)
         return
     if not a.name:
-        die("give a run name or --all")
+        die("give a run name or --all PREFIX")
     stop_run(load_run(a.name))
 
 
@@ -1183,6 +1194,7 @@ def build_parser():
     def start_args(s, room_help):
         s.add_argument("--build", help="build dir name under build/ or a path (default: rig.ini build)")
         s.add_argument("--disc")
+        s.add_argument("--front", action="store_true", help="boot the real front end (no fast boot); ready once the console answers")
         s.add_argument("--env", action="append", default=[], metavar="K=V")
         s.add_argument("--mods", help="mods dir, or 'none' for an empty one (default: the real user's)")
         s.add_argument("--settings", help="port_settings.ini to use, or 'none' (default: the real user's)")
@@ -1263,7 +1275,9 @@ def build_parser():
     s.add_argument("--out-dir", help="where the shots go (default: build/rig/<name>/fxbisect)")
     s = add("stop", cmd_stop, "quit the game, then kill only the recorded processes")
     s.add_argument("name", nargs="?")
-    s.add_argument("--all", action="store_true")
+    s.add_argument("--all", metavar="PREFIX", nargs="?", const="",
+                   help="stop your live runs whose name starts with PREFIX")
+    s.add_argument("--everyone", action="store_true", help="stop every live run, other sessions' included")
     add("ls", cmd_ls, "list runs; reaps the Xvfb of dead runs")
     s = add("log", cmd_log, "tail game.log without the noisy lines")
     s.add_argument("name")

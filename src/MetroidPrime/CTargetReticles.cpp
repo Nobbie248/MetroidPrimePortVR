@@ -38,6 +38,7 @@
 #include "vr/vr_view.h"
 #include "vr/vr_look_scan.h"
 #include "vr/vr_settings.h"
+#include "port_mouse.h"
 #endif
 
 #include <float.h>
@@ -608,11 +609,29 @@ void CCompoundTargetReticle::Draw(const CStateManager& mgr, bool hideLockon) con
 
     CGraphics::SetCullMode(kCM_None);
 
+#ifdef TARGET_PC
+    // The groups were placed at the tick's poses. While smooth frames draw
+    // actors and the camera between ticks, carry a lock-on with its target to
+    // where it is drawn, and an idle (camera-placed) group with the camera,
+    // else they shake against what they mark (issue #76). Restored below.
+    CTargetReticleRenderState& curr = const_cast< CTargetReticleRenderState& >(x10c_currGroupInterp);
+    CTargetReticleRenderState& next = const_cast< CTargetReticleRenderState& >(x174_nextGroupInterp);
+    const CVector3f savedCurr = curr.GetTargetPositionWorld();
+    const CVector3f savedNext = next.GetTargetPositionWorld();
+    PortPresentGroup(curr, mgr);
+    PortPresentGroup(next, mgr);
+#endif
+
     if (!hideLockon) {
       DrawCurrLockOnGroup(rot, mgr);
       DrawNextLockOnGroup(rot, mgr);
       DrawOrbitZoneGroup(rot, mgr);
     }
+
+#ifdef TARGET_PC
+    curr.SetTargetPositionWorld(savedCurr);
+    next.SetTargetPositionWorld(savedNext);
+#endif
 
     DrawGrappleGroup(rot, mgr, hideLockon);
 
@@ -1053,6 +1072,9 @@ void CCompoundTargetReticle::DrawNextLockOnGroup(const CMatrix3f& rot,
   float radius = x174_nextGroupInterp.GetRadiusWorld();
   float factor = x174_nextGroupInterp.GetFactor();
   float visorFactor = mgr.GetPlayerState()->GetVisorTransitionFactor();
+  // Port: F1 "Secondary crosshairs" off hides the seeker and the X-ray/thermal next-target
+  // reticles; the scan visor's box below stays (it shows what a scan would pick).
+  const bool portSecondary = PortDebug::SecondaryCrosshairs();
 
   bool scanRet = false;
   bool xrayRet = false;
@@ -1076,7 +1098,7 @@ void CCompoundTargetReticle::DrawNextLockOnGroup(const CMatrix3f& rot,
 
   float minVpClampScale = x174_nextGroupInterp.GetMinViewportClampScale();
 
-  if (!xrayRet && factor > 0.f) {
+  if (portSecondary && !xrayRet && factor > 0.f) {
     const_cast< TCachedToken< CModel >& >(x40_seeker).TryCache();
     if (CModel* const model = x40_seeker.GetObject()) {
       float scale = CalculateClampedScale(position, radius,
@@ -1096,7 +1118,7 @@ void CCompoundTargetReticle::DrawNextLockOnGroup(const CMatrix3f& rot,
     }
   }
 
-  if (xrayRet) {
+  if (portSecondary && xrayRet) {
     const_cast< TCachedToken< CModel >& >(xac_xrayRetRing).TryCache();
     if (CModel* const model = xac_xrayRetRing.GetObject()) {
       float scale = CalculateClampedScale(position, radius,
@@ -1117,7 +1139,7 @@ void CCompoundTargetReticle::DrawNextLockOnGroup(const CMatrix3f& rot,
     }
   }
 
-  if (thermalRet) {
+  if (portSecondary && thermalRet) {
     const_cast< TCachedToken< CModel >& >(xb8_thermalReticle).TryCache();
     if (CModel* const model = xb8_thermalReticle.GetObject()) {
       float scale = CalculateClampedScale(position, radius,
@@ -1221,12 +1243,28 @@ void CCompoundTargetReticle::DrawOrbitZoneGroup(const CMatrix3f& rot,
       scale = CalculateClampedScale(targetPos, scale, tweak->x20c_reticuleClampMin,
                                     tweak->x210_reticuleClampMax, mgr);
     } else {
-      // The idle crosshair sits on the tick's aim ray, placed against the
-      // simulation camera. Keep it where it is relative to the view while
-      // smooth frames blend the camera between ticks or per-frame look turns it
-      // ahead, else it slides off-centre and snaps back every tick (issue #24).
-      targetPos = camMgr->GetCurrentCameraTransform(mgr) *
-                  (camMgr->GetSimulationCameraTransform(mgr).GetInverse() * targetPos);
+    targetPos = camMgr->GetCurrentCameraTransform(mgr) *
+                (camMgr->GetSimulationCameraTransform(mgr).GetInverse() * targetPos);
+    // Pointer aim: the crosshair is the pointer, moved every drawn frame. The model's
+    // geometry sits well in front of its origin (it turns with the camera), so put its
+    // centre on the ray through the pointer at the depth it is drawn at when centred.
+    float pointerX = 0.f;
+    float pointerY = 0.f;
+    if (PortDebug::PresentedPointerAimPosition(CCameraManager::GetPresentationInterpolation(),
+                                                    pointerX, pointerY)) {
+      const CGameCamera& cam = camMgr->GetCurrentCamera(mgr);
+      float yaw = 0.f;
+      float pitch = 0.f;
+      PortMouse::PointerAim::RayAngles(pointerX, pointerY, cam.GetRenderFov(),
+                                       cam.GetAspectRatio(), yaw, pitch);
+      const CTransform4f camXf = camMgr->GetCurrentCameraTransform(mgr);
+      const CVector3f centre = model->GetBoundingBox().GetCenterPoint() * scale;
+      const float depth = (camXf.GetInverse() * targetPos).GetY() + centre.GetY();
+      const CVector3f dir(sinf(yaw) * cosf(pitch), cosf(yaw) * cosf(pitch), sinf(pitch));
+      if (depth > 0.f && dir.GetY() > 0.f) {
+        targetPos = camXf * (dir * (depth / dir.GetY()) - centre);
+      }
+    }
     }
 #endif
     gpRender->SetModelMatrix(CTransform4f(crosshairRotation, targetPos) * CTransform4f::Scale(scale));
@@ -1266,6 +1304,23 @@ void CCompoundTargetReticle::UpdateTargetParameters(CTargetReticleRenderState& s
                                      : xf4_targetPos);
   }
 }
+
+#ifdef TARGET_PC
+void CCompoundTargetReticle::PortPresentGroup(CTargetReticleRenderState& state,
+                                              const CStateManager& mgr) {
+  // Same sources as UpdateTargetParameters: an actor's point moves with the
+  // actor's drawn pose, the idle point with the drawn camera (see issue #24).
+  if (const CActor* act = TCastToConstPtr< CActor >(
+          mgr.GetObjectListById(kOL_All).GetObjectById(state.GetTargetId()))) {
+    state.SetTargetPositionWorld(act->PortPresentedPoint(state.GetTargetPositionWorld()));
+  } else if (state.GetIsOrbitZoneIdlePosition()) {
+    const CCameraManager* camMgr = mgr.GetCameraManager();
+    state.SetTargetPositionWorld(
+        camMgr->GetCurrentCameraTransform(mgr) *
+        (camMgr->GetSimulationCameraTransform(mgr).GetInverse() * state.GetTargetPositionWorld()));
+  }
+}
+#endif
 
 float CCompoundTargetReticle::CalculateRadiusWorld(const CActor& actor,
                                                    const CStateManager& mgr) const {
@@ -1336,6 +1391,14 @@ float CCompoundTargetReticle::CalculateClampedScale(CVector3f pos, float scale, 
                                                     float clampMax, const CStateManager& mgr) {
   const CGameCamera& cam = mgr.GetCameraManager()->GetCurrentCamera(mgr);
   CTransform4f camXf = mgr.GetCameraManager()->GetCurrentCameraTransform(mgr);
+#ifdef TARGET_PC
+  // Draws pass points placed for the presented camera (PortPresentGroup), but
+  // the scale is measured against the tick's camera. Between ticks the two are
+  // up to a step apart, so walking forward or back pulsed the clamped size of
+  // the X-ray ring and thermal reticle at every sim step (issue #97). Measure
+  // the point where it sits relative to the drawn camera.
+  pos = mgr.GetCameraManager()->GetSimulationCameraTransform(mgr) * camXf.GetInverse() * pos;
+#endif
   CVector3f viewSpace = cam.GetTransform().TransposeMultiply(pos);
 #ifdef TARGET_PC
   const auto settings = PortVr::GetVrSettings();

@@ -58,6 +58,9 @@ public:
   // base indices, in an extra block of at least 0x40 bytes. Returns false for
   // retail surfaces.
   bool PortBaseIndices(uint* out) const;
+  // The surface's visor mesh filter word (PortVisorMesh, platform/include/port_visor_mesh.h):
+  // 0 for retail surfaces and Remastered meshes with no filter bit.
+  uint PortVisorWord() const;
 #endif
 
 private:

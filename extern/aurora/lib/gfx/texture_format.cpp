@@ -27,6 +27,8 @@ TextureFormatInfo format_info(wgpu::TextureFormat format) noexcept {
   case wgpu::TextureFormat::BGRA8Unorm:
   case wgpu::TextureFormat::R32Float:
     return {1, 1, 4, false};
+  case wgpu::TextureFormat::RGBA16Float: // linear scene copies (GXPortCopyScene)
+    return {1, 1, 8, false};
   case wgpu::TextureFormat::BC1RGBAUnorm:
   case wgpu::TextureFormat::BC1RGBAUnormSrgb:
     return {4, 4, 8, true};

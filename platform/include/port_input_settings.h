@@ -22,6 +22,13 @@ constexpr int kPadAltCount = 16;
 constexpr int kCrosshairSizeMin = 25;
 constexpr int kCrosshairSizeMax = 100;
 constexpr int kCrosshairSizeDefault = 50;
+// Pointer aim: dead box in percent of the half screen, edge turn speed in degrees/second.
+constexpr int kPointerAimBoxMin = 20;
+constexpr int kPointerAimBoxMax = 95;
+constexpr int kPointerAimBoxDefault = 70;
+constexpr int kPointerAimTurnMin = 30;
+constexpr int kPointerAimTurnMax = 720;
+constexpr int kPointerAimTurnDefault = 180;
 // The Android touch overlay's margins, in dp.
 constexpr float kTouchMarginMaxDp = 300.f;
 constexpr float kTouchSideMarginDefault = 16.f;
@@ -45,7 +52,12 @@ struct Settings {
   bool remasteredMovement = true;
   bool springFlick = false;
   float springFlickRate = 6.f;
+  bool springSwipe = true;  // Android: a quick swipe up on the touch aim area springs
   float stickAimRate = 900.f;
+  // With stickAimSplit on, stickAimRateY drives vertical stick aim and
+  // stickAimRate only the horizontal; off, stickAimRate drives both.
+  bool stickAimSplit = false;
+  float stickAimRateY = 900.f;
   // Gyro aiming: off / hold / always, auto / controller / phone, and how fast a
   // rotation turns into aim travel.
   int gyroMode = 0;
@@ -72,6 +84,9 @@ struct Settings {
   bool mouseButtons = true;
   bool mouseCrosshair = true;
   int crosshairSize = kCrosshairSizeDefault;
+  bool pointerAim = false; // the mouse moves a pointer; the view turns past the dead box
+  int pointerAimBox = kPointerAimBoxDefault;
+  int pointerAimTurn = kPointerAimTurnDefault;
   float mouseSensitivity = 0.0035f;
   // What each mouse button does under mouse aim (PortInputMap::EMouseAction).
   int mouseActions[PortInputMap::kMouseButtonCount] = {

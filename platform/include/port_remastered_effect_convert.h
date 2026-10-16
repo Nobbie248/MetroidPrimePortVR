@@ -48,9 +48,11 @@
 // gives their child ids: generators (GPSM) as PART, swooshes (SWSH) as SWHC
 // (CParticleSwooshDataFactory's SWSH stream, Remastered's SBDM blend mode as
 // AALP) and electric effects (ELC2, ELSM) as ELSC (CParticleElectricDataFactory's
-// ELSM stream). ELC2 has no line widths or colours (LWD1-3, LCL1-3), so one
-// draws only its child generators and swoosh. The other embedded forms (weapon,
-// collision, decal) and KSSM spawn tables are not converted yet.
+// ELSM stream). An ELC2 starts with the port-only marker PEL2 and carries its
+// own fields (SIDE, RADS, LRAD, ..., see Elc2Properties) plus the VMAT material,
+// so the runtime draws it as CParticleElectric2's camera-facing ribbons. The
+// other embedded forms (weapon, collision, decal) and KSSM spawn tables are not
+// converted yet.
 
 #include "port_remastered_effect.h"
 

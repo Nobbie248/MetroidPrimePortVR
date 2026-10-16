@@ -1,8 +1,10 @@
 #include "port_input_remap_ui.h"
 
 #include "port_controls.h"
+#include "port_debug.h"
 #include "port_input_bindings.h"
 #include "port_input_devices.h"
+#include "port_pointer.h"
 
 #include <dolphin/pad.h>
 #include <imgui.h>
@@ -913,7 +915,14 @@ const std::vector<SGroup>& Groups() {
           Action::VisorPrev},
          true},
         {"Morph Ball", {Action::SpringBall}, true},
-        {"Port", {Action::PortMenu, Action::SaveState, Action::LoadState, Action::Screenshot, Action::ToggleOriginal}, true},
+        // Read instead of the game buttons in menus and on the map ("Separate menu buttons").
+        {"Menus and map",
+         {Action::MenuA, Action::MenuB, Action::MenuX, Action::MenuY, Action::MenuL, Action::MenuR,
+          Action::MenuLAnalog, Action::MenuRAnalog, Action::MenuUp, Action::MenuDown, Action::MenuLeft,
+          Action::MenuRight},
+         true},
+        {"Port", {Action::PortMenu, Action::SaveState, Action::LoadState, Action::Screenshot, Action::ToggleOriginal,
+          Action::PhotoMode}, true},
         {"Layers (shift keys, advanced)", {Action::Layer1, Action::Layer2, Action::Layer3, Action::Layer4}, false},
     };
     // An action added to the engine but not sorted here still gets a row.
@@ -963,6 +972,16 @@ const char* GameHint(Action a) {
   case Action::AimDown:
   case Action::AimLeft:
   case Action::AimRight: return "Twin-stick aim";
+  case Action::MenuA: return "Confirm";
+  case Action::MenuB: return "Back";
+  case Action::MenuL:
+  case Action::MenuR:
+  case Action::MenuLAnalog:
+  case Action::MenuRAnalog: return "Page, map zoom";
+  case Action::MenuUp:
+  case Action::MenuDown:
+  case Action::MenuLeft:
+  case Action::MenuRight: return "Navigate";
   default: return nullptr;
   }
 }
@@ -1102,6 +1121,15 @@ void DrawTable(const SViews& views, bool editorDrawn) {
       // Every device's inputs in one cell; the icons tell them apart.
       ImGui::TableNextColumn();
       const float right = ImGui::GetCursorScreenPos().x + ImGui::GetContentRegionAvail().x;
+      // The Port menu's last key or controller input can't be removed (a touch one
+      // isn't enough on desktop); BuildProfile falls back to F1 if it goes anyway.
+      bool keepLast = false;
+      if (action == PortInput::Action::PortMenu) {
+        size_t reachable = 0;
+        for (const Family f : families)
+          if (f != Family::Touch) reachable += cells[int(f)].rows.size();
+        keepLast = reachable <= 1;
+      }
       bool first = true;
       for (const Family f : families) {
         ImGui::PushID(int(f));
@@ -1139,7 +1167,11 @@ void DrawTable(const SViews& views, bool editorDrawn) {
             ImGui::TextDisabled("(%s)", notes.c_str());
           }
           ImGui::SameLine(0.f, xGap);
-          if (ImGui::SmallButton("x")) {
+          const bool locked = keepLast && f != Family::Touch;
+          ImGui::BeginDisabled(locked);
+          const bool remove = ImGui::SmallButton("x");
+          ImGui::EndDisabled();
+          if (remove) {
             pending.action = action;
             pending.family = f;
             if (isDefault) {
@@ -1150,7 +1182,11 @@ void DrawTable(const SViews& views, bool editorDrawn) {
               pending.index = size_t(userIndex);
             }
           }
-          ImGui::SetItemTooltip("Remove this input.");
+          if (locked)
+            ImGui::SetItemTooltip("The Port menu needs at least one key or controller input. Add another "
+                                  "one first to remove this.");
+          else
+            ImGui::SetItemTooltip("Remove this input.");
           ImGui::PopID();
         }
         ImGui::PopID();
@@ -1338,6 +1374,43 @@ void DrawActiveController() {
 
 } // namespace
 
+std::string BindingsText(PortInput::Action action, const char* separator) {
+  // Hints ask every frame; the profile is rebuilt at most twice a second.
+  struct SCached {
+    PortInput::Action action;
+    std::string separator;
+    std::string text;
+    uint64_t atMs;
+  };
+  static std::vector<SCached> sCache;
+  const uint64_t now = SDL_GetTicks();
+  for (const SCached& c : sCache) {
+    if (c.action == action && c.separator == separator && now - c.atMs < 500) return c.text;
+  }
+  PortInput::Profile profile;
+  PortInputDevices::BuildProfile(profile);
+  std::vector<std::vector<Input>> seen;
+  std::string text;
+  for (const Binding& b : profile.bindings) {
+    if (b.action != action || b.count == 0) continue;
+    // A chord bound in both orders is listed once.
+    std::vector<Input> set(b.inputs.begin(), b.inputs.begin() + b.count);
+    std::sort(set.begin(), set.end(), [](const Input& x, const Input& y) {
+      return PortInput::InputToText(x) < PortInput::InputToText(y);
+    });
+    if (std::find(seen.begin(), seen.end(), set) != seen.end()) continue;
+    seen.push_back(set);
+    if (!text.empty()) text += separator;
+    for (int k = 0; k < b.count; ++k) {
+      if (k != 0) text += " + ";
+      text += InputName(b.inputs[k]);
+    }
+  }
+  std::erase_if(sCache, [&](const SCached& c) { return c.action == action && c.separator == separator; });
+  sCache.push_back({action, separator, text, now});
+  return text;
+}
+
 bool Capturing() {
   // The game thread asks too; a capture left behind when the page closed or the
   // tab changed stops counting once the page isn't drawn.
@@ -1394,6 +1467,20 @@ void Draw() {
 
   ImGui::SameLine();
   DrawReset(views);
+  bool menuStandard = PortDebug::MenuStandardButtons();
+  if (ImGui::Checkbox("Separate menu buttons", &menuStandard)) PortDebug::SetMenuStandardButtons(menuStandard);
+  ImGui::SetItemTooltip("On: menus and the map use the controller's \"Menus and map\" rows (by default its own "
+                        "buttons: A confirms, B backs out, the triggers page and zoom). Start and the map "
+                        "button keep their gameplay inputs. Keys and mouse buttons on those rows replace their "
+                        "gameplay action there. Bindings set for Menu or Map under Advanced still apply.\nOff: menus and the map follow your gameplay bindings, and the Menus and map "
+                        "rows do nothing.");
+  ImGui::SameLine();
+  bool pointerMenus = PortPointer::Enabled();
+  if (ImGui::Checkbox("Point and click menus", &pointerMenus)) PortDebug::SetPointerMenus(pointerMenus);
+  ImGui::SetItemTooltip("On: the mouse and touch work the game's menus and map. Hovering or tapping selects, "
+                        "a click (or a tap on the selected item) confirms, right click backs out, a click on a "
+                        "button hint presses it. Drags set sliders and turn the Samus doll and the map; the "
+                        "wheel or a pinch zooms them; a two-finger twist turns the map.\nOff: menus and the map read only buttons and keys.");
   ImGui::Separator();
 
   const bool editorOnTop = sEditing != kEditNone && !sEditRowShown;

@@ -75,7 +75,9 @@ struct TableText {
 // for. False when the table cannot be read or nothing in it changed.
 // `checkWording` (a disc other than 1.00, whose tables Remastered's indices
 // don't fit) matches each indexed string by its English instead.
+// `strgId` is the table's id: a few strings of the fixed UI tables are placed
+// by an explicit name -> index list (1.00 only).
 bool MergeStringTable(const uint8_t* retail, size_t size, const TableText& text, bool checkWording,
-                      std::vector<uint8_t>& out, int& reworded, int& translated);
+                      std::vector<uint8_t>& out, int& reworded, int& translated, uint32_t strgId = 0);
 
 }  // namespace PortRemastered

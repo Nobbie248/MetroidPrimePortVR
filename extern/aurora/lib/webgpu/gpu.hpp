@@ -49,6 +49,12 @@ extern GraphicsConfig g_graphicsConfig;
 extern TextureWithSampler g_frameBuffer;
 extern TextureWithSampler g_frameBufferResolved;
 extern TextureWithSampler g_depthBuffer;
+// Linear HDR scene colour (MSAA + resolved), the world EFB's size, sharing g_depthBuffer. Empty until
+// ensure_scene_hdr_target() allocates it; g_frameBuffer stays the 8-bit display EFB that present and
+// screenshots read.
+inline constexpr wgpu::TextureFormat SceneHdrFormat = wgpu::TextureFormat::RGBA16Float;
+extern TextureWithSampler g_sceneHdr;
+extern TextureWithSampler g_sceneHdrResolved;
 extern wgpu::RenderPipeline g_CopyPipeline;
 extern wgpu::RenderPipeline g_CopyPremultipliedAlphaPipeline;
 extern wgpu::BindGroup g_CopyBindGroup;
@@ -73,7 +79,22 @@ bool surface_window_changed();
 void resize_swapchain(uint32_t width, uint32_t height, uint32_t nativeWidth, uint32_t nativeHeight, bool force = false);
 // Changes MSAA (1 or 4) and the anisotropy that GX_ANISO_4 maps to. Call between frames with a live surface.
 void set_quality(uint32_t msaaSamples, uint16_t anisotropy);
-TextureWithSampler create_render_texture(uint32_t width, uint32_t height, bool multisampled);
+// format Undefined means the surface format.
+TextureWithSampler create_render_texture(uint32_t width, uint32_t height, bool multisampled,
+                                         wgpu::TextureFormat format = wgpu::TextureFormat::Undefined);
+// Conservative policy, not a format probe: RGBA16Float as a blendable, multisampled, resolvable
+// attachment is core WebGPU, but only devices with CoreFeaturesAndLimits get the HDR scene. Compatibility
+// devices (many Android GLES / older Vulkan ones) stay LDR even where the format would work.
+bool scene_hdr_supported() noexcept;
+// Allocates g_sceneHdr/g_sceneHdrResolved for the current g_frameBuffer size and sample count if
+// needed, under Validation/OutOfMemory/Internal error scopes. True only with both textures and views
+// valid and error-free; otherwise nothing stays allocated, and a failed size/sample count is warned
+// about once and not retried until it changes or the target is released. Kept across on/off until
+// resize, MSAA change or shutdown.
+bool ensure_scene_hdr_target();
+// g_sceneHdr's sample count, 0 while it is not allocated.
+uint32_t scene_hdr_sample_count() noexcept;
+void release_scene_hdr_target() noexcept;
 // A depth attachment in the configured depth format and MSAA sample count.
 TextureWithSampler create_depth_texture(uint32_t width, uint32_t height);
 const TextureWithSampler& present_source() noexcept;

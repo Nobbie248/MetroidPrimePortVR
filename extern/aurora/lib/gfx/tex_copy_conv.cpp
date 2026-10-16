@@ -12,6 +12,11 @@
 #include <absl/container/flat_hash_map.h>
 
 #include "texture_convert.hpp"
+#include "hdr_tone.hpp"
+
+#include <algorithm>
+#include <mutex>
+#include <tuple>
 
 using namespace std::string_literals;
 
@@ -328,6 +333,12 @@ static wgpu::Sampler g_nearestSampler;
 static wgpu::Sampler g_linearSampler;
 static absl::flat_hash_map<GXTexFmt, wgpu::RenderPipeline> g_pipelines;
 static wgpu::RenderPipeline g_blitPipeline;
+// CopyDomain::HdrDisplay / Linear pipelines, made on first use (an LDR run makes none), keyed by
+// (format, domain, output format); GX_TF_RGBA8 stands for the passthrough blit.
+static std::mutex g_domainMutex;
+static wgpu::BindGroupLayout g_hdrBindGroupLayout;
+static absl::flat_hash_map<std::tuple<GXTexFmt, CopyDomain, wgpu::TextureFormat>, wgpu::RenderPipeline>
+    g_domainPipelines;
 static wgpu::BindGroupLayout g_depthSnapshotBindGroupLayout;
 static wgpu::BindGroupLayout g_depthSnapshotBindGroupLayoutMS;
 static wgpu::RenderPipeline g_depthSnapshotPipeline;
@@ -449,6 +460,101 @@ static wgpu::RenderPipeline create_pipeline(const ConvPipeline& conv, const std:
 
 bool needs_conversion(const GXTexFmt fmt) { return g_pipelines.contains(fmt); }
 
+static constexpr std::string_view HdrCopyPreamble = R"(
+@group(0) @binding(3) var<uniform> hdr_copy_tone: array<vec4f, 3>;
+
+fn hdr_copy_display(c: vec4f) -> vec4f {
+    return vec4f(hdr_post_tone(c.rgb, hdr_copy_tone[0], hdr_copy_tone[1], hdr_copy_tone[2]), c.a);
+}
+)"sv;
+
+static wgpu::BindGroupLayout hdr_bind_group_layout() {
+  if (!g_hdrBindGroupLayout) {
+    static constexpr std::array entries{
+        wgpu::BindGroupLayoutEntry{
+            .binding = 0,
+            .visibility = wgpu::ShaderStage::Fragment,
+            .sampler = wgpu::SamplerBindingLayout{.type = wgpu::SamplerBindingType::Filtering},
+        },
+        wgpu::BindGroupLayoutEntry{
+            .binding = 1,
+            .visibility = wgpu::ShaderStage::Fragment,
+            .texture =
+                wgpu::TextureBindingLayout{
+                    .sampleType = wgpu::TextureSampleType::Float,
+                    .viewDimension = wgpu::TextureViewDimension::e2D,
+                },
+        },
+        wgpu::BindGroupLayoutEntry{
+            .binding = 2,
+            .visibility = wgpu::ShaderStage::Vertex,
+            .buffer = wgpu::BufferBindingLayout{.type = wgpu::BufferBindingType::Uniform},
+        },
+        wgpu::BindGroupLayoutEntry{
+            .binding = 3,
+            .visibility = wgpu::ShaderStage::Fragment,
+            .buffer = wgpu::BufferBindingLayout{.type = wgpu::BufferBindingType::Uniform},
+        },
+    };
+    static constexpr wgpu::BindGroupLayoutDescriptor descriptor{
+        .label = "TexCopyConv HDR Bind Group Layout",
+        .entryCount = entries.size(),
+        .entries = entries.data(),
+    };
+    g_hdrBindGroupLayout = g_device.CreateBindGroupLayout(&descriptor);
+  }
+  return g_hdrBindGroupLayout;
+}
+
+// HdrDisplay: the format's fragment shader with each sample post-toned first. Linear: the plain
+// fragment shader (passthrough, or RGB565's alpha 1) into the RGBA16F destination.
+// A scaled HdrDisplay copy filters the light and post-tones the filtered sample, where an LDR copy
+// filters display values: the two are not filter-for-filter equal, by design (no exact copy-filter
+// parity is claimed; the curve is not linear, so they differ only where the filter mixes texels).
+static wgpu::RenderPipeline domain_pipeline(GXTexFmt fmt, CopyDomain domain, wgpu::TextureFormat outputFormat) {
+  std::lock_guard lock{g_domainMutex};
+  const auto key = std::make_tuple(fmt, domain, outputFormat);
+  if (const auto it = g_domainPipelines.find(key); it != g_domainPipelines.end()) {
+    return it->second;
+  }
+  std::string_view frag = FragPassthrough;
+  if (fmt != GX_TF_RGBA8) {
+    const auto it = std::ranges::find(ConvPipelines, fmt, &ConvPipeline::fmt);
+    if (it == ConvPipelines.end() || (domain == CopyDomain::Linear && fmt != GX_TF_RGB565)) {
+      Log.fatal("No {} copy pipeline for format {}", domain == CopyDomain::Linear ? "linear" : "HDR",
+                static_cast<int>(fmt));
+    }
+    frag = it->fragShader;
+  }
+  std::string fragShader{frag};
+  std::string preamble{ShaderPreamble};
+  wgpu::BindGroupLayout layout = g_bindGroupLayout;
+  if (domain == CopyDomain::HdrDisplay) {
+    static constexpr std::string_view Sample = "textureSample(src, src_samp, in.uv)";
+    std::string wrapped;
+    size_t pos = 0;
+    for (size_t at; (at = fragShader.find(Sample, pos)) != std::string::npos; pos = at + Sample.size()) {
+      wrapped.append(fragShader, pos, at - pos);
+      wrapped += "hdr_copy_display(";
+      wrapped += Sample;
+      wrapped += ")";
+    }
+    if (pos == 0) {
+      Log.fatal("HDR copy pipeline for format {}: no sample to post-tone", static_cast<int>(fmt));
+    }
+    wrapped.append(fragShader, pos);
+    fragShader = std::move(wrapped);
+    preamble += hdr::ToneWgsl;
+    preamble += hdr::PostToneWgsl;
+    preamble += HdrCopyPreamble;
+    layout = hdr_bind_group_layout();
+  }
+  const char* label = domain == CopyDomain::Linear ? "TexCopyConv Linear" : "TexCopyConv HDR";
+  auto pipeline = create_pipeline({fmt, fragShader, outputFormat, label}, preamble, layout);
+  g_domainPipelines.emplace(key, pipeline);
+  return pipeline;
+}
+
 void initialize() {
   static constexpr std::array bindGroupLayoutEntries{
       wgpu::BindGroupLayoutEntry{
@@ -551,6 +657,11 @@ void initialize() {
 }
 
 void shutdown() {
+  {
+    std::lock_guard lock{g_domainMutex};
+    g_domainPipelines.clear();
+    g_hdrBindGroupLayout = {};
+  }
   g_pipelines.clear();
   g_blitPipeline = {};
   g_bindGroupLayout = {};
@@ -587,6 +698,36 @@ static void execute(const wgpu::CommandEncoder& cmd, const ConvRequest& req, con
     };
     const wgpu::BindGroupDescriptor bindGroupDescriptor{
         .layout = g_depthBindGroupLayout,
+        .entryCount = bindGroupEntries.size(),
+        .entries = bindGroupEntries.data(),
+    };
+    bindGroup = g_device.CreateBindGroup(&bindGroupDescriptor);
+  } else if (req.domain == CopyDomain::HdrDisplay) {
+    const auto& sampler = req.sampleFilter == SampleFilter::Linear ? g_linearSampler : g_nearestSampler;
+    const std::array bindGroupEntries{
+        wgpu::BindGroupEntry{
+            .binding = 0,
+            .sampler = sampler,
+        },
+        wgpu::BindGroupEntry{
+            .binding = 1,
+            .textureView = req.srcView,
+        },
+        wgpu::BindGroupEntry{
+            .binding = 2,
+            .buffer = detail::resources().uniformBuffer,
+            .offset = req.uniformRange.offset,
+            .size = req.uniformRange.size,
+        },
+        wgpu::BindGroupEntry{
+            .binding = 3,
+            .buffer = detail::resources().uniformBuffer,
+            .offset = req.toneRange.offset,
+            .size = req.toneRange.size,
+        },
+    };
+    const wgpu::BindGroupDescriptor bindGroupDescriptor{
+        .layout = hdr_bind_group_layout(),
         .entryCount = bindGroupEntries.size(),
         .entries = bindGroupEntries.data(),
     };
@@ -639,6 +780,10 @@ static void execute(const wgpu::CommandEncoder& cmd, const ConvRequest& req, con
 }
 
 void run(const wgpu::CommandEncoder& cmd, const ConvRequest& req) {
+  if (req.domain != CopyDomain::Display) {
+    execute(cmd, req, domain_pipeline(req.fmt, req.domain, req.dst->format));
+    return;
+  }
   const auto it = g_pipelines.find(req.fmt);
   if (it == g_pipelines.end()) {
     Log.fatal("No copy conversion pipeline for format {}", static_cast<int>(req.fmt));
@@ -646,7 +791,13 @@ void run(const wgpu::CommandEncoder& cmd, const ConvRequest& req) {
   execute(cmd, req, it->second);
 }
 
-void blit(const wgpu::CommandEncoder& cmd, const ConvRequest& req) { execute(cmd, req, g_blitPipeline); }
+void blit(const wgpu::CommandEncoder& cmd, const ConvRequest& req) {
+  if (req.domain != CopyDomain::Display) {
+    execute(cmd, req, domain_pipeline(GX_TF_RGBA8, req.domain, req.dst->format));
+    return;
+  }
+  execute(cmd, req, g_blitPipeline);
+}
 
 bool snapshot_depth_supported() noexcept { return static_cast<bool>(g_depthSnapshotPipeline); }
 

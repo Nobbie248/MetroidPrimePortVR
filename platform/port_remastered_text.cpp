@@ -401,6 +401,23 @@ bool ConvertText(const std::u16string& remastered, const std::u16string& retail,
   return true;
 }
 
+// Remastered's own button glyph for START (cd17), and the coloured door glyphs
+// it draws before a door's name (cd37 wave, cd38 plasma, and the door textures).
+constexpr char16_t kStartButton = 0xCD17;
+
+// `count` is the payload's length in units.
+bool IsDoorGlyph(unsigned group, unsigned type, const char16_t* payload, size_t count) {
+  if (group == 1 && type == 0) {
+    return count >= 1 && (payload[0] == 0xCD37 || payload[0] == 0xCD38);
+  }
+  if (group == 1 && type == 1) {
+    // "TXTR_WhiteDoor": a texture name after a length unit.
+    const std::u16string name(payload, count);
+    return name.find(u"TXTR_") != std::u16string::npos && name.find(u"Door") != std::u16string::npos;
+  }
+  return false;
+}
+
 bool TranslateText(const std::u16string& remastered, const std::u16string& retail, const std::u16string& english,
                    std::u16string& out) {
   // The disc's button images, in the order its string shows them.
@@ -433,6 +450,14 @@ bool TranslateText(const std::u16string& remastered, const std::u16string& retai
         AppendColour(payload, body, coloured);
       } else if ((group == 0 && type == 2) || (group == 1 && type == 3)) {
         // A size and a layout mode, as in ConvertText.
+      } else if (IsDoorGlyph(group, type, payload, units - 3)) {
+        // Remastered's door icon: the disc names the door in colour only. Its space goes too.
+        if (i + 1 < remastered.size() && remastered[i + 1] == u' ') {
+          ++i;
+        }
+      } else if (group == 1 && type == 0 && image == images.size() && units == 4 && payload[0] == kStartButton &&
+                 retail.find(u"START") != std::u16string::npos) {
+        body += u"START";  // the disc prints the button's name as plain text
       } else if (group == 1 && (type == 0 || type == 1) && image < images.size()) {
         body += images[image++];  // a button or an icon, where the disc shows its own
       } else {
@@ -475,8 +500,44 @@ bool TranslateText(const std::u16string& remastered, const std::u16string& retai
   return true;
 }
 
+// Strings whose English differs from the disc's, so the wording match misses
+// them: Remastered's name for the 1.00 index. Each pair was read against both
+// English texts. The 1.00 tables only: another version's indices move.
+struct NamedIndex {
+  uint32_t strg;
+  const char* name;
+  uint32_t index;
+};
+constexpr NamedIndex kNamedIndices[] = {
+    {0x0552A456, "HyperMode", 21},
+    {0x0552A456, "ThardusBoost", 104},
+    {0x0552A456, "FirstPowerBombPickup", 109},
+    {0x500EC6A0, "PowerBeamCombo", 41},
+    {0x500EC6A0, "CombatVisorDescription", 66},
+    {0x500EC6A0, "ScanVisorDescription", 67},
+    {0x500EC6A0, "XRayVisorDescription", 68},
+    {0x500EC6A0, "ThermoVisorDescription", 69},
+    {0x500EC6A0, "PowerBeamDescription", 70},
+    {0x500EC6A0, "IceBeamDescription", 72},
+    {0x500EC6A0, "WaveBeamDescription", 74},
+    {0x500EC6A0, "WaveBeamComboDescription", 75},
+    {0x500EC6A0, "PlasmaBeamDescription", 76},
+    {0x500EC6A0, "SpaceJumpBootsDescription", 79},
+    {0x500EC6A0, "GrappleBeamDescription", 80},
+    {0x500EC6A0, "MissileLauncherDescription", 81},
+    {0x500EC6A0, "VariaSuitDescription", 83},
+    {0x500EC6A0, "GravitySuitDescription", 84},
+    {0x500EC6A0, "PhazonSuitDescription", 85},
+    {0x500EC6A0, "EnergyTankDescription", 86},
+    {0x500EC6A0, "BoostBallDescription", 88},
+    {0x500EC6A0, "BombDescription", 90},
+    {0x500EC6A0, "PowerBombDescription", 91},
+    {0x500EC6A0, "ChargeBeamDescription", 92},
+    {0x500EC6A0, "BeamComboDescription", 93},
+};
+
 bool MergeStringTable(const uint8_t* retail, size_t size, const TableText& text, bool checkWording,
-                      std::vector<uint8_t>& out, int& reworded, int& translated) {
+                      std::vector<uint8_t>& out, int& reworded, int& translated, uint32_t strgId) {
   reworded = 0;
   translated = 0;
   if (size < 16 || ReadBE32(retail) != kStrgMagic || ReadBE32(retail + 4) != 0) {
@@ -602,6 +663,15 @@ bool MergeStringTable(const uint8_t* retail, size_t size, const TableText& text,
       versions[placed[e]] = entries[e].second;
     } else if (!moved && entries[e].first < count) {
       versions[entries[e].first] = entries[e].second;
+    }
+  }
+  if (!checkWording) {
+    for (const NamedIndex& named : kNamedIndices) {
+      const auto at = text.byName.find(named.name);
+      if (named.strg == strgId && named.index < count && versions[named.index] == nullptr &&
+          at != text.byName.end() && at->second.count(kRemasteredEnglish) != 0) {
+        versions[named.index] = &at->second;
+      }
     }
   }
   for (const auto& [name, byLanguage] : text.byName) {

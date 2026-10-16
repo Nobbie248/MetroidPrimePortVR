@@ -28,6 +28,7 @@
 #include "port_build_info.h"
 #include "port_log.h"
 #include "port_log_file.h"
+#include "port_memory_log.h"
 #include "port_mods.h"
 #include "port_pal_languages.h"
 #include "port_room_geo.h"
@@ -368,13 +369,10 @@ std::string FindUnreadableDiscFile() {
 }
 
 constexpr const char* kSupportedDisc =
-    "Metroid Prime for the GameCube is supported: USA 1.00\n(GM8E01, revision 0), and PAL (GM8P01, experimental).";
-// Shown instead while other releases are opted into (MP_DISC_ANY_VERSION).
-constexpr const char* kSupportedDiscAny =
     "Metroid Prime for the GameCube is supported: USA 1.00, 1.01\nand 1.02 (GM8E01), and PAL (GM8P01, experimental).";
 
 const char* SupportedDiscText() {
-    return PortDisc::IsAccepted(PortDisc::Version::Usa101) ? kSupportedDiscAny : kSupportedDisc;
+    return kSupportedDisc;
 }
 
 // What the user picked instead, in words: the usual mistakes are another
@@ -958,9 +956,18 @@ int main(int argc, char** argv) {
     if (envFrameBuffers >= 0) {
         frameBufferScale = static_cast<uint32_t>(std::clamp(static_cast<unsigned long>(envFrameBuffers), 1UL, 16UL));
     }
-    if (frameBufferScale > 1) {
-        PortLog::Write("port: frame buffers at %ux (%s)\n", frameBufferScale,
-                       envFrameBuffers >= 0 ? "MP_FRAME_BUFFERS" : "room geometry");
+    // 0 follows frameBufferScale and, in resident mode, grows after an overflow (aurora,
+    // up to 6x); MP_STORAGE_BUFFERS pins it.
+    uint32_t frameStorageScale = 0;
+    const int envStorageBuffers = port::EnvInt("MP_STORAGE_BUFFERS", -1);
+    if (envStorageBuffers >= 0) {
+        frameStorageScale = static_cast<uint32_t>(std::clamp(static_cast<unsigned long>(envStorageBuffers), 1UL, 16UL));
+    }
+    if (frameBufferScale > 1 || frameStorageScale > 1) {
+        PortLog::Write("port: frame buffers at %ux, storage at %ux (%s)\n", frameBufferScale,
+                       frameStorageScale != 0 ? frameStorageScale : frameBufferScale,
+                       envFrameBuffers >= 0 || envStorageBuffers >= 0 ? "MP_FRAME_BUFFERS/MP_STORAGE_BUFFERS"
+                                                                      : "room geometry");
     }
     // Settings, mods, save states and the shader caches sit in user/ beside the
     // executable when that folder can be written to (port_paths.h).
@@ -1007,6 +1014,7 @@ int main(int argc, char** argv) {
         }
     }
 #endif
+    PortMemoryLog::LogStartup();
     const std::span<const uint8_t> embeddedSeed = PortEmbedded::Find("initial_pipeline_cache.db");
     // PortVr: PrimedGun's own seed (tools/primedgun_seed.py), merged after upstream's: the configs
     // the fork's draws ask for and the headset's eye pipelines. Embedded on desktop; the Quest
@@ -1058,6 +1066,7 @@ int main(int argc, char** argv) {
         .mem1Size = mem1Size,
         .mem2Size = ARAM_DEFAULT_SIZE,
         .frameBufferScale = frameBufferScale,
+        .frameStorageScale = frameStorageScale,
         .residentGeometryMiB = residentMiB,
         // An embedded seed wins over a stale initial_pipeline_cache.db beside the executable.
         .pipelineCacheSeedData = embeddedSeed.data(),
@@ -1230,6 +1239,9 @@ int main(int argc, char** argv) {
         std::filesystem::remove(driverMarker, ec);
     }
     // From what the device gave, which can be less than was asked for.
+    if (aurora_get_frame_storage_scale() != (frameStorageScale != 0 ? frameStorageScale : frameBufferScale)) {
+        PortLog::Write("port: frame storage at %ux, all this device allows\n", aurora_get_frame_storage_scale());
+    }
     if (aurora_get_frame_buffer_scale() != frameBufferScale) {
         PortLog::Write("port: frame buffers at %ux, all this device allows\n", aurora_get_frame_buffer_scale());
     }

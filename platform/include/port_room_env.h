@@ -2,10 +2,12 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <memory>
 #include <string>
 #include <vector>
 
 #include "port_maya_spline.h"
+#include "port_room_env_tiles.h"
 
 // A room's lighting environment for PBR models: reflection probes, each a box of the world
 // and a prefiltered HDR cube map of what surrounds it. A mod supplies one per area as
@@ -15,7 +17,7 @@
 // ambient colour.
 //
 // The file is little endian:
-//   'MPEV', u32 version (1 to 18), f32 tonemap[4], u32 probes, u32 cubes
+//   'MPEV', u32 version (1 to 21), f32 tonemap[4], u32 probes, u32 cubes
 //   probe: f32 worldToBox[12], f32 worldToCube[9], s32 layer, u32 cube, f32 scale, f32 padding
 //          and from version 8 on, s32 priority, f32 intensity min, f32 intensity max
 //          (before it the padding is unused, 1 m, and the rest 0, 0, 1). From version 9
@@ -30,6 +32,14 @@
 //   point: half mean[3], half lobe[3], u8 sharpness[3], u8 direction[3][3] (of red, green
 //          and blue, along the grid's axes; 0..255 is -1..1). A mean of zero is no point
 //          (inside a wall).
+// Version 21 replaces the grids: the u32 is 0 or 1, and 1 is followed by the area's own
+// baked-lighting tiles (see port_room_env_tiles.h; nothing is borrowed from a neighbour):
+//   f32 worldToPoint[12] (area space to world point coordinates), s32 box[6] (PHDR lo xyz,
+//   hi xyz, in points), u32 tiles, u32 dataBytes
+//   tile:  s32 layer (0..5), s32 bx, by, bz (tile origin / (64 or 128, 64, 16)), s32 lo[3],
+//          s32 size[3] (the crop within the tile; size 0 is an empty tile), u32 offset
+//   then dataBytes of crops, x fastest then y then z: layers 0 and 1 hold 3 halves a
+//   point, layers 2..5 3 bytes. Tiles are sorted by (layer, bx, by, bz).
 // Version 3 goes on:
 //   f32 exposure[2], the lowest and highest exposure value the room's auto exposure may
 //          settle on (0, 0: the room has no auto exposure)
@@ -117,6 +127,11 @@
 //          two factors, for a timeline without their spline), then kLightSplines splines (PointLight's
 //          order), each u32 bytes (0: none) and that many bytes of a CMayaSpline padded to 4.
 //          A Remastered point or spot LightDynamic (see RoomLights).
+// Version 20 adds, after the lights:
+//   u32 hints
+//   hint: u8 mode (1 active while the camera is inside a fluid, 2 once it has left one), u8 pad[3],
+//         f32 min, f32 max, f32 bias, f32 sigma, f32 static lerp. Remastered's fluid-mode
+//         CAutoExposureHintGOC (see ExposureHints); the plain hint stays in the header fields.
 // The tonemap is Remastered's: the exposure value without auto exposure, the radiance
 // that comes out as middle grey once exposed, and how far the curve's toe and shoulder
 // are pulled in.
@@ -172,6 +187,9 @@ struct Grid {
   uint32_t size[3] = {};
   size_t offset = 0; // of the points, in File::data
   float average = 0.f; // geometric mean of the lit points' luminance
+  // Version 21 on: the points composed from the world's mapped tiles (port_room_env_tiles.h),
+  // which are not in the file; offset is unused then.
+  std::shared_ptr<const std::vector<uint8_t>> points;
 };
 
 constexpr uint32_t kGradeLutSize = 33;
@@ -364,6 +382,15 @@ struct PointLight {
   bool hasSpline[kLightSplines] = {};
 };
 
+// An auto exposure hint with a fluid mode (CAutoExposureHintGOC mode 1 or 2).
+struct FluidHint {
+  uint8_t mode = 1;
+  float exposure[2] = {};
+  float bias = 0.f;
+  float sigma = 32.f;
+  float staticLerp = 0.5f;
+};
+
 struct File {
   uint32_t version = 0;
   float tonemap[4] = {};
@@ -371,6 +398,7 @@ struct File {
   float exposureBias = 0.f;
   float exposureSigma = 32.f; // Remastered's default
   float staticLerp = 0.5f;
+  std::vector<FluidHint> fluidHints; // version 20
   float contrast = 0.f;
   float bloomThreshold = 0.9f;
   std::vector<float> bloomTints; // RGBA; empty: the room has no bloom
@@ -384,6 +412,8 @@ struct File {
   std::vector<Probe> probes;
   std::vector<Cube> cubes;
   std::vector<Grid> grids;
+  // Version 21 on: the area's own baked-lighting tiles instead of grids (null before it).
+  std::shared_ptr<const PortRoomEnvTiles::TileSet> tiles;
   Lightmap lightmap;
   std::vector<uint8_t> data;
 };
@@ -393,6 +423,8 @@ struct File {
 // "1A2B3C4D.roomenv" (any case) -> 0x1A2B3C4D.
 bool ParseFileName(const std::string& fileName, uint32_t& id);
 bool Parse(std::vector<uint8_t>&& data, File& out, std::string& error);
+// One version 21 tile-set section at `at` (advanced past it); false with `error` when malformed.
+bool ParseTileSet(const std::vector<uint8_t>& data, size_t& at, PortRoomEnvTiles::TileSet& set, std::string& error);
 // The roomenv/brdf.lut a mod supplies: a 16x8 RG8 table of Remastered's environment BRDF
 // (scale in red, bias in green). The file must be exactly this long.
 constexpr size_t kBrdfLutSize = 16 * 8 * 2;
@@ -527,7 +559,7 @@ struct Selection {
   // For GXSetPBRLightmap, when the model was announced with SetLightmapHint: the area's baked
   // lightmap, which then lights it in place of the volume (0: none).
   uint32_t lightmap = 0;
-  float lightmapRect[4] = {};    // offU, offV, scale, level
+  float lightmapRect[4] = {};    // offU, offV, scale (0: one texel), level
   float worldToLightmap[9] = {}; // rows of world direction -> the lightmap's axes
 };
 // The room cube and baked ambient for a model at `pos`; false when no loaded area has
@@ -675,10 +707,42 @@ void SendScriptState(uint32_t sender, int state);
 // Once a frame: whether the player and the camera are in a fluid. A change drives the
 // grades of the loaded areas linked to kSenderPlayerFluid / kSenderCameraWater.
 void SetFluid(bool player, bool camera);
+
+// CAutoExposureHintGOC's fluid modes (0x539574 EntityLoaded, 0x539644 InsideFluidStateChanged):
+// the hints of a room are told whether the CAMERA is inside a fluid. Mode 1 is active while it
+// is, mode 2 once it has left one (it starts inactive, even outside). A hint that becomes
+// active registers with the post effects manager as type 1, which snaps the exposure; one
+// that stops unregisters. Of the registered hints the newest wins at equal priority.
+struct ExposureHints {
+  bool inside = false; // the last fluid state told (the GOC's +0x48)
+  std::vector<uint8_t> active; // per FluidHint
+  std::vector<uint64_t> order; // per FluidHint: registration number, 0 when unregistered
+  uint64_t next = 1;
+  // Starts the room's hints as EntityLoaded does with the camera's current state.
+  bool Load(const std::vector<FluidHint>& hints, bool cameraInside);
+  // The camera entered or left a fluid. True when a hint registered, which snaps.
+  bool Set(const std::vector<FluidHint>& hints, bool cameraInside);
+  // The registered hint that wins, or -1 for the room's plain hint.
+  int Pick(size_t count) const;
+};
+
+// TransitionTonemapParams 0xb005bc: one step of the move between tonemap parameter sets
+// (`from`, `to`; 6 values). A new target starts a move at progress 0 when idle; a move in
+// progress keeps `from` and its progress when retargeted. Returns the shown values.
+struct ParamTransition {
+  float from[6] = {};
+  float to[6] = {};
+  float shown[6] = {};
+  float progress = 0.f;
+  bool moving = false;
+  void Snap(const float target[6]);
+  void Step(const float target[6], float dt, float time = 1.f);
+};
 // A new game: every grade back to how it starts.
 void ResetGrades();
 // The console's `roomenv grades`: the camera area's grades and which are on.
 std::string GradeInfo();
+void SetViewGradesOn(bool on); // debug: every grade request of the viewed room on or off
 // MP_COLOR_GRADE, the console's `grade`.
 void SetColorGradeEnabled(bool on);
 bool ColorGradeEnabled();

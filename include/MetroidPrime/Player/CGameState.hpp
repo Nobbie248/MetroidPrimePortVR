@@ -94,6 +94,10 @@ public:
     bool reconciled;
   };
   ApProgress& PortApProgress() { return xpc_apProgress; }
+  // The map pickups this save has seen (PortMapPickups, "Seen" mode), one bit
+  // per dot index. Saved as the "PKSN" trailer after the Archipelago one.
+  static const int kPortSeenWords = 4;
+  uint* PortSeenPickups() { return xpc_seenPickups; }
 #endif
 
 private:
@@ -115,6 +119,7 @@ private:
   bool x228_25_initPowerupsAtFirstSpawn : 1;
 #ifdef TARGET_PC
   ApProgress xpc_apProgress;
+  uint xpc_seenPickups[kPortSeenWords];
 #endif
 };
 CHECK_SIZEOF(CGameState, 0x230)

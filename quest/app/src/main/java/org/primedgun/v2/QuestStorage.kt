@@ -76,7 +76,7 @@ object QuestStorage {
     fun shippedCannonLibrary(context: Context): File = File(context.filesDir, "cannon_textures")
 
     /**
-     * Null when [file] holds Metroid Prime USA 1.00 (GM8E01) or PAL (GM8P01,
+     * Null when [file] holds Metroid Prime USA 1.00/1.01/1.02 (GM8E01) or PAL (GM8P01,
      * experimental), disc 0 revision 0, else what is wrong with it. These are the discs
      * the game boots (platform/disc.cpp PortDisc::IsAccepted), and it checks the
      * mounted disc again.
@@ -129,7 +129,8 @@ object QuestStorage {
         return when {
             (gameId != "GM8E01" && gameId != "GM8P01") || disc != 0 ->
                 "The selected disc is not Metroid Prime USA or PAL (game id $gameId)."
-            revision != 0 -> "The selected disc is revision $revision; PrimedGun v2 needs revision 0: USA 1.00 or PAL."
+            (gameId == "GM8E01" && revision !in 0..2) || (gameId == "GM8P01" && revision != 0) ->
+                "The selected disc is revision $revision; supported discs are USA 1.00, 1.01, 1.02 or PAL revision 0."
             else -> null
         }
     }

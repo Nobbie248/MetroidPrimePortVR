@@ -27,6 +27,13 @@ CElectricDescription* CParticleElectricDataFactory::CreateGeneratorDescription(C
   CElectricDescription* desc = rs_new CElectricDescription();
   CreateELSM(desc, in, pool);
   LoadELSMTokens(desc);
+#ifdef TARGET_PC
+  if (desc->xPortVfx) {
+    for (CPortVfxMat::Tex& t : desc->xPortVfx->mat.tex) {
+      t.token.ForceCache();
+    }
+  }
+#endif
   return desc;
 }
 
@@ -129,6 +136,83 @@ bool CParticleElectricDataFactory::CreateELSM(CElectricDescription* desc, CInput
     case 'ZERY':
       desc->x70_ZERY = CParticleDataFactory::GetBool(in);
       break;
+#ifdef TARGET_PC
+    // Port-only marker of a converted Remastered ELC2 (CParticleElectric2).
+    case 'PEL2':
+      CParticleDataFactory::GetClassID(in);
+      desc->xPortElc2 = in.ReadLong() != 0;
+      break;
+    case 'SIDE':
+      desc->xPortSIDE = CParticleDataFactory::GetIntElement(in);
+      break;
+    case 'LWQD':
+      desc->xPortLWQD = CParticleDataFactory::GetIntElement(in);
+      break;
+    case 'NFOM':
+      desc->xPortNFOM = CParticleDataFactory::GetIntElement(in);
+      break;
+    case 'TSPN':
+      desc->xPortTSPN = CParticleDataFactory::GetIntElement(in);
+      break;
+    case 'BDEP':
+      desc->xPortBDEP = CParticleDataFactory::GetIntElement(in);
+      break;
+    case 'BNDI':
+      desc->xPortBNDI = CParticleDataFactory::GetIntElement(in);
+      break;
+    case 'RADS':
+      desc->xPortRADS = CParticleDataFactory::GetRealElement(in);
+      break;
+    case 'LRAD':
+      desc->xPortLRAD = CParticleDataFactory::GetRealElement(in);
+      break;
+    case 'RRAD':
+      desc->xPortRRAD = CParticleDataFactory::GetRealElement(in);
+      break;
+    case 'SLVF':
+      desc->xPortSLVF = CParticleDataFactory::GetRealElement(in);
+      break;
+    case 'BLNC':
+      desc->xPortBLNC = CParticleDataFactory::GetRealElement(in);
+      break;
+    case 'BCFF':
+      desc->xPortBCFF = CParticleDataFactory::GetRealElement(in);
+      break;
+    case 'BLEN':
+      desc->xPortBLEN = CParticleDataFactory::GetRealElement(in);
+      break;
+    case 'BANG':
+      desc->xPortBANG = CParticleDataFactory::GetRealElement(in);
+      break;
+    case 'BIDF':
+      desc->xPortBIDF = CParticleDataFactory::GetRealElement(in);
+      break;
+    case 'BLDF':
+      desc->xPortBLDF = CParticleDataFactory::GetRealElement(in);
+      break;
+    case 'AMDF':
+      desc->xPortAMDF = CParticleDataFactory::GetRealElement(in);
+      break;
+    case 'NCLR':
+      desc->xPortNCLR = CParticleDataFactory::GetColorElement(in);
+      break;
+    case 'LLRD':
+      desc->xPortLLRD = CParticleDataFactory::GetBool(in);
+      break;
+    case 'FPLB':
+      desc->xPortFPLB = CParticleDataFactory::GetBool(in);
+      break;
+    // Port-only Remastered material, as a PART's.
+    case 'VMAT':
+    case 'VTMT':
+    case 'VPMT':
+    case 'VSMT':
+    case 'ITEN':
+      if (!CParticleDataFactory::PortReadVfxProperty(classId, desc->xPortVfx, in, pool)) {
+        return false;
+      }
+      break;
+#endif
     case '_END':
       done = true;
       break;

@@ -29,7 +29,7 @@ ships no disc image, and neither does any package or release built from it.
 ## Setup Notes
 
 1. Launch **PrimedGun** and use **Select Game** to choose your own Metroid Prime
-   disc image. USA 1.00 (`GM8E01`, revision 0) is supported; PAL (`GM8P01`) is
+   disc image. USA 1.00/1.01/1.02 (`GM8E01`, revisions 0-2) is supported; PAL (`GM8P01`) is
    experimental.
 2. On PC, start your OpenXR runtime and enable **VR** in **Port Config**. On
    Quest, select the game in the launcher panel, then press **Play** to enter VR.
@@ -67,26 +67,12 @@ for settings and transfer details.
 - [Dolphin VR Discord](https://discord.gg/GdmffzCTrh)
 - [Flat2VR Modding Discord](https://discord.gg/flat2vr)
 
-## Randomizer and Archipelago
+## Randomizer and Archipelago Multiworld
 
-Both are supported, on all three platforms.
-
-- **Randomizer** — item placement is driven by a seed file. `tools/rando_seed.py`
-  generates one and `docs/RANDOMIZER.md` covers the format.
-- **Archipelago multiworld** — the Metroid Prime AP world's item and location
-  tables are built in. Open F1 > Archipelago, enter the server (`host:port`), your
-  slot name and the password if any, and connect; no seed file is needed. The
-  seed's options are applied and a new game starts at the Landing Site with
-  the intro skipped. Each seed and slot gets its own memory card, checks made
-  offline are sent on the next connect, Recent games resumes an earlier seed,
-  and the Chat sub-tab shows the server log and sends messages such as `!hint`.
-  DeathLink is supported.
-
-  `wss://` needs no extra setup on any platform: OpenSSL is vendored and linked
-  statically on Android, and the trust store is enumerated by hand, so the
-  system CA bundle is not required. See `docs/ARCHIPELAGO.md`.
-
-Cutscenes are always skippable in randomizer and Archipelago games.
+- **Randomizer** — Generate your own randomizer games
+- **Archipelago multiworld** — Generate a game in archipelago with the [Metroid Prime APWorld](https://github.com/UltiNaruto/MetroidAPrime) and host it. Open F1 > Archipelago, enter the server (`host:port`), your
+  slot name and the password if any, and connect; no seed file is needed. Each seed and slot gets its own separate save, checks made
+  offline are sent on the next connect, chat with command support, DeathLink.
 
 ## Downloads
 
@@ -95,18 +81,6 @@ for available builds. Every build needs your own disc image.
 
 The underlying native port supports the following package formats; consult
 each release for the files provided.
-
-| Platform | Artefact | Notes |
-| --- | --- | --- |
-| Linux | AppImage | Self-contained, no install. `chmod +x` and run. |
-| Linux | Flatpak | `io.github.odrannnn.metroidprimeport` |
-| Linux | `.tar.gz` | The bare binary, its textures and the licences |
-| Windows | `.zip` | Unzip anywhere; needs a Visual C++ redistributable |
-| Android | `.apk` | Sideload; enable install from unknown sources |
-
-Android APKs are signed with a project release key. An app signed with one key
-cannot be updated by one signed with another, so keep the key — see
-`docs/RELEASING.md`.
 
 ## Building
 
@@ -164,32 +138,11 @@ tools/make_android_keystore.sh          # once; writes android/keystore.properti
 tools/android_apk.sh :app:assembleRelease
 ```
 
-Both files it writes name a private key and are deliberately untracked. The
-build needs a Rust toolchain on `PATH`, because the disc layer is `nod`
-cross-compiled for `aarch64-linux-android`. Without one the build still
-succeeds but links a stub that cannot open a disc — see
-`docs/ANDROID_BUILD_PROBE.md`.
-
 ## Running
 
 ```sh
 ./build/native/metroid_prime_port "/path/to/Metroid Prime (USA) (v1.00).iso"
 ```
-
-The disc can also be set with `MP_DISC`, kept beside the executable, or picked
-through a file dialog the first time you launch without one — the choice is
-remembered in the settings. The image must be `GM8E01`, disc 0, revision 0 (USA 1.00), or
-`GM8P01` (PAL, experimental, which also brings its French, German, Spanish and Italian text;
-a USA player can add those from a PAL image in F1 > Game > Language). If a
-remembered disc stops opening — the file moved, or on Android the system revoked
-its access grant — the port asks again rather than exiting.
-
-On Android the first pick is copied into app storage, so later launches need no
-permission and there is nothing to grant again.
-
-`--version` prints the source revision without starting graphics; include it in
-bug reports. The F1 overlay holds the rest of the settings, and the same flags
-are available as `MP_*` environment variables.
 
 ## Packaging
 
@@ -253,5 +206,10 @@ and remains Nintendo's. See `NOTICE`.
 Metroid Prime is a trademark of Nintendo. This project is unaffiliated with
 Nintendo and Retro Studios, and ships no game data.
 
-`docs/NATIVE_PORT.md` is the detailed reference: build options, every setting
-and environment variable, the smoke-test hooks, and the platform notes.
+`docs/NATIVE_PORT.md` is the detailed reference: build options, the smoke-test hooks,
+and the platform notes. Every setting and environment variable lives in
+`docs/SETTINGS.md` (debug console: `docs/CONSOLE.md`, mods: `docs/MODS.md`).
+
+## AI assistance
+
+Parts of this port were written with AI coding assistants, under my oversight.

@@ -25,6 +25,9 @@ public:
   bool ShouldLeftTableAdvance() override;
   bool ShouldRightTableAdvance() override;
   uint GetRightTableCount() const override;
+#ifdef TARGET_PC
+  void PortPointerInput(CFinalInput& input) override;
+#endif
 
   COptionsScreen(const CStateManager& mgr, CGuiFrame& frame, const CStringTable& pauseStrg);
 

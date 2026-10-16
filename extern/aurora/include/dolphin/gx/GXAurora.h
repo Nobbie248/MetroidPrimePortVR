@@ -241,6 +241,12 @@ u8 AuroraSetCullMirrored(u8 mirrored);
 //   f32 diffuse, f32 f0, f32 alpha, u32 alphaReplaces
 #define GX_AURORA_SET_PBR_LIGHT_SCALE 0x0053
 
+// Per-draw model colour modulation of the following PBR draws (see GXSetPBRModelModulation). Stays
+// in effect until changed; diffuse 1, 1, 1, 1, incandescence 0, 0, 0, 1 and coverage 1 are neutral.
+// Payload:
+//   f32 diffuse r, g, b, a, f32 incan r, g, b, a, f32 coverage
+#define GX_AURORA_SET_PBR_MODEL_MODULATION 0x006D
+
 // Port extension: Remastered's bloom, colour grade and frame average over the EFB as drawn so
 // far (see GXPortPostProcess). Queued, so the game thread does not wait for the FIFO to be
 // processed before it can record it.
@@ -332,6 +338,13 @@ u8 AuroraSetCullMirrored(u8 mirrored);
 #define GX_AURORA_PORT_XRAY 0x006B
 // Port extension: one pass of Remastered's thermal visor post (GXPortThermalPass). Payload: 20 u32 words.
 #define GX_AURORA_PORT_THERMAL 0x006C
+// Port extension: EFB draws go to the RGBA16F linear HDR scene (GXPortSceneHdr). Payload: u8 on.
+#define GX_AURORA_PORT_SCENE_HDR 0x006E
+// Port extension: the EFB copies that follow are linear scene copies (GXPortCopyScene). Payload: u8 on.
+#define GX_AURORA_PORT_COPY_SCENE 0x006F
+// Port extension: Remastered's actor shadow (GXPortActorShadow*). Payload: u8 mode (0 end, 1 casters
+// begin, 2 decal begin, 3 render the actor maps), then for 1 and 2 u8 layer and 16 vec4 floats.
+#define GX_AURORA_PORT_ACTOR_SHADOW 0x0070
 
 #define GX2_SET_POLYGON_OFFSET 0x1000
 

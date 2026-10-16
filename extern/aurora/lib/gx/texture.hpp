@@ -39,6 +39,8 @@ void invalidate_replacement(uint64_t replacementId) noexcept;
 void end_frame() noexcept;
 void shutdown() noexcept;
 void set_content_cache_budget_for_testing(uint64_t bytes) noexcept;
+// Times the leak detector has logged a suspected per-frame texture leak.
+uint64_t leak_warning_count() noexcept;
 
 // Internal resolvers exposed for cache tests.
 gfx::TextureHandle resolve_static_texture(const GXTexObj_& obj);

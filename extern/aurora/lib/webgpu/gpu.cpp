@@ -7,6 +7,7 @@
 #include <cstdint>
 #include <cstdlib>
 #include <deque>
+#include <memory>
 #include <span>
 #include <string>
 #include <string_view>
@@ -67,6 +68,8 @@ bool g_vulkanLibraryFailed = false;
 GraphicsConfig g_graphicsConfig;
 TextureWithSampler g_frameBuffer;
 TextureWithSampler g_frameBufferResolved;
+TextureWithSampler g_sceneHdr;
+TextureWithSampler g_sceneHdrResolved;
 TextureWithSampler g_depthBuffer;
 
 // EFB -> XFB copy pipeline
@@ -322,13 +325,16 @@ wgpu::PresentMode select_present_mode(const wgpu::SurfaceCapabilities& capabilit
   return wgpu::PresentMode::Fifo;
 }
 
-TextureWithSampler create_render_texture(uint32_t width, uint32_t height, bool multisampled) {
+TextureWithSampler create_render_texture(uint32_t width, uint32_t height, bool multisampled,
+                                         wgpu::TextureFormat format) {
   const wgpu::Extent3D size{
       .width = width,
       .height = height,
       .depthOrArrayLayers = 1,
   };
-  const auto format = g_graphicsConfig.surfaceConfiguration.format;
+  if (format == wgpu::TextureFormat::Undefined) {
+    format = g_graphicsConfig.surfaceConfiguration.format;
+  }
   uint32_t sampleCount = 1;
   if (multisampled) {
     sampleCount = g_graphicsConfig.msaaSamples;
@@ -376,6 +382,129 @@ TextureWithSampler create_render_texture(uint32_t width, uint32_t height, bool m
       .format = format,
       .sampler = std::move(sampler),
   };
+}
+
+namespace {
+// g_sceneHdr's sample count; 0 while it is not allocated.
+uint32_t g_sceneHdrSamples = 0;
+// The size and sample count whose allocation failed. Not retried (or warned about again) until either
+// changes or release_scene_hdr_target() runs.
+wgpu::Extent3D g_sceneHdrFailedSize{};
+uint32_t g_sceneHdrFailedSamples = 0;
+bool g_sceneHdrNoCoreLogged = false;
+
+bool scene_hdr_handles_valid(const TextureWithSampler& target) noexcept {
+  return target.texture && target.view && target.format == SceneHdrFormat;
+}
+
+void release_scene_hdr_textures() noexcept {
+  g_sceneHdr = {};
+  g_sceneHdrResolved = {};
+  g_sceneHdrSamples = 0;
+}
+
+struct ScopeResult {
+  bool done = false;
+  wgpu::PopErrorScopeStatus status = wgpu::PopErrorScopeStatus::CallbackCancelled;
+  wgpu::ErrorType type = wgpu::ErrorType::NoError;
+  std::string message;
+};
+
+// Creates the MSAA + resolved pair under Validation, OutOfMemory and Internal error scopes. False with
+// `error` set when a scope caught an error or did not report in time. Each callback owns its result, so
+// one that fires after a timed-out wait (or on instance teardown) writes nothing on this stack.
+bool create_scene_hdr_textures(uint32_t width, uint32_t height, std::string& error) {
+  constexpr std::array filters{
+      wgpu::ErrorFilter::Validation,
+      wgpu::ErrorFilter::OutOfMemory,
+      wgpu::ErrorFilter::Internal,
+  };
+  for (const auto filter : filters) {
+    g_device.PushErrorScope(filter);
+  }
+  g_sceneHdr = create_render_texture(width, height, true, SceneHdrFormat);
+  g_sceneHdrResolved = create_render_texture(width, height, false, SceneHdrFormat);
+  bool ok = true;
+  for (size_t i = filters.size(); i-- > 0;) {
+    auto result = std::make_shared<ScopeResult>();
+    const auto future = g_device.PopErrorScope(
+        wgpu::CallbackMode::WaitAnyOnly,
+        [result](wgpu::PopErrorScopeStatus status, wgpu::ErrorType type, wgpu::StringView message) {
+          result->done = true;
+          result->status = status;
+          result->type = type;
+          result->message = std::string{std::string_view{message}};
+        });
+    const auto waitStatus = g_instance.WaitAny(future, 5000000000);
+    if (!ok) {
+      continue;
+    }
+    if (waitStatus != wgpu::WaitStatus::Success || !result->done) {
+      error = fmt::format("{} scope wait {}", magic_enum::enum_name(filters[i]), magic_enum::enum_name(waitStatus));
+      ok = false;
+    } else if (result->status != wgpu::PopErrorScopeStatus::Success) {
+      error = fmt::format("{} scope status {}", magic_enum::enum_name(filters[i]),
+                          magic_enum::enum_name(result->status));
+      ok = false;
+    } else if (result->type != wgpu::ErrorType::NoError) {
+      error = fmt::format("{}: {}", magic_enum::enum_name(result->type), result->message);
+      ok = false;
+    }
+  }
+  if (ok && !(scene_hdr_handles_valid(g_sceneHdr) && scene_hdr_handles_valid(g_sceneHdrResolved))) {
+    error = "null texture or view";
+    ok = false;
+  }
+  return ok;
+}
+} // namespace
+
+bool scene_hdr_supported() noexcept { return g_device && g_hasCoreFeatures; }
+
+bool ensure_scene_hdr_target() {
+  const auto size = g_frameBuffer.size;
+  const uint32_t samples = g_graphicsConfig.msaaSamples;
+  if (g_sceneHdrSamples == samples && g_sceneHdr.size.width == size.width &&
+      g_sceneHdr.size.height == size.height && scene_hdr_handles_valid(g_sceneHdr) &&
+      scene_hdr_handles_valid(g_sceneHdrResolved)) {
+    return true;
+  }
+  // Stale (other size or sample count) or partial: never reused.
+  release_scene_hdr_textures();
+  if (!g_device || size.width == 0 || size.height == 0) {
+    return false;
+  }
+  if (!g_hasCoreFeatures) {
+    if (!g_sceneHdrNoCoreLogged) {
+      g_sceneHdrNoCoreLogged = true;
+      Log.info("HDR scene target disabled: the device lacks CoreFeaturesAndLimits");
+    }
+    return false;
+  }
+  if (g_sceneHdrFailedSamples == samples && g_sceneHdrFailedSize.width == size.width &&
+      g_sceneHdrFailedSize.height == size.height) {
+    return false;
+  }
+  std::string error;
+  if (!create_scene_hdr_textures(size.width, size.height, error)) {
+    release_scene_hdr_textures();
+    g_sceneHdrFailedSize = size;
+    g_sceneHdrFailedSamples = samples;
+    Log.warn("HDR scene target {}x{} ({} samples) not allocated: {}", size.width, size.height, samples, error);
+    return false;
+  }
+  g_sceneHdrSamples = samples;
+  g_sceneHdrFailedSize = {};
+  g_sceneHdrFailedSamples = 0;
+  return true;
+}
+
+uint32_t scene_hdr_sample_count() noexcept { return g_sceneHdrSamples; }
+
+void release_scene_hdr_target() noexcept {
+  release_scene_hdr_textures();
+  g_sceneHdrFailedSize = {};
+  g_sceneHdrFailedSamples = 0;
 }
 
 const TextureWithSampler& present_source() noexcept {
@@ -1358,6 +1487,7 @@ void shutdown() {
   g_resampledFrameBuffer = {};
   g_frameBuffer = {};
   g_frameBufferResolved = {};
+  release_scene_hdr_target();
   g_depthBuffer = {};
   g_queue = {};
   g_surface = {};
@@ -1403,6 +1533,8 @@ static void resize_swapchain_internal(uint32_t width, uint32_t height, uint32_t 
   }
   g_frameBuffer = create_render_texture(width, height, true);
   g_frameBufferResolved = create_render_texture(width, height, false);
+  // Reallocated lazily at the new size and sample count on the next request.
+  release_scene_hdr_target();
   g_depthBuffer = create_depth_texture(width, height);
   g_CopyBindGroup = create_copy_bind_group(present_source());
 }

@@ -14,7 +14,9 @@
 #include "port_debug.h"
 #include "port_pbr_record.h"
 #include "port_room_env.h"
+#include "port_visor_mesh.h"
 #include <algorithm>
+#include <cassert>
 #include <cmath>
 #include <vector>
 #endif
@@ -242,11 +244,60 @@ struct SPortPBROverride {
 std::vector< SPortPBROverride > sPortPBROverrides;
 bool sPortGlows = false;
 f32 sPortGlow[3];
+int sPortKindSlot = -1;
+f32 sPortKindValue = 0.f;
 bool sPortSky = false;
 f32 sPortSkyGain[3];
 f32 sPortChargeShell = 0.f;
 f32 sPortDisintegration = 0.f;
+int sPortActiveVisor = 0;
+unsigned sPortVisorSkipped = 0;
+unsigned sPortShadowSkipped = 0;
+
+// Remastered's mesh filter for one surface (PortVisorMesh): true when it isn't drawn. A surface
+// with the shadow bit isn't drawn by a cast-only pass, and in a drawing pass is drawn without
+// casting: the guard turns the caster off for it and restores it.
+struct SPortVisorGuard {
+  bool restore = false;
+  bool Skip(const CCubeSurface& surface) {
+    const uint word = surface.PortVisorWord();
+    if (word == 0) {
+      return false;
+    }
+    if (PortVisorMesh::SkipsVisor(word, sPortActiveVisor)) {
+      ++sPortVisorSkipped;
+      return true;
+    }
+    if (PortVisorMesh::SkipsShadow(word)) {
+      const u8 mode = GXPortGetShadowCasterMode();
+      if (mode == 2) {
+        ++sPortShadowSkipped;
+        return true;
+      }
+      if (mode == 1) {
+        ++sPortShadowSkipped;
+        GXPortSetShadowCaster(false);
+        restore = true;
+      }
+    }
+    return false;
+  }
+  ~SPortVisorGuard() {
+    if (restore) {
+      GXPortSetShadowCaster(true);
+    }
+  }
+};
 } // namespace
+
+void CCubeModel::PortSetActiveVisor(const int visor) { sPortActiveVisor = visor; }
+
+void CCubeModel::PortTakeVisorSkipCounts(unsigned& visor, unsigned& shadow) {
+  visor = sPortVisorSkipped;
+  shadow = sPortShadowSkipped;
+  sPortVisorSkipped = 0;
+  sPortShadowSkipped = 0;
+}
 
 void CCubeModel::PortSetChargeShell(const f32 amount) { sPortChargeShell = amount; }
 
@@ -268,6 +319,11 @@ void CCubeModel::PortSetGlow(const f32* rgb) {
   for (int i = 0; i < 3; ++i) {
     sPortGlow[i] = rgb[i];
   }
+}
+
+void CCubeModel::PortSetKindParam(const int slot, const f32 value) {
+  sPortKindSlot = slot >= 0 && slot < 4 ? slot : -1;
+  sPortKindValue = value;
 }
 
 void CCubeModel::PortOverridePBR(const CCubeModel* model, const int material, const int field,
@@ -429,7 +485,9 @@ void CCubeModel::PortSetFallbackGlow(const CCubeMaterial& material, const int id
   }
   // The konst holds the emissive in gamma 2.2 and cannot exceed 1.0, so a glow brighter
   // than that (s * gain > 1) is clamped to it.
-  const f32 gain = PortRoomEnv::GlowGain(frameExposed);
+  // An opaque-pass glow is shown at the static exposure (the PBR shader's pbr_tone.w), so the
+  // frame-exposed gain is rescaled by GlowScale() unless the draw is frame-exposed.
+  const f32 gain = PortRoomEnv::GlowGain(frameExposed) * (frameExposed ? 1.f : PortRoomEnv::GlowScale());
   GXColor color{0, 0, 0, 255};
   u8* channels[3] = {&color.r, &color.g, &color.b};
   for (int i = 0; i < 3; ++i) {
@@ -496,6 +554,8 @@ f32 CCubeModel::PortSetPBRMaterial(const int idx, const f32 fade, const bool fad
       values[entry.field] = entry.value;
     }
   }
+  // A float driver's value for the kind parameter (falling water's GRDU, CCH0.z).
+  PortApplyKindParam(sPortKindSlot, sPortKindValue, values);
   // A liquid's surface (kinds 5 and 6) moves: its first parameter is a rate, and the
   // shader gets the phase. So do falling water (kind 7), the beam glow (9) and the
   // Waste Disposal tank's distortion (11), the Frigate's force fields (14) and the Phazon3 stone (21); glass (8) does not
@@ -603,10 +663,31 @@ struct SPortGlassCopy {
   bool mips; // copied with a mip chain (kind 23 samples blurred levels; the others read level 0)
 };
 SPortGlassCopy sPortGlassCopy = {false, 0, 0, 0, 0, 0, 0, false};
+// The pause visor's pass CSamusDoll set (CCubeModel::PortInventoryScope), while it is set.
+bool sPortInventoryActive = false;
+CCubeModel::PortInventoryPass sPortInventoryPass = {false, {1.f, 1.f, 1.f, 1.f}, 0.f, 1.f};
 } // namespace
+
+CCubeModel::PortInventoryScope::PortInventoryScope(const PortInventoryPass& pass) {
+  assert(!sPortInventoryActive && "PortInventoryScope does not nest");
+  sPortInventoryActive = true;
+  sPortInventoryPass = pass;
+}
+
+CCubeModel::PortInventoryScope::~PortInventoryScope() {
+  sPortInventoryActive = false;
+  GXSetPBRModelModulation(nullptr, nullptr, 1.f);
+}
 #endif
 
 void CCubeModel::DrawSurface(const CCubeSurface& surface, const CModelFlags& modelFlags) const {
+#ifdef TARGET_PC
+  // The pause screen's doll isn't a world draw: no filter there.
+  SPortVisorGuard visorGuard;
+  if (!sPortInventoryActive && visorGuard.Skip(surface)) {
+    return;
+  }
+#endif
   const CCubeMaterial material = GetMaterialByIndex(surface.GetMaterialIndex());
   if (material.IsFlagSet(kStateFlag_ShadowOccluderMesh) && !sDrawingOccluders) {
     return;
@@ -622,23 +703,42 @@ void CCubeModel::DrawSurface(const CCubeSurface& surface, const CModelFlags& mod
   const CModelFlags opaqueFlags(CModelFlags::kT_Opaque, static_cast< uchar >(modelFlags.GetShaderSet()),
                                 static_cast< CModelFlags::EFlags >(modelFlags.GetOtherFlags()),
                                 modelFlags.GetColorRef());
+  f32 portKind = -1.f;
+  if (material.IsFlagSet(kStateFlag_PortPBR)) {
+    f32 values[19];
+    PortReadPBRMaterial(static_cast< int >(surface.GetMaterialIndex()), values, nullptr, nullptr, nullptr);
+    portKind = values[13];
+  }
+  // The pause visor's pass (PortInventoryScope): its own materials (kinds 36, 37) are PBR under
+  // the pass's mode, shaded as opaque (the pass's colour reaches their shader as DIFC, ICMC and
+  // C, not as a TEV modulation or the fade) with the pass's depth, and drawn sorted with the
+  // material's blend; else they keep their TEV and the doll's flags. Nothing else is affected.
+  const EPortInventoryDraw inventoryDraw =
+      PortInventoryDraw(sPortInventoryActive, sPortInventoryPass, portKind, modelFlags.GetTrans(),
+                        CCubeMaterial::PortPBRAllowed(opaqueFlags), CCubeMaterial::PortScreenCopyUsed());
+  const bool outside = inventoryDraw == kPID_Outside;
+  const bool inventory = inventoryDraw == kPID_Pbr;
   const CColor& tint = modelFlags.GetColorRef();
-  const bool pbrBlend = modelFlags.GetTrans() == CModelFlags::kT_Blend && tint.GetRedu8() == 0xFF &&
+  const bool pbrBlend = outside && modelFlags.GetTrans() == CModelFlags::kT_Blend && tint.GetRedu8() == 0xFF &&
                         tint.GetGreenu8() == 0xFF && tint.GetBlueu8() == 0xFF &&
                         material.IsFlagSet(kStateFlag_PortPBR) &&
                         CCubeMaterial::PortPBRAllowed(opaqueFlags);
   const bool solidBlend = pbrBlend && tint.GetAlphau8() == 0xFF;
   const bool fadeBlend = pbrBlend && !solidBlend;
-  const CModelFlags& drawFlags = solidBlend ? opaqueFlags : modelFlags;
+  f32 inventoryDiffuse[4];
+  f32 inventoryIncan[4];
+  f32 inventoryCoverage = 1.f;
+  if (inventory &&
+      !PortInventoryModulation(sPortInventoryPass, inventoryDiffuse, inventoryIncan, inventoryCoverage)) {
+    return;
+  }
+  const CModelFlags drawFlags = PortDrawFlags(inventory, solidBlend, opaqueFlags, modelFlags);
   // The Ice Beam cannon's frost shell (kind 12) shows only while the beam charges
   // (PortSetChargeShell, or a console override of its first parameter), and only as PBR:
   // the TEV fallback has no dissolve and would freeze the gun for good.
   if (material.IsFlagSet(kStateFlag_PortPBR)) {
     const int idx = static_cast< int >(surface.GetMaterialIndex());
-    f32 values[19];
-    f32 lightScale[2];
-    PortReadPBRMaterial(idx, values, nullptr, lightScale, nullptr);
-    if (values[13] > 11.5f && values[13] < 12.5f) {
+    if (portKind > 11.5f && portKind < 12.5f) {
       f32 amount = sPortChargeShell;
       for (const SPortPBROverride& entry : sPortPBROverrides) {
         if (entry.model == this && entry.material == idx && entry.field == 15) {
@@ -650,7 +750,24 @@ void CCubeModel::DrawSurface(const CCubeSurface& surface, const CModelFlags& mod
       }
     }
   }
+  // The TEV fallback of a PBR material lit by the bake takes only the runtime lights, as its PBR
+  // draw does (GXSetPBRLightSkip below); Remastered has no area lights on a baked-lit model.
+  if (!inventory && material.IsFlagSet(kStateFlag_PortPBR) && CCubeMaterial::sPortAreaLights != 0 &&
+      !PortRoomEnv::AreaLights() && !(outside && (fadeBlend || CCubeMaterial::PortPBRAllowed(drawFlags)))) {
+    const CTransform4f& tevXf = CGraphics::GetModelMatrix();
+    const CVector3f tevOrigin = x20_bounds.Invalid() ? tevXf.GetTranslation() : tevXf * x20_bounds.GetCenterPoint();
+    float pos[3] = {tevOrigin.GetX(), tevOrigin.GetY(), tevOrigin.GetZ()};
+    PortRoomEnv::ProbeOverride(pos);
+    PortRoomEnv::Selection env;
+    const bool found = PortRoomEnv::Select(pos, env);
+    const bool lightmap =
+        found && env.lightmap != 0 && PortLightmapSlot(static_cast< int >(surface.GetMaterialIndex())) >= 0;
+    if (found && ((env.hasAmbient && env.ambientAbsolute) || env.volume != 0 || lightmap)) {
+      CCubeMaterial::sPortTevLightSkip = CCubeMaterial::sPortAreaLights;
+    }
+  }
   material.SetCurrent(drawFlags, surface, *this);
+  CCubeMaterial::sPortTevLightSkip = 0;
   if (material.IsFlagSet(kStateFlag_PortHudGlow) && !material.IsFlagSet(kStateFlag_PortPBR)) {
     // Remastered's 3853595c on FRME_Helmet: rgb = T*v1 + T*ICNC (ICNC white), alpha T.a^2*v1.a,
     // drawn with the widget's own blend (additive: src alpha, one) into the UNORM target after
@@ -660,12 +777,12 @@ void CCubeModel::DrawSurface(const CCubeSurface& surface, const CModelFlags& mod
   }
   // Port: PBR mod materials. The fallback TEV set above stays valid for the
   // paths PortPBRAllowed rejects.
-  const bool pbr = fadeBlend || (material.IsFlagSet(kStateFlag_PortPBR) &&
-                                 CCubeMaterial::PortPBRAllowed(drawFlags));
+  const bool pbr = inventory || (outside && (fadeBlend || (material.IsFlagSet(kStateFlag_PortPBR) &&
+                                                           CCubeMaterial::PortPBRAllowed(drawFlags))));
   // A fading model is shaded as it is at full alpha.
   const CModelFlags& lookFlags = fadeBlend ? opaqueFlags : drawFlags;
-  const bool sortedDraw =
-      lookFlags.GetTrans() >= CModelFlags::kT_Blend || material.IsFlagSet(kStateFlag_DepthSorting);
+  const bool sortedDraw = (inventory ? modelFlags : lookFlags).GetTrans() >= CModelFlags::kT_Blend ||
+                          material.IsFlagSet(kStateFlag_DepthSorting);
   if (!pbr && material.IsFlagSet(kStateFlag_PortPBR)) {
     PortSetFallbackGlow(material, static_cast< int >(surface.GetMaterialIndex()),
                         sortedDraw && !sPortSky);
@@ -848,17 +965,26 @@ void CCubeModel::DrawSurface(const CCubeSurface& surface, const CModelFlags& mod
       const bool occluded = found && kind > 27.5f && kind < 28.5f;
       GXSetPBRProbeEx(viewToCube, 1.f, occluded ? env.occlusionMin : 1.f, occluded ? env.occlusionInvMax : 1.f);
       GXSetPBRCube(materialCubeId, materialCubeParams);
+    } else if (inventory) {
+      // The visor reflects its own cube (267ccd84) or, without it or with the probe off,
+      // nothing: never the room's.
+      static const f32 kNoVisorCube[4] = {0.f, 0.f, 0.f, 0.f};
+      GXSetPBRProbe(viewToWorld, 0.f);
+      GXSetPBRCube(0, kNoVisorCube);
     }
     // Glass (kinds 8 and 11) and the force fields (14) see what is behind them: the screen so far,
     // copied into map 7 as the refracting particles copy it (CElementGen).
     if (((kind > 7.5f && kind < 8.5f) || (kind > 10.5f && kind < 11.5f) || (kind > 13.5f && kind < 14.5f) ||
-         (kind > 22.5f && kind < 23.5f) || (kind > 28.5f && kind < 30.5f) || (kind > 33.5f && kind < 34.5f)) &&
+         (kind > 22.5f && kind < 23.5f) || (kind > 28.5f && kind < 30.5f) || (kind > 33.5f && kind < 34.5f) ||
+         (kind > 35.5f && kind < 36.5f)) &&
         CCubeMaterial::PortScreenCopyUsed()) {
       int portLeft, portTop, portWidth, portHeight;
       CGraphics::GetViewport(portLeft, portTop, portWidth, portHeight);
       SPortGlassCopy& copy = sPortGlassCopy;
       const bool wantMips = (kind > 22.5f && kind < 23.5f) || (kind > 28.5f && kind < 30.5f);
-      const bool current = copy.valid && copy.serial == GXPortCopySerial() &&
+      // The visor's glass (36) keeps the scene by its pass's weight, so each pass sees what is
+      // there now, the other visor layer's last draw included: it copies every time.
+      const bool current = !(kind > 35.5f && kind < 36.5f) && copy.valid && copy.serial == GXPortCopySerial() &&
                            copy.frame == CGraphics::GetFrameCounter() && copy.left == portLeft &&
                            copy.top == portTop && copy.width == portWidth && copy.height == portHeight &&
                            (copy.mips || !wantMips);
@@ -869,7 +995,7 @@ void CCubeModel::DrawSurface(const CCubeSurface& surface, const CModelFlags& mod
                          wantMips ? GX_TRUE : GX_FALSE);
         const bool useVideoFilter = CGraphics::GetUseVideoFilter();
         CGraphics::SetUseVideoFilter(false);
-        GXCopyTex(CGraphics::GetDolphinSpareBuffer(), GX_FALSE);
+        GXPortCopyScene(CGraphics::GetDolphinSpareBuffer(), GX_FALSE);
         CGraphics::SetUseVideoFilter(useVideoFilter);
         GXPixModeSync();
         copy.valid = true;
@@ -894,6 +1020,11 @@ void CCubeModel::DrawSurface(const CCubeSurface& surface, const CModelFlags& mod
         GXLoadTexObj(&mipObj, CGraphics::kSpareBufferTexMapID);
         CTexture::InvalidateTexmap(CGraphics::kSpareBufferTexMapID);
       }
+    }
+    if (inventory) {
+      GXSetPBRModelModulation(inventoryDiffuse, inventoryIncan, inventoryCoverage);
+    } else {
+      GXSetPBRModelModulation(nullptr, nullptr, 1.f);
     }
     GXSetPBR(GX_TRUE);
     ++CCubeMaterial::sPortPBRDraws;
@@ -1134,6 +1265,12 @@ void CCubeModel::DrawFlat(const float* positions, const float* normals,
   if (which != kSS_Sorted) {
     for (CCubeSurface surface = x38_firstUnsorted; surface.IsValid();
          surface = surface.GetNextSurface()) {
+#ifdef TARGET_PC
+      SPortVisorGuard visorGuard;
+      if (visorGuard.Skip(surface)) {
+        continue;
+      }
+#endif
       CCubeMaterial material = GetMaterialByIndex(surface.GetMaterialIndex());
       CGX::SetVtxDescv_Compressed(material.GetVertexDescLwzx());
       surface.CallDisplayList();
@@ -1143,6 +1280,12 @@ void CCubeModel::DrawFlat(const float* positions, const float* normals,
   if (which != kSS_Unsorted) {
     for (CCubeSurface surface = x3c_firstSorted; surface.IsValid();
          surface = surface.GetNextSurface()) {
+#ifdef TARGET_PC
+      SPortVisorGuard visorGuard;
+      if (visorGuard.Skip(surface)) {
+        continue;
+      }
+#endif
       CCubeMaterial material = GetMaterialByIndex(surface.GetMaterialIndex());
       CGX::SetVtxDescv_Compressed(material.GetVertexDescLwzx());
       surface.CallDisplayList();

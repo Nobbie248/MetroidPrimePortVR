@@ -103,6 +103,15 @@ public:
   void DrawTouchBounds() const;
   bool IsModelOpaque(const CStateManager& mgr) const;
   void RenderInternal(const CStateManager& mgr) const;
+#ifdef TARGET_PC
+  // Port: draws only the base model into the sun's shadow map (no particles, blob shadow or
+  // sorted submission). True when the model draw was issued (the pipeline may still reject a blended or cutout draw);
+  // false when there was nothing to draw or the box is outside the map.
+  bool PortRenderShadowCaster(const CStateManager& mgr) const;
+  // Port: draws the base model as a caster into the current projected actor shadow map.
+  void PortRenderActorShadowCaster(const CStateManager& mgr) const;
+  void PortConfigureShadow(const CStateManager& mgr);
+#endif
   void CreateShadowIfNeeded();
 
   const CTransform4f& GetTransform() const { return x34_transform; }
@@ -260,14 +269,20 @@ public:
   // instead of x34_transform. False when no blend applies (the view is left
   // alone): smoothing off, capped frames, snapped moves, new actors.
   bool PortPresentedView(const CTransform4f& view, CTransform4f& out) const;
-  // Rigid blend of two transforms at t, with the snap rule above (over 4
-  // units or 45 degrees apart = false). `cur` gets the rigid form of `to`.
+  // A world point carried along with this actor to where it is drawn (the
+  // point itself when no blend applies), for HUD markers placed on it.
+  CVector3f PortPresentedPoint(const CVector3f& world) const;
+  // Rigid blend of two transforms at t, with the snap rule above (a teleport
+  // or 45 degrees apart = false). `cur` gets the rigid form of `to`.
   // A non-zero `pivot` (world offset to the visual centre, the morph ball's
   // radius) makes that centre lerp and the turn happen about it; then only a
-  // teleport cuts, a big roll keeps the translation (port_presentation_rules.h).
+  // teleport cuts, a big roll keeps the translation. `lastStep2` is the
+  // squared step of the tick before, so fast movers aren't taken for
+  // teleports (port_presentation_rules.h).
   static bool PortBlendRigid(const CTransform4f& from, const CTransform4f& to, float t,
                              CTransform4f& blend, CTransform4f& cur,
-                             const CVector3f& pivot = CVector3f::Zero());
+                             const CVector3f& pivot = CVector3f::Zero(),
+                             float lastStep2 = 0.f);
 #endif
 
 protected:
@@ -329,6 +344,8 @@ private:
 #ifdef TARGET_PC
   CTransform4f xPortPrevTransform;
   uint xPortPrevGeneration;
+  // Squared step of the tick before (0 when that tick had no snapshot).
+  float xPortLastStep2;
   bool xPortOwnPresentation;
 #endif
 };
@@ -345,6 +362,23 @@ private:
   CPortActorRenderScope(const CPortActorRenderScope&);
   CPortActorRenderScope& operator=(const CPortActorRenderScope&);
   CTransform4f xSavedView;
+  bool xActive;
+};
+
+// Port: while alive, undoes an active CPortActorRenderScope, for draws that
+// smooth themselves in world space (a swoosh trail left behind the actor must
+// not move rigidly with it).
+class CPortRenderScopeSuspend {
+public:
+  explicit CPortRenderScopeSuspend(bool enable);
+  ~CPortRenderScopeSuspend();
+  // Re-enters the actor shift early (the system can't blend itself after all).
+  void Resume();
+
+private:
+  CPortRenderScopeSuspend(const CPortRenderScopeSuspend&);
+  CPortRenderScopeSuspend& operator=(const CPortRenderScopeSuspend&);
+  CTransform4f xScopedView;
   bool xActive;
 };
 #endif

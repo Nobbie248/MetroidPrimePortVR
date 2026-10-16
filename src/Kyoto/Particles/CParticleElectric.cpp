@@ -22,10 +22,26 @@
 #include "MetroidPrime/CActor.hpp"
 #include "MetroidPrime/Cameras/CCameraManager.hpp"
 #include "port_debug.h"
+#include "Kyoto/Particles/CParticleElectric2Port.hpp"
 #include "port_fx_debug.h"
 #endif
 
 ushort CParticleElectric::sSeed = 99;
+
+#ifdef TARGET_PC
+void CParticleElectric::PortElc2Step(bool emitting) {
+  CParticleElectric2Port::Ctx ctx;
+  ctx.xf = xf8_cachedXf;
+  ctx.globalScale = xe0_globalScale;
+  ctx.localScale = xec_localScale;
+  ctx.modu = x1b8_moduColor;
+  ctx.ipos = x178_overrideIPos ? &*x178_overrideIPos : nullptr;
+  ctx.ivel = x188_overrideIVel ? &*x188_overrideIVel : nullptr;
+  ctx.fpos = x198_overrideFPos ? &*x198_overrideFPos : nullptr;
+  ctx.fvel = x1a8_overrideFVel ? &*x1a8_overrideFVel : nullptr;
+  xPortElc2->Step(x28_currentFrame, emitting, ctx);
+}
+#endif
 
 CParticleElectric::CParticleElectric(TToken< CElectricDescription > desc)
 : x1c_elecDesc(desc)
@@ -73,6 +89,12 @@ CParticleElectric::CParticleElectric(TToken< CElectricDescription > desc)
   } else {
     x2c_LIFE = 0x7fffff;
   }
+#ifdef TARGET_PC
+  if (x1c_elecDesc->xPortElc2) {
+    xPortElc2.reset(new CParticleElectric2Port(**x1c_elecDesc));
+    return;
+  }
+#endif
   if (x1c_elecDesc->x40_SSWH) {
     x450_27_haveSSWH = true;
     for (int i = 0; i < x154_SCNT; ++i) {
@@ -316,9 +338,16 @@ const bool CParticleElectric::Update(double dt) {
   }
   while (evalTime < x30_curTime) {
     CParticleGlobals::SetEmitterTime(x28_currentFrame);
-    UpdateElectricalEffects();
-    if (emitting) {
-      AddElectricalEffects();
+#ifdef TARGET_PC
+    if (xPortElc2) {
+      PortElc2Step(emitting);
+    } else
+#endif
+    {
+      UpdateElectricalEffects();
+      if (emitting) {
+        AddElectricalEffects();
+      }
     }
     if (x450_25_haveGPSM) {
       if (x28_currentFrame >= x2c_LIFE) {
@@ -358,6 +387,22 @@ void CParticleElectric::Render() {
   }
 #endif
   const float startTime = CStopwatch::GetGlobalTime();
+#ifdef TARGET_PC
+  if (xPortElc2) {
+    if (x450_29_transformDirty) {
+      UpdateCachedTransform();
+    }
+    CGraphics::DisableAllLights();
+    CGraphics::SetDepthWriteMode(true, kE_LEqual, false);
+    CGraphics::SetBlendMode(kBM_Blend, kBF_SrcAlpha, kBF_InvSrcAlpha, kLO_Clear);
+    CGraphics::SetModelMatrix(CTransform4f::Identity());
+    CGraphics::SetCullMode(kCM_None);
+    xPortElc2->Render(x28_currentFrame, CGraphics::GetViewMatrix());
+    CGraphics::SetCullMode(kCM_Front);
+    x12c_renderTime = CStopwatch::GetGlobalTime() - startTime;
+    return;
+  }
+#endif
   if (!x3e8_electricManagers.empty()) {
     if (x450_29_transformDirty) {
       UpdateCachedTransform();
@@ -628,6 +673,12 @@ void CParticleElectric::UpdateLine(int idx, int frame) {
 }
 
 void CParticleElectric::BuildBounds() {
+#ifdef TARGET_PC
+  if (xPortElc2) {
+    x160_systemBounds = xPortElc2->BoltCount() > 0 ? xPortElc2->Bounds() : CAABox::MakeMaxInvertedBox();
+    return;
+  }
+#endif
   if (GetParticleCount() <= 0) {
     x160_systemBounds = CAABox::MakeMaxInvertedBox();
     return;
@@ -683,6 +734,11 @@ bool CParticleElectric::IsSystemDeletable() const {
   if (x450_24_emitting && x28_currentFrame < x2c_LIFE) {
     return false;
   }
+#ifdef TARGET_PC
+  if (xPortElc2) {
+    return xPortElc2->BoltCount() == 0;
+  }
+#endif
   if (!x3e8_electricManagers.empty()) {
     return false;
   }
@@ -704,6 +760,11 @@ bool CParticleElectric::IsSystemDeletable() const {
 }
 
 int CParticleElectric::GetParticleCount() const {
+#ifdef TARGET_PC
+  if (xPortElc2) {
+    return xPortElc2->PointCount();
+  }
+#endif
   int count = 0;
   if (!x3e8_electricManagers.empty()) {
     for (AUTO(it, x3e8_electricManagers.begin()); it != x3e8_electricManagers.end(); ++it) {
@@ -729,6 +790,20 @@ int CParticleElectric::GetParticleCount() const {
 }
 
 void CParticleElectric::ForceParticleCreation(int count) {
+#ifdef TARGET_PC
+  if (xPortElc2) {
+    if (x450_29_transformDirty) {
+      UpdateCachedTransform();
+    }
+    CParticleElectric2Port::Ctx ctx;
+    ctx.xf = xf8_cachedXf;
+    ctx.globalScale = xe0_globalScale;
+    ctx.localScale = xec_localScale;
+    ctx.modu = x1b8_moduColor;
+    xPortElc2->Create(x28_currentFrame, count, ctx);
+    return;
+  }
+#endif
   CGlobalRandom random(x14c_randState);
   CreateNewParticles(count);
 }

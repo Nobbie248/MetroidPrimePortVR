@@ -129,14 +129,13 @@ void CGuiCamera::Draw(const CGuiWidgetDrawParms& parms) const {
     }
     mCenterX = 0.f;
     mCenterZ = 0.f;
-    // PortVr: remembered for the headset's head-locked plane (GetDrawTanHalfWidth).
-    mDrawTanHalfHeight = std::tan(0.5f * fov * (3.14159265f / 180.f));
-    mDrawTanHalfWidth = mDrawTanHalfHeight * aspect;
+    mDrawTanY = std::tan(0.5f * fov * 3.14159265f / 180.f);
+    mDrawTanX = mDrawTanY * aspect;
     CGraphics::SetPerspective(fov, aspect, mCameraParms.perspective.znear,
                               mCameraParms.perspective.zfar);
   } else {
-    mDrawTanHalfWidth = 0.f;
-    mDrawTanHalfHeight = 0.f;
+    mDrawTanX = 0.f;
+    mDrawTanY = 0.f;
     float left = mCameraParms.orthographic.left;
     float right = mCameraParms.orthographic.right;
     float top = mCameraParms.orthographic.top;
@@ -194,15 +193,16 @@ void CGuiCamera::Draw(const CGuiWidgetDrawParms& parms) const {
   CGuiWidget::Draw(parms);
 }
 
-CTransform4f CGuiCamera::GetAspectSpreadTransform(const CVector3f& worldAnchor) const {
-  if (mSpread == 1.f && mSpreadY == 1.f) {
+CTransform4f CGuiCamera::GetAspectSpreadTransform(const CVector3f& worldAnchor,
+                                                  float weight) const {
+  if ((mSpread == 1.f || weight == 0.f) && mSpreadY == 1.f) {
     return CTransform4f::Identity();
   }
   const CTransform4f invView = mSpreadView.GetInverse();
   const CVector3f eyePos = invView * worldAnchor;
   if (!mSpreadAboutEye) {
     return CTransform4f::Translate(mSpreadView.Rotate(CVector3f(
-        (mSpread - 1.f) * (eyePos.GetX() - mSpreadCenterX), 0.f,
+        weight * (mSpread - 1.f) * (eyePos.GetX() - mSpreadCenterX), 0.f,
         (mSpreadY - 1.f) * (eyePos.GetZ() - mCenterZ))));
   }
   // Camera +Y is forward; +Z is screen-up. Keep the anchor's depth unchanged.
@@ -219,8 +219,7 @@ CTransform4f CGuiCamera::GetAspectSpreadTransform(const CVector3f& worldAnchor) 
   }
   // The horizontal spread: x += offset * depth is an exact image translation, so the widget keeps
   // its authored shape (turning it toward the eye squashed the side clusters at very wide ratios).
-  const float offset = GetAspectSliceOffset(eyePos.GetX() / eyePos.GetY(), false,
-                                            GetSliceCenter(eyePos.GetY()));
+  const float offset = GetLaggedSliceOffset(eyePos, false, weight);
   return mSpreadView *
          CTransform4f(1.f, offset, 0.f, 0.f, 0.f, 1.f, 0.f, 0.f, 0.f, 0.f, 1.f, 0.f) * invView;
 }
@@ -246,21 +245,30 @@ bool CGuiCamera::GetAspectSlices(float& inner, float& outer, bool curved) const 
 
 void CGuiCamera::SetHudO2WTransform(const CTransform4f& xf, const CVector3f& idlePos) {
   SetO2WTransform(xf);
-  mSpreadLag = xf.GetQuickInverse() * CTransform4f::Translate(idlePos);
+  SetSpreadLag(xf.GetQuickInverse() * CTransform4f::Translate(idlePos));
 }
 
-float CGuiCamera::GetSliceCenter(float depth) const {
-  const CVector3f center = mSpreadLag * CVector3f(0.f, depth, 0.f);
-  return center.GetY() > 0.f ? center.GetX() / center.GetY() : 0.f;
+float CGuiCamera::GetLaggedTangent(float tangent, float depth) const {
+  const CVector3f view = mSpreadLag * CVector3f(tangent * depth, depth, 0.f);
+  return view.GetY() > 0.f ? view.GetX() / view.GetY() : tangent;
 }
 
-float CGuiCamera::GetAspectSliceOffset(float tangent, bool curved, float center) const {
+float CGuiCamera::GetLaggedSliceOffset(const CVector3f& eye, bool curved, float weight) const {
+  const CVector3f idle = mSpreadLagInv * eye;
+  if (idle.GetY() <= 0.f || eye.GetY() <= 0.f) {
+    return 0.f;
+  }
+  const float warp = weight * GetAspectSliceOffset(idle.GetX() / idle.GetY(), curved);
+  const CVector3f moved = mSpreadLag * (idle + CVector3f(warp * idle.GetY(), 0.f, 0.f));
+  return moved.GetY() > 0.f ? moved.GetX() / moved.GetY() - eye.GetX() / eye.GetY() : 0.f;
+}
+
+float CGuiCamera::GetAspectSliceOffset(float tangent, bool curved) const {
   float inner, outer;
   if (!GetAspectSlices(inner, outer, curved)) {
     return 0.f;
   }
   curved = IsSliceCurved(curved);
-  tangent -= center;
   // Past `outer` everything keeps its authored distance to the screen edge.
   const float shift = (mSpread - 1.f) * mSpreadHalfTan;
   const float a = std::fabs(tangent);
@@ -286,8 +294,22 @@ CTransform4f CGuiCamera::GetHudScaleTransform(float scaleWeight) const {
          CTransform4f::Translate(-center) * mSpreadView.GetInverse();
 }
 
-CTransform4f CGuiCamera::GetHudTransform(const CVector3f& worldAnchor, float scaleWeight) const {
-  return GetHudScaleTransform(scaleWeight) * GetAspectSpreadTransform(worldAnchor);
+CTransform4f CGuiCamera::GetHudTransform(const CVector3f& worldAnchor, float scaleWeight,
+                                         float spreadWeight) const {
+  return GetHudScaleTransform(scaleWeight) * GetAspectSpreadTransform(worldAnchor, spreadWeight);
+}
+
+CVector3f CGuiCamera::ConvertToDrawnScreenSpace(const CVector3f& point, float spreadWeight) const {
+  if (mDrawTanX <= 0.f || mDrawTanY <= 0.f) {
+    return ConvertToScreenSpace(point);
+  }
+  const CVector3f eye =
+      mSpreadView.GetInverse() * (GetHudTransform(point, 1.f, spreadWeight) * point);
+  if (eye.GetY() <= 0.f) {
+    return CVector3f(-1.f, -1.f, 1.f);
+  }
+  return CVector3f(eye.GetX() / (eye.GetY() * mDrawTanX), eye.GetZ() / (eye.GetY() * mDrawTanY),
+                   0.f);
 }
 
 CVector3f CGuiCamera::ConvertToScreenSpace(const CVector3f& point) const {

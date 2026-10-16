@@ -5,6 +5,9 @@ Aurora provides the GameCube SDK compatibility layer, SDL3, and WebGPU/Dawn;
 MusyX provides the software audio engine. It does not link DolRecomp or the
 ModernGekko runtime from the separate recompilation experiment.
 
+Other docs: `docs/SETTINGS.md` (controls and settings), `docs/MODS.md` (mods and
+texture replacements), `docs/CONSOLE.md` (debug console).
+
 ## Build
 
 Requirements: CMake 3.25+, Ninja, a C++20 compiler/library, and a C compiler with
@@ -92,11 +95,13 @@ image. Otherwise, when no disc is found it opens the platform's file dialog and
 remembers the answer as `disc_path` in the settings file. There is no prompt
 when the port has no window to show one on, or with `MP_NO_DISC_DIALOG=1`
 (for scripted runs that do have a window, as on a build runner). The disc must
-identify as **GM8E01, disc 0, revision 0** (USA 1.00) or **GM8P01** (PAL).
+identify as **GM8E01, disc 0, revision 0, 1 or 2** (USA 1.00, 1.01 or 1.02) or **GM8P01** (PAL).
 PAL support is experimental: a PAL disc runs the same 1.00 code on its own data, at 60 Hz, with every port
 feature (Remastered import, randomizer, Archipelago, cutscene skips) and its
-languages; its saves are kept apart from USA ones. USA 1.01 and 1.02 are only
-taken with `MP_DISC_ANY_VERSION=1` (untested); Japanese, Korean and Wii discs
+languages; its saves are kept apart from USA ones. USA 1.01 runs the same
+way; its data differs from 1.00 only in a few rooms' scripts and one credits
+name. USA 1.02 runs the same way (its rooms' scripts differ more, and the
+cutscene skips and the Arboretum gate fix have 1.02 variants); Japanese, Korean and Wii discs
 are rejected. Nod/Aurora supports additional image
 containers, but the same retail content is required.
 
@@ -450,361 +455,7 @@ screen quickly to see the result.
 
 ### Mods folder
 
-`mods` in the user folder (or wherever `MP_MODS` points; created on first
-start) replaces disc data without touching the disc image. Each folder in it is
-a mod, applied in name order so a later name wins; folders starting with `.` are
-skipped. The binary layouts below are also in
-`platform/include/port_{mods,room_geo,room_liquid,room_env,hd_font,hud_bars}.h`,
-which are authoritative. Inside a mod:
-
-- a file at a disc path (`Metroid1.pak`, `Audio/frigate.dsp`,
-  `Video/attract0.thp`; case does not matter) replaces that file. Only
-  existing disc files can be replaced; others are reported and ignored.
-- a file named `<8 hex digits>.<type>` (`1A2B3C4D.TXTR`, `0552A456.STRG`),
-  anywhere in the mod, replaces that resource, uncompressed, in every PAK that
-  holds it. The PAK is served as a virtual file with the loose file appended
-  past the original data, 32-byte aligned (see `platform/include/port_mods.h`). A
-  loose resource also applies inside a PAK another mod replaced whole. An id
-  that no PAK holds is added to `NoARAM.pak` (loaded from boot, so any model or
-  frame can reference it): the table grows by one entry and the original data
-  moves down to keep its 32-byte alignment. An id another PAK holds under a
-  different type is reported and ignored. A resource can be any size (the port
-  keeps PAK sizes whole; retail stops at 4 MB), though the game heap still
-  bounds what fits: a 16 MB texture runs it out of memory. `MP_MEM1_MB=<n>`
-  raises the emulated MEM1 arena (default 24 MB, capped at 1024) and the game
-  heap with it, for mods heavier than the retail heap allows; the log says
-  `port: MEM1 arena raised to <n> MB`.
-- a file named `<8 hex digits>.dds`, anywhere in the mod, is a native texture:
-  the full-size image of the TXTR with that id, with a full mip chain. The
-  importer writes BC7 (BC5, two-channel, for PBR normal maps), or ASTC 4x4
-  (normal maps as RGBA with B=0, A=255) when the GPU has ASTC and no BC; the
-  loader also reads BC3, BC1 and RGBA8. `MP_REMASTERED_TEXTURE_FORMAT=bc|astc`
-  forces the choice (for testing); `--import-remastered` has no GPU and writes BC
-  unless told otherwise. The import logs `remastered: writing <BC7|ASTC 4x4>
-  textures`. The ASTC encoder is ARM's astc-encoder (`extern/astcenc`, FAST
-  preset, about 2 s for a 2048 px map with its mips on one desktop core). The TXTR still
-  loads (the mod's own, which can be a few texels across, or the disc's) and
-  supplies the wrap and filter state; the `.dds` is what is drawn. Aurora
-  streams it on worker threads into GPU memory, so its size never counts
-  against the game heap: a mod of 2048 px maps runs at the default arena. A
-  later mod's TXTR without a `.dds` drops an earlier mod's `.dds` for that id.
-  On a GPU with neither BC nor ASTC the TXTR is drawn instead; a BC `.dds` on a
-  phone (an import made on a desktop) is refused the same way. The log
-  and the Mods panel count them (`mods: <n> native texture(s)`).
-  `MP_TEXTURE_MAX_DIM=<px>` caps the size a `.dds` is loaded at (0 = no limit;
-  default 0, 1024 on Android) and `MP_TEXTURE_CACHE_MB=<n>` the memory the
-  loaded ones may keep cached (default 4096, 1024 on Android).
-- a file named `<name>.sdfont`, anywhere in the mod, is a distance-field font
-  (each texel holds how far it is from the glyph's edge), which stays sharp at
-  any resolution. The port draws its glyphs in place of the disc's bitmap ones
-  for the Deface fonts (HUD, menus, scans, logbook), fitted to the disc's
-  capital H; the layout is still the disc's (advances, kerning, line breaks),
-  so text sits where it did. From a character the file lacks, the rest of
-  that run of text is drawn from the disc. The last mod with one wins,
-  `MP_HD_FONT=0` turns it off, and the layout is in
-  `platform/include/port_hd_font.h`.
-- a file named `<FRME id, 8 hex digits>.hudbars`, anywhere in the mod, gives
-  the energy-bar widgets of that HUD frame their own shape: per bar, named
-  after its widget, a strip of stations (two points and their texture
-  coordinates) from the empty end to the full end. The game still supplies the
-  value, the colours and the texture; the port fills the strip by its measured
-  length, so stations need not be evenly spaced, and blends it as the widget's
-  draw flags say. The last mod with one for a frame wins, and the layout is in
-  `platform/include/port_hud_bars.h`.
-- a file named `<MREA id, 8 hex digits>.roomenv`, anywhere in the mod, is that
-  area's lighting environment for PBR materials: reflection probes, each a box
-  of the world with a prefiltered HDR cube map (BC6H) of what surrounds it. A
-  PBR model reflects the cube of the smallest box it stands in (else the
-  nearest), in place of the port's live probe, exposed so the cube's average
-  is middle grey. A file may also hold baked ambient light: a grid of points
-  through the room, each with the light arriving there and the direction most
-  of it comes from, per colour. A PBR model standing in a grid takes the
-  colour and direction of its ambient light from the points around its origin;
-  the game's ambient colour only sets how bright it is. A file also carries
-  the room's tonemap values and its auto exposure settings, and a
-  probe's scale turns its cube (stored normalised) back into radiance. Those
-  set one exposure for the frame, the way Remastered does: the room the
-  camera is in is exposed by its own radiance, its exposure bias and the
-  range its auto exposure is held to, cubes and baked ambient keep their
-  level relative to that, and the result goes through that room's tone curve
-  (the formulas are Remastered's own; the frame's average is stood in for by
-  the room's middle probe). `MP_ROOM_ENV_EXPOSURE=0` turns that off: every
-  cube is then exposed to middle grey and the game's ambient sets the level.
-  Files load and unload with their areas, and a cube is decoded
-  on first use. The layout is in `platform/include/port_room_env.h`.
-- a file named `<MREA id, 8 hex digits>.roomgeo`, anywhere in the mod, is that
-  area's static geometry: a list of models, each with the transform that
-  places it in the area, drawn in place of the area's own surfaces (its
-  actors, doors and pickups are drawn as before). The layout (little-endian,
-  versions 1 to 3) is in `platform/include/port_room_geo.h`. The models are
-  ordinary CMDLs of the mod and are loaded
-  with the area. The Thermal and X-Ray visors draw the retail area. A game
-  started with such a mod installed takes a 256 MB arena and larger frame
-  buffers (2 times the usual size with `MP_ROOM_GEO_RESIDENT`, the default; 12
-  without it, 6 on Android; see `MP_FRAME_BUFFERS`), since these rooms are many
-  times retail's vertex count; a mod loaded into a running game without them
-  is not drawn until the next start.
-- a file named `<MREA id, 8 hex digits>.roomliquid`, anywhere in the mod, holds
-  that area's liquid surfaces (water, poison, lava) as models: each is drawn in
-  place of the fluid plane of the area's water object that stands where its
-  transform says, at the height the game gives that plane, so a rising or
-  draining liquid still moves. The object itself is untouched (fog, splashes,
-  damage). The layout is in `platform/include/port_room_liquid.h`. Their
-  materials carry a `PBR4` record of kind 5 (water, poison: a
-  colour, an opacity and two moving normal maps) or 6 (a lava pool: a pattern
-  carried along a flow map, coloured by a ramp).
-  The Thermal and X-Ray visors show the surface too: the Thermal visor's passes
-  shade it as they shade a fluid plane (the hot pass adds it), and the X-Ray
-  visor draws it unchanged. `MP_ROOM_LIQUID=0` or the
-  console's `roomliquid off` draws the retail planes instead.
-- a PBR material (flag bit 14) may end in a 28-byte record: six big-endian floats
-  (emissive multiplier rgb, backlight) and the tag `PBRM`, inside the
-  material's own span in the offset table. The multiplier scales the emissive map.
-  The backlight triple of a lit material is Remastered's CharacterBacklight: the
-  strength of the light from behind, of the light from above, and the power of its
-  fade up the model's height plus 1 (0 = no fade); `MP_REMASTERED_BACKLIGHT=0`
-  turns it off. The two strengths follow the room's Backlight hints (roomenv v11,
-  picked and faded like the colour grade hints; none = top 2, back 4; console
-  `roomenv grades`). On a ColorUnlit material it is the gain, three times. A material
-  without the record gets 1 and 0.
-  `PBR6` (92 bytes, the 19 floats, the wrap word, then diffuse and F0 factors) carries
-  Remastered's LITS (LightBleedScale) for a two-sided mesh's back copy:
-  `GXSetPBRLightScale` scales only the PBR diffuse and F0 (never emissive, backlight or
-  specular) and resets to 1, 1 on every material. A material with a finite positive LITS
-  gets its back copy as a primitive and material of its own, diffuse |LITS| and F0 0
-  (LITS 1 included). **Geometry contract:** that copy's vertices keep the older back
-  copy's turned-round normals (so the TEV fallback, thermal and every other reader light
-  it as before), and an F0 factor of exactly 0 is the marker by which the PBR shader
-  turns the normal back to the surface's own, as Remastered keeps N for a positive LITS.
-  The cotangent frame is built on the stored normal: from behind the screen's handedness
-  flips with the winding, so that gives the front's own T and B (the back keeps them,
-  as Remastered does). The converter emits F0 0 only there; every other caller is 1.
-  No LITS and -1 keep the older copy (factors 1, 1); 0 and negatives other than -1 are
-  unsurveyed and keep it too.
-  Older records read as factors 1 and 1 (`platform/include/port_pbr_record.h`).
-  Two longer forms follow the same six floats: `PBR2` (36 bytes) adds a height-blend
-  threshold and a mode (1 unlit: the material's own colour and glow; 2 the base
-  map's alpha scales the glow; 4 the vertex colour tints the surface; summed),
-  and `PBR3` (56 bytes) adds a second layer's edge width and the scale and offset of both layers' heights. A `PBR3`
-  material binds three more maps (base, metal/roughness, normal of the second
-  layer) and blends the two by the vertex alpha and the base maps' alphas.
-  A colour attribute tints a PBR material's albedo only with mode 4.
-- text and image files (`.txt`, `.md`, `.json`, `.png`, ...) are ignored
-  silently, so a mod can carry its readme.
-
-Mods load at startup, after the disc is opened (the game caches PAK tables when
-it boots), and everything reads through Aurora's DVD overlays, so the game code
-is unchanged. The log lists each mod's counts and any problems ("mods: ..."),
-and F1 > Mods shows the same, with a Load mods switch (`mods`) and a
-checkbox per mod (`mods_disabled`, `/`-separated names); both take effect on
-the next start. `tools/extract_textures.py`'s `disc_files`/`pak_resources` get
-a resource's original bytes to edit. Checked with a `0552A456.STRG` (the file
-select's "New Game") read from the disc and from a whole-file `MiscData.pak`
-mod. On Android `mods/` is in the data folder; move that to shared storage
-(F1 > System > Data folder) to add mods with a file manager.
-
-#### Reloading without a restart
-
-F1 > Mods > Reload mods (console: `mods reload`) reads the mods folder
-again while the game runs: added, removed, edited, enabled and disabled mods
-all take effect, PAK resources and native `.dds` textures alike. The game is
-rebuilt where Samus stands, exactly as a save state load does (enemies, doors
-and puzzles come back as after a memory card load), with every PAK reopened so
-that all it draws is loaded from the new files. It runs at the next game tick,
-so unpause first; pressed in the menus, it happens when a game starts. Change
-the folder first, then reload: until then the game still reads the old files,
-so don't delete a loaded mod and keep playing.
-
-#### Importers
-
-An importer is a program of your own that builds a mod from files you have (a
-model pack, another release of the game); the port ships none. Put an
-executable file (Windows: `.exe`, `.bat`, `.cmd`) in `importers` in the pref
-folder, beside `mods`, and F1 > Mods gets a Run button for it, with an
-optional argument field, the tail of its output while it runs, and Cancel.
-`metroid_prime_port --import` lists them and `--import <name> [argument]` runs
-one in the terminal without starting the game, returning its exit code.
-
-The importer gets the argument as `argv[1]`, the mods folder to write into as
-`MP_MODS_DIR`, and the importers folder as its working directory. Its stdout
-and stderr are shown a line at a time (a carriage return rewrites the line, so
-progress bars work); exit code 0 means the mod is in place, and Reload mods (or
-a restart) loads it. Cancel sends a terminate request to the importer
-alone, so a script should pass it on to its children. Desktop only.
-
-#### Metroid Prime Remastered models
-
-**Very experimental and currently unsupported.** The import, the room
-environments and above all room geometry are work in progress: expect wrong
-or missing models, lighting that is off, crashes and heavy memory use, and a
-re-import after most updates. Bug reports about a game running with this mod
-are not handled for now; remove `mods/remastered-models` to get the retail
-game back.
-
-The port can build a model mod from your own copy of Metroid Prime Remastered;
-nothing of it ships. F1 > Remastered > Import > "Metroid Prime Remastered models"
-takes the game's `.nsp` or gamecard dump (`.xci`) and your console's key file
-(`prod.keys`, not `title.keys`; `~/.switch/prod.keys` is filled in when it
-exists). An `.xci`, or an `.nsp` converted from one, needs the key file's
-`key_area_key_application_XX` keys; compressed `.nsz`/`.xcz` must be
-decompressed first. The panel remembers both files once they are picked
-or used, as `remastered_nsp` and `remastered_keys` in the settings file (on
-Android, the picked documents). Import converts in the background while the game
-runs, on all but two cores. The result is staged in `mods/.remastered-models.importing`
-and installed as `mods/remastered-models`, replacing an older one, when the
-import ends (a mod reload then loads it; the pending install also applies at
-the next start). A cancelled or interrupted import leaves nothing behind.
-Once it has ended, "Load it again" in the same panel reloads the mods by hand.
-From a terminal,
-`metroid_prime_port --import-remastered <image.nsp|image.xci> [key file]` does the same
-on every core without starting the game and installs at once (the disc comes
-from `MP_DISC`, the remembered path, or a copy beside the executable).
-
-A full import writes `.import-version` (the importer's `kImportVersion`, then the build's commit) into
-the mod. At each mod scan, `remastered-models` or any mod with that file counts as an import; one whose
-stamp is missing or lower than the build's `kImportVersion` is stale, so the log says so, a toast shows
-once per launch, and the Mods and import panels say "re-import needed". Bump `kImportVersion` in
-`port_remastered_import.h` whenever a change needs a re-import to take effect. The movies-only import
-leaves the stamp alone.
-
-The port reads the image itself (`platform/port_remastered_nsp.cpp`, `_pak`,
-`_txtr`, `_cmdl`), and `_convert` writes a CMDL (plus CSKR for skinned models)
-over each retail model listed in `_table`, with its PBR maps as native `.dds`
-textures. Texture ids are a CRC of the Remastered texture's id and its
-role, so a map shared by several models is written once.
-
-After the models, `_room` writes a `.roomenv` (above) for every area into the
-mod's `roomenv` folder: it matches each Remastered room to the retail area by
-its doors, and takes the room's reflection probes, their HDR cubes and its
-baked ambient grid. A grid of more than about a million points is stored at
-half resolution, which keeps every file under 25 MB. A world that can't be
-read is reported and skipped; the models are installed all the same.
-
-With "Room geometry too" ticked in the panel (on by default; off by default
-on Android, where ticking it shows a warning), or `MP_REMASTERED_GEOMETRY=all` (or a comma-separated
-list of room names, or `none`) for the command line and the console, the
-import also writes the rooms' static geometry: every model a room places,
-converted as above with textures capped at 1024 px, and a `.roomgeo` per
-area, in the mod's `roomgeo` folder. Experimental: the full set is about
-8,500 models and brings the mod from 1 GB to 6.5 GB, and the game has to be
-restarted to draw it.
-
-The room geometry also brings the rooms' liquid
-surfaces: each water, poison or lava volume's own surface model, converted
-with that room's colour, opacity, wave directions and flow, and a
-`.roomliquid` per area in the `roomgeo` folder.
-
-The import also carries over Remastered's rewording of the English text (scan
-entries, logbook, pickups: 120 strings in 100 tables on the US disc). Each
-changed table is written as `<id>.STRG` in the mod's `text` folder: the
-disc's own table with the reworded strings replaced. A string is replaced only
-when its words differ, so layout-only differences stay as on the disc;
-Remastered's hand-placed line breaks (fitted to its own boxes) are kept only
-where the disc's string breaks a line too, the rest left to word wrap;
-highlight colours are kept (`&push;&main-color=…;…&pop;`) and the layout tags
-a disc string opens with are carried over. Strings that name a button of
-Remastered's controls or use one of its icons keep the disc's text, as do
-strings with characters outside ASCII. `MP_REMASTERED_TEXT=0` leaves the text
-out.
-`MP_REMASTERED_EFFECTS=1` (or 0; also true/on/yes) turns the experimental particle effect step on or off
-(default off; `docs/REMASTERED_EFFECTS.md`).
-
-Remastered's French, Spanish, German, Italian and Dutch text comes along too
-(about 1,900 strings each), as extra language sections in the same tables,
-named by Remastered's language codes (`EUFR`, `EUSP`, `EUGE`, `EUIT`, `EUDU`).
-A string Remastered doesn't translate, or one whose buttons don't line up with
-the disc's, keeps the disc's wording: a PAL disc's own translation where it has
-one, else English. A PAL disc's French, German, Spanish and Italian work without
-the mod too. Pick the language in F1 > Game > Language (ini key
-`text_language`, or `MP_LANGUAGE=EUFR` for one run). It changes while the game
-runs (console: `language EUGE`, `language en`): text already on screen
-switches the next time its menu or screen opens. Without the mod a USA disc stays in English
-unless a PAL image's languages are added: F1 > Game > Language > "Add languages
-from a PAL disc..." (or `--import-pal-languages <image>` on the command line)
-reads the PAL image once and copies its French, German, Spanish and Italian
-text tables and fonts to `<user>/languages/`. The game keeps running from the
-USA disc, and the PAL image isn't needed afterwards. "Remove" deletes the copy.
-The USA disc's fonts are ASCII only, so each accented letter is drawn as its base
-letter, unless the PAL fonts were added (they take effect after a restart) or
-the mod's typeface (`font/deface.sdfont`) is loaded; either one draws the real letter.
-
-It also writes Remastered's typeface as `font/deface.sdfont` (see above): the
-FONT asset with the most characters, its first face.
-
-The in-game HUD is carried over as well, into the mod's `hud` folder: fourteen
-frames (combat, scan, thermal, X-ray, ball, base, map, pause, pause
-instructions, generic menu, message, quit, flat scan and helmet). The disc's frame stays the
-skeleton, so every widget the game looks up by name is still there; a widget
-Remastered has under the same name takes its placement, colour and model from
-there, and the models and pictures Remastered added are placed under their
-parents. Each frame is written as `<id>.FRME` with its models (`.CMDL`), its
-pictures (a small `.TXTR` and, above 64 px, a `.dds`) and, for the energy,
-missile and threat bars, a `.hudbars`. `MP_REMASTERED_HUD=0` leaves the HUD
-out, and with it the map icons and the `.MAPA` rooms below. The map screen comes too, with one difference: Remastered lays it out for
-a wider view and shows fewer prompts, so its legend, area name and hint are
-set from Remastered on the disc's plane, and the prompts it lacks keep the
-disc's places. The map's icons come as well, into `map/`: the save, missile
-and elevator stations replace the disc's textures, and the six arrows of a
-door between floors, which the disc draws with one tinted texture, get
-Remastered's own under ids the port looks for (`port_map_icons.h`). So do the
-rooms: Remastered's map of a world (`CMAP`) names no room of the disc, so its
-areas are paired with the disc's by place and size, and the few it reshaped
-are written as `<id>.MAPA` with the disc's doors
-and markers; the rest keep the disc's map. Experimental: the map's compass is
-left out, as the disc does not have one.
-
-The menu movies come along too, into the mod's `Video` folder under the disc's
-names: the title, the file select and its transitions, and four of the attract
-movies (the other six, and the credits and ending movies, stay the disc's).
-Remastered's are H.264; the game plays THP, a JPEG per frame, so each is decoded
-once and written again, by default as 1600x900 at 30 frames a second (the disc's
-own rate; the game's decoder does not keep up with 60 at that size), about
-550 MB for the sixteen. `MP_REMASTERED_MOVIES=1280x720@30` picks another size
-and rate, `MP_REMASTERED_MOVIES=0` leaves them out. A movie of any size is
-fitted to the view with its shape kept, so in 4:3 these have bars above and
-below.
-
-The concept art of the image galleries comes too: the 120 full-size pictures in
-`UI_FrontEnd` (taller than 1000 pixels) are written as JPEGs into the mod's
-`gallery` folder (`gallery/NNN.jpg`, fitted within 1920x1080, quality 90; about
-0.3 MB each, 36 MB in all), and F1 > Remastered > Gallery opens them in a viewer window. The decoder
-is the one the game uses for THP movies, so no extra library is needed.
-`MP_REMASTERED_GALLERY=0` leaves them out.
-
-The decoding is done by **ffmpeg**, run as a separate program: `MP_FFMPEG` if
-set, else an `ffmpeg` next to the game's executable, else the one on the path.
-The Windows package has one next to the executable; on Linux install it from
-your distribution.
-Without one the import finishes without the movies and says so; install ffmpeg
-and use "Import movies" in the same panel (or `--import-remastered-movies
-<nsp> [keys]`), which adds only the movies to the mod already there.
-Android cannot start a program like that, so there the system's own decoder
-(MediaCodec) reads the movies and the port writes the JPEGs itself; nothing has
-to be installed.
-
-Measured on the development machine: 342 models and 275 room environments, 44
-seconds on 16 threads, 2.3 GB of memory at the peak, 1.1 GB on disk (half of it
-the room environments).
-
-On Android the panel has two buttons that open the system's file picker, one
-for the `.nsp`/`.xci` and one for the key file. Neither file is copied: the import
-reads them where they are. It runs on two threads there to keep its memory
-down. Not yet run on a device.
-
-#### Collision stays on the disc's model
-
-A solid static actor with no authored collision extent (zero or negative) takes
-its collision box from its model's bounds. A mod that replaces the model would
-replace the collider with it (a lava crust drawn a few centimetres thick walls
-off a floor the disc's model is flush with), so `ScriptLoader::LoadActor` reads
-the box from the original disc's CMDL header instead
-(`platform/port_actor_collision_bounds.cpp`): via `aurora_dvd_base_*` only, so
-no overlay or loose mod file is ever consulted, indexed once from the base PAK
-tables and cached per model. Only the normal model counts, as in retail, where
-the X-ray and thermal models are attached after the box is taken. Authored extents, `ANCS` actors and non-solid
-actors are unchanged, and a missing or malformed disc model falls back to the
-drawn model's bounds. Rendering is not affected.
-
+Moved to `docs/MODS.md`.
 ### Platforms
 
 The port is built and tested on Linux and Windows (macOS builds and passes
@@ -843,6 +494,24 @@ glibc floor and the licensing position.
 Where FUSE itself is unavailable, such as in a container, run the AppImage
 with `APPIMAGE_EXTRACT_AND_RUN=1` (or `--appimage-extract-and-run`), which
 unpacks to a temporary directory instead of mounting.
+
+### 1.00 sequence-break compatibility
+
+F1 > Game > Cutscenes > "1.00 sequence-break compatibility" (INI key
+`revision_100_compatibility`, default false; forced on in randomizer and
+Archipelago games, reload needed) puts back what 1.00 sequence breaks rely on.
+`platform/port_revision_scripts.cpp` adds room-script ops (applied through
+`PortSkipCutscenes::PatchArea`, whose op stream it shares) for the rev2 locks, the 1.02 Hive Totem
+trigger and lock, and the PAL Ore Processing, Main Quarry and Central Dynamo
+locks (randomprime's values, not byte-exact 1.00). Every op target is checked first (layer, object
+type, property size, lock model, active byte), and a mismatch leaves the room
+untouched (logged, all or nothing); deactivations are EDITs of the active byte,
+removals are DELETEs of the verified full ids.
+It reads the setting at use through
+`PortDebug::Revision100Compatibility() || PortSkipCutscenes::Forced()`. Only the
+named script locks are fixed; missing 1.00 geometry (e.g. the Ruined Shrine
+root) is not restored. Unit test: `port_revision_scripts_tests`. Ordinary
+cutscene skipping is independent.
 
 ### Controls and settings
 
@@ -1811,3 +1480,16 @@ Manual validation still matters: door/room traversal, map/pause transitions,
 retail/Dolphin save import/export, interrupted saves, controller hot-plugging,
 audio pitch/tempo by ear, and Windows packaged gameplay on a clean machine.
 The automated lifecycle driver does not claim full-game coverage.
+
+## Save import and conversion
+
+The memory-card import (debug UI → Memory card → Import, `PortGci::ImportBytes`) accepts
+Metroid Prime saves from any source and converts them to the mounted disc's format
+(`platform/port_save_convert.*`): USA GCI, real PAL GCI (3 blocks), the port's earlier
+1-block PAL saves, raw cards (`GM8E`/`GM8P`), and Wii Trilogy `save.bin`/`data.bin`.
+Same-format imports are copied unchanged; if a native-format candidate exists it wins over
+conversions. Ids with no counterpart in the target release are dropped and counted in the
+import summary. On a PAL disc, startup moves legacy "MetroidPrime A"/"B" files into
+`_replaced` and writes the newest as a real PAL file. Tests: `ctest -R port_save_convert`
+(the fixture part needs `PORT_SAVE_FIXTURES`, default `../wii-save`, and skips otherwise).
+Layout tables are generated by `tools/gen_save_layouts.py` into `platform/save_layouts/`.

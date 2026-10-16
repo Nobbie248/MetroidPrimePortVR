@@ -198,6 +198,7 @@ set(MP_GAME_SOURCES
     src/Kyoto/Particles/CParticleGen.cpp
     src/Kyoto/Particles/CParticleGlobals.cpp
     src/Kyoto/Particles/CParticleSwoosh.cpp
+    src/Kyoto/Particles/CParticleElectric2Port.cpp
     src/Kyoto/Particles/CParticleSwooshDataFactory.cpp
     src/Kyoto/Particles/CRealElement.cpp
     src/Kyoto/Particles/CSpawnSystemKeyframeData.cpp

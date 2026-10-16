@@ -10,6 +10,7 @@
 #include "port_mods.h"
 #include "port_remastered_txtr.h"
 #include "port_room_env_lod.h"
+#include "port_room_env_tiles.h"
 #include "port_room_geo.h"
 #include "vr/vr_view.h"
 
@@ -26,7 +27,10 @@
 #include <cstring>
 #include <deque>
 #include <fstream>
+#include <future>
 #include <iterator>
+#include <map>
+#include <memory>
 #include <mutex>
 #include <thread>
 #include <unordered_map>
@@ -47,16 +51,39 @@ struct GpuVolume {
   uint32_t id = 0; // 0: not made yet (the worker is filling it in)
 };
 
+// A room's file as the loader thread leaves it.
+struct Loaded {
+  File file;
+  std::string error; // set when the file could not be read or parsed
+  bool ok = false;
+  std::vector<float> average; // per cube (CubeAverage)
+  std::vector<float> peak;
+};
+
 struct Area {
   File file;
   bool hasFile = false; // the file was read
+  // Load reads and parses the file on another thread; until Finish takes the result the area
+  // looks like one without a file, and the script states it is sent wait in `queued`.
+  std::future<Loaded> pending;
+  uint32_t pendingFrames = 0;
+  bool pendingFluid = false; // sPlayerFluid and sCameraWater when Load was called
+  bool pendingWater = false;
+  std::vector<std::pair<uint32_t, int>> queued; // sender, state
   uint32_t serial = 0;  // of this load, which the worker's jobs for it carry
   std::vector<GpuCube> cubes;
   std::vector<GpuVolume> volumes; // one a grid
+  // Version 21 files (file.tiles) have no grid of their own: the world's one (World).
+  float ownAverage = 0.f; // of the area's own tiles, for the exposure before the grid exists
+  uint64_t loadSeq = 0;  // the order of Load calls, which is the order tiles are registered in
+  bool registered = false; // its tiles are in sTiles
+  bool settled = false;    // Finish ran (or the load failed): the next area may register
   uint32_t lightmap = 0; // GXCreatePBRLightmap's id; 0 until the worker has made it, or none
   float exposure = 0.f; // what takes the room's radiance to the display's range; 0: unknown
   float tone[3][4] = {}; // its tone curve
   bool hasGeo = false;   // the mod replaces its geometry
+  ExposureHints hints;   // the fluid-mode exposure hints' state
+  bool hintSnap = false; // a fluid hint registered this frame: the exposure snaps
   uint64_t layers = ~uint64_t(0); // its active script layers (SetAreaLayers)
   // Its grades' requests (Remastered's CAreaPrioritizedGameHintManager): on or off, and
   // when they were last turned on, which decides between equal priorities.
@@ -114,7 +141,10 @@ struct FrameState {
   float from[6] = {};
   float to[6] = {};
   float shown[6] = {};
-  std::chrono::steady_clock::time_point start;
+  // CPostFXManager::TransitionTonemapParams: while `moving`, shown = from + (to - from) *
+  // progress, and a new target keeps both `from` and `progress`.
+  bool moving = false;
+  float progress = 0.f;
   std::chrono::steady_clock::time_point last;
   float carry = 0.f; // seconds not stepped yet
   float exposure = 0.f; // 2^(3 - EV); 0: none yet
@@ -142,6 +172,17 @@ uint32_t sNextSerial = 1;
 // Defined after sAreas so that it is destroyed, and its thread joined, first.
 enum class JobKind { Cube, Volume, Lightmap, Keep };
 
+// A version 21 volume job's input: the area's own tiles and, per key of its region, the
+// tiles of the area whose copy is mapped, as sTiles had them when the job was made. The
+// shared tile sets keep the data alive whatever the areas do meanwhile.
+struct VolumeInput {
+  std::shared_ptr<const PortRoomEnvTiles::TileSet> own;
+  std::map<PortRoomEnvTiles::TileKey, std::shared_ptr<const PortRoomEnvTiles::TileSet>> mapped;
+  // The world texture's job (serial 0): every mapped key, composed in one space.
+  bool world = false;
+  float worldToPoint[12] = {};
+};
+
 struct Job {
   JobKind kind = JobKind::Cube;
   uint32_t area = 0;
@@ -149,12 +190,18 @@ struct Job {
   size_t index = 0;    // of the cube or grid in the file
   const File* file = nullptr;
   bool raw = false; // Lightmap: the device takes its BC6H blocks as they are
+  std::shared_ptr<const VolumeInput> input; // Volume of a version 21 file
+  uint32_t gen = 0;                         // World::gen when it was made
 };
 
 struct Result {
   JobKind kind = JobKind::Cube;
   uint32_t area = 0;
   uint32_t serial = 0;
+  uint32_t gen = 0;
+  bool resolved = false; // Volume: `grid` is the composed one
+  bool empty = false;    // Volume: the tiles leave no lit point
+  Grid grid;             // Volume of a version 21 file
   size_t index = 0;
   std::vector<uint16_t> cube;  // RGBA16F, as GXCreatePBRCube takes it
   std::vector<uint8_t> volume; // as GXCreatePBRVolume takes it, or Keep's bytes
@@ -173,6 +220,9 @@ struct Worker {
   void Submit(const Job& job);
   // Drops the jobs and results of a load, and waits for its job that is running to stop.
   void Cancel(uint32_t serial);
+  // Drops the queued volume jobs of a load (a newer one replaces them) and the results of
+  // them that are waiting; the one running ends on its own and TakeResults drops its result.
+  void DropVolumes(uint32_t serial);
   // The oldest result, if there is one; a cube or volume only when `gpu`.
   bool Take(Result& out, bool gpu);
 
@@ -194,6 +244,48 @@ struct Worker {
 };
 Worker sWorker;
 
+// Remastered keeps one world-wide virtual texture of baked lighting, its tiles keyed by world
+// position. Every area registers its own copy of each tile it has when it loads
+// (CBakedLightingProbeTexture, from InitializeRenderNodes 0x3fc2f4 through
+// OnRegisterContextNode 0x1ca01c): the first copy stays mapped and later ones wait on standby,
+// and when the mapped copy's area unloads (0x1ca650) the most recently registered standby copy
+// takes over, or the tile is unmapped. sTiles is that table, sTileSets the tiles of each
+// registered area, and sTileSeq the order areas have been asked to load in. The one world
+// grid is composed from every mapped key (SubmitWorld, ResolveVolume), and composed again when
+// a key changes owner or an area comes or goes.
+PortRoomEnvTiles::TileTable sTiles;
+std::unordered_map<uint32_t, std::shared_ptr<const PortRoomEnvTiles::TileSet>> sTileSets;
+uint64_t sTileSeq = 0;
+
+// Android keeps each grid under 24 MB so low-memory phones do not run out (halved above this);
+// desktop keeps every grid whole, as Remastered samples them.
+#ifdef __ANDROID__
+constexpr size_t kMaxGridPoints = size_t(1) << 20;
+#else
+constexpr size_t kMaxGridPoints = 0;
+#endif
+
+// Remastered samples one texture for the whole world, by position alone, so a version 21
+// file has no grid of its own: the port composes every mapped tile of every loaded area into
+// one dense grid and volume (SubmitWorld), rebuilt when a tile changes owner or an area comes
+// or goes. The old volume stays bound until the new one is on the GPU.
+struct World {
+  Grid grid;             // the composed grid; size 0 with none
+  uint32_t volume = 0;   // GXCreatePBRVolume's id; 0 until the worker has made it
+  uint32_t gen = 0;      // of the composition asked for; a result of an older one is dropped
+  bool dirty = false;    // a tile changed owner since the last SubmitWorld
+  bool has() const { return volume != 0 && grid.average > 0.f; }
+};
+World sWorld;
+File sNoFile; // the file of the world's job, which reads none
+
+// The grids an area samples: the composed one of a version 21 file, else the file's own.
+// Version 21 areas share the world grid (World), so it is not one of theirs.
+const std::vector<Grid>& Grids(const Area& area) {
+  static const std::vector<Grid> none;
+  return area.file.tiles != nullptr ? none : area.file.grids;
+}
+
 uint32_t sNextCube = 1;
 uint32_t sNextVolume = 1;
 int sVolumes = -1;
@@ -206,7 +298,7 @@ bool sHint = false;
 bool sBrdfSent = false; // the mods' brdf.lut, or the lack of one, is with Aurora
 uint32_t sHintArea = 0;
 float sHintCentre[3];
-float sHintLightmap[3] = {}; // SetLightmapHint; scale 0: none
+float sHintLightmap[3] = {}; // SetLightmapHint; PortRoomGeo::HasLightmapLookup
 int sEnabled = -1;
 int sExposure = -1;
 int sBloom = -1;
@@ -332,6 +424,9 @@ float HalfToFloat(uint16_t h) {
 }
 
 void Free(Area& area) {
+  if (area.pending.valid()) {
+    area.pending.wait(); // the loader thread reads nothing of the area, but the future must not outlive it
+  }
   // Before the file goes: the worker may be reading it.
   sWorker.Cancel(area.serial);
   for (GpuCube& cube : area.cubes) {
@@ -385,7 +480,8 @@ bool FillVolume(const File& file, const Grid& grid, std::vector<uint8_t>& texels
   static const int kLayers = int(port::EnvFloat("MP_ROOM_ENV_FILL_LAYERS", 0.f));
   const size_t sx = grid.size[0], sy = grid.size[1], sz = grid.size[2];
   const size_t count = sx * sy * sz;
-  std::vector<uint8_t> points(file.data.begin() + grid.offset, file.data.begin() + grid.offset + count * kPoint);
+  const uint8_t* source = grid.points ? grid.points->data() : file.data.data() + grid.offset;
+  std::vector<uint8_t> points(source, source + count * kPoint);
   const auto lit = [&points](size_t index) {
     const uint8_t* p = points.data() + index * kPoint;
     // Means are not negative, so any set bit but the sign is light.
@@ -474,6 +570,43 @@ bool FillVolume(const File& file, const Grid& grid, std::vector<uint8_t>& texels
   return true;
 }
 
+// A version 21 area's grid: its region's mapped tiles composed into points (ResolveGrid), then
+// filled as FillVolume does. On the worker; false when cancelled.
+bool ResolveVolume(const VolumeInput& input, const File* file, Result& out, const std::atomic<bool>& cancel) {
+  const PortRoomEnvTiles::Lookup lookup = [&input](const PortRoomEnvTiles::TileKey& key) {
+    const auto it = input.mapped.find(key);
+    return it != input.mapped.end() ? it->second : std::shared_ptr<const PortRoomEnvTiles::TileSet>();
+  };
+  PortRoomEnvTiles::ResolvedGrid resolved;
+  std::string note;
+  out.resolved = true;
+  bool composed;
+  if (input.world) {
+    std::vector<PortRoomEnvTiles::TileKey> keys;
+    keys.reserve(input.mapped.size());
+    for (const auto& entry : input.mapped) {
+      keys.push_back(entry.first);
+    }
+    composed = PortRoomEnvTiles::ResolveWorld(input.worldToPoint, keys, lookup, kMaxGridPoints, resolved, note);
+  } else {
+    composed = PortRoomEnvTiles::ResolveGrid(*input.own, lookup, kMaxGridPoints, resolved, note);
+  }
+  if (!composed) {
+    out.empty = true;
+    out.grid = {};
+    PortLog::Write("room env: %08X tiles: %s\n", out.area, note.c_str());
+    return true;
+  }
+  if (cancel.load(std::memory_order_relaxed)) {
+    return false;
+  }
+  std::copy(std::begin(resolved.worldToGrid), std::end(resolved.worldToGrid), out.grid.worldToGrid);
+  std::copy(std::begin(resolved.size), std::end(resolved.size), out.grid.size);
+  out.grid.average = resolved.average;
+  out.grid.points = std::make_shared<const std::vector<uint8_t>>(std::move(resolved.points));
+  return FillVolume(*file, out.grid, out.volume, cancel);
+}
+
 // How far outside a grid a point is, in metres; 0 inside.
 float GridDistance(const Grid& grid, const float pos[3]) {
   const float* m = grid.worldToGrid;
@@ -532,9 +665,14 @@ float RoomExposure(const Area& area) {
       std::nth_element(levels.begin(), levels.begin() + levels.size() / 2, levels.end());
       level = levels[levels.size() / 2];
     } else {
-      // The grid's points are the same radiance.
-      for (const Grid& grid : file.grids) {
+      // The grid's points are the same radiance (a version 21 area's own tiles before its
+      // grid is composed from the mapped ones).
+      for (const Grid& grid : Grids(area)) {
         level = std::max(level, grid.average);
+      }
+      level = std::max(level, area.ownAverage);
+      if (area.file.tiles != nullptr && level <= 0.f) {
+        level = sWorld.grid.average;
       }
     }
     if (!(level > 0.f)) {
@@ -825,7 +963,7 @@ void DriveGrades(uint32_t mrea, Area& area, uint32_t sender, int state) {
 }
 
 // Every grade and backlight as it starts, then the fluids the player and camera are in already.
-void StartGrades(uint32_t mrea, Area& area) {
+void StartGrades(uint32_t mrea, Area& area, bool playerFluid, bool cameraWater) {
   area.grades.assign(area.file.grades.size(), {});
   for (size_t i = 0; i < area.grades.size(); ++i) {
     area.grades[i].on = area.file.grades[i].on;
@@ -859,37 +997,183 @@ void StartGrades(uint32_t mrea, Area& area) {
       StartTransition(area, i);
     }
   }
-  if (sPlayerFluid) {
+  if (playerFluid) {
     DriveGrades(mrea, area, kSenderPlayerFluid, 0);
   }
-  if (sCameraWater) {
+  if (cameraWater) {
     DriveGrades(mrea, area, kSenderCameraWater, 0);
   }
 }
 
+// MP_ROOMENV_TIMING=1 logs where Load's time goes.
+bool LoadTiming() {
+  static const bool on = port::EnvFloat("MP_ROOMENV_TIMING", 0.f) != 0.f;
+  return on;
+}
+
+double MsSince(std::chrono::steady_clock::time_point t) {
+  return std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t).count();
+}
+
+// Reads and parses a room's file, and averages its cubes, on a thread of its own: the file
+// is up to 40 MB, which stalled the render thread for 140 ms when a room loaded cold.
+Loaded ReadRoomFile(const std::string& path) {
+  Loaded loaded;
+  std::ifstream in(PortGci::PathFromString(path), std::ios::binary);
+  std::vector<uint8_t> data = ReadAll(in);
+  if (!in || !Parse(std::move(data), loaded.file, loaded.error)) {
+    if (loaded.error.empty()) {
+      loaded.error = "cannot read";
+    }
+    return loaded;
+  }
+  const size_t cubes = loaded.file.cubes.size();
+  loaded.average.resize(cubes);
+  loaded.peak.resize(cubes);
+  for (size_t i = 0; i < cubes; ++i) {
+    loaded.average[i] = CubeAverage(loaded.file, loaded.file.cubes[i], loaded.peak[i]);
+  }
+  loaded.ok = true;
+  return loaded;
+}
+
+// Starts the area's load; Finish completes it on the render thread.
 void Load(uint32_t mrea, Area& area) {
   area.hasGeo = !PortMods::RoomGeoPath(mrea).empty();
   const std::string path = PortMods::RoomEnvPath(mrea);
   if (path.empty()) {
     return;
   }
-  std::ifstream in(PortGci::PathFromString(path), std::ios::binary);
-  std::vector<uint8_t> data = ReadAll(in);
-  std::string error;
-  if (!in || !Parse(std::move(data), area.file, error)) {
-    PortLog::Write("room env: %s: %s\n", path.c_str(), error.empty() ? "cannot read" : error.c_str());
-    area.file = {};
+  area.pendingFrames = 0;
+  area.pendingFluid = sPlayerFluid;
+  area.pendingWater = sCameraWater;
+  area.queued.clear();
+  area.loadSeq = ++sTileSeq;
+  try {
+    area.pending = std::async(std::launch::async, ReadRoomFile, path);
+  } catch (...) {
+    area.pending = std::async(std::launch::deferred, ReadRoomFile, path);
+  }
+}
+
+// Has the worker compose the world texture from the tiles mapped now: every mapped key of
+// every registered area, in one grid (a version 21 file). Called once the tables settle.
+void SubmitWorld() {
+  sWorld.dirty = false;
+  auto input = std::make_shared<VolumeInput>();
+  input->world = true;
+  const PortRoomEnvTiles::TileSet* first = nullptr;
+  for (const auto& [key, node] : sTiles.Mapped()) {
+    const auto set = sTileSets.find(node);
+    if (set == sTileSets.end() || set->second->Find(key) == nullptr) {
+      continue;
+    }
+    if (first == nullptr) {
+      first = set->second.get();
+      std::copy(std::begin(first->worldToPoint), std::end(first->worldToPoint), input->worldToPoint);
+    } else if (!std::equal(std::begin(first->worldToPoint), std::end(first->worldToPoint),
+                           std::begin(set->second->worldToPoint))) {
+      static bool warned = false;
+      if (!warned) {
+        warned = true;
+        PortLog::Write("room env: area %08X has a different tile space than the others; its tiles are placed "
+                       "as if it had the same one\n", node);
+      }
+    }
+    input->mapped.emplace(key, set->second);
+  }
+  ++sWorld.gen;
+  sWorker.DropVolumes(0);
+  if (first == nullptr) {
+    // Nothing is mapped: nothing to sample.
+    if (sWorld.volume != 0) {
+      GXDestroyPBRVolume(sWorld.volume);
+      sWorld.volume = 0;
+    }
+    sWorld.grid = {};
+    Invalidate();
     return;
+  }
+  Job job{JobKind::Volume, 0, 0, 0, &sNoFile};
+  job.input = std::move(input);
+  job.gen = sWorld.gen;
+  sWorker.Submit(job);
+}
+
+// Registers the tiles of the areas that have loaded, in the order Load was called (the order
+// Remastered loads its areas in: the first copy of a tile stays mapped). An area waits for
+// the ones asked for before it, so the order does not depend on which file reads first.
+void RegisterReady() {
+  for (;;) {
+    uint32_t nextMrea = 0;
+    Area* next = nullptr;
+    uint64_t waiting = UINT64_MAX; // the earliest area still loading
+    for (auto& [mrea, area] : sAreas) {
+      if (area.loadSeq == 0) {
+        continue;
+      }
+      if (!area.settled) {
+        waiting = std::min(waiting, area.loadSeq);
+      } else if (!area.registered && area.file.tiles != nullptr && (next == nullptr || area.loadSeq < next->loadSeq)) {
+        next = &area;
+        nextMrea = mrea;
+      }
+    }
+    if (next == nullptr || next->loadSeq > waiting) {
+      break;
+    }
+    std::vector<PortRoomEnvTiles::TileKey> keys;
+    for (const PortRoomEnvTiles::Tile& tile : next->file.tiles->tiles) {
+      keys.push_back(tile.key);
+    }
+    sTileSets[nextMrea] = next->file.tiles;
+    sTiles.Register(nextMrea, keys);
+    next->registered = true;
+    sWorld.dirty = true;
+  }
+  if (sWorld.dirty) {
+    SubmitWorld();
+  }
+}
+
+// Completes a load: takes the file from the loader thread (waiting for it if need be), then
+// does what Load did on the render thread, and sends the area the states it was sent since.
+void Finish(uint32_t mrea, Area& area) {
+  if (!area.pending.valid()) {
+    return;
+  }
+  const auto t0 = std::chrono::steady_clock::now();
+  Loaded loaded = area.pending.get();
+  const double waitMs = MsSince(t0);
+  if (!loaded.ok) {
+    PortLog::Write("room env: %s: %s\n", PortMods::RoomEnvPath(mrea).c_str(), loaded.error.c_str());
+    area.file = {};
+    area.queued.clear();
+    area.settled = true;
+    RegisterReady();
+    return;
+  }
+  const auto t1 = std::chrono::steady_clock::now();
+  area.file = std::move(loaded.file);
+  if (area.file.tiles != nullptr) {
+    area.ownAverage = PortRoomEnvTiles::OwnAverage(*area.file.tiles);
   }
   area.cubes.resize(area.file.cubes.size());
   for (size_t i = 0; i < area.cubes.size(); ++i) {
-    area.cubes[i].average = CubeAverage(area.file, area.file.cubes[i], area.cubes[i].peak);
+    area.cubes[i].average = loaded.average[i];
+    area.cubes[i].peak = loaded.peak[i];
     // Black: nothing to reflect, and no exposure to set by it.
     area.cubes[i].failed = !(area.cubes[i].average > 1e-6f);
   }
-  area.volumes.resize(area.file.grids.size());
-  StartGrades(mrea, area);
+  area.volumes.resize(area.file.tiles != nullptr ? 1 : area.file.grids.size());
+  StartGrades(mrea, area, area.pendingFluid, area.pendingWater);
+  area.hintSnap = area.hints.Load(area.file.fluidHints, area.pendingWater);
   area.exposure = RoomExposure(area);
+  if (LoadTiming()) {
+    PortLog::Write("room env timing: %08X finish: waited %.2f ms for the loader, then %.2f ms (%zu cubes, %zu grids, "
+                   "pending %u frames)\n",
+                   mrea, waitMs, MsSince(t1), area.file.cubes.size(), area.file.grids.size(), area.pendingFrames);
+  }
   const float* const t = area.file.tonemap;
   if (area.exposure > 0.f && t[1] > 0.f && t[1] < 1.f) {
     BuildTone(t[1], area.file.contrast, t[2], t[3], area.tone);
@@ -903,8 +1187,10 @@ void Load(uint32_t mrea, Area& area) {
   if (sNextSerial == 0) {
     sNextSerial = 1;
   }
+  area.settled = true;
   // The worker makes them all now, so no draw waits for one. The volumes first: until its
-  // area's are made, room geometry is lit as without volumes (see HasVolume).
+  // area's are made, room geometry is lit as without volumes (see HasVolume). A version 21
+  // file's grid is composed once its tiles are registered (RegisterReady, below).
   for (size_t i = 0; i < area.file.grids.size(); ++i) {
     if (area.file.grids[i].average > 0.f) {
       sWorker.Submit({JobKind::Volume, mrea, area.serial, i, &area.file});
@@ -927,6 +1213,30 @@ void Load(uint32_t mrea, Area& area) {
   // Drops the cubes' and lightmap's blocks once they are made.
   if (!area.file.cubes.empty() || lightmapFits) {
     sWorker.Submit({JobKind::Keep, mrea, area.serial, 0, &area.file});
+  }
+  std::vector<std::pair<uint32_t, int>> queued;
+  queued.swap(area.queued);
+  for (const auto& [sender, state] : queued) {
+    DriveGrades(mrea, area, sender, state);
+  }
+  RegisterReady();
+  Invalidate();
+}
+
+// Completes the loads that are ready, and any that must be: the room the camera is in (it
+// draws this frame), and one that has waited so long a draw may need it.
+void FinishLoads() {
+  constexpr uint32_t kMaxPendingFrames = 8;
+  for (auto& [mrea, area] : sAreas) {
+    if (!area.pending.valid()) {
+      continue;
+    }
+    const bool ready = area.pending.wait_for(std::chrono::seconds(0)) == std::future_status::ready;
+    if (ready || mrea == sViewArea || area.pendingFrames >= kMaxPendingFrames) {
+      Finish(mrea, area);
+    } else {
+      ++area.pendingFrames;
+    }
   }
 }
 
@@ -1105,6 +1415,19 @@ void Worker::Cancel(uint32_t serial) {
   wake.notify_all();
 }
 
+void Worker::DropVolumes(uint32_t serial) {
+  std::lock_guard<std::mutex> lock(mutex);
+  jobs.erase(std::remove_if(jobs.begin(), jobs.end(),
+                            [serial](const Job& job) { return job.serial == serial && job.kind == JobKind::Volume; }),
+             jobs.end());
+  results.erase(std::remove_if(results.begin(), results.end(),
+                               [serial](const Result& result) {
+                                 return result.serial == serial && result.kind == JobKind::Volume;
+                               }),
+                results.end());
+  wake.notify_all();
+}
+
 bool Worker::Take(Result& out, bool gpu) {
   std::lock_guard<std::mutex> lock(mutex);
   if (results.empty() || (!gpu && results.front().kind != JobKind::Keep)) {
@@ -1149,10 +1472,14 @@ bool Worker::Do(const Job& job, Result& out) {
   out.area = job.area;
   out.serial = job.serial;
   out.index = job.index;
+  out.gen = job.gen;
   switch (job.kind) {
   case JobKind::Cube:
     return DecodeCube(*job.file, job.file->cubes[job.index], out.cube, cancel);
   case JobKind::Volume:
+    if (job.input != nullptr) {
+      return ResolveVolume(*job.input, job.file, out, cancel);
+    }
     return FillVolume(*job.file, job.file->grids[job.index], out.volume, cancel);
   case JobKind::Lightmap:
     return MakeLightmap(*job.file, job.raw, out, cancel);
@@ -1166,10 +1493,52 @@ bool Worker::Do(const Job& job, Result& out) {
 // Hands the worker's decoded cubes and filled volumes to the GPU, one a frame: each is
 // megabytes for Aurora to copy and upload, and an area brings several at once. While the
 // room environment is off they wait (nothing would use them), and so does the worker.
+// The world texture's result: a volume made from tiles that have changed hands since is dropped.
+void TakeWorld(Result& result) {
+  if (result.gen != sWorld.gen) {
+    return;
+  }
+  if (result.empty) {
+    if (sWorld.volume != 0) {
+      GXDestroyPBRVolume(sWorld.volume);
+      sWorld.volume = 0;
+    }
+    sWorld.grid = {};
+    return;
+  }
+  sWorld.grid = std::move(result.grid);
+  const Grid& grid = sWorld.grid;
+  // The old volume is destroyed after the new one is created: aurora erases it when the destroy
+  // command is processed (not deferred), so commands already queued that name it still run first.
+  const uint32_t oldVolume = sWorld.volume;
+  sWorld.volume = sNextVolume++;
+  if (sNextVolume == 0) {
+    sNextVolume = 1;
+  }
+  const auto tv = std::chrono::steady_clock::now();
+  const size_t volumeBytes = result.volume.size();
+  GXCreatePBRVolumeOwned(sWorld.volume, grid.size[0], grid.size[1], grid.size[2],
+                         new std::vector<uint8_t>(std::move(result.volume)));
+  if (LoadTiming()) {
+    PortLog::Write("room env timing: world GXCreatePBRVolume %.2f ms (%zu bytes)\n", MsSince(tv), volumeBytes);
+  }
+  PortLog::Write("room env: world volume %u %ux%ux%u average %g (%zu mapped tiles)\n", sWorld.volume, grid.size[0],
+                 grid.size[1], grid.size[2], grid.average, sTiles.KeyCount());
+  if (oldVolume != 0) {
+    GXDestroyPBRVolume(oldVolume);
+  }
+}
+
 void TakeResults() {
   bool gpu = Enabled();
   Result result;
   while (sWorker.Take(result, gpu)) {
+    if (result.kind == JobKind::Volume && result.serial == 0) {
+      TakeWorld(result);
+      Invalidate();
+      gpu = false;
+      continue;
+    }
     const auto found = sAreas.find(result.area);
     if (found == sAreas.end() || found->second.serial != result.serial) {
       continue; // Free drops an area's results, so this does not happen
@@ -1223,8 +1592,14 @@ void TakeResults() {
       if (sNextVolume == 0) {
         sNextVolume = 1;
       }
-      GXCreatePBRVolume(gpuVolume.id, grid.size[0], grid.size[1], grid.size[2], result.volume.data(),
-                        uint32_t(result.volume.size()));
+      const auto tv = std::chrono::steady_clock::now();
+      const size_t volumeBytes = result.volume.size();
+      GXCreatePBRVolumeOwned(gpuVolume.id, grid.size[0], grid.size[1], grid.size[2],
+                             new std::vector<uint8_t>(std::move(result.volume)));
+      if (LoadTiming()) {
+        PortLog::Write("room env timing: %08X GXCreatePBRVolume %.2f ms (%zu bytes)\n", result.area, MsSince(tv),
+                       volumeBytes);
+      }
       PortLog::Write("room env: %08X volume %u %ux%ux%u average %g\n", result.area, gpuVolume.id, grid.size[0],
                      grid.size[1], grid.size[2], grid.average);
     }
@@ -1435,6 +1810,7 @@ void UpdateFrame(bool roomGeoDrawing) {
   constexpr float kGrey = 0.2158605f; // sRGB 128, linear
   constexpr uint32_t kInFlight = 3;   // readbacks Aurora may have queued
   using Clock = std::chrono::steady_clock;
+  FinishLoads();
   TakeResults();
   // The exposure moves every frame, so a model's last answer is stale.
   sLastValid = false;
@@ -1457,13 +1833,29 @@ void UpdateFrame(bool roomGeoDrawing) {
     f.loaded.swap(loaded);
     return;
   }
-  const Area& area = view->second;
+  Area& area = view->second;
   const File& file = area.file;
   const float* const t = file.tonemap;
-  const bool hint = file.exposure[0] != 0.f || file.exposure[1] != 0.f;
+  // The hint in force: a registered fluid hint, else the room's plain one.
+  struct Hint {
+    float exposure[2];
+    float bias, sigma, staticLerp;
+  } eff = {{file.exposure[0], file.exposure[1]}, file.exposureBias, file.exposureSigma, file.staticLerp};
+  const int fluidPick = area.hints.Pick(file.fluidHints.size());
+  if (fluidPick >= 0) {
+    const FluidHint& h = file.fluidHints[size_t(fluidPick)];
+    eff = {{h.exposure[0], h.exposure[1]}, h.bias, h.sigma, h.staticLerp};
+  }
+  const bool hint = eff.exposure[0] != 0.f || eff.exposure[1] != 0.f;
+  // A hint that registered this frame is type 1: SetValue instead of the Gaussian's easing. The
+  // types are cleared after every frame, wherever the view was.
+  const bool hintSnap = fluidPick >= 0 && area.hintSnap;
+  for (auto& entry : sAreas) {
+    entry.second.hintSnap = false;
+  }
   // CSceneTonemapParams' static exposure: a fixed point in the hint's range, or the
   // tonemap's own EV without one.
-  const float staticEv = hint ? file.exposure[0] + (file.exposure[1] - file.exposure[0]) * file.staticLerp : t[0];
+  const float staticEv = hint ? eff.exposure[0] + (eff.exposure[1] - eff.exposure[0]) * eff.staticLerp : t[0];
   const float target[6] = {t[0], t[1], file.contrast, t[2], t[3], staticEv};
   float radiance[3] = {};
   uint32_t serial = 0;
@@ -1477,22 +1869,39 @@ void UpdateFrame(bool roomGeoDrawing) {
     f.started = true;
     std::memcpy(f.from, target, sizeof(target));
     std::memcpy(f.to, target, sizeof(target));
-    f.start = f.last = now;
+    f.last = now;
+    f.moving = false;
+    f.progress = 0.f;
     f.carry = 0.f;
     f.measured = false;
     f.ignoreUntil = serial + kInFlight;
-  } else if (std::memcmp(target, f.to, sizeof(target)) != 0) {
-    std::memcpy(f.from, f.shown, sizeof(f.shown));
+  } else {
     std::memcpy(f.to, target, sizeof(target));
-    f.start = now;
   }
   f.area = sViewArea;
-  const float moved = std::min(std::chrono::duration<float>(now - f.start).count(), 1.f);
-  for (int i = 0; i < 6; ++i) {
-    f.shown[i] = f.from[i] + (f.to[i] - f.from[i]) * moved;
+  // TransitionTonemapParams 0xb005bc: idle at `from`; a target that differs starts a move at
+  // progress 0, and every moving frame adds dt over the transition time (1 s up or down,
+  // skTonemap_ParamTransition*Time) before it blends. Retargeting mid-move keeps `from` and
+  // the progress; the move ends by making the target `from`.
+  {
+    ParamTransition tr;
+    std::memcpy(tr.from, f.from, sizeof(tr.from));
+    std::memcpy(tr.to, f.to, sizeof(tr.to));
+    tr.progress = f.progress;
+    tr.moving = f.moving;
+    if (jump) {
+      tr.Snap(target);
+    } else {
+      tr.Step(target, std::chrono::duration<float>(now - f.last).count());
+    }
+    std::memcpy(f.from, tr.from, sizeof(f.from));
+    std::memcpy(f.to, tr.to, sizeof(f.to));
+    std::memcpy(f.shown, tr.shown, sizeof(f.shown));
+    f.progress = tr.progress;
+    f.moving = tr.moving;
   }
-  if (f.sigma != file.exposureSigma) {
-    f.sigma = file.exposureSigma;
+  if (f.sigma != eff.sigma) {
+    f.sigma = eff.sigma;
     f.ev.SetSigma(f.sigma);
   }
   // Measuring settles only where the picture follows the exposure: room geometry, lit by
@@ -1503,8 +1912,8 @@ void UpdateFrame(bool roomGeoDrawing) {
     f.serial = serial;
     const float peak = std::max(std::max(radiance[0], radiance[1]), radiance[2]);
     if (f.measuring && int32_t(serial - f.ignoreUntil) > 0 && peak > 0.f && std::isfinite(peak)) {
-      const float ev = std::log2(peak / kGrey) + 3.f + file.exposureBias;
-      f.measuredEv = std::min(std::max(ev, file.exposure[0]), file.exposure[1]);
+      const float ev = std::log2(peak / kGrey) + 3.f + eff.bias;
+      f.measuredEv = std::min(std::max(ev, eff.exposure[0]), eff.exposure[1]);
       f.measured = true;
     }
   }
@@ -1522,7 +1931,7 @@ void UpdateFrame(bool roomGeoDrawing) {
   // through the Gaussian, a step every 60th of a second.
   f.carry += std::chrono::duration<float>(now - f.last).count();
   f.last = now;
-  if (jump || !hint) {
+  if (jump || !hint || hintSnap) {
     f.ev.SetValue(f.targetEv);
     f.carry = 0.f;
   } else {
@@ -1537,6 +1946,12 @@ void UpdateFrame(bool roomGeoDrawing) {
   f.hasTone = f.exposure > 0.f && f.shown[1] > 0.f && f.shown[1] < 1.f;
   if (f.hasTone) {
     BuildTone(f.shown[1], f.shown[2], f.shown[3], f.shown[4], f.tone);
+  }
+  static const bool sLog = port::EnvFlag("MP_ROOM_ENV_EXPOSURE_LOG");
+  if (sLog) {
+    PortLog::Write("room env exposure: area %08X jump %d shown %g %g %g %g %g %g ev %g target %g fluid %d snap %d\n",
+                   sViewArea, int(jump), f.shown[0], f.shown[1], f.shown[2], f.shown[3], f.shown[4], f.shown[5],
+                   f.ev.value, f.targetEv, fluidPick, int(hintSnap));
   }
 }
 
@@ -1782,16 +2197,22 @@ bool ColorGrade(LayerActive layerActive, void* context, uint32_t& a, uint32_t& b
     const auto now = std::chrono::steady_clock::now();
     if (!f.started) {
       f = {true, target, target, 0.f, 0.f, now};
+    } else if (pick == nullptr) {
+      // No grade requested: CColorGradeManager::OnHintChangedCallback (0x6b86ec) returns
+      // without a transition when the new hint is null, so the last grade keeps its full
+      // weight (Remastered never fades to identity).
     } else if (target != f.to) {
       // Mid-fade, the new fade starts from whichever grade showed more.
       const float shown = f.seconds > 0.f
           ? std::chrono::duration<float>(now - f.start).count() / f.seconds : 1.f;
       f.from = shown >= 0.5f ? f.to : f.from;
       f.to = target;
-      f.seconds = off != nullptr ? off->fadeOut : pick != nullptr ? pick->fadeIn : f.fadeOut;
+      f.seconds = off != nullptr ? off->fadeOut : pick->fadeIn;
       f.start = now;
     }
-    f.fadeOut = pick != nullptr ? pick->fadeOut : 0.f;
+    if (pick != nullptr) {
+      f.fadeOut = pick->fadeOut;
+    }
   }
   GradeFade& f = sGradeFade;
   if (!f.started) {
@@ -2448,12 +2869,20 @@ void OnScriptState(uint32_t mrea, uint32_t sender, int state) {
     Load(mrea, found->second);
     Invalidate();
   }
+  if (found->second.pending.valid()) {
+    found->second.queued.emplace_back(sender, state);
+    return;
+  }
   DriveGrades(mrea, found->second, sender, state);
 }
 
 void SendScriptState(uint32_t sender, int state) {
   for (auto& [mrea, area] : sAreas) {
-    DriveGrades(mrea, area, sender, state);
+    if (area.pending.valid()) {
+      area.queued.emplace_back(sender, state);
+    } else {
+      DriveGrades(mrea, area, sender, state);
+    }
   }
 }
 
@@ -2469,6 +2898,10 @@ void SetFluid(bool player, bool camera) {
     sCameraWater = camera;
     for (auto& [mrea, area] : sAreas) {
       DriveGrades(mrea, area, kSenderCameraWater, camera ? 0 : 1);
+      // The hints hear the camera's fluid state in every loaded area (once their file is in).
+      if (area.hasFile && area.hints.Set(area.file.fluidHints, camera)) {
+        area.hintSnap = true;
+      }
     }
   }
 }
@@ -2480,13 +2913,40 @@ void ResetGrades() {
   sBacklight = {};
   sFog = {};
   for (auto& [mrea, area] : sAreas) {
-    StartGrades(mrea, area);
+    // A load still waiting for its file starts its grades when it finishes.
+    if (!area.pending.valid()) {
+      StartGrades(mrea, area, false, false);
+    } else {
+      area.pendingFluid = area.pendingWater = false;
+      area.queued.clear();
+    }
+  }
+}
+
+void SetViewGradesOn(bool on) {
+  const auto it = sAreas.find(sViewArea);
+  if (it == sAreas.end()) {
+    return;
+  }
+  for (auto& request : it->second.grades) {
+    request.on = on;
+    if (on) {
+      request.order = ++sGradeOrder;
+    }
   }
 }
 
 std::string GradeInfo() {
   std::string out;
   char line[256];
+  if (sGradeFade.started) {
+    const GradeFade& f = sGradeFade;
+    const float t = f.seconds > 0.f
+        ? std::min(1.f, std::chrono::duration<float>(std::chrono::steady_clock::now() - f.start).count() / f.seconds)
+        : 1.f;
+    std::snprintf(line, sizeof(line), "grade fade: %08X -> %08X, weight %.3f over %g s\n", f.from, f.to, t, f.seconds);
+    out += line;
+  }
   std::snprintf(line, sizeof(line), "player in fluid %d, camera in water %d\n", int(sPlayerFluid), int(sCameraWater));
   out += line;
   float top, back;
@@ -2540,6 +3000,11 @@ void SetViewArea(uint32_t mrea) {
   if (sViewArea != mrea) {
     sViewArea = mrea;
     sLastValid = false;
+    // It draws this frame: no waiting for its file past here.
+    const auto found = sAreas.find(mrea);
+    if (found != sAreas.end()) {
+      Finish(mrea, found->second);
+    }
   }
 }
 
@@ -2640,7 +3105,7 @@ void SetLightmapHint(const float lookup[3]) { std::memcpy(sHintLightmap, lookup,
 
 void ClearVolumeHint() {
   sHint = false;
-  sHintLightmap[2] = 0.f;
+  std::fill(std::begin(sHintLightmap), std::end(sHintLightmap), 0.f);
 }
 
 static bool sProbeOverride = false;
@@ -2671,9 +3136,13 @@ bool HasVolume(uint32_t mrea) {
   // Only once the worker has made every volume the area has: until then its models are lit
   // as they are without volumes.
   const Area& area = found->second;
+  if (area.file.tiles != nullptr) {
+    return area.ownAverage > 0.f && sWorld.has();
+  }
   bool lit = false;
-  for (size_t i = 0; i < area.file.grids.size(); ++i) {
-    if (area.file.grids[i].average > 0.f) {
+  const std::vector<Grid>& grids = Grids(area);
+  for (size_t i = 0; i < grids.size() && i < area.volumes.size(); ++i) {
+    if (grids[i].average > 0.f) {
       if (area.volumes[i].id == 0) {
         return false;
       }
@@ -2743,6 +3212,17 @@ void Reset() {
     Free(area);
   }
   sAreas.clear();
+  sTiles.Clear();
+  sTileSets.clear();
+  sTileSeq = 0;
+  sWorker.Cancel(0);
+  if (sWorld.volume != 0) {
+    GXDestroyPBRVolume(sWorld.volume);
+  }
+  sWorld.volume = 0;
+  sWorld.grid = {};
+  sWorld.dirty = false;
+  ++sWorld.gen;
   FreeBlend();
   sFrame = {};
   sBrdfSent = false;
@@ -2756,6 +3236,13 @@ void SetLoadedAreas(const uint32_t* mreas, size_t count) {
   bool changed = false;
   for (auto it = sAreas.begin(); it != sAreas.end();) {
     if (std::find(mreas, mreas + count, it->first) == mreas + count) {
+      if (it->second.registered) {
+        // Its mapped tiles go to the most recent copy another area holds (or unmap).
+        if (!sTiles.Unregister(it->first).empty()) {
+          sWorld.dirty = true;
+        }
+      }
+      sTileSets.erase(it->first);
       Free(it->second);
       it = sAreas.erase(it);
       changed = true;
@@ -2763,12 +3250,16 @@ void SetLoadedAreas(const uint32_t* mreas, size_t count) {
       ++it;
     }
   }
+  if (sAreas.empty()) {
+    sTileSeq = 0;
+  }
   for (size_t i = 0; i < count; ++i) {
     if (sAreas.find(mreas[i]) == sAreas.end()) {
       Load(mreas[i], sAreas[mreas[i]]);
       changed = true;
     }
   }
+  RegisterReady(); // also composes the world texture again when a tile changed hands
   if (changed) {
     Invalidate();
   }
@@ -2851,25 +3342,42 @@ void Locate(const float pos[3], Located& out) {
       out.cube = &gpu;
     }
   }
-  if (sHint && VolumesEnabled()) {
+  if (VolumesEnabled() && !sHint && sWorld.has() && !sAreas.empty() && sAreas.begin()->second.file.tiles != nullptr) {
+    // A draw with no hint area: Remastered samples the same world texture by position, so it
+    // gets the world volume, with the first area's exposure.
+    out.volumeArea = &sAreas.begin()->second;
+    out.grid = &sWorld.grid;
+    out.volume = sWorld.volume;
+  } else if (sHint && VolumesEnabled()) {
     const auto found = sAreas.find(sHintArea);
     if (found != sAreas.end()) {
       Area& area = found->second;
-      int pick = -1;
-      float nearest = 0.f;
-      for (size_t i = 0; i < area.file.grids.size(); ++i) {
-        const float distance = GridDistance(area.file.grids[i], pos);
-        if (area.file.grids[i].average > 0.f && (pick < 0 || distance < nearest)) {
-          pick = int(i);
-          nearest = distance;
-        }
-      }
-      if (pick >= 0) {
-        const GpuVolume& gpu = area.volumes[pick];
-        if (gpu.id != 0) {
+      if (area.file.tiles != nullptr) {
+        // One texture for the world, sampled by position alone (a tap past the mapped
+        // tiles reads the transparent black border).
+        if (sWorld.has()) {
           out.volumeArea = &area;
-          out.grid = &area.file.grids[pick];
-          out.volume = gpu.id;
+          out.grid = &sWorld.grid;
+          out.volume = sWorld.volume;
+        }
+      } else {
+        int pick = -1;
+        float nearest = 0.f;
+        const std::vector<Grid>& grids = Grids(area);
+        for (size_t i = 0; i < grids.size() && i < area.volumes.size(); ++i) {
+          const float distance = GridDistance(grids[i], pos);
+          if (grids[i].average > 0.f && (pick < 0 || distance < nearest)) {
+            pick = int(i);
+            nearest = distance;
+          }
+        }
+        if (pick >= 0) {
+          const GpuVolume& gpu = area.volumes[pick];
+          if (gpu.id != 0) {
+            out.volumeArea = &area;
+            out.grid = &grids[pick];
+            out.volume = gpu.id;
+          }
         }
       }
     }
@@ -2878,13 +3386,19 @@ void Locate(const float pos[3], Located& out) {
     // The first grid with light whose texture holds the point is the one. Remastered has
     // no fallback spot: outside a texture the sampler reads its transparent black border.
     for (auto& [mrea, area] : sAreas) {
-      for (const Grid& grid : area.file.grids) {
+      for (const Grid& grid : Grids(area)) {
         if (grid.average > 0.f && SampleGrid(area.file, grid, pos, out.sample)) {
           out.ambientArea = &area;
           out.average = grid.average;
           return;
         }
       }
+    }
+    // Version 21 areas: the world grid. Its exposure is the hint's area's, else the first's.
+    if (sWorld.grid.average > 0.f && !sAreas.empty() && SampleGrid(sNoFile, sWorld.grid, pos, out.sample)) {
+      const auto hint = sAreas.find(sHintArea);
+      out.ambientArea = hint != sAreas.end() ? &hint->second : &sAreas.begin()->second;
+      out.average = sWorld.grid.average;
     }
   }
 }
@@ -3027,7 +3541,7 @@ bool Compose(const Located& located, Selection& out) {
 // cache, which is by position, since instances that share a middle need not share a lookup.
 bool AddLightmap(Selection& out) {
   out.lightmap = 0;
-  if (!sHint || !(sHintLightmap[2] > 0.f) || !Enabled() || !VolumesEnabled()) {
+  if (!sHint || !PortRoomGeo::HasLightmapLookup(sHintLightmap) || !Enabled() || !VolumesEnabled()) {
     return false;
   }
   const auto found = sAreas.find(sHintArea);
@@ -3047,6 +3561,10 @@ bool AddLightmap(Selection& out) {
     return false;
   }
   static const float scale = port::EnvFloat("MP_ROOM_ENV_LIGHTMAP_SCALE", 1.f);
+  // The shader takes a level of 0 for no lightmap (a scale of 0 is a one-texel lookup).
+  if (!(level * scale > 0.f)) {
+    return false;
+  }
   out.lightmap = area.lightmap;
   out.lightmapRect[0] = sHintLightmap[0];
   out.lightmapRect[1] = sHintLightmap[1];
@@ -3228,6 +3746,37 @@ std::string Info(const float pos[3]) {
       }
       out += line;
     }
+  }
+  if (sWorld.grid.size[0] != 0) {
+    Ambient ambient;
+    const float distance = GridDistance(sWorld.grid, pos);
+    const bool lit = distance == 0.f && SampleGrid(sNoFile, sWorld.grid, pos, ambient);
+    char here[160] = "no light here";
+    if (lit) {
+      std::snprintf(here, sizeof(here), "lit here, mean %g %g %g", ambient.mean[0], ambient.mean[1], ambient.mean[2]);
+    }
+    std::snprintf(line, sizeof(line), "  world grid: %u x %u x %u (%.1f M points), average %g, volume %u, %s\n",
+                  sWorld.grid.size[0], sWorld.grid.size[1], sWorld.grid.size[2],
+                  double(sWorld.grid.size[0]) * sWorld.grid.size[1] * sWorld.grid.size[2] / 1e6, sWorld.grid.average,
+                  sWorld.volume, here);
+    out += line;
+  }
+  // The tile table: per registered area, its load order, tiles, and how many it owns (the
+  // mapped copy of a key is the first loaded one; see Grids()).
+  for (const auto& [mrea, area] : sAreas) {
+    const auto set = sTileSets.find(mrea);
+    if (!area.registered || set == sTileSets.end()) {
+      continue;
+    }
+    size_t own = 0;
+    for (const PortRoomEnvTiles::Tile& tile : set->second->tiles) {
+      uint32_t node = 0;
+      own += sTiles.Active(tile.key, &node) && node == mrea ? 1 : 0;
+    }
+    std::snprintf(line, sizeof(line), "  tiles %08X: load #%llu, %zu tiles, %zu mapped to it, %zu keys in the table\n",
+                  mrea, static_cast<unsigned long long>(area.loadSeq), set->second->tiles.size(), own,
+                  sTiles.KeyCount());
+    out += line;
   }
   return out;
 }

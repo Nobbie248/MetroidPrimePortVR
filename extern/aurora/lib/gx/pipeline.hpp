@@ -52,6 +52,7 @@ struct PipelineConfig {
   uint32_t polygonOffsetScaleBits;
   uint32_t polygonOffsetClampBits;
   // 1: the sun's shadow-map pipeline of a ShaderConfig::shadow draw (vs_shadow, depth only).
+  // 2: the same with the draw's cut test (vs_shadow_cut, fs_shadow; the colour pass's group 2 and layout).
   uint32_t shadowPass = 0;
   bool depthCompare, depthUpdate, alphaUpdate, colorUpdate;
 };

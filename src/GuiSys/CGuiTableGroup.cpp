@@ -177,6 +177,23 @@ bool CGuiTableGroup::DoCancel() {
   return true;
 }
 
+#ifdef TARGET_PC
+// Pointer menus (port_pointer.h): jump straight to a row, firing the same
+// selection-change callback (with the previous row) a stick step would.
+bool CGuiTableGroup::PortSelect(int worker) {
+  if (worker < 0 || worker >= xc0_elementCount || worker == xc4_userSelection ||
+      !IsWorkerSelectable(worker)) {
+    return false;
+  }
+  const int userSelect = xc4_userSelection;
+  SelectWorker(worker);
+  if (x104_doMenuSelChange) {
+    x104_doMenuSelChange(this, userSelect);
+  }
+  return true;
+}
+#endif
+
 void CGuiTableGroup::SetMenuAdvanceCallback(const TFunctor1< CGuiTableGroup* const >& func) {
   xd4_doMenuAdvance = func;
 }

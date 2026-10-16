@@ -28,6 +28,10 @@
 #include "MetroidPrime/Tweaks/CTweakPlayerRes.hpp"
 #include "rstl/StringExtras.hpp"
 #include "rstl/math.hpp"
+#include "port_photo.h"
+#ifdef TARGET_PC
+#include "port_pointer_menu.h"
+#endif
 #include <float.h>
 
 CPauseScreen::ESubScreen CPauseScreen::GetPreviousSubscreen(ESubScreen screen) {
@@ -303,7 +307,11 @@ void CPauseScreen::Draw() const {
       CGuiWidgetDrawParms(totalAlpha, CVector3f(0.f, 15.f * yOff, 0.f)));
 }
 
+#ifdef TARGET_PC
+void CPauseScreen::ProcessControllerInput(const CStateManager& mgr, const CFinalInput& frameInput) {
+#else
 void CPauseScreen::ProcessControllerInput(const CStateManager& mgr, const CFinalInput& input) {
+#endif
   if (!IsLoaded()) {
     return;
   }
@@ -312,6 +320,31 @@ void CPauseScreen::ProcessControllerInput(const CStateManager& mgr, const CFinal
   }
   bool bExits = false;
   rstl::auto_ptr< CPauseScreenBase >& screen = x7c_screens[x78_activeIdx];
+#ifdef TARGET_PC
+  // Port: clicks on the button hints act as their buttons; the rest goes to
+  // the screen. The copy stands in for the frame's input from here on.
+  CFinalInput pointerInput = frameInput;
+  const bool pointer = PortPointerMenu::Begin();
+  if (pointer && !InputEnabled()) {
+    // A screen's own dialog (the options' quit prompt) disables the frame.
+    if (!screen.null() && x8_curSubscreen == xc_nextSubscreen && screen->InputDisabled()) {
+      screen->PortPointerInput(pointerInput);
+    }
+  } else if (pointer) {
+    if (PortPointerMenu::TakeClickOn(x38_textpane_l1) ||
+        PortPointerMenu::TakeClickOn(x40_textpane_a)) {
+      pointerInput.PortSetL(true, true);
+    } else if (PortPointerMenu::TakeClickOn(x3c_textpane_r) ||
+               PortPointerMenu::TakeClickOn(x44_textpane_b)) {
+      pointerInput.PortSetR(true, true);
+    } else if (PortPointerMenu::TakeClickOn(x48_textpane_return)) {
+      pointerInput.PortSetStart(true, true);
+    } else if (!screen.null()) {
+      screen->PortPointerInput(pointerInput);
+    }
+  }
+  const CFinalInput& input = pointerInput;
+#endif
   if (!screen.null()) {
     if (screen->GetMode() == CPauseScreenBase::kM_LeftTable) {
       bExits = true;
@@ -320,7 +353,7 @@ void CPauseScreen::ProcessControllerInput(const CStateManager& mgr, const CFinal
   }
   if (InputEnabled()) {
     bool invalid = IsInvalidSubscreen(x8_curSubscreen);
-    if (input.PStart() || (input.PB() && bExits) ||
+    if (input.PStart() || (input.PB() && bExits) || PortPhoto::EnterPending() ||
         (!x7c_screens[x78_activeIdx].null() &&
          x7c_screens[x78_activeIdx]->ShouldExitPauseScreen())) {
       CSfxManager::SfxStart(0x59a, 0x7f, 0x40, false, CSfxManager::kMedPriority, false,
@@ -670,6 +703,67 @@ void CPauseScreenBase::ProcessInput(const CFinalInput& input) {
   x198_25_handledInput = false;
   x8_frame.ProcessUserInput(input);
 }
+
+#ifdef TARGET_PC
+void CPauseScreenBase::PortPointerInput(CFinalInput& input) {
+  using PortPointerMenu::Action;
+  if (InputDisabled()) {
+    return;
+  }
+  // Workers 0 and 6 of the right log are scroll sentinels: only the rows in
+  // view that hold an entry count.
+  const int lastRight =
+      rstl::min_val(5, static_cast< int >(GetRightTableCount()) - x18_firstViewRightSel);
+  switch (x10_mode) {
+  case kM_LeftTable:
+    if (PortPointerMenu::Table(x70_tablegroup_leftlog, false) == Action::Advance) {
+      PortPointerMenu::NoteAdvanced();
+      PortPointerMenu::PressA(input);
+    } else if (lastRight >= 1 &&
+               PortPointerMenu::PeekClickRow(x84_tablegroup_rightlog, 1, lastRight) >= 0) {
+      // A click into the entries opens them, as A on the category does.
+      PortPointerMenu::TakeClick();
+      PortPointerMenu::PressA(input);
+    }
+    break;
+  case kM_RightTable:
+    if (PortPointerMenu::PeekClickRow(x70_tablegroup_leftlog) >= 0) {
+      // A click on a category goes back to the left table and acts there.
+      x84_tablegroup_rightlog->PortCancel();
+      if (PortPointerMenu::Table(x70_tablegroup_leftlog, false) == Action::Advance) {
+        PortPointerMenu::NoteAdvanced();
+        PortPointerMenu::PressA(input);
+      }
+    } else if (lastRight >= 1 && PortPointerMenu::Table(x84_tablegroup_rightlog, false, true, 1,
+                                                        lastRight) == Action::Advance) {
+      PortPointerMenu::NoteAdvanced();
+      PortPointerMenu::PressA(input);
+    } else {
+      const int steps = PortPointerMenu::TakeScrollSteps(
+          PortPointerMenu::RowPitch(x84_tablegroup_rightlog, 1, 2, 24.f));
+      if (steps != 0) {
+        SetRightTableSelection(0, -steps);
+      }
+    }
+    break;
+  case kM_TextScroll: {
+    if (PortPointerMenu::TakeClick()) {
+      PortPointerMenu::PressA(input);
+    }
+    const int steps = PortPointerMenu::TakeScrollSteps(40.f);
+    if (steps != 0) {
+      input.PortPressLeftStickY(steps > 0 ? 1.f : -1.f);
+    }
+    break;
+  }
+  default:
+    break;
+  }
+  if (PortPointerMenu::TakeBack()) {
+    PortPointerMenu::PressB(input);
+  }
+}
+#endif
 
 void CPauseScreenBase::UpdateSideTable(CGuiTableGroup* table) {
   if (table == nullptr) {

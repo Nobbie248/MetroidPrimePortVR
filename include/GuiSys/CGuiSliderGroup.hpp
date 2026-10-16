@@ -32,6 +32,11 @@ public:
   void SetCurVal(float cur);
   float GetCurVal() const { return xc0_roundedCurVal; }
   EState GetState() const { return xf0_state; }
+#ifdef TARGET_PC
+  // Jumps to the increment nearest fraction (0..1) of the range, firing the
+  // change callback as a pad step would.
+  void PortSetFraction(float fraction);
+#endif
 
 private:
   float xb8_minVal;

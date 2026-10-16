@@ -26,6 +26,24 @@
 #include "port_map_pickups.h"
 #include "port_map_batch.h"
 #include <dolphin/gx/GXGet.h>
+
+namespace {
+// Rooms mode: true when the area still holds a pickup whose memory relay is not
+// in the world's mailbox.
+bool PortRoomHoldsPickup(const IWorld& world, int areaIdx) {
+  const CAssetId worldId = world.IGetWorldAssetId();
+  const CScriptMailbox& mailbox = *gpGameState->StateForWorld(worldId).Mailbox().GetPtr();
+  size_t count = 0;
+  const PortMapPickups::Dot* dots = PortMapPickups::Dots(count);
+  for (size_t i = 0; i < count; ++i) {
+    if (dots[i].world == worldId && world.IGetAreaId(dots[i].area).Value() == areaIdx &&
+        !mailbox.HasMsg(TEditorId(dots[i].relay))) {
+      return true;
+    }
+  }
+  return false;
+}
+} // namespace
 #endif
 
 struct CMapObjectSortInfoGreaterThan {
@@ -385,6 +403,15 @@ void CMapWorld::DrawAreas(const CMapWorldDrawParms& parms, int selArea,
       finalSurface = CColor::Lerp(finalSurface, flashColor, pulse);
       finalOutline = CColor::Lerp(finalOutline, flashColor, pulse);
     }
+#ifdef TARGET_PC
+    if (PortMapPickups::Mode() == PortDebug::kMapPickups_Rooms &&
+        PortRoomHoldsPickup(parms.GetWorld(), areaIdx)) {
+      // Amber half way, alpha kept.
+      const CColor amber(0xffb030ffu);
+      finalSurface = CColor::Lerp(finalSurface, amber, 0.5f).WithAlphaOf(finalSurface.GetAlpha());
+      finalOutline = CColor::Lerp(finalOutline, amber, 0.5f).WithAlphaOf(finalOutline.GetAlpha());
+    }
+#endif
     const CTransform4f modelView =
         cameraXf.GetQuickInverse() * area->GetAreaPostTransform(parms.GetWorld(), areaIdx);
     int j;
@@ -565,7 +592,8 @@ void CMapWorld::DrawAreas(const CMapWorldDrawParms& parms, int selArea,
 #endif
   }
 #ifdef TARGET_PC
-  if (PortMapPickups::Active()) {
+  if (PortMapPickups::Mode() == PortDebug::kMapPickups_All ||
+      PortMapPickups::Mode() == PortDebug::kMapPickups_Seen) {
     DrawPortPickups(parms, bfsInfos);
   }
 #endif
@@ -573,9 +601,12 @@ void CMapWorld::DrawAreas(const CMapWorldDrawParms& parms, int selArea,
 
 #ifdef TARGET_PC
 // Port: a white dot for each pickup not yet collected (PortMapPickups), in the
-// rooms this pass drew; tracker colours in an Archipelago game. Map objects sort after everything else, so drawing the
-// dots last keeps retail's order. A pickup counts as collected once its memory
-// relay is in the world's mailbox, which is what keeps it gone after a reload.
+// rooms this pass drew (Seen mode: only those the player has seen, or that a
+// map station mapped); tracker colours in an Archipelago game. With pickup
+// kinds on, a minor item is a ring instead of a dot and a collected pickup a
+// grey cross. Map objects sort after everything else, so drawing the dots last
+// keeps retail's order. A pickup counts as collected once its memory relay is
+// in the world's mailbox, which is what keeps it gone after a reload.
 void CMapWorld::DrawPortPickups(const CMapWorldDrawParms& parms,
                                 const rstl::vector< CMapAreaBFSInfo >& bfsInfos) const {
   const IWorld& world = parms.GetWorld();
@@ -591,6 +622,14 @@ void CMapWorld::DrawPortPickups(const CMapWorldDrawParms& parms,
   static const int kSegments = 12;
   static const float kRadius = 1.3f;
   static const float kRimRadius = 1.7f;
+  // A minor item's ring keeps the dot's outline with a rim-coloured hole.
+  static const float kHoleRadius = 0.7f;
+  // The cross's bars: half length and half width, then the rim's.
+  static const float kBarLength = 1.4f;
+  static const float kBarWidth = 0.3f;
+  static const float kRimBarLength = 1.8f;
+  static const float kRimBarWidth = 0.7f;
+  static const float kHalfSqrt2 = 0.70710678f;
   const CColor rim = CColor(0x202020ff).WithAlphaOf(parms.GetAlpha());
   bool setUp = false;
   size_t count = 0;
@@ -603,21 +642,30 @@ void CMapWorld::DrawPortPickups(const CMapWorldDrawParms& parms,
   if (!PortMapPickups::Colors(tracker)) {
     tracker = nullptr;
   }
+  const unsigned char* kinds = PortDebug::MapPickupKinds() ? PortMapPickups::Kinds() : nullptr;
+  const bool seenOnly = PortMapPickups::Mode() == PortDebug::kMapPickups_Seen;
+  const bool stationShows = PortDebug::MapStationPickups();
   for (size_t i = 0; i < count; ++i) {
     const PortMapPickups::Dot& dot = dots[i];
     if (dot.world != worldId) {
       continue;
     }
-    CColor color = white;
-    if (tracker != nullptr) {
-      const bool collected =
-          tracker[i] == PortMapPickups::kC_Grey || mailbox.HasMsg(TEditorId(dot.relay));
-      color = CColor(kTrackerColors[collected ? PortMapPickups::kC_Grey : tracker[i]])
-                  .WithAlphaOf(parms.GetAlpha());
-    } else if (mailbox.HasMsg(TEditorId(dot.relay))) {
+    const int areaIdx = world.IGetAreaId(dot.area).Value();
+    if (seenOnly && !PortMapPickups::Seen(i) &&
+        !(stationShows && mwInfo.IsWorldVisible(areaIdx))) {
       continue;
     }
-    const int areaIdx = world.IGetAreaId(dot.area).Value();
+    const bool collected = (tracker != nullptr && tracker[i] == PortMapPickups::kC_Grey) ||
+                           mailbox.HasMsg(TEditorId(dot.relay));
+    if (collected && tracker == nullptr && kinds == nullptr) {
+      continue;
+    }
+    CColor color = white;
+    if (collected) {
+      color = CColor(kTrackerColors[PortMapPickups::kC_Grey]).WithAlphaOf(parms.GetAlpha());
+    } else if (tracker != nullptr) {
+      color = CColor(kTrackerColors[tracker[i]]).WithAlphaOf(parms.GetAlpha());
+    }
     bool drawn = false;
     for (int j = 0; j < bfsInfos.size() && !drawn; ++j) {
       drawn = bfsInfos[j].GetAreaIndex() == areaIdx;
@@ -635,11 +683,34 @@ void CMapWorld::DrawPortPickups(const CMapWorldDrawParms& parms,
     const CVector3f pos = CMapArea::GetAreaPostTranslate(world, areaIdx) +
                           CVector3f(dot.pos[0], dot.pos[1], dot.pos[2]);
     gpRender->SetModelMatrix(modelXf * CTransform4f::Translate(pos) * billboard);
-    // A dark rim first, so the dot also reads on the pale explored rooms.
-    for (int pass = 0; pass < 2; ++pass) {
-      const float radius = pass == 0 ? kRimRadius : kRadius;
+    // A dark rim first, so the mark also reads on the pale explored rooms.
+    if (collected && kinds != nullptr) {
+      for (int pass = 0; pass < 2; ++pass) {
+        const float length = pass == 0 ? kRimBarLength : kBarLength;
+        const float width = pass == 0 ? kRimBarWidth : kBarWidth;
+        for (int bar = 0; bar < 2; ++bar) {
+          // Along (1, 1) or (1, -1), turned 45 degrees.
+          const float side = bar == 0 ? 1.f : -1.f;
+          const float ax = length * kHalfSqrt2;
+          const float az = side * length * kHalfSqrt2;
+          const float wx = -side * width * kHalfSqrt2;
+          const float wz = width * kHalfSqrt2;
+          CGraphics::StreamBegin(kP_TriangleStrip);
+          CGraphics::StreamColor(pass == 0 ? rim : color);
+          CGraphics::StreamVertex(-ax - wx, 0.f, -az - wz);
+          CGraphics::StreamVertex(-ax + wx, 0.f, -az + wz);
+          CGraphics::StreamVertex(ax - wx, 0.f, az - wz);
+          CGraphics::StreamVertex(ax + wx, 0.f, az + wz);
+          CGraphics::StreamEnd();
+        }
+      }
+      continue;
+    }
+    const bool ring = kinds != nullptr && kinds[i] == PortMapPickups::kK_Minor;
+    for (int pass = 0; pass < (ring ? 3 : 2); ++pass) {
+      const float radius = pass == 0 ? kRimRadius : pass == 1 ? kRadius : kHoleRadius;
       CGraphics::StreamBegin(kP_TriangleFan);
-      CGraphics::StreamColor(pass == 0 ? rim : color);
+      CGraphics::StreamColor(pass == 1 ? color : rim);
       CGraphics::StreamVertex(0.f, 0.f, 0.f);
       for (int k = 0; k <= kSegments; ++k) {
         const float angle = k * (M_2PIF / kSegments);

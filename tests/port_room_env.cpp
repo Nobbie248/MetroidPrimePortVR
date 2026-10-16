@@ -908,9 +908,101 @@ void TestPowerBomb() {
   PortRoomEnv::PowerBombBakedLight(4.5f, rgb);
   Check(isColor(rgb, 1.f, 1.f, 1.f), "bomb: white again from 4.5 s");
 }
+void TestExposureHints() {
+  using PortRoomEnv::ExposureHints;
+  using PortRoomEnv::FluidHint;
+  using PortRoomEnv::ParamTransition;
+  std::vector<FluidHint> hints(2);
+  hints[0].mode = 1;
+  hints[1].mode = 2;
+  ExposureHints h;
+  // Camera outside at load: mode 1 idle, mode 2 inactive until the first exit.
+  Check(!h.Load(hints, false), "hints: nothing registers at load outside a fluid");
+  Check(h.Pick(2) == -1, "hints: the plain hint outside");
+  Check(h.Set(hints, true), "hints: entering registers mode 1 (snap)");
+  Check(h.Pick(2) == 0, "hints: mode 1 in force inside");
+  Check(!h.Set(hints, true), "hints: no change, no snap");
+  Check(h.Set(hints, false), "hints: leaving registers mode 2 (snap)");
+  Check(h.Pick(2) == 1, "hints: mode 2 in force after the exit");
+  Check(h.Set(hints, true) && h.Pick(2) == 0, "hints: re-entering swaps back to mode 1");
+  // Camera inside at load: mode 1 registers (snap), mode 2 stays out.
+  Check(h.Load(hints, true) && h.Pick(2) == 0, "hints: inside at load starts mode 1");
+  // Mode 1 alone: leaving unregisters without a snap.
+  std::vector<FluidHint> one(1);
+  ExposureHints g;
+  g.Load(one, false);
+  g.Set(one, true);
+  Check(!g.Set(one, false) && g.Pick(1) == -1, "hints: leaving only unregisters mode 1");
+
+  const float a[6] = {1, 2, 3, 4, 5, 6};
+  const float b[6] = {11, 12, 13, 14, 15, 16};
+  const float c[6] = {21, 22, 23, 24, 25, 26};
+  ParamTransition t;
+  t.Snap(a);
+  t.Step(a, 0.1f);
+  Check(!t.moving && t.shown[0] == 1.f, "transition: idle at the target");
+  t.Step(b, 0.f);
+  Check(t.moving && t.progress == 0.f && t.shown[0] == 1.f, "transition: a new target starts at progress 0");
+  t.Step(b, 0.5f);
+  Check(std::fabs(t.shown[0] - 6.f) < 1e-4f && std::fabs(t.progress - 0.5f) < 1e-6f, "transition: half way");
+  t.Step(c, 0.f);
+  Check(t.from[0] == 1.f && std::fabs(t.progress - 0.5f) < 1e-6f, "transition: retarget keeps from and progress");
+  Check(std::fabs(t.shown[0] - 1.f) > 0.f && t.to[0] == 21.f, "transition: the retarget aims at the new target");
+  t.Step(c, 0.5f);
+  Check(!t.moving && t.from[0] == 21.f && t.shown[0] == 21.f, "transition: ends on the target");
+  t.Snap(b);
+  Check(!t.moving && t.shown[3] == 14.f && t.from[3] == 14.f, "transition: snap");
+}
+// A version 21 tile-set section: identity transform, `box`, one 1x1x1 layer-0 tile.
+std::vector<uint8_t> MakeTileSection(const float matrix0, const int32_t box[6], uint32_t count = 1) {
+  std::vector<uint8_t> out;
+  for (int i = 0; i < 12; ++i) {
+    PutFloat(out, i == 0 ? matrix0 : 0.f);
+  }
+  for (int i = 0; i < 6; ++i) {
+    Put32(out, uint32_t(box[i]));
+  }
+  Put32(out, count);
+  Put32(out, count != 0 ? 6 : 0);
+  for (uint32_t i = 0; i < count; ++i) {
+    for (uint32_t v : {0u, i, 0u, 0u, 0u, 0u, 0u, 1u, 1u, 1u, 0u}) {
+      Put32(out, v);
+    }
+  }
+  out.insert(out.end(), count != 0 ? 6 : 0, 0);
+  return out;
+}
+
+void TestTileSection() {
+  const int32_t good[6] = {0, 0, 0, 10, 10, 10};
+  const auto parse = [](const std::vector<uint8_t>& d) {
+    PortRoomEnvTiles::TileSet set;
+    std::string error;
+    size_t at = 0;
+    return PortRoomEnv::ParseTileSet(d, at, set, error);
+  };
+  Check(parse(MakeTileSection(1.f, good)), "tiles: well formed");
+  const int32_t inverted[6] = {5, 0, 0, 4, 10, 10};
+  Check(!parse(MakeTileSection(1.f, inverted)), "tiles: inverted box");
+  const int32_t huge[6] = {-2000000000, 0, 0, 2000000000, 10, 10};
+  Check(!parse(MakeTileSection(1.f, huge)), "tiles: absurd box");
+  const int32_t wide[6] = {0, 0, 0, 100000, 10, 10};
+  Check(!parse(MakeTileSection(1.f, wide)), "tiles: box wider than a room");
+  Check(!parse(MakeTileSection(std::numeric_limits<float>::infinity(), good)), "tiles: non-finite transform");
+  std::vector<uint8_t> many = MakeTileSection(1.f, good);
+  many[72] = 0xFF;
+  many[73] = 0xFF;
+  many[74] = 0xFF;
+  many[75] = 0x7F;
+  Check(!parse(many), "tiles: absurd tile count");
+  std::vector<uint8_t> cut = MakeTileSection(1.f, good);
+  cut.pop_back();
+  Check(!parse(cut), "tiles: cut short");
+}
 } // namespace
 
 int main() {
+  TestTileSection();
   TestBrdfLut();
   TestPowerBomb();
   TestNames();
@@ -920,6 +1012,7 @@ int main() {
   TestBlend();
   TestGrid();
   TestLod();
+  TestExposureHints();
   if (sFailures != 0) {
     std::fprintf(stderr, "%d failure(s)\n", sFailures);
     return 1;

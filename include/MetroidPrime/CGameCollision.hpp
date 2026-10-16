@@ -16,6 +16,7 @@ class CStateManager;
 class CTransform4f;
 class CRayCastResult;
 class CPhysicsActor;
+class CPlayer;
 class CInternalCollisionStructure;
 class CUnitVector3f;
 class ICollisionFilter;
@@ -91,7 +92,7 @@ public:
   FindNonIntersectingVector(const CStateManager& mgr, CAreaCollisionCache& cache,
                             CPhysicsActor& actor, const CCollisionPrimitive& prim,
                             const TEntityList& nearList); // name?
-  static void CollisionFailsafe(const CStateManager& mgr, CAreaCollisionCache& cache,
+  static bool CollisionFailsafe(const CStateManager& mgr, CAreaCollisionCache& cache,
                                 CPhysicsActor& actor,
                                 const CCollisionPrimitive& prim,
                                 const TEntityList& nearList, float dt,
@@ -104,6 +105,10 @@ public:
                          const TEntityList*);
   static void MoveAndCollide(CStateManager& mgr, CPhysicsActor& actor, float dt,
                              const ICollisionFilter& filter, const TEntityList*);
+#ifdef TARGET_PC
+  static void MoveAirborneStepped(CStateManager& mgr, CPlayer& player, float dt,
+                                  const TEntityList*);
+#endif
 
   static void MakeCollisionCallbacks(CStateManager&, CPhysicsActor&, const TUniqueId&,
                                      const CCollisionInfoList&);

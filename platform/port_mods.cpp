@@ -642,13 +642,16 @@ void Initialize() {
       }
       pending.push_back(std::move(pak));
     }
+    // Resources are found by id alone, so an added id must not repeat under
+    // another type: a model would get the texture's bytes.
     std::vector<const LooseResource*> added;
+    std::set<uint32_t> addedIds;
     for (const auto& [key, resource] : loose) {
       if (used.count(key) != 0) {
         continue;
       }
       const std::string name = PathString(PathFromString(resource.hostPath).filename());
-      if (knownIds.count(key.second) != 0) {
+      if (knownIds.count(key.second) != 0 || !addedIds.insert(key.second).second) {
         Message(resource.mod + ": " + name + " reuses an id another type holds; ignored");
       } else if (homeEntry < 0) {
         Message(resource.mod + ": " + name + " is in no PAK and NoARAM.pak is missing; ignored");

@@ -2,6 +2,7 @@
 
 #include "pipeline_cache.hpp"
 #include "types.hpp"
+#include "tex_copy_conv.hpp"
 #include "tex_palette_conv.hpp"
 #include "stereo_frame.hpp"
 #include "texture.hpp"
@@ -119,6 +120,10 @@ struct RenderPass {
   Range resolveUniformRange;
   Range resolveMipsUniformRange;
   bool resolveMips = false; // resolveTarget has a mip chain to fill after the copy
+  // What the colour copy makes of the source (an HDR scene pass's copies are not Display) and,
+  // for HdrDisplay, the tone curve it was recorded with.
+  tex_copy_conv::CopyDomain resolveDomain = tex_copy_conv::CopyDomain::Display;
+  Range resolveToneRange;
   int probeFace = -1; // resolveTarget is this face of the PBR probe
   Range probeUniformRange;
   wgpu::Texture snapshotColorDst;

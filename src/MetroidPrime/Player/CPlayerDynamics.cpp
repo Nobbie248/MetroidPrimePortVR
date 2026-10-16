@@ -50,15 +50,35 @@ static const float skTransitionFilterTime = .95f;
 static bool sFastMorphAirCarry = false;
 // Remastered movement under direct aim (PortDebug::RemasteredMovement), set by
 // ComputeMovement: one force along the stick, and GetDampedClampedVelocityWR
-// slows the planar speed as a whole, with Remastered's air drag in every air
-// state. Retail skips the friction while a jump rises, so the speed dips at
-// takeoff and recovers at the apex (issue #46); Remastered and PrimeHack don't.
+// slows and clamps the planar speed as a whole, with Remastered's air drag in
+// the air. Jumps follow Remastered's CPlayerMP1::JumpInput (0xcf0060; issue
+// #117): see RemasteredJump.
 static bool sPlanarMovement = false;
 // Set while airborne once an orbit was held (a scan dash or strafe jump): the
 // rest of that airtime moves as retail, whose rising jump keeps the dash's
 // speed (Remastered's drag took a dash from 20 to 13 u/s), so dash tricks
 // such as Space Jump early still carry. Cleared on landing.
 static bool sOrbitAirCarry = false;
+// Remastered movement jumps as Remastered: the jump timeouts are 0.25 s
+// (0.117 s for a double jump) instead of 0.235 (0.1), the press cancels the
+// vertical velocity, and the last push tick blends the jump force into
+// gravity by the fraction of the tick left on the timeout. The fraction makes
+// the push last the timeout at any tick rate, so JumpTimeoutsAtRate is not
+// needed. Both minimum times equal the allowed times, as in retail, so the
+// minimum timeout is 0 and a release does not end the push early.
+static const float kRemasteredJumpTime = 0.25f;
+static const float kRemasteredDoubleJumpTime = 0.117f;
+static bool RemasteredJump(const CPlayer& player, const CStateManager& mgr) {
+  return player.MouseControlsAllowed(mgr) && PortDebug::RemasteredMovement();
+}
+// Direct aim without Remastered movement moves along the stick as retail moves
+// forward: ComputeMovement pushes along the stick and GetDampedClampedVelocityWR
+// takes the friction along and across it, as retail takes it along and across
+// the body. The unit stick direction in body axes (x right, y forward) is kept
+// once the stick is released, so a diagonal stops as a straight run does.
+static bool sStickFrame = false;
+static float sStickRight = 0.f;
+static float sStickForward = 1.f;
 #endif
 
 static const CMaterialList BallTransitionInclude = CMaterialList(kMT_Solid);
@@ -98,7 +118,10 @@ CVector3f CPlayer::GetDampedClampedVelocityWR() const {
     // Like an orbit, a grapple jump's flight is only clamped.
     const bool grappleJump =
         x258_movementState != NPlayer::kMS_OnGround && x3d8_grappleJumpTimeout > 0.f;
-    if (!grappleJump && speed > 1e-14f) {
+    const float maxSpeed = gpTweakPlayer->GetPlayerTranslationMaxSpeed(GetSurfaceRestraint());
+    if (grappleJump) {
+      planarVelocity.SetY(CMath::Limit(planarVelocity.GetY(), maxSpeed));
+    } else if (speed > 1e-14f) {
       const float tickScale = PortDebug::TickPeriod() * 60.f;
       float newSpeed;
       if (GetSurfaceRestraint() == kSR_Air) {
@@ -109,13 +132,13 @@ CVector3f CPlayer::GetDampedClampedVelocityWR() const {
             0.f, speed - gpTweakPlayer->GetPlayerTranslationFriction(GetSurfaceRestraint()) *
                              tickScale);
       }
+      // Remastered clamps the planar speed as a whole (0xcee29c). A scan dash's
+      // sideways momentum still carries (issue #30): sOrbitAirCarry moves the
+      // rest of its airtime as retail.
+      newSpeed = CMath::Min(newSpeed, maxSpeed);
       planarVelocity.SetX(planarVelocity.GetX() * (newSpeed / speed));
       planarVelocity.SetY(planarVelocity.GetY() * (newSpeed / speed));
     }
-    // Remastered clamps the planar speed; only forward is, as retail, so a scan
-    // dash's sideways momentum still carries once the lock breaks (issue #30).
-    planarVelocity.SetY(CMath::Limit(
-        planarVelocity.GetY(), gpTweakPlayer->GetPlayerTranslationMaxSpeed(GetSurfaceRestraint())));
     if (x258_movementState == NPlayer::kMS_OnGround) {
       planarVelocity.SetZ(0.f);
     }
@@ -123,6 +146,16 @@ CVector3f CPlayer::GetDampedClampedVelocityWR() const {
   }
 #endif
   CVector3f localVelocity = GetTransform().TransposeRotate(GetVelocityWR());
+#ifdef TARGET_PC
+  // Into the stick's axes: y along the stick, x to its right.
+  const bool stickFrame = sStickFrame && x304_orbitState == kOS_NoOrbit;
+  if (stickFrame) {
+    const float right = localVelocity.GetX();
+    const float forward = localVelocity.GetY();
+    localVelocity.SetX(right * sStickForward - forward * sStickRight);
+    localVelocity.SetY(right * sStickRight + forward * sStickForward);
+  }
+#endif
   if ((x258_movementState != NPlayer::kMS_ApplyJump ||
        (x258_movementState == NPlayer::kMS_ApplyJump && GetSurfaceRestraint() != kSR_Air)) &&
       x304_orbitState == kOS_NoOrbit) {
@@ -142,6 +175,14 @@ CVector3f CPlayer::GetDampedClampedVelocityWR() const {
       localVelocity.SetX(CMath::Min(0.f, localVelocity.GetX() + friction));
     }
   }
+#ifdef TARGET_PC
+  if (stickFrame) {
+    const float across = localVelocity.GetX();
+    const float along = localVelocity.GetY();
+    localVelocity.SetX(across * sStickForward + along * sStickRight);
+    localVelocity.SetY(along * sStickForward - across * sStickRight);
+  }
+#endif
   // Only forward speed is capped, as retail, under mouse aim too: sideways
   // momentum past walking speed (a scan dash whose lock broke mid-air) must
   // carry (issue #30). Free strafing stays within the cap through its force law.
@@ -366,8 +407,7 @@ void CPlayer::ComputeMovement(const CFinalInput& input, CStateManager& mgr, floa
   } else if (x304_orbitState != kOS_NoOrbit) {
     sOrbitAirCarry = true;
   }
-  sPlanarMovement =
-      MouseControlsAllowed(mgr) && PortDebug::RemasteredMovement() && !sOrbitAirCarry;
+  sPlanarMovement = RemasteredJump(*this, mgr) && !sOrbitAirCarry;
 #endif
   float turnInput = mouseMovement ? 0.f : TurnInput(input);
   float forwardInput = ForwardInput(input, turnInput);
@@ -375,6 +415,29 @@ void CPlayer::ComputeMovement(const CFinalInput& input, CStateManager& mgr, floa
   if (mouseMovement) {
     strafeInput = ControlMapper::GetAnalogInput(ControlMapper::kC_StrafeRight, input) -
                   ControlMapper::GetAnalogInput(ControlMapper::kC_StrafeLeft, input);
+#ifdef TARGET_PC
+    if (IsMorphBallTransitioning()) {
+      strafeInput = 0.f;
+    } else if (!sPlanarMovement) {
+      // Full at 0.8 as forward is, so a diagonal tops out where straight does.
+      // Remastered leaves strafe unscaled (ComputeMovement 0xcefb48).
+      strafeInput = CMath::Clamp(-1.f, strafeInput / 0.8f, 1.f);
+    }
+    // The GameCube stick gate (PADClamp) clips a diagonal to 40/72 per axis, a
+    // radius of 0.786, short of full: undo it, as on a round stick (Remastered's
+    // Switch pad), so every direction reaches the top speed. Only ever grows the
+    // input, which is clamped to 1 below.
+    const float rawX = std::fabs(sPlanarMovement ? strafeInput : strafeInput * 0.8f);
+    const float rawY = std::fabs(forwardInput * 0.8f);
+    const float rawLength = std::hypot(rawX, rawY);
+    if (rawLength > 1e-5f) {
+      const float a = std::max(rawX, rawY) / rawLength;
+      const float b = std::min(rawX, rawY) / rawLength;
+      const float gate = 40.f / 72.f / (40.f / 72.f * a + 32.f / 72.f * b);
+      strafeInput /= gate;
+      forwardInput /= gate;
+    }
+#endif
     const auto inputAxes = PortMouse::ClampPlanar({strafeInput, forwardInput}, 1.f);
     strafeInput = inputAxes.right;
     forwardInput = inputAxes.forward;
@@ -394,6 +457,16 @@ void CPlayer::ComputeMovement(const CFinalInput& input, CStateManager& mgr, floa
     vrMove = PortVr::VrDirectionalMove(flatSpeed, x258_movementState == NPlayer::kMS_OnGround, dt,
                                        mgr.GetUpdateFrameIndex());
   }
+  sStickFrame = mouseMovement && !sPlanarMovement;
+  if (sStickFrame) {
+    const float length = std::hypot(strafeInput, forwardInput);
+    if (length > 1e-5f) {
+      sStickRight = strafeInput / length;
+      sStickForward = forwardInput / length;
+    }
+  }
+#endif
+#ifdef TARGET_PC
   // A fast morph carries its velocity through without friction (gravity still
   // applies through JumpInput). A fast unmorph is instant.
   if (!IsMorphBallTransitioning() || !IsFastMorphTransition())
@@ -451,19 +524,6 @@ void CPlayer::ComputeMovement(const CFinalInput& input, CStateManager& mgr, floa
   const bool frictionApplied =
       (x258_movementState != NPlayer::kMS_ApplyJump || GetSurfaceRestraint() != kSR_Air) &&
       x304_orbitState == kOS_NoOrbit;
-  // Direct aim moves along the stick as retail moves forward. The friction is
-  // subtracted per body axis, so each axis's force law offsets it in full; while
-  // none is (a jump's rise), the offset goes along the stick's unit direction,
-  // or a diagonal would head for more than retail's top speed, and faster.
-  float strafeDirection = 0.f;
-  float forwardDirection = forwardInput > 0.f ? 1.f : -1.f;
-  if (mouseMovement && !frictionApplied) {
-    const float length = std::hypot(strafeInput, forwardInput);
-    if (length > 0.f) {
-      strafeDirection = strafeInput / length;
-      forwardDirection = forwardInput / length;
-    }
-  }
 #endif
   float forwardForce;
   if (!close_enough(0.f, forwardInput)) {
@@ -484,7 +544,7 @@ void CPlayer::ComputeMovement(const CFinalInput& input, CStateManager& mgr, floa
 #endif
     float desiredSpeed = forwardInput * (maxSpeed - frictionSpeed);
 #ifdef TARGET_PC
-    desiredSpeed += (frictionSpeed + law.shift) * forwardDirection;
+    desiredSpeed += (frictionSpeed + law.shift) * (forwardInput > 0.f ? 1.f : -1.f);
 #else
     desiredSpeed += frictionSpeed * (forwardInput > 0.f ? 1.f : -1.f);
 #endif
@@ -500,59 +560,37 @@ void CPlayer::ComputeMovement(const CFinalInput& input, CStateManager& mgr, floa
     forwardForce = 0.f;
   }
   float strafeForce = 0.f;
-  if (mouseMovement) {
-    const float acceleration = gpTweakPlayer->GetMaxTranslationalAcceleration(GetSurfaceRestraint());
-    const float maxSpeed = gpTweakPlayer->GetPlayerTranslationMaxSpeed(GetSurfaceRestraint());
-    const float sideVelocity = GetTransform().TransposeRotate(GetVelocityWR()).GetX();
-    strafeForce = PortMouse::AxisForce(strafeInput, sideVelocity, maxSpeed,
-                                      gpTweakPlayer->GetPlayerTranslationFriction(GetSurfaceRestraint()),
-                                      GetMass(), dt, acceleration, tickScale, frictionApplied,
-                                      strafeDirection);
-    // Retail has no sideways force, so strafing the way a dash carries the
-    // player must not brake its momentum back to walking speed.
-    if (CMath::AbsF(sideVelocity) > maxSpeed && sideVelocity * strafeInput > 0.f) {
-      strafeForce = 0.f;
-    }
-    const auto force = PortMouse::ClampPlanar({strafeForce, forwardForce}, acceleration);
-    strafeForce = force.right;
-    forwardForce = force.forward;
 #ifdef TARGET_PC
-    if (sPlanarMovement) {
-      // Remastered: the retail force law once, along the stick, with the stick's
-      // magnitude as the input and the velocity along it as the speed. The
-      // magnitude is radial, scaled as retail scales forward alone (full at 0.8),
-      // so a diagonal is as fast as straight ahead; retail leaves strafe unscaled.
-      strafeForce = forwardForce = 0.f;
-      const float stickStrafe =
-          ControlMapper::GetAnalogInput(ControlMapper::kC_StrafeRight, input) -
-          ControlMapper::GetAnalogInput(ControlMapper::kC_StrafeLeft, input);
-      const float stickForward =
-          forwardInput == 0.f
-              ? 0.f
-              : ControlMapper::GetAnalogInput(ControlMapper::kC_Forward, input) -
-                    ControlMapper::GetAnalogInput(ControlMapper::kC_Backward, input);
-      const float stickMagnitude = std::hypot(stickStrafe, stickForward);
-      if (stickMagnitude > 1e-5f) {
-        const float directionX = stickStrafe / stickMagnitude;
-        const float directionY = stickForward / stickMagnitude;
-        const float magnitude = CMath::Min(stickMagnitude / 0.8f, 1.f);
-        const CVector3f localVelocity = GetTransform().TransposeRotate(GetVelocityWR());
-        const float along =
-            directionX * localVelocity.GetX() + directionY * localVelocity.GetY();
-        float planarForce = PortMouse::AxisForce(
-            magnitude, along, maxSpeed,
-            gpTweakPlayer->GetPlayerTranslationFriction(GetSurfaceRestraint()), GetMass(), dt,
-            acceleration, tickScale);
-        // As above: momentum past the cap the way the stick points isn't braked.
-        if (along > maxSpeed && planarForce < 0.f) {
-          planarForce = 0.f;
-        }
-        strafeForce = planarForce * directionX;
-        forwardForce = planarForce * directionY;
+  if (mouseMovement) {
+    // Direct aim: the retail forward law once, along the stick, with the stick's
+    // magnitude as the input and the velocity along the stick as the speed
+    // (Remastered's Compute2DMovementForce). Without Remastered movement the
+    // friction is taken in the stick's axes too, so any direction moves exactly
+    // as retail moves straight ahead.
+    strafeForce = forwardForce = 0.f;
+    const float magnitude = std::hypot(strafeInput, forwardInput);
+    if (magnitude > 1e-5f) {
+      const float directionX = strafeInput / magnitude;
+      const float directionY = forwardInput / magnitude;
+      const float acceleration =
+          gpTweakPlayer->GetMaxTranslationalAcceleration(GetSurfaceRestraint());
+      const float maxSpeed = gpTweakPlayer->GetPlayerTranslationMaxSpeed(GetSurfaceRestraint());
+      const CVector3f localVelocity = GetTransform().TransposeRotate(GetVelocityWR());
+      const float along = directionX * localVelocity.GetX() + directionY * localVelocity.GetY();
+      float planarForce = PortMouse::AxisForce(
+          magnitude, along, maxSpeed,
+          gpTweakPlayer->GetPlayerTranslationFriction(GetSurfaceRestraint()), GetMass(), dt,
+          acceleration, tickScale, sPlanarMovement || frictionApplied);
+      // Retail has no sideways force, so moving the way a dash carries the
+      // player must not brake its momentum back to walking speed (issue #30).
+      if (along > maxSpeed && planarForce < 0.f) {
+        planarForce = 0.f;
       }
+      strafeForce = planarForce * directionX;
+      forwardForce = planarForce * directionY;
     }
-#endif
   }
+#endif
   if (x304_orbitState != kOS_NoOrbit && gkFreeLookPreventsOrbitMovement && x3dd_lookButtonHeld) {
     forwardForce = 0.f;
   }
@@ -778,6 +816,12 @@ float CPlayer::JumpInput(const CFinalInput& input, CStateManager& mgr) {
     if (x258_movementState != NPlayer::kMS_Jump) {
       if (ControlMapper::GetPressInput(ControlMapper::kC_JumpOrBoost, input)) {
         SetMoveState(NPlayer::kMS_Jump, mgr);
+#ifdef TARGET_PC
+        if (RemasteredJump(*this, mgr)) {
+          const CVector3f impulse(0.f, 0.f, -GetVelocityWR().GetZ() * GetMass());
+          ApplyImpulseWR(impulse, CAxisAngle::Identity());
+        }
+#endif
         return jumpFactor * (verticalJumpAccel * GetMass());
       }
       return 0.f;
@@ -787,14 +831,53 @@ float CPlayer::JumpInput(const CFinalInput& input, CStateManager& mgr) {
     if (forward < backward) {
       forward = ControlMapper::GetAnalogInput(ControlMapper::kC_Backward, input);
     }
-    return jumpFactor *
-           ((verticalJumpAccel - forward * (verticalJumpAccel - horizontalJumpAccel)) * GetMass());
+    const float force = jumpFactor * ((verticalJumpAccel -
+                                       forward * (verticalJumpAccel - horizontalJumpAccel)) *
+                                      GetMass());
+#ifdef TARGET_PC
+    const float dt = PortDebug::TickPeriod();
+    if (RemasteredJump(*this, mgr) && x288_startingJumpTimeout < dt) {
+      const float pushed = x288_startingJumpTimeout / dt;
+      return pushed * force + (1.f - pushed) * GetGravity() * GetMass();
+    }
+#endif
+    return force;
   }
   if (x258_movementState == NPlayer::kMS_Jump) {
     SetMoveState(NPlayer::kMS_ApplyJump, mgr);
   }
   return 0.f;
 }
+
+#ifdef TARGET_PC
+// The jump force runs on the press tick and on every later tick until this
+// timeout, counted down once per tick, reaches zero; once the button is released
+// it runs only while the timeout is still at or above the minimum timeout. At
+// 60 Hz the 0.235 s jump therefore pushes for 15 ticks (0.25 s); at 120 Hz it
+// would round to 29 ticks (0.242 s) and jump ~7% lower. Set both timeouts so the
+// push lasts the retail 60 Hz durations at the current tick rate.
+static void JumpTimeoutsAtRate(float& timeout, float& minTimeout) {
+  const float period = PortDebug::TickPeriod();
+  if (period * 60.f == 1.f) {
+    return;
+  }
+  int pushTicks = 1;
+  int minTicks = 1;
+  float left = timeout;
+  for (int i = 0; i < 600; ++i) {
+    left -= 1.f / 60.f;
+    if (left <= 0.f) {
+      break;
+    }
+    ++pushTicks;
+    if (minTimeout <= left) {
+      ++minTicks;
+    }
+  }
+  timeout = static_cast<float>(pushTicks) / 60.f - 0.5f * period;
+  minTimeout = timeout - (static_cast<float>(minTicks) / 60.f - 0.5f * period);
+}
+#endif
 
 void CPlayer::SetMoveState(NPlayer::EPlayerMovementState state, CStateManager& mgr) {
   switch (state) {
@@ -805,12 +888,34 @@ void CPlayer::SetMoveState(NPlayer::EPlayerMovementState state, CStateManager& m
       x288_startingJumpTimeout = gpTweakPlayer->GetAllowedDoubleJumpTime();
       x290_minJumpTimeout =
           gpTweakPlayer->GetAllowedDoubleJumpTime() - gpTweakPlayer->GetMinDoubleJumpTime();
+#ifdef TARGET_PC
+      if (RemasteredJump(*this, mgr)) {
+        x288_startingJumpTimeout = kRemasteredDoubleJumpTime;
+        x290_minJumpTimeout = 0.f;
+      } else {
+        JumpTimeoutsAtRate(x288_startingJumpTimeout, x290_minJumpTimeout);
+      }
+#endif
       x28c_sjTimer = 0.f;
     } else if (x258_movementState != NPlayer::kMS_Jump) {
       DoSfxEffects(CSfxManager::SfxStart(SFXsam_b_jump_01, 127, 64, true));
       x2a0_ = 0.01f;
       x288_startingJumpTimeout = gpTweakPlayer->GetAllowedJumpTime();
       x290_minJumpTimeout = gpTweakPlayer->GetAllowedJumpTime() - gpTweakPlayer->GetMinJumpTime();
+#ifdef TARGET_PC
+      if (RemasteredJump(*this, mgr)) {
+        x288_startingJumpTimeout = kRemasteredJumpTime;
+        x290_minJumpTimeout = 0.f;
+      } else {
+        JumpTimeoutsAtRate(x288_startingJumpTimeout, x290_minJumpTimeout);
+      }
+      // Remastered SetMoveState (0xcf0788) drops the ground collider on a ground
+      // jump, so the jump moves with the off-ground mover from its first tick
+      // instead of being snapped back to the floor (issue #117).
+      if (RemasteredJump(*this, mgr)) {
+        RemoveMaterial(kMT_GroundCollider, mgr);
+      }
+#endif
       if (mgr.GetPlayerState()->GetItemAmount(CPlayerState::kIT_SpaceJumpBoots) != 0) {
         x28c_sjTimer = gpTweakPlayer->GetMaxDoubleJumpWindow();
       } else {
@@ -860,6 +965,12 @@ void CPlayer::SetMoveState(NPlayer::EPlayerMovementState state, CStateManager& m
     x288_startingJumpTimeout = 0.f;
     if (x258_movementState != NPlayer::kMS_ApplyJump) {
       x258_movementState = NPlayer::kMS_ApplyJump;
+#ifdef TARGET_PC
+      // Remastered SetMoveState (0xcf0788) drops it here too.
+      if (RemasteredJump(*this, mgr)) {
+        RemoveMaterial(kMT_GroundCollider, mgr);
+      }
+#endif
       if (x294_jumpCameraTimer <= 0.f && x29c_fallCameraTimer <= 0.f && !x3dc_inFreeLook &&
           !x3dd_lookButtonHeld) {
         x29c_fallCameraTimer = 0.01f;

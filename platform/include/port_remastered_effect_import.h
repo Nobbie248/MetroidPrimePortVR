@@ -10,9 +10,9 @@
 // on the disc (a material instance's, or a TXTR of Remastered's own) are
 // converted and written as "<ID>.TXTR" under new ids.
 //
-// The step is off unless the import menu's toggle or MP_REMASTERED_EFFECTS=1
-// turns it on: the conversion leaves out what retail cannot draw, and some of
-// its mappings are not yet confirmed in game (docs/REMASTERED_EFFECTS.md).
+// The step is on unless MP_REMASTERED_EFFECTS=0 turns it off. The conversion
+// leaves out what retail cannot draw, and some of its mappings are not yet
+// confirmed in game (docs/REMASTERED_EFFECTS.md).
 
 #include "port_remastered_effect.h"
 #include "port_remastered_report.h"
@@ -88,10 +88,9 @@ struct EffectImportResult {
   int dropped = 0;     // retail properties left out across the written PARTs
 };
 
-// Whether the next import converts effects: MP_REMASTERED_EFFECTS when set
-// ("1" on, anything else off), else what SetImportEffects() last said (off).
+// Whether the next import converts effects: on, unless MP_REMASTERED_EFFECTS
+// is set to something other than "1".
 bool WantsRemasteredEffects();
-void SetImportEffects(bool on);
 
 EffectImportResult ImportEffects(const EffectImportIO& io);
 

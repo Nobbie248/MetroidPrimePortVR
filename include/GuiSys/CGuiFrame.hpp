@@ -70,6 +70,12 @@ public:
   // down without pitching them, all those above the view centre by one offset and all those below
   // by another, so pieces of one assembly (the helmet shell, its glass and lights) stay together.
   void SetSpreadSlideTree(const CGuiWidget* root);
+  // Port: move `root` and every widget parented (at any depth) under it by only `weight()` of the
+  // horizontal spread (0 keeps the 4:3 place, 1 is the full spread). Read at every draw, so it
+  // follows a setting live.
+  void SetSpreadWeightTree(const CGuiWidget* root, float (*weight)());
+  // Port: the weight registered for `widget`, 1 for none.
+  float GetSpreadWeight(const CGuiWidget* widget) const;
   // Port: whether a loaded model of this frame has a Remastered interference material
   // (kStateFlag_PortHudInterference), i.e. the frame fades in through DYIN, not retail's static.
   bool PortHasHudInterference() const;
@@ -93,6 +99,7 @@ private:
   std::vector< std::pair< const CGuiWidget*, const CGuiWidget* > > mSpreadAnchors;
   std::vector< const CGuiWidget* > mSpreadStretch;
   std::vector< const CGuiWidget* > mSpreadSlide;
+  std::vector< std::pair< const CGuiWidget*, float (*)() > > mSpreadWeights;
 #endif
 };
 CHECK_SIZEOF(CGuiFrame, 0x5c);

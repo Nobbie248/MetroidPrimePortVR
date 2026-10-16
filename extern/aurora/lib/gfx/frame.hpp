@@ -29,6 +29,8 @@ std::optional<RegisteredEncoderTaskType> find_runtime_encoder_task_type(EncoderT
 } // namespace aurora::gfx::detail
 
 namespace aurora::gfx {
+// The 8-bit display EFB (g_frameBuffer), whichever target scene_render_target_layout() reports.
+RenderTargetLayout display_render_target_layout() noexcept;
 void initialize();
 void shutdown();
 bool begin_frame();

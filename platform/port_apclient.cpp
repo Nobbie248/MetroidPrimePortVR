@@ -10,7 +10,9 @@
 #include "port_debug.h"
 #include "port_rando_gen.h"
 #include "port_randomizer.h"
+#include "port_savestate.h"
 #include "port_skip_cutscenes.h"
+#include "port_strings.h"
 #include "port_ws.h"
 
 #include "MetroidPrime/CHealthInfo.hpp"
@@ -40,6 +42,7 @@
 #include <map>
 #include <memory>
 #include <mutex>
+#include <random>
 #include <string>
 #include <thread>
 #include <utility>
@@ -71,13 +74,26 @@ std::filesystem::path ConfigDirectory() {
   return parent.empty() ? std::filesystem::path(".") : parent;
 }
 
-// One slot's game in one seed: its save card, state file and game.json.
-std::filesystem::path GameDirectory(const std::string& slot, const std::string& seed) {
-  return ConfigDirectory() / "archipelago_games" / Protocol::GameDirectoryName(slot, seed);
+// One slot's game in one seed: its save card, state file and game.json. A room
+// generated from a seed another room already plays has the same seed name, so
+// it gets its own directory, the seed's with the room's `suffix` (EnterRoom).
+std::filesystem::path GameDirectory(const std::string& slot, const std::string& seed,
+                                    const std::string& suffix = std::string()) {
+  return ConfigDirectory() / "archipelago_games" /
+         Protocol::GameDirectoryName(slot, suffix.empty() ? seed : seed + "-" + suffix);
 }
 
-std::string GameStatePath(const std::string& slot, const std::string& seed) {
-  return (GameDirectory(slot, seed) / "archipelago_state.json").string();
+std::string GameStatePath(const std::string& slot, const std::string& seed,
+                          const std::string& suffix = std::string()) {
+  return (GameDirectory(slot, seed, suffix) / "archipelago_state.json").string();
+}
+
+// The directory suffix of `room` in `seed`: none if the seed's own directory
+// belongs to it, or if the room is not known yet.
+std::string RoomSuffix(const std::string& slot, const std::string& seed, const std::string& room) {
+  if (room.empty() || Protocol::LoadStateFile(GameStatePath(slot, seed)).room == room)
+    return std::string();
+  return room;
 }
 
 // archipelago.json is written from the overlay (Connect, Disconnect) and by the
@@ -298,6 +314,8 @@ struct Runtime {
   // The seed's own state file, in its game directory; empty until the seed is
   // known (remembered in archipelago.json, or named by the server).
   std::string statePath;
+  // The game directory's room suffix (GameDirectory); empty for the seed's own.
+  std::string roomSuffix;
   // MP_AP_RESET_STATE=1 at launch, waiting for the seed's state to be loaded.
   bool resetPending = false;
   Config config;
@@ -333,6 +351,9 @@ struct Runtime {
   bool goalSent = false;
   // The checks the running game records have been handed to this session.
   bool recordSynced = false;
+  // SwitchNotice(): set when a game of another seed or room was sent back to
+  // the title.
+  std::string switchNotice;
 };
 
 Runtime& GetRuntime() {
@@ -359,8 +380,10 @@ std::shared_ptr<const PortApWorld::Layout> SessionWorldLocked(Runtime& runtime) 
 }
 
 // Names the session a save's received items came from: FNV-1a over the seed
-// and slot, never 0, which marks a game no session has given items to.
-uint32_t SessionIdentity(const std::string& seed, const std::string& slot) {
+// and slot (and the room suffix of a seed's second room), never 0, which marks
+// a game no session has given items to.
+uint32_t SessionIdentity(const std::string& seed, const std::string& slot,
+                         const std::string& roomSuffix) {
   uint32_t hash = 2166136261u;
   const auto mix = [&hash](const std::string& text) {
     for (const char c : text) {
@@ -371,6 +394,10 @@ uint32_t SessionIdentity(const std::string& seed, const std::string& slot) {
   mix(seed);
   mix(std::string(1, '\0'));
   mix(slot);
+  if (!roomSuffix.empty()) {
+    mix(std::string(1, '\0'));
+    mix(roomSuffix);
+  }
   return hash != 0 ? hash : 1;
 }
 
@@ -430,23 +457,22 @@ void QueueRecordedChecksLocked(Runtime& runtime, const CGameState::ApProgress& p
 // the save records how many it holds, and on load the session rewinds to that
 // many and has the server replay the rest. The other way round, the save
 // records the checks it made, some of which the session may not have seen.
-void ReconcileLocked(Runtime& runtime, CGameState::ApProgress& progress) {
+// True when the running game is another seed's or room's than the session's
+// (the server changed under it): the caller sends it back to the title.
+bool ReconcileLocked(Runtime& runtime, CGameState::ApProgress& progress) {
   const Protocol::State& state = runtime.session->GetState();
   if (state.seed.empty())
-    return; // no session yet to compare with; nothing can have been granted
-  const uint32_t identity = SessionIdentity(state.seed, runtime.config.slot);
+    return false; // no session yet to compare with; nothing can have been granted
+  const uint32_t identity = SessionIdentity(state.seed, runtime.config.slot, runtime.roomSuffix);
   if (progress.reconciled) {
-    // The server changed seeds under a running game. The session has already
-    // dropped the old seed's progress, and none of the new one's is held yet.
-    if (progress.identity != identity) {
-      progress.identity = identity;
-      progress.appliedIndex = 0;
-      ClearChecked(progress);
-    } else if (!runtime.recordSynced) {
+    // The game holds the old seed's or room's items, which the new one's
+    // checks and receipts can't be applied on top of.
+    if (progress.identity != identity)
+      return true;
+    if (!runtime.recordSynced)
       QueueRecordedChecksLocked(runtime, progress); // reconnected mid-game
-    }
     runtime.recordSynced = true;
-    return;
+    return false;
   }
   progress.reconciled = true;
   runtime.recordSynced = true;
@@ -467,14 +493,14 @@ void ReconcileLocked(Runtime& runtime, CGameState::ApProgress& progress) {
     progress.identity = identity;
     progress.appliedIndex = static_cast<uint>(
         std::clamp<int64_t>(firstPending, 0, std::numeric_limits<uint32_t>::max()));
-    return;
+    return false;
   }
   // A new game, or a save from another seed or slot, holds none of these items.
   const int64_t held = progress.identity == identity ? progress.appliedIndex : 0;
   progress.identity = identity;
   progress.appliedIndex = static_cast<uint>(held);
   if (held == firstPending)
-    return;
+    return false;
   PortLog::Write("archipelago: the loaded game holds %lld of %lld received items; "
                  "asking the server for the rest\n",
                  static_cast<long long>(held), static_cast<long long>(state.nextItemIndex));
@@ -483,6 +509,7 @@ void ReconcileLocked(Runtime& runtime, CGameState::ApProgress& progress) {
   runtime.grants.clear();
   runtime.itemCount = static_cast<int>(std::min<int64_t>(held, std::numeric_limits<int>::max()));
   runtime.syncWanted = true;
+  return false;
 }
 
 // With the built-in tables the game is a plain disc, so what the AP ISO patches
@@ -632,10 +659,11 @@ std::vector<std::string> ServerUrls(const std::string& server) {
 }
 
 // Records a game in its directory's game.json (for the recent-games list) and
-// remembers its seed in archipelago.json, so the next launch picks its save card
-// before the server answers.
-void RecordGame(const Config& config, const std::string& seed) {
-  const std::filesystem::path dir = GameDirectory(config.slot, seed);
+// remembers its seed and room in archipelago.json, so the next launch picks its
+// save card before the server answers.
+void RecordGame(const Config& config, const std::string& seed, const std::string& room,
+                const std::string& roomSuffix) {
+  const std::filesystem::path dir = GameDirectory(config.slot, seed, roomSuffix);
   std::error_code ignored;
   std::filesystem::create_directories(dir, ignored);
   Protocol::Connection game;
@@ -643,22 +671,27 @@ void RecordGame(const Config& config, const std::string& seed) {
   game.slot = config.slot;
   game.password = config.password;
   game.seed = seed;
+  game.room = room;
   game.lastPlayed = static_cast<int64_t>(std::time(nullptr));
   std::string error;
   if (!Protocol::SaveConnectionFile((dir / "game.json").string(), game, error))
     PortLog::Write("archipelago: %s\n", error.c_str());
   std::lock_guard<std::mutex> lock(ConnectionFileMutex());
   Protocol::Connection saved = Protocol::LoadConnectionFile(ConfigPath());
-  if (saved.server != config.server || saved.slot != config.slot || saved.seed == seed)
+  if (saved.server != config.server || saved.slot != config.slot ||
+      (saved.seed == seed && saved.room == room))
     return; // changed by a Connect since this session started, or already known
   saved.seed = seed;
+  saved.room = room;
   if (!Protocol::SaveConnectionFile(ConfigPath(), saved, error))
     PortLog::Write("archipelago: %s\n", error.c_str());
 }
 
 // The server named its seed. Each game keeps its progress in its own
 // directory, so a seed other than the one loaded swaps that game's state in.
-// Runs on the socket thread before the session sees the RoomInfo.
+// The room is not known until after Connected (EnterRoom), so this goes by the
+// one archipelago.json remembers for the seed. Runs on the socket thread before
+// the session sees the RoomInfo.
 void EnterSeed(Runtime& runtime, const std::string& seed) {
   if (seed.empty())
     return;
@@ -671,8 +704,14 @@ void EnterSeed(Runtime& runtime, const std::string& seed) {
     config = runtime.config;
     oldPath = runtime.statePath;
   }
-  RecordGame(config, seed);
-  const std::string path = GameStatePath(config.slot, seed);
+  std::string suffix;
+  {
+    std::lock_guard<std::mutex> lock(ConnectionFileMutex());
+    const Protocol::Connection saved = Protocol::LoadConnectionFile(ConfigPath());
+    if (saved.seed == seed)
+      suffix = RoomSuffix(config.slot, seed, saved.room);
+  }
+  const std::string path = GameStatePath(config.slot, seed, suffix);
   if (path == oldPath)
     return;
   runtime.FlushState(); // the old game's progress, to its own file
@@ -709,10 +748,117 @@ void EnterSeed(Runtime& runtime, const std::string& seed) {
   }
   runtime.session->SetState(state);
   runtime.statePath = path;
+  runtime.roomSuffix = suffix;
   runtime.recordSynced = false;
   runtime.MarkStateDirtyLocked();
   // The directory's name holds the slot name, which the log leaves out.
   PortLog::Write("archipelago: game state for seed \"%s\" in archipelago_games\n", seed.c_str());
+}
+
+// The server's data storage key naming this slot's room (EnterRoom).
+std::string RoomKey(const PortJson::Value& connected) {
+  const PortJson::Value* team = connected.Find("team");
+  const PortJson::Value* slot = connected.Find("slot");
+  if (team == nullptr || slot == nullptr || !team->IsNumber() || !slot->IsNumber())
+    return std::string();
+  return "MetroidPrimePort_room_" + std::to_string(team->AsInt()) + "_" +
+         std::to_string(slot->AsInt());
+}
+
+// Claims a name for the room: the first client in a room stores its random
+// one, and every later connection reads that back in the SetReply.
+std::string BuildRoomClaim(const std::string& key) {
+  std::random_device device;
+  std::mt19937_64 random((static_cast<uint64_t>(device()) << 32) ^ device() ^
+                         static_cast<uint64_t>(std::time(nullptr)));
+  char name[17];
+  std::snprintf(name, sizeof(name), "%016llx", static_cast<unsigned long long>(random()));
+  return "[{\"cmd\":\"Set\",\"key\":" + port::JsonQuote(key) + ",\"default\":\"" + name +
+         "\",\"want_reply\":true,\"operations\":[{\"operation\":\"default\",\"value\":null}]}]";
+}
+
+// The server named the room (or could not; `room` is empty then). A new room
+// generated from the same seed has the same seed name as the old one, so the
+// seed alone would have this room resend the old room's checks and be given
+// their items again. Each room keeps its progress in its own directory: the
+// seed's own if it is the room's or unclaimed and not another room's (checks
+// recorded there that this room's server has none of), else one suffixed with
+// the room. Runs on the socket thread before the session sees the Connected.
+void EnterRoom(Runtime& runtime, const std::string& room,
+               const std::vector<int64_t>& serverChecked) {
+  Config config;
+  std::string seed;
+  std::string oldPath;
+  std::string oldSuffix;
+  std::string oldRoom;
+  Protocol::State base; // the seed's own directory's, as current as it is
+  {
+    std::lock_guard<std::mutex> lock(runtime.mutex);
+    if (runtime.session == nullptr)
+      return;
+    config = runtime.config;
+    seed = runtime.session->GetState().seed;
+    oldPath = runtime.statePath;
+    oldSuffix = runtime.roomSuffix;
+    oldRoom = runtime.session->GetState().room;
+    if (oldSuffix.empty())
+      base = runtime.session->GetState();
+  }
+  if (seed.empty())
+    return;
+  if (room.empty()) {
+    // Not answered: stay in the directory the seed picked.
+    RecordGame(config, seed, oldRoom, oldSuffix);
+    return;
+  }
+  if (!oldSuffix.empty())
+    base = Protocol::LoadStateFile(GameStatePath(config.slot, seed));
+  bool own = base.room == room;
+  if (base.room.empty()) {
+    own = base.checkedLocations.empty();
+    for (const int64_t id : base.checkedLocations) {
+      if (std::find(serverChecked.begin(), serverChecked.end(), id) != serverChecked.end()) {
+        own = true;
+        break;
+      }
+    }
+  }
+  const std::string suffix = own ? std::string() : room;
+  const std::string path = GameStatePath(config.slot, seed, suffix);
+  if (path == oldPath) {
+    std::lock_guard<std::mutex> lock(runtime.mutex);
+    if (runtime.session == nullptr)
+      return;
+    if (runtime.session->GetState().room != room) {
+      runtime.session->SetRoom(room);
+      runtime.MarkStateDirtyLocked();
+    }
+    runtime.roomSuffix = suffix;
+  } else {
+    runtime.FlushState(); // the old room's progress, to its own file
+    Protocol::State state = Protocol::LoadStateFile(path);
+    // The seed's own directory may hold a game from before rooms were named.
+    if (state.slot != config.slot || state.seed != seed ||
+        (!state.room.empty() && state.room != room))
+      state = Protocol::State();
+    state.slot = config.slot;
+    state.seed = seed;
+    state.room = room;
+    std::lock_guard<std::mutex> lock(runtime.mutex);
+    if (runtime.session == nullptr)
+      return;
+    // Another room's: its items and unsent checks do not carry over.
+    PortLog::Write("archipelago: this is another room of seed \"%s\"; switching games\n",
+                   seed.c_str());
+    runtime.grants.clear();
+    runtime.queuedChecks.clear();
+    runtime.session->SetState(state);
+    runtime.statePath = path;
+    runtime.roomSuffix = suffix;
+    runtime.recordSynced = false;
+    runtime.MarkStateDirtyLocked();
+  }
+  RecordGame(config, seed, room, suffix);
 }
 
 void WorkerLoop(Runtime& runtime) {
@@ -771,6 +917,216 @@ void WorkerLoop(Runtime& runtime) {
 
     bool connectionFailed = !transportReady;
     bool apConnected = false;
+    // One command from the server; false once the connection has failed.
+    const auto handleCommand = [&](const PortJson::Value& command) -> bool {
+      const PortJson::Value* cmdValue = command.Find("cmd");
+      const std::string cmd = cmdValue != nullptr && cmdValue->IsString()
+                                  ? cmdValue->AsString()
+                                  : std::string();
+      std::vector<std::string> outgoing;
+      std::vector<ItemGrant> newGrants;
+      std::string connectPacket;
+      std::vector<int64_t> initialChecks;
+      std::vector<int64_t> sendAllChecks;
+      bool connectedNow = false;
+      bool refused = false;
+      if (cmd == "RoomInfo") {
+        const PortJson::Value* seedName = command.Find("seed_name");
+        if (seedName != nullptr && seedName->IsString())
+          EnterSeed(runtime, seedName->AsString());
+      }
+      // Every game's names can be a lot of work, and the game thread
+      // takes the same lock every frame, so they are read in out here.
+      const bool dataPackage = cmd == "DataPackage";
+      Session::DataPackageNames packageNames;
+      if (dataPackage)
+        packageNames = Session::ParseDataPackage(command);
+      {
+        std::lock_guard<std::mutex> lock(runtime.mutex);
+        if (runtime.session == nullptr)
+          return true;
+        const int64_t oldIndex = runtime.session->GetState().nextItemIndex;
+        const std::vector<int64_t> oldChecks = runtime.session->GetState().checkedLocations;
+        const std::map<int64_t, int64_t> oldProgressive =
+            runtime.session->GetState().progressive;
+        const std::string oldSeed = runtime.session->GetState().seed;
+        const bool oldHasLogic = runtime.session->GetState().hasLogic;
+        const PortApLogic::Options oldLogic = runtime.session->GetState().logic;
+        const bool oldHasWorld = runtime.session->GetState().hasWorld;
+        // The layout is the large part of the state, so it is not copied
+        // to be compared: a new revision says it may have changed.
+        const uint64_t oldWorldRevision = runtime.session->WorldRevision();
+        const std::string oldError = runtime.session->LastError();
+        const std::string oldResetReason = runtime.session->ResetReason();
+        if (dataPackage)
+          runtime.session->MergeDataPackage(std::move(packageNames));
+        else
+          runtime.session->HandlePacket(command, outgoing, newGrants);
+        if (runtime.session->ResetReason() != oldResetReason) {
+          // The recorded checks belonged to another session, so the state
+          // file has just been rewritten empty. Say why, because the
+          // symptom otherwise is a multiworld that sends nothing.
+          PortLog::Write(
+                       "archipelago: saved progress was %s; starting this slot fresh (set "
+                       "MP_AP_RESET_STATE=1 to discard it deliberately)\n",
+                       runtime.session->ResetReason().c_str());
+        }
+        const Protocol::State& state = runtime.session->GetState();
+        if (state.nextItemIndex != oldIndex || state.checkedLocations != oldChecks ||
+            state.progressive != oldProgressive || state.seed != oldSeed ||
+            state.hasLogic != oldHasLogic || state.logic != oldLogic ||
+            state.hasWorld != oldHasWorld ||
+            runtime.session->WorldRevision() != oldWorldRevision)
+          runtime.MarkStateDirtyLocked();
+        runtime.grants.insert(runtime.grants.end(), newGrants.begin(), newGrants.end());
+        runtime.lastMessage = runtime.session->LastMessage();
+        for (Protocol::ChatLine line; runtime.session->TakeChatLine(line);)
+          runtime.AppendChatLocked(std::move(line.type), std::move(line.text));
+        const std::string& packetError = runtime.session->LastError();
+        if (cmd != "ConnectionRefused" && !packetError.empty() && packetError != oldError &&
+            packetError != runtime.lastError) {
+          runtime.lastError = packetError;
+          runtime.LogStateLocked(packetError);
+        }
+        if (cmd == "Connected")
+          runtime.syncWanted = false; // the handshake replays everything anyway
+        if (cmd == "RoomInfo") {
+          connectPacket = runtime.session->BuildConnect();
+        } else if (cmd == "Connected" && runtime.session->HandshakeComplete()) {
+          connectedNow = true;
+          runtime.connected = true;
+          runtime.stateLabel = "connected";
+          runtime.lastError.clear();
+          runtime.LogStateLocked("connected");
+          runtime.AppendChatLocked("port", "Connected to " + ServerLabel(config.server) + " as " + config.slot);
+          initialChecks = state.checkedLocations;
+          for (auto queued = runtime.queuedChecks.begin(); queued != runtime.queuedChecks.end();) {
+            if (std::find(initialChecks.begin(), initialChecks.end(), *queued) !=
+                initialChecks.end())
+              queued = runtime.queuedChecks.erase(queued);
+            else
+              ++queued;
+          }
+          if (port::EnvFlag("MP_AP_SEND_ALL"))
+            sendAllChecks = runtime.session->AllLocationIds();
+          for (const std::string& warning : runtime.session->GetSlotData().warnings)
+            PortLog::Write("archipelago: seed option %s; the game will not match the "
+                           "seed's logic\n",
+                           warning.c_str());
+        } else if (cmd == "ConnectionRefused") {
+          refused = true;
+          runtime.connected = false;
+          runtime.stateLabel = "error";
+          runtime.lastError = runtime.session->LastError();
+          if (runtime.lastError.empty())
+            runtime.lastError = "connection refused";
+          connectionError = runtime.lastError;
+          runtime.LogStateLocked(runtime.lastError);
+        } else if (runtime.session->HandshakeComplete() && !apConnected) {
+          apConnected = true;
+        }
+      }
+
+      if (!connectPacket.empty() && !SendPacket(client, connectPacket, connectionError)) {
+        connectionFailed = true;
+        return false;
+      }
+      if (connectedNow) {
+        apConnected = true;
+        backoff = 5;
+        if (!initialChecks.empty() &&
+            !SendPacket(client, Session::BuildLocationChecks(initialChecks), connectionError)) {
+          connectionFailed = true;
+          return false;
+        }
+        if (!initialChecks.empty())
+          CountChecks(runtime, initialChecks.size());
+        if (!sendAllChecks.empty() &&
+            !SendPacket(client, Session::BuildLocationChecks(sendAllChecks), connectionError)) {
+          connectionFailed = true;
+          return false;
+        }
+        if (!sendAllChecks.empty())
+          CountChecks(runtime, sendAllChecks.size());
+      }
+      for (const std::string& packet : outgoing) {
+        if (!SendPacket(client, packet, connectionError)) {
+          connectionFailed = true;
+          return false;
+        }
+      }
+      if (refused) {
+        connectionFailed = true;
+        return false;
+      }
+      return true;
+    };
+    // Connected and everything after it wait until the server names the room
+    // (EnterRoom), so the session takes them into the room's own progress.
+    bool roomAsked = false;
+    bool holding = false;
+    std::string roomKey;
+    std::vector<PortJson::Value> held;
+    std::chrono::steady_clock::time_point holdStart;
+    const auto releaseHeld = [&](const std::string& room) -> bool {
+      holding = false;
+      std::vector<int64_t> serverChecked;
+      if (const PortJson::Value* checked = held.front().Find("checked_locations");
+          checked != nullptr && checked->IsArray()) {
+        for (const PortJson::Value& id : checked->AsArray()) {
+          if (id.IsNumber())
+            serverChecked.push_back(id.AsInt());
+        }
+      }
+      EnterRoom(runtime, room, serverChecked);
+      std::vector<PortJson::Value> commands = std::move(held);
+      held.clear();
+      for (const PortJson::Value& command : commands) {
+        if (!handleCommand(command))
+          return false;
+      }
+      return true;
+    };
+    // One command from the server, held back while the room is asked for.
+    const auto receiveCommand = [&](const PortJson::Value& command) -> bool {
+      const PortJson::Value* cmdValue = command.Find("cmd");
+      const std::string cmd =
+          cmdValue != nullptr && cmdValue->IsString() ? cmdValue->AsString() : std::string();
+      if (holding) {
+        if (cmd == "SetReply" && command.StringOr("key") == roomKey) {
+          const PortJson::Value* value = command.Find("value");
+          std::string room;
+          if (value != nullptr && value->IsString() && value->AsString().size() <= 64)
+            room = value->AsString();
+          if (room.empty())
+            PortLog::Write("archipelago: the server gave no room name; keeping the seed's game\n");
+          return releaseHeld(room);
+        }
+        if (cmd == "InvalidPacket" && command.StringOr("original_cmd") == "Set") {
+          PortLog::Write("archipelago: the server refused the room name (%s); keeping the "
+                         "seed's game\n",
+                         command.StringOr("text").c_str());
+          return releaseHeld(std::string());
+        }
+        held.push_back(command);
+        return true;
+      }
+      if (cmd == "Connected" && !roomAsked) {
+        roomAsked = true;
+        roomKey = RoomKey(command);
+        if (!roomKey.empty()) {
+          if (!SendPacket(client, BuildRoomClaim(roomKey), connectionError)) {
+            connectionFailed = true;
+            return false;
+          }
+          holding = true;
+          holdStart = std::chrono::steady_clock::now();
+          held.push_back(command);
+          return true;
+        }
+      }
+      return handleCommand(command);
+    };
     if (!transportReady) {
       if (!runtime.stop.load(std::memory_order_acquire)) // not a failure when cut short
         runtime.SetError(connectionError);
@@ -811,150 +1167,15 @@ void WorkerLoop(Runtime& runtime) {
             commands.push_back(std::move(root));
 
           for (const PortJson::Value& command : commands) {
-            const PortJson::Value* cmdValue = command.Find("cmd");
-            const std::string cmd = cmdValue != nullptr && cmdValue->IsString()
-                                        ? cmdValue->AsString()
-                                        : std::string();
-            std::vector<std::string> outgoing;
-            std::vector<ItemGrant> newGrants;
-            std::string connectPacket;
-            std::vector<int64_t> initialChecks;
-            std::vector<int64_t> sendAllChecks;
-            bool connectedNow = false;
-            bool refused = false;
-            if (cmd == "RoomInfo") {
-              const PortJson::Value* seedName = command.Find("seed_name");
-              if (seedName != nullptr && seedName->IsString())
-                EnterSeed(runtime, seedName->AsString());
-            }
-            // Every game's names can be a lot of work, and the game thread
-            // takes the same lock every frame, so they are read in out here.
-            const bool dataPackage = cmd == "DataPackage";
-            Session::DataPackageNames packageNames;
-            if (dataPackage)
-              packageNames = Session::ParseDataPackage(command);
-            {
-              std::lock_guard<std::mutex> lock(runtime.mutex);
-              if (runtime.session == nullptr)
-                continue;
-              const int64_t oldIndex = runtime.session->GetState().nextItemIndex;
-              const std::vector<int64_t> oldChecks = runtime.session->GetState().checkedLocations;
-              const std::map<int64_t, int64_t> oldProgressive =
-                  runtime.session->GetState().progressive;
-              const std::string oldSeed = runtime.session->GetState().seed;
-              const bool oldHasLogic = runtime.session->GetState().hasLogic;
-              const PortApLogic::Options oldLogic = runtime.session->GetState().logic;
-              const bool oldHasWorld = runtime.session->GetState().hasWorld;
-              // The layout is the large part of the state, so it is not copied
-              // to be compared: a new revision says it may have changed.
-              const uint64_t oldWorldRevision = runtime.session->WorldRevision();
-              const std::string oldError = runtime.session->LastError();
-              const std::string oldResetReason = runtime.session->ResetReason();
-              if (dataPackage)
-                runtime.session->MergeDataPackage(std::move(packageNames));
-              else
-                runtime.session->HandlePacket(command, outgoing, newGrants);
-              if (runtime.session->ResetReason() != oldResetReason) {
-                // The recorded checks belonged to another session, so the state
-                // file has just been rewritten empty. Say why, because the
-                // symptom otherwise is a multiworld that sends nothing.
-                PortLog::Write(
-                             "archipelago: saved progress was %s; starting this slot fresh (set "
-                             "MP_AP_RESET_STATE=1 to discard it deliberately)\n",
-                             runtime.session->ResetReason().c_str());
-              }
-              const Protocol::State& state = runtime.session->GetState();
-              if (state.nextItemIndex != oldIndex || state.checkedLocations != oldChecks ||
-                  state.progressive != oldProgressive || state.seed != oldSeed ||
-                  state.hasLogic != oldHasLogic || state.logic != oldLogic ||
-                  state.hasWorld != oldHasWorld ||
-                  runtime.session->WorldRevision() != oldWorldRevision)
-                runtime.MarkStateDirtyLocked();
-              runtime.grants.insert(runtime.grants.end(), newGrants.begin(), newGrants.end());
-              runtime.lastMessage = runtime.session->LastMessage();
-              for (Protocol::ChatLine line; runtime.session->TakeChatLine(line);)
-                runtime.AppendChatLocked(std::move(line.type), std::move(line.text));
-              const std::string& packetError = runtime.session->LastError();
-              if (cmd != "ConnectionRefused" && !packetError.empty() && packetError != oldError &&
-                  packetError != runtime.lastError) {
-                runtime.lastError = packetError;
-                runtime.LogStateLocked(packetError);
-              }
-              if (cmd == "Connected")
-                runtime.syncWanted = false; // the handshake replays everything anyway
-              if (cmd == "RoomInfo") {
-                connectPacket = runtime.session->BuildConnect();
-              } else if (cmd == "Connected" && runtime.session->HandshakeComplete()) {
-                connectedNow = true;
-                runtime.connected = true;
-                runtime.stateLabel = "connected";
-                runtime.lastError.clear();
-                runtime.LogStateLocked("connected");
-                runtime.AppendChatLocked("port", "Connected to " + ServerLabel(config.server) + " as " + config.slot);
-                initialChecks = state.checkedLocations;
-                for (auto queued = runtime.queuedChecks.begin(); queued != runtime.queuedChecks.end();) {
-                  if (std::find(initialChecks.begin(), initialChecks.end(), *queued) !=
-                      initialChecks.end())
-                    queued = runtime.queuedChecks.erase(queued);
-                  else
-                    ++queued;
-                }
-                if (port::EnvFlag("MP_AP_SEND_ALL"))
-                  sendAllChecks = runtime.session->AllLocationIds();
-                for (const std::string& warning : runtime.session->GetSlotData().warnings)
-                  PortLog::Write("archipelago: seed option %s; the game will not match the "
-                                 "seed's logic\n",
-                                 warning.c_str());
-              } else if (cmd == "ConnectionRefused") {
-                refused = true;
-                runtime.connected = false;
-                runtime.stateLabel = "error";
-                runtime.lastError = runtime.session->LastError();
-                if (runtime.lastError.empty())
-                  runtime.lastError = "connection refused";
-                connectionError = runtime.lastError;
-                runtime.LogStateLocked(runtime.lastError);
-              } else if (runtime.session->HandshakeComplete() && !apConnected) {
-                apConnected = true;
-              }
-            }
-
-            if (!connectPacket.empty() && !SendPacket(client, connectPacket, connectionError)) {
-              connectionFailed = true;
+            if (!receiveCommand(command))
               break;
-            }
-            if (connectedNow) {
-              apConnected = true;
-              backoff = 5;
-              if (!initialChecks.empty() &&
-                  !SendPacket(client, Session::BuildLocationChecks(initialChecks), connectionError)) {
-                connectionFailed = true;
-                break;
-              }
-              if (!initialChecks.empty())
-                CountChecks(runtime, initialChecks.size());
-              if (!sendAllChecks.empty() &&
-                  !SendPacket(client, Session::BuildLocationChecks(sendAllChecks), connectionError)) {
-                connectionFailed = true;
-                break;
-              }
-              if (!sendAllChecks.empty())
-                CountChecks(runtime, sendAllChecks.size());
-            }
-            for (const std::string& packet : outgoing) {
-              if (!SendPacket(client, packet, connectionError)) {
-                connectionFailed = true;
-                break;
-              }
-            }
-            if (connectionFailed)
-              break;
-            if (refused) {
-              connectionFailed = true;
-              break;
-            }
           }
           if (connectionFailed)
+            break;
+        }
+        if (holding && std::chrono::steady_clock::now() - holdStart > std::chrono::seconds(10)) {
+          PortLog::Write("archipelago: the server did not name the room; keeping the seed's game\n");
+          if (!releaseHeld(std::string()))
             break;
         }
 
@@ -963,7 +1184,7 @@ void WorkerLoop(Runtime& runtime) {
         bool syncWanted = false;
         bool goalWanted = false;
         std::vector<std::string> pendingSay;
-        if (apConnected) {
+        if (apConnected && !holding) {
           std::lock_guard<std::mutex> lock(runtime.mutex);
           goalWanted = runtime.goalWanted && !runtime.goalSent;
           runtime.goalSent = runtime.goalSent || goalWanted;
@@ -1123,15 +1344,21 @@ void StartLocked(Runtime& runtime, bool firstStart) {
   MigrateLegacyState(parent);
   // The seed this slot had last time picks the game (and its save card) until
   // the server says otherwise.
-  const std::string seed = Protocol::LoadConnectionFile(configPath).seed;
+  const Protocol::Connection savedConnection = Protocol::LoadConnectionFile(configPath);
+  const std::string& seed = savedConnection.seed;
   Protocol::State state;
   runtime.statePath.clear();
+  runtime.roomSuffix.clear();
   if (!seed.empty()) {
-    runtime.statePath = GameStatePath(runtime.config.slot, seed);
+    runtime.roomSuffix = RoomSuffix(runtime.config.slot, seed, savedConnection.room);
+    runtime.statePath = GameStatePath(runtime.config.slot, seed, runtime.roomSuffix);
     state = Protocol::LoadStateFile(runtime.statePath);
-    if (state.slot != runtime.config.slot || (!state.seed.empty() && state.seed != seed))
+    if (state.slot != runtime.config.slot || (!state.seed.empty() && state.seed != seed) ||
+        (!runtime.roomSuffix.empty() && state.room != savedConnection.room))
       state = Protocol::State();
     state.seed = seed;
+    if (!runtime.roomSuffix.empty())
+      state.room = savedConnection.room;
   }
   // A rewind the client cannot see - a new game or an older save on the same
   // slot and seed - leaves the recorded checks looking valid, so this is the
@@ -1289,6 +1516,7 @@ ConnectionDetails SavedConnection() {
     details.password = saved.password;
     details.enabled = saved.enabled;
     details.seed = saved.seed;
+    details.room = saved.room;
     return details;
   } catch (...) {
     return ConnectionDetails();
@@ -1312,6 +1540,7 @@ std::vector<ConnectionDetails> RecentGames() {
       details.slot = game.slot;
       details.password = game.password;
       details.seed = game.seed;
+      details.room = game.room;
       details.lastPlayed = game.lastPlayed;
       games.push_back(std::move(details));
     }
@@ -1367,10 +1596,13 @@ bool Connect(const ConnectionDetails& details, std::string& error) {
       // seed (and save card) stays until the server says otherwise.
       // A game resumed from the recent list brings its own seed.
       const Protocol::Connection saved = Protocol::LoadConnectionFile(ConfigPath());
-      if (!details.seed.empty())
+      if (!details.seed.empty()) {
         connection.seed = details.seed;
-      else if (saved.server == connection.server && saved.slot == connection.slot)
+        connection.room = details.room;
+      } else if (saved.server == connection.server && saved.slot == connection.slot) {
         connection.seed = saved.seed;
+        connection.room = saved.room;
+      }
       if (!Protocol::SaveConnectionFile(ConfigPath(), connection, error))
         return false;
     }
@@ -1646,6 +1878,17 @@ const char* LastMessage() {
   return message.c_str();
 }
 
+const char* SwitchNotice() {
+  EnsureLoaded();
+  Runtime& runtime = GetRuntime();
+  thread_local std::string notice;
+  {
+    std::lock_guard<std::mutex> lock(runtime.mutex);
+    notice = runtime.switchNotice;
+  }
+  return notice.c_str();
+}
+
 bool TakeNotification(std::string& text) {
   try {
     EnsureLoaded();
@@ -1826,6 +2069,36 @@ bool PickupModel(uint32_t world, uint32_t area, uint32_t entity, PortRandomizer:
   }
 }
 
+int PickupMinor(uint32_t world, uint32_t area, uint32_t entity) {
+  try {
+    const MetroidPrime::Location* location = MetroidPrime::FindPickup(world, area, entity);
+    if (location == nullptr || !BuiltinRules())
+      return -1;
+    int64_t item = 0;
+    bool sameGame = false;
+    int64_t flags = 0;
+    {
+      Runtime& runtime = GetRuntime();
+      std::lock_guard<std::mutex> lock(runtime.mutex);
+      if (!runtime.enabled || runtime.session == nullptr ||
+          !runtime.session->ScoutedAt(location->id, item, sameGame, &flags))
+        return -1;
+    }
+    if (!sameGame)
+      return (flags & 1) != 0 ? 0 : 1; // progression
+    switch (item - MetroidPrime::kItemBase) {
+    case MetroidPrime::kMissileExpansion:
+    case MetroidPrime::kPowerBombExpansion:
+    case MetroidPrime::kEnergyTank:
+      return 1;
+    default:
+      return 0;
+    }
+  } catch (...) {
+    return -1;
+  }
+}
+
 bool PickupScanText(uint32_t world, uint32_t area, uint32_t entity, std::string& out) {
   try {
     const MetroidPrime::Location* location = MetroidPrime::FindPickup(world, area, entity);
@@ -1884,8 +2157,14 @@ bool NewGameStart(uint32_t& world, uint32_t& area) {
 bool WarpToStart(uint32_t& world, uint32_t& area) {
   try {
     const std::shared_ptr<const PortApWorld::Layout> seedLayout = SeedLayout();
-    if (seedLayout == nullptr)
-      return false;
+    if (seedLayout == nullptr) {
+      // A legacy seed only moves pickups, so its start is the new game's.
+      if (!PortRandomizer::Enabled())
+        return false;
+      world = MetroidPrime::kTallonWorld;
+      area = MetroidPrime::kLandingSiteArea;
+      return true;
+    }
     const PortApWorld::Layout& layout = *seedLayout;
     // A start room the tables don't have is the Landing Site, as for a new game.
     PortApWorld::Place place;
@@ -2287,7 +2566,21 @@ void Poll(CStateManager& mgr) {
       std::lock_guard<std::mutex> lock(runtime.mutex);
       if (!runtime.enabled || runtime.session == nullptr)
         return;
-      ReconcileLocked(runtime, progress);
+      if (ReconcileLocked(runtime, progress)) {
+        // Its items stay in the game, and quick resume would take it for the
+        // new one's (whose identity it now has), so it is left for the file
+        // select. The new game's receipts stay queued for it.
+        if (mgr.GetWantsToQuit())
+          return;
+        PortLog::Write("archipelago: the server is another seed or room than the game in "
+                       "play; back to the title\n");
+        runtime.switchNotice = "This is another Archipelago seed or room than the game that "
+                               "was running. Start its game from the file select.";
+        PortSaveState::ResumeDiscard();
+        mgr.QuitGame();
+        return;
+      }
+      runtime.switchNotice.clear();
       grants.swap(runtime.grants);
       const size_t room = static_cast<size_t>(std::max(0, std::numeric_limits<int>::max() -
                                                            runtime.itemCount));

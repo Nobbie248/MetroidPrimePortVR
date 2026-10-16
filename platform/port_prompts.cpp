@@ -4,6 +4,8 @@
 
 #include "port_debug.h"
 #include "port_embedded.h"
+#include "port_input_devices.h"
+#include "port_pointer.h"
 #include "port_textures.h"
 #include "vr/vr_pad.h"
 
@@ -63,7 +65,9 @@ struct PromptKey {
 };
 constexpr PromptKey kKeys[] = {
     {PAD_BUTTON_A, 32, 32, 0xbb21e8755f36b2f0ull, "5"},   // AButtonIn
+    {PAD_BUTTON_A, 32, 32, 0x7a49be0e828a6d9aull, "14"},  // AButtonOut, the scan box's and message screen's model
     {PAD_BUTTON_B, 32, 32, 0xe6dbfd18d4666ee7ull, "5"},   // BButtonIn
+    {PAD_BUTTON_B, 32, 32, 0xcf85aefc93af603full, "14"},  // BButtonOut
     {PAD_BUTTON_X, 32, 32, 0x818890ce3f3a949bull, "5"},   // XButtonOut, "Press X to ... Morph Ball"
     {PAD_BUTTON_Y, 32, 32, 0x281ae5aa517797edull, "5"},   // YButtonOut, the pause and map screens
     {PAD_BUTTON_START, 32, 32, 0x1ff9d2b310c0b706ull, "14"},  // StartButtonOut, the pause Return
@@ -245,6 +249,17 @@ constexpr GameCubeButton kNsoGameCubeButtons[] = {
     {PAD_NATIVE_BUTTON_TRIGGER_RIGHT, PAD_TRIGGER_R, "gamecube_r"},
 };
 
+// The native pad button that presses `button` for the prompts: the bindings in
+// use (Remap's, and the "Menus and map" rows in menus and the map while
+// "Separate menu buttons" applies), or PAD_NATIVE_BUTTON_INVALID.
+u32 PadNativeForButton(PADButton button) {
+  PortInput::Input in;
+  if (!PortInputDevices::PromptButtonInput(button, PortInput::Family::Pad, in)) {
+    return PAD_NATIVE_BUTTON_INVALID;
+  }
+  return PortInputDevices::PromptNativeButton(in);
+}
+
 // The icon for `button` on a GameCube pad, or empty to leave the game's own art,
 // which is already right for a GC pad on its default mapping. So only an action
 // moved to another button gets an icon. The GameCube touch layout also resolves
@@ -262,20 +277,11 @@ std::string GameCubeStemForButton(PADButton button) {
   } else {
     return {};
   }
-  u32 count = 0;
-  PADButtonMapping* mappings = PADGetButtonMappings(PAD_CHAN0, &count);
-  for (u32 i = 0; mappings != nullptr && i < count; ++i) {
-    if (mappings[i].padButton != button) {
-      continue;
+  const int native = static_cast<int>(PadNativeForButton(button));
+  for (size_t j = 0; j < tableSize; ++j) {
+    if (table[j].sdlButton == native) {
+      return table[j].action == button ? std::string() : std::string(table[j].stem);
     }
-    // Unbound means the analog trigger for L and R, which is the default too.
-    const int native = static_cast<int>(mappings[i].nativeButton);
-    for (size_t j = 0; j < tableSize; ++j) {
-      if (table[j].sdlButton == native) {
-        return table[j].action == button ? std::string() : std::string(table[j].stem);
-      }
-    }
-    break;
   }
   return {};
 }
@@ -321,6 +327,10 @@ bool sEnabled = false;
 // device resolves to "keyboard" anyway.
 enum class ActiveInput { Pad, Keyboard, TouchXbox, TouchGameCube };
 std::atomic< ActiveInput > sActiveInput{ActiveInput::Pad};
+// Within Keyboard, whether a key rather than the mouse was used last. When the
+// mouse was (PortPointer::MouseIsLast), a screen the pointer drives shows A and B
+// as its clicks.
+std::atomic< bool > sKeyInput{false};
 
 // Keys sent by the phone or the OS rather than a keyboard in the player's hands.
 bool IsSystemKey(SDL_Scancode scancode) {
@@ -354,16 +364,19 @@ bool SDLCALL active_input_watch(void*, SDL_Event* event) {
   case SDL_EVENT_MOUSE_MOTION:
     if (!IsTouchMouse(event->motion.which)) {
       sActiveInput.store(ActiveInput::Keyboard, std::memory_order_relaxed);
+      sKeyInput.store(false, std::memory_order_relaxed);
     }
     break;
   case SDL_EVENT_MOUSE_BUTTON_DOWN:
     if (!IsTouchMouse(event->button.which)) {
       sActiveInput.store(ActiveInput::Keyboard, std::memory_order_relaxed);
+      sKeyInput.store(false, std::memory_order_relaxed);
     }
     break;
   case SDL_EVENT_MOUSE_WHEEL:
     if (!IsTouchMouse(event->wheel.which)) {
       sActiveInput.store(ActiveInput::Keyboard, std::memory_order_relaxed);
+      sKeyInput.store(false, std::memory_order_relaxed);
     }
     break;
   case SDL_EVENT_KEY_DOWN:
@@ -371,6 +384,7 @@ bool SDLCALL active_input_watch(void*, SDL_Event* event) {
     // overlay, not a physical keyboard.
     if (!event->key.repeat && !IsSystemKey(event->key.scancode)) {
       sActiveInput.store(ActiveInput::Keyboard, std::memory_order_relaxed);
+      sKeyInput.store(true, std::memory_order_relaxed);
     }
     break;
   case SDL_EVENT_GAMEPAD_BUTTON_DOWN:
@@ -477,32 +491,33 @@ const char* StemForScancode(int scancode) {
   return nullptr;
 }
 
-// The key bound to `button` (the main key, else the second), or PAD_KEY_INVALID.
-int KeyForButton(PADButton button) {
-  for (u32 slot = 0; slot < PAD_KEY_SLOT_COUNT; ++slot) {
-    u32 count = 0;
-    PADKeyButtonBinding* bindings = PADGetKeyButtonBindingsSlot(PAD_CHAN0, slot, &count);
-    for (u32 i = 0; bindings != nullptr && i < count; ++i) {
-      if (bindings[i].padButton == button && bindings[i].scancode != PAD_KEY_INVALID) {
-        return bindings[i].scancode;
-      }
-    }
+// A keyboard-family input as the scancode the icon table uses (a mouse button
+// as Aurora's PAD_KEY_MOUSE_*), or PAD_KEY_INVALID.
+int ScancodeForInput(const PortInput::Input& in) {
+  if (in.device == PortInput::Device::Key) {
+    return in.code;
+  }
+  if (in.device == PortInput::Device::MouseButton) {
+    // Each run of mouse codes (PortInputDevices::kMouse*) is SDL's left, middle,
+    // right, X1, X2.
+    const int button = in.code % PortInputDevices::kMouseKeySlot;
+    return button <= PAD_KEY_MOUSE_LEFT - PAD_KEY_MOUSE_X2 ? PAD_KEY_MOUSE_LEFT - button : PAD_KEY_INVALID;
   }
   return PAD_KEY_INVALID;
 }
 
-// The key that pushes `axis` (the main key, else the second), or PAD_KEY_INVALID.
+// The key (or mouse button) bound to `button`, or PAD_KEY_INVALID.
+int KeyForButton(PADButton button) {
+  PortInput::Input in;
+  return PortInputDevices::PromptButtonInput(button, PortInput::Family::Keyboard, in) ? ScancodeForInput(in)
+                                                                                       : PAD_KEY_INVALID;
+}
+
+// The key that pushes `axis`, or PAD_KEY_INVALID.
 int KeyForAxis(PADAxis axis) {
-  for (u32 slot = 0; slot < PAD_KEY_SLOT_COUNT; ++slot) {
-    u32 count = 0;
-    PADKeyAxisBinding* bindings = PADGetKeyAxisBindingsSlot(PAD_CHAN0, slot, &count);
-    for (u32 i = 0; bindings != nullptr && i < count; ++i) {
-      if (bindings[i].padAxis == axis && bindings[i].scancode != PAD_KEY_INVALID) {
-        return bindings[i].scancode;
-      }
-    }
-  }
-  return PAD_KEY_INVALID;
+  PortInput::Input in;
+  return PortInputDevices::PromptAxisInput(axis, PortInput::Family::Keyboard, in) ? ScancodeForInput(in)
+                                                                                  : PAD_KEY_INVALID;
 }
 
 // A whole stick or D-pad on keys: the cluster icon when the four keys are one
@@ -529,14 +544,23 @@ std::string KeyClusterStem(const int (&keys)[4]) {
 
 // The icon stem for whatever is bound to `button` on `device`, or empty when
 // the port has no icon for it (in which case the static set stays in place).
-// Keyboard and mouse come from the key bindings; a pad follows its own button
-// mapping, so a remapped button shows the button it was remapped to.
+// Both follow the bindings in use (PortInputDevices::PromptButtonInput), so a
+// remapped button shows the key or button it was remapped to.
 std::string IconStemForButton(PADButton button, const char* device) {
   if (std::strcmp(device, "gamecube") == 0) {
     return GameCubeStemForButton(button);
   }
-  u32 count = 0;
   if (std::strcmp(device, "keyboard") == 0) {
+    // On a screen the pointer drives, a click is A and a right click B.
+    if (!sKeyInput.load(std::memory_order_relaxed) && PortPointer::MouseIsLast() &&
+        PortPointer::ScreenActive()) {
+      if (button == PAD_BUTTON_A) {
+        return "mouse_left";
+      }
+      if (button == PAD_BUTTON_B) {
+        return "mouse_right";
+      }
+    }
     const char* stem = StemForScancode(KeyForButton(button));
     return stem != nullptr ? std::string(stem) : std::string();
   }
@@ -546,16 +570,9 @@ std::string IconStemForButton(PADButton button, const char* device) {
   // name per action.
   const bool trigger = button == PAD_TRIGGER_L || button == PAD_TRIGGER_R;
   const std::string triggerStem = std::string(device) + (button == PAD_TRIGGER_L ? "_lt" : "_rt");
-  PADButtonMapping* mappings = PADGetButtonMappings(PAD_CHAN0, &count);
-  for (u32 i = 0; mappings != nullptr && i < count; ++i) {
-    if (mappings[i].padButton != button) {
-      continue;
-    }
-    const char* suffix = SuffixForSdlButton(static_cast<int>(mappings[i].nativeButton));
-    if (suffix != nullptr) {
-      return std::string(device) + "_" + suffix;
-    }
-    break;
+  const char* suffix = SuffixForSdlButton(static_cast<int>(PadNativeForButton(button)));
+  if (suffix != nullptr) {
+    return std::string(device) + "_" + suffix;
   }
   return trigger ? triggerStem : std::string();
 }
@@ -569,41 +586,36 @@ constexpr PADAxis kCStickAxes[4] = {PAD_AXIS_RIGHT_Y_POS, PAD_AXIS_RIGHT_Y_NEG, 
 // The icon for one direction of a pad axis: the stick and the way it is pushed,
 // or the button driving the axis. With `whole`, the stick itself.
 std::string PadStemForAxis(PADAxis axis, const char* device, bool whole) {
-  u32 count = 0;
-  PADAxisMapping* mappings = PADGetAxisMappings(PAD_CHAN0, &count);
-  for (u32 i = 0; mappings != nullptr && i < count; ++i) {
-    if (mappings[i].padAxis != axis) {
-      continue;
-    }
-    // Aurora reads the native axis whenever it is set, else the button.
-    const int native = mappings[i].nativeAxis.nativeAxis;
-    if (native != -1) {
-      const bool leftStick = native == SDL_GAMEPAD_AXIS_LEFTX || native == SDL_GAMEPAD_AXIS_LEFTY;
-      const bool rightStick = native == SDL_GAMEPAD_AXIS_RIGHTX || native == SDL_GAMEPAD_AXIS_RIGHTY;
-      if (!leftStick && !rightStick) {
-        return {};  // a trigger driving a stick: no art for that
-      }
-      std::string stem = std::string(device) + (leftStick ? "_stick_l" : "_stick_r");
-      if (whole) {
-        return stem;
-      }
-      // SDL's Y axis is positive downwards.
-      const bool positive = mappings[i].nativeAxis.sign == AXIS_SIGN_POSITIVE;
-      const bool vertical = native == SDL_GAMEPAD_AXIS_LEFTY || native == SDL_GAMEPAD_AXIS_RIGHTY;
-      return stem + (vertical ? (positive ? "_down" : "_up") : (positive ? "_right" : "_left"));
-    }
-    const char* suffix = SuffixForSdlButton(mappings[i].nativeButton);
-    if (suffix == nullptr) {
-      return {};
-    }
-    // A stick moved onto the D-pad reads as the D-pad; any other set of
-    // buttons has no single icon.
-    if (whole) {
-      return std::strncmp(suffix, "dpad_", 5) == 0 ? std::string(device) + "_dpad" : std::string();
-    }
-    return std::string(device) + "_" + suffix;
+  PortInput::Input in;
+  if (!PortInputDevices::PromptAxisInput(axis, PortInput::Family::Pad, in)) {
+    return {};
   }
-  return {};
+  if (in.device == PortInput::Device::PadAxis) {
+    const int native = in.code;
+    const bool leftStick = native == SDL_GAMEPAD_AXIS_LEFTX || native == SDL_GAMEPAD_AXIS_LEFTY;
+    const bool rightStick = native == SDL_GAMEPAD_AXIS_RIGHTX || native == SDL_GAMEPAD_AXIS_RIGHTY;
+    if (!leftStick && !rightStick) {
+      return {};  // a trigger driving a stick: no art for that
+    }
+    std::string stem = std::string(device) + (leftStick ? "_stick_l" : "_stick_r");
+    if (whole || in.dir == 0) {
+      return stem;
+    }
+    // SDL's Y axis is positive downwards.
+    const bool positive = in.dir > 0;
+    const bool vertical = native == SDL_GAMEPAD_AXIS_LEFTY || native == SDL_GAMEPAD_AXIS_RIGHTY;
+    return stem + (vertical ? (positive ? "_down" : "_up") : (positive ? "_right" : "_left"));
+  }
+  const char* suffix = SuffixForSdlButton(static_cast<int>(PortInputDevices::PromptNativeButton(in)));
+  if (suffix == nullptr) {
+    return {};
+  }
+  // A stick moved onto the D-pad reads as the D-pad; any other set of
+  // buttons has no single icon.
+  if (whole) {
+    return std::strncmp(suffix, "dpad_", 5) == 0 ? std::string(device) + "_dpad" : std::string();
+  }
+  return std::string(device) + "_" + suffix;
 }
 
 // The icon for a stick prompt: the whole stick, or one way (dir 0-3 = up, down,

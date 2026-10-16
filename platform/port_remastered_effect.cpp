@@ -201,9 +201,192 @@ constexpr const char* kDefaultPropertySigs = "e b bg g be";
 // Unknown elements are tried with up to this many element arguments.
 constexpr int kMaxUnknownArity = 4;
 
-uint32_t FourCCOf(const char* text) {
+constexpr uint32_t FourCCOf(const char* text) {
   return uint32_t(uint8_t(text[0])) << 24 | uint32_t(uint8_t(text[1])) << 16 | uint32_t(uint8_t(text[2])) << 8 |
          uint32_t(uint8_t(text[3]));
+}
+
+bool HasFourCC(const char* words, uint32_t value) {
+  for (const char* word = words; *word != 0;) {
+    if (FourCCOf(word) == value) {
+      return true;
+    }
+    word += 4;
+    while (*word == ' ') {
+      ++word;
+    }
+  }
+  return false;
+}
+
+enum class RolePropertyEncoding : uint8_t { Guid, CnstByte, Typed, Rotation };
+
+constexpr uint8_t kAnyRolePropertyTag = 0xff;
+
+struct RolePropertySchema {
+  uint32_t form;
+  uint32_t property;
+  RolePropertyEncoding encoding;
+  char type = 0;
+  uint8_t expectedTag = kAnyRolePropertyTag;
+};
+
+// Exact role-root allowlist. Every row is tied to its factory form and one
+// factory-proven representation; the global property-name set and fallback
+// signatures are deliberately irrelevant to role parsing. The new Plasma rows
+// also pin the observed input-header selector instead of accepting any tag.
+constexpr RolePropertySchema kRolePropertySchemas[] = {
+    {FourCCOf("WPSM"), FourCCOf("APSM"), RolePropertyEncoding::Guid},
+    {FourCCOf("WPSM"), FourCCOf("APS2"), RolePropertyEncoding::Guid, 0, 0},
+    {FourCCOf("WPSM"), FourCCOf("ASW1"), RolePropertyEncoding::Guid},
+    {FourCCOf("WPSM"), FourCCOf("ASW2"), RolePropertyEncoding::Guid},
+    {FourCCOf("WPSM"), FourCCOf("ASW3"), RolePropertyEncoding::Guid},
+    {FourCCOf("WPSM"), FourCCOf("COLR"), RolePropertyEncoding::Guid},
+    {FourCCOf("WPSM"), FourCCOf("FC60"), RolePropertyEncoding::CnstByte},
+    {FourCCOf("WPSM"), FourCCOf("SPS1"), RolePropertyEncoding::CnstByte},
+    {FourCCOf("WPSM"), FourCCOf("HOMG"), RolePropertyEncoding::CnstByte},
+    {FourCCOf("WPSM"), FourCCOf("INRT"), RolePropertyEncoding::Rotation, 0, 0},
+    {FourCCOf("WPSM"), FourCCOf("AP11"), RolePropertyEncoding::CnstByte},
+    {FourCCOf("WPSM"), FourCCOf("AP21"), RolePropertyEncoding::CnstByte},
+    {FourCCOf("WPSM"), FourCCOf("APSO"), RolePropertyEncoding::CnstByte},
+    {FourCCOf("WPSM"), FourCCOf("SPS2"), RolePropertyEncoding::CnstByte},
+    {FourCCOf("WPSM"), FourCCOf("AS11"), RolePropertyEncoding::CnstByte},
+    {FourCCOf("WPSM"), FourCCOf("AS12"), RolePropertyEncoding::CnstByte},
+    {FourCCOf("WPSM"), FourCCOf("AS13"), RolePropertyEncoding::CnstByte},
+    {FourCCOf("WPSM"), FourCCOf("EWTR"), RolePropertyEncoding::CnstByte},
+    {FourCCOf("WPSM"), FourCCOf("LWTR"), RolePropertyEncoding::CnstByte},
+    {FourCCOf("WPSM"), FourCCOf("SWTR"), RolePropertyEncoding::CnstByte},
+    {FourCCOf("WPSM"), FourCCOf("IVEC"), RolePropertyEncoding::Typed, 'V'},
+    {FourCCOf("WPSM"), FourCCOf("TRAT"), RolePropertyEncoding::Typed, 'R'},
+    {FourCCOf("WPSM"), FourCCOf("PSLT"), RolePropertyEncoding::Typed, 'I'},
+    {FourCCOf("WPSM"), FourCCOf("PSCL"), RolePropertyEncoding::Typed, 'V'},
+    {FourCCOf("WPSM"), FourCCOf("PSVM"), RolePropertyEncoding::Typed, 'M'},
+    {FourCCOf("WPSM"), FourCCOf("VMD2"), RolePropertyEncoding::CnstByte},
+    {FourCCOf("CRSM"), FourCCOf("BHFX"), RolePropertyEncoding::Guid},
+    {FourCCOf("CRSM"), FourCCOf("DSHX"), RolePropertyEncoding::Guid},
+    {FourCCOf("CRSM"), FourCCOf("DDCL"), RolePropertyEncoding::Guid},
+    {FourCCOf("CRSM"), FourCCOf("SHFX"), RolePropertyEncoding::Guid},
+    {FourCCOf("CRSM"), FourCCOf("GRDL"), RolePropertyEncoding::Guid},
+    {FourCCOf("CRSM"), FourCCOf("ICDL"), RolePropertyEncoding::Guid},
+    {FourCCOf("CRSM"), FourCCOf("MEDL"), RolePropertyEncoding::Guid},
+    {FourCCOf("CRSM"), FourCCOf("DEFS"), RolePropertyEncoding::Guid},
+    {FourCCOf("CRSM"), FourCCOf("WODL"), RolePropertyEncoding::Guid},
+    {FourCCOf("CRSM"), FourCCOf("DSFX"), RolePropertyEncoding::Guid},
+    {FourCCOf("CRSM"), FourCCOf("CODL"), RolePropertyEncoding::Guid},
+    {FourCCOf("CRSM"), FourCCOf("6DRN"), RolePropertyEncoding::Guid},
+    {FourCCOf("CRSM"), FourCCOf("4DRN"), RolePropertyEncoding::Guid},
+    {FourCCOf("CRSM"), FourCCOf("FOFF"), RolePropertyEncoding::Typed, 'R'},
+    {FourCCOf("CRSM"), FourCCOf("RNGE"), RolePropertyEncoding::Typed, 'R'},
+    {FourCCOf("CRSM"), FourCCOf("PBHX"), RolePropertyEncoding::Guid},
+    {FourCCOf("CRSM"), FourCCOf("CSFX"), RolePropertyEncoding::Guid},
+    {FourCCOf("CRSM"), FourCCOf("3MUD"), RolePropertyEncoding::Guid, 0, 4},
+    {FourCCOf("CRSM"), FourCCOf("3LAV"), RolePropertyEncoding::Guid, 0, 4},
+    {FourCCOf("CRSM"), FourCCOf("3SAN"), RolePropertyEncoding::Guid, 0, 4},
+};
+
+constexpr size_t kMaxRoleProperties = 1024;
+constexpr size_t kMaxRoleExpressionDepth = 64;
+constexpr size_t kMaxRoleValueNodes = 4096;
+constexpr uint8_t kEulerRotationOrderCount = 6;
+
+const RolePropertySchema* FindRolePropertySchema(uint32_t form, uint32_t property) {
+  for (const RolePropertySchema& schema : kRolePropertySchemas) {
+    if (schema.form == form && schema.property == property) {
+      return &schema;
+    }
+  }
+  return nullptr;
+}
+
+enum class RetailValue : uint8_t { Int, Real, Vector, ModVector, Color, Bool, Asset, RawReal };
+
+// These are the field dispatch tables in CProjectileWeaponDataFactory::CreateWPSM
+// and CCollisionResponseData. Unknown records are not skippable: the game
+// factories reject them too.
+bool RetailFieldValue(uint32_t owner, uint32_t field, RetailValue& value) {
+  if (owner == FourCCOf("WPSM")) {
+    switch (field) {
+    case FourCCOf("IORN"):
+    case FourCCOf("IVEC"):
+    case FourCCOf("PSOV"):
+    case FourCCOf("PSCL"):
+    case FourCCOf("POFS"):
+    case FourCCOf("OFST"):
+      value = RetailValue::Vector;
+      return true;
+    case FourCCOf("PSVM"):
+      value = RetailValue::ModVector;
+      return true;
+    case FourCCOf("PSLT"):
+      value = RetailValue::Int;
+      return true;
+    case FourCCOf("PCOL"):
+      value = RetailValue::Color;
+      return true;
+    case FourCCOf("TRAT"):
+    case FourCCOf("RNGE"):
+    case FourCCOf("FOFF"):
+      value = RetailValue::Real;
+      return true;
+    case FourCCOf("APSM"):
+    case FourCCOf("APS2"):
+    case FourCCOf("ASW1"):
+    case FourCCOf("ASW2"):
+    case FourCCOf("ASW3"):
+    case FourCCOf("OHEF"):
+    case FourCCOf("COLR"):
+    case FourCCOf("PJFX"):
+      value = RetailValue::Asset;
+      return true;
+    case FourCCOf("VMD2"):
+    case FourCCOf("AP11"):
+    case FourCCOf("AP21"):
+    case FourCCOf("APSO"):
+    case FourCCOf("AS11"):
+    case FourCCOf("AS12"):
+    case FourCCOf("AS13"):
+    case FourCCOf("HOMG"):
+    case FourCCOf("EWTR"):
+    case FourCCOf("LWTR"):
+    case FourCCOf("SWTR"):
+    case FourCCOf("F60H"):
+    case FourCCOf("SVBD"):
+    case FourCCOf("NDTT"):
+    case FourCCOf("SPS1"):
+    case FourCCOf("SPS2"):
+    case FourCCOf("FC60"):
+      value = RetailValue::Bool;
+      return true;
+    default:
+      return false;
+    }
+  }
+
+  if (owner != FourCCOf("CRSM")) {
+    return false;
+  }
+  static constexpr const char* kParticleFields =
+      "NODP DEFS CRTS MTLS GRAS ICEE GOOO WODS WATR 1MUD 1LAV 1SAN 1PRJ DCHR DCHS DCSH DENM DESP DESH BTLE WASP TALP "
+      "PTGM SPIR FPIR FFLE PARA BMON BFLR PBOS IBOS 1SVA 1RPR 1MTR 1PDS 1FLB 1DRN 1MRE CHOZ JZAP 1ISE 1BSE 1ATB "
+      "1ATA BTSP WWSP TASP TGSP SPSP FPSP FFSP PSSP BMSP BFSP PBSP IBSP 2SVA 2RPR 2MTR 2PDS 2FLB 2DRN 2MRE CHSP "
+      "JZSP 3ISE 3BSE 3ATB 3ATA BTSH WWSH TASH TGSH SPSH FPSH FFSH PSSH BMSH BFSH PBSH IBSH 3SVA 3RPR 3MTR 3PDS "
+      "3FLB 3DRN 3MRE CHSH JZSH 5ISE 5BSE 5ATB 5ATA";
+  static constexpr const char* kSoundFields =
+      "NSFX DSFX CSFX MSFX GRFX ICFX GOFX WSFX WTFX 2MUD 2LAV 2SAN 2PRJ DCFX DSFX DSHX DEFX ESFX SHFX BEFX WWFX "
+      "TAFX GTFX SPFX FPFX FFFX PAFX BMFX BFFX PBFX IBFX 4SVA 4RPR 4MTR 4PDS 4FLB 4DRN 4MRE CZFX JZAS 2ISE 2BSE "
+      "2ATB 2ATA BSFX WSFX TSFX GSFX SSFX FSFX SFFX PSFX MSFX SBFX PBSX IBSX 5SVA 5RPR 5MTR 5PDS 5FLB 5DRN 5MRE "
+      "CSFX JZPS 4ISE 4BSE 4ATB 4ATA BHFX WHFX THFX GHFX SHFX FHFX HFFX PHFX MHFX HBFX PBHX IBHX 6SVA 6RPR 6MTR "
+      "6PDS 6FLB 6DRN 6MRE CHFX JZHS 6ISE 6BSE 6ATB 6ATA";
+  static constexpr const char* kDecalFields = "NDCL DDCL CODL MEDL GRDL ICDL GODL WODL WTDL 3MUD 3LAV 3SAN CHDL ENDL";
+  if (HasFourCC(kParticleFields, field) || HasFourCC(kSoundFields, field) || HasFourCC(kDecalFields, field)) {
+    value = RetailValue::Asset;
+    return true;
+  }
+  if (field == FourCCOf("RNGE") || field == FourCCOf("FOFF")) {
+    value = RetailValue::RawReal;
+    return true;
+  }
+  return false;
 }
 
 std::vector<std::string> SplitSigs(const char* text) {
@@ -329,13 +512,177 @@ bool Contains(const Ends& ends, size_t end) { return std::binary_search(ends.beg
 
 class Parser {
 public:
-  Parser(const uint8_t* data, size_t size) : m_data(data), m_size(size), m_grammar(TheGrammar()) {}
+  Parser(const uint8_t* data, size_t size, bool reversedFourCC = true, bool strictRetail = false)
+  : m_data(data), m_size(size), m_grammar(TheGrammar()), m_reversedFourCC(reversedFourCC), m_strictRetail(strictRetail) {}
 
   size_t Furthest() const { return m_furthest; }
 
+  bool StrictRoleRoot(size_t at, uint32_t form, size_t end, EffectNode& out, std::string& error) {
+    m_roleDepthExceeded = false;
+    m_roleNodeBudgetExceeded = false;
+    size_t nodes = 1; // root EffectNode
+    size_t records = 0;
+    if (!SpanFits(at, 4, end) || FourCCAt(at) != form) {
+      error = "role DESC root form does not match its RFRM form";
+      return false;
+    }
+    out = EffectNode();
+    out.form = form;
+    size_t pos = at + 4;
+    for (;;) {
+      if (!SpanFits(pos, 5, end)) {
+        error = "truncated role-property header";
+        return false;
+      }
+      const size_t propertyAt = pos;
+      const uint32_t fourcc = FourCCAt(pos);
+      const uint8_t tag = m_data[pos + 4];
+      if (fourcc == 0 || tag > 5) {
+        error = "invalid role-property header";
+        return false;
+      }
+      if (fourcc == kEnd) {
+        if (tag != 4 || !ConsumeRoleNode(0, nodes) || pos + 5 != end) {
+          error = "role property list has an invalid _END or trailing bytes";
+          return false;
+        }
+        return true;
+      }
+      if (records == kMaxRoleProperties) {
+        error = "role property-count limit exceeded";
+        return false;
+      }
+      const RolePropertySchema* schema = FindRolePropertySchema(form, fourcc);
+      if (schema == nullptr) {
+        char offset[32];
+        std::snprintf(offset, sizeof(offset), "0x%zx", propertyAt);
+        error = "unknown role property " + EffectFourCCString(fourcc) + " at " + offset;
+        return false;
+      }
+      if (schema->expectedTag != kAnyRolePropertyTag && tag != schema->expectedTag) {
+        error = "role property " + EffectFourCCString(fourcc) + " has an unexpected input-header tag";
+        return false;
+      }
+      if (!ConsumeRoleNode(0, nodes)) {
+        error = "role value-node budget exceeded";
+        return false;
+      }
+      EffectProperty property;
+      property.fourcc = fourcc;
+      property.tag = tag;
+      property.offset = propertyAt;
+      size_t valueAt = pos + 5;
+      if (schema->encoding == RolePropertyEncoding::Guid) {
+        if (!SpanFits(valueAt, 16, end) || !ConsumeRoleNode(1, nodes)) {
+          error = "truncated role GUID or role value-node budget exceeded";
+          return false;
+        }
+        EffectValue value;
+        value.kind = EffectValue::Kind::Guid;
+        value.offset = valueAt;
+        value.size = 16;
+        std::memcpy(value.guid.data(), m_data + valueAt, value.guid.size());
+        property.value.push_back(std::move(value));
+        valueAt += 16;
+      } else if (schema->encoding == RolePropertyEncoding::CnstByte) {
+        if (!SpanFits(valueAt, 5, end) || FourCCAt(valueAt) != kCnst || !ConsumeRoleNode(1, nodes) ||
+            !ConsumeRoleNode(2, nodes)) {
+          error = "role boolean is not an exact CNST byte or role value-node budget exceeded";
+          return false;
+        }
+        EffectValue element;
+        element.kind = EffectValue::Kind::Element;
+        element.fourcc = kCnst;
+        element.offset = valueAt;
+        element.size = 5;
+        EffectValue byte;
+        byte.kind = EffectValue::Kind::Byte;
+        byte.word = m_data[valueAt + 4];
+        byte.offset = valueAt + 4;
+        byte.size = 1;
+        element.args.push_back(std::move(byte));
+        property.value.push_back(std::move(element));
+        valueAt += 5;
+      } else if (schema->encoding == RolePropertyEncoding::Rotation) {
+        EffectValue value;
+        if (!ParseRoleRotation(valueAt, 1, nodes, value, end)) {
+          if (m_roleDepthExceeded) {
+            error = "role expression-depth limit exceeded";
+          } else if (m_roleNodeBudgetExceeded) {
+            error = "role value-node budget exceeded";
+          } else {
+            error = "role property " + EffectFourCCString(fourcc) +
+                    " is not an exact REUL rotation with three typed reals and an enum byte";
+          }
+          return false;
+        }
+        property.value.push_back(std::move(value));
+      } else {
+        EffectValue value;
+        if (!ParseRoleTyped(valueAt, schema->type, 1, nodes, value, end)) {
+          if (m_roleDepthExceeded) {
+            error = "role expression-depth limit exceeded";
+          } else if (m_roleNodeBudgetExceeded) {
+            error = "role value-node budget exceeded";
+          } else {
+            error = "role property " + EffectFourCCString(fourcc) + " does not match its single typed schema";
+          }
+          return false;
+        }
+        property.value.push_back(std::move(value));
+      }
+      property.size = valueAt - propertyAt;
+      out.properties.push_back(std::move(property));
+      pos = valueAt;
+      ++records;
+    }
+  }
+
+  bool RetailRoleId(uint32_t expectedClass, uint32_t targetField, uint32_t& out, std::string* error) {
+    m_retailFailureAt = 0;
+    m_retailFailure.clear();
+    if (m_reversedFourCC || !m_strictRetail || FourCCAt(0) != expectedClass) {
+      if (error != nullptr) {
+        *error = "retail class FourCC does not match the expected factory";
+      }
+      return false;
+    }
+    const RetailWalkResult result = WalkRetail(4, expectedClass, targetField, 0, 0, false, 0);
+    if (result.solutions == 0) {
+      if (error != nullptr) {
+        char offset[32];
+        std::snprintf(offset, sizeof(offset), "0x%zx", m_retailFailureAt);
+        *error = "cannot bound " + (m_retailFailure.empty() ? std::string("retail field stream") : m_retailFailure) +
+                 " at " + offset;
+      }
+      return false;
+    }
+    if (result.solutions != 1) {
+      if (error != nullptr) {
+        *error = "retail field stream has multiple valid parses";
+      }
+      return false;
+    }
+    if (result.linkCount != 1) {
+      if (error != nullptr) {
+        *error = result.linkCount == 0 ? "top-level role field is missing"
+                                       : "top-level role field is duplicated";
+      }
+      return false;
+    }
+    if (!result.hasLink) {
+      if (error != nullptr) {
+        *error = "top-level role field is NONE";
+      }
+      return false;
+    }
+    out = result.link;
+    return true;
+  }
+
   // A FourCC at `at` (stored byte-reversed), or 0 when the bytes are not one.
   uint32_t FourCCAt(size_t at) const {
-    if (at + 4 > m_size) {
+    if (at > m_size || m_size - at < 4) {
       return 0;
     }
     for (size_t i = 0; i < 4; ++i) {
@@ -344,7 +691,7 @@ public:
         return 0;
       }
     }
-    return ReadLE32(m_data + at);
+    return m_reversedFourCC ? ReadLE32(m_data + at) : port::ReadBE32(m_data + at);
   }
 
   bool StartsWithElement(size_t at) const {
@@ -362,10 +709,10 @@ public:
   }
 
   std::optional<uint32_t> U32(size_t at) const {
-    if (at + 4 > m_size) {
+    if (at > m_size || m_size - at < 4) {
       return std::nullopt;
     }
-    return ReadLE32(m_data + at);
+    return m_reversedFourCC ? ReadLE32(m_data + at) : port::ReadBE32(m_data + at);
   }
 
   // Where the element starting at `at` can end.
@@ -383,6 +730,10 @@ public:
         ends = Array(at + 4);
       } else if (fourcc == kKews) {
         ends = KeyWeights(at + 4);
+      } else if (m_strictRetail && m_grammar.elements.count(fourcc) == 0) {
+        // The game factories reject an unknown element. Do not let the effect
+        // reader's permissive arity guesses make an unrecognized retail field
+        // look skippable.
       } else {
         for (const std::string& sig : m_grammar.ElementSigs(fourcc)) {
           AddEnds(ends, Args(at + 4, sig));
@@ -412,6 +763,9 @@ public:
   // lists the element, else untyped.
   Ends Typed(size_t at, int type) {
     if (m_grammar.TypedSigs(type, FourCCAt(at)) == nullptr) {
+      if (m_strictRetail) {
+        return {};
+      }
       return Element(at);
     }
     return TypedOnly(at, type);
@@ -890,6 +1244,337 @@ public:
   }
 
 private:
+  static bool SpanFits(size_t at, size_t bytes, size_t limit) { return at <= limit && bytes <= limit - at; }
+
+  bool ConsumeRoleNode(size_t depth, size_t& nodes) {
+    if (depth > kMaxRoleExpressionDepth) {
+      m_roleDepthExceeded = true;
+      return false;
+    }
+    if (nodes >= kMaxRoleValueNodes) {
+      m_roleNodeBudgetExceeded = true;
+      return false;
+    }
+    ++nodes;
+    return true;
+  }
+
+  const std::string* RoleTypedSignature(char type, uint32_t fourcc) const {
+    // MPCB's factory-backed vector form is one vector argument. The shared
+    // converter table also has an unproven trailing-real fallback; role parsing
+    // intentionally selects only the single factory form.
+    if (type == 'V' && fourcc == FourCCOf("MPCB")) {
+      static const std::string kMpcbVector = "V";
+      return &kMpcbVector;
+    }
+    const int typeIndex = TypeIndex(type);
+    if (typeIndex < 0) {
+      return nullptr;
+    }
+    const std::vector<std::string>* signatures = m_grammar.TypedSigs(typeIndex, fourcc);
+    return signatures != nullptr && signatures->size() == 1 ? &signatures->front() : nullptr;
+  }
+
+  const std::string* RoleElementSignature(uint32_t fourcc) const {
+    const auto found = m_grammar.elements.find(fourcc);
+    return found != m_grammar.elements.end() && found->second.size() == 1 ? &found->second.front() : nullptr;
+  }
+
+  static size_t RoleKeyframeValueSize(char type) {
+    switch (type) {
+    case 'I':
+    case 'R':
+      return 4;
+    case 'V':
+      return 12;
+    case 'C':
+      return 16;
+    default:
+      return 0;
+    }
+  }
+
+  bool ParseRoleArgument(size_t& at, char type, char keyValueType, size_t depth, size_t& nodes,
+                         EffectValue& out, size_t end) {
+    if (type == 'w' || type == 'b' || type == 'g') {
+      const size_t bytes = type == 'w' ? 4 : type == 'b' ? 1 : 16;
+      if (!SpanFits(at, bytes, end) || !ConsumeRoleNode(depth, nodes)) {
+        return false;
+      }
+      out.offset = at;
+      out.size = bytes;
+      if (type == 'w') {
+        out.kind = EffectValue::Kind::Word;
+        out.word = ReadLE32(m_data + at);
+      } else if (type == 'b') {
+        out.kind = EffectValue::Kind::Byte;
+        out.word = m_data[at];
+      } else {
+        out.kind = EffectValue::Kind::Guid;
+        std::memcpy(out.guid.data(), m_data + at, out.guid.size());
+      }
+      at += bytes;
+      return true;
+    }
+    if (type == 'e') {
+      return ParseRoleElement(at, depth, nodes, out, end);
+    }
+    if (type == 'k') {
+      const size_t keySize = RoleKeyframeValueSize(keyValueType);
+      return keySize != 0 && ParseRoleKeyframes(at, keySize, depth, nodes, out, end);
+    }
+    // Uppercase K is the converter's generic KEYF alternative. No WPSM/CRSM
+    // factory-backed typed schema pins its element type or long header, so the
+    // strict role path does not infer either from candidate byte lengths.
+    if (type == 'K') {
+      return false;
+    }
+    if (TypeIndex(type) >= 0) {
+      return ParseRoleTyped(at, type, depth, nodes, out, end);
+    }
+    return false;
+  }
+
+  bool ParseRoleArguments(size_t& at, const std::string& signature, char keyValueType, size_t depth,
+                          size_t& nodes, std::vector<EffectValue>& values, size_t end) {
+    for (char type : signature) {
+      EffectValue value;
+      if (!ParseRoleArgument(at, type, keyValueType, depth, nodes, value, end)) {
+        return false;
+      }
+      values.push_back(std::move(value));
+    }
+    return true;
+  }
+
+  bool ParseRoleTyped(size_t& at, char type, size_t depth, size_t& nodes, EffectValue& out, size_t end) {
+    if (depth > kMaxRoleExpressionDepth) {
+      m_roleDepthExceeded = true;
+      return false;
+    }
+    if (!SpanFits(at, 4, end) || !ConsumeRoleNode(depth, nodes)) {
+      return false;
+    }
+    const size_t start = at;
+    const uint32_t fourcc = FourCCAt(at);
+    const std::string* signature = RoleTypedSignature(type, fourcc);
+    if (fourcc == 0 || signature == nullptr) {
+      return false;
+    }
+    EffectValue value;
+    value.kind = EffectValue::Kind::Element;
+    value.fourcc = fourcc;
+    value.offset = start;
+    at += 4;
+    if (!ParseRoleArguments(at, *signature, type, depth + 1, nodes, value.args, end)) {
+      return false;
+    }
+    value.size = at - start;
+    out = std::move(value);
+    return true;
+  }
+
+  bool ParseRoleElement(size_t& at, size_t depth, size_t& nodes, EffectValue& out, size_t end) {
+    if (depth > kMaxRoleExpressionDepth) {
+      m_roleDepthExceeded = true;
+      return false;
+    }
+    if (!SpanFits(at, 4, end) || !ConsumeRoleNode(depth, nodes)) {
+      return false;
+    }
+    const size_t start = at;
+    const uint32_t fourcc = FourCCAt(at);
+    const std::string* signature = RoleElementSignature(fourcc);
+    if (fourcc == 0 || signature == nullptr) {
+      return false;
+    }
+    EffectValue value;
+    value.kind = EffectValue::Kind::Element;
+    value.fourcc = fourcc;
+    value.offset = start;
+    at += 4;
+    if (!ParseRoleArguments(at, *signature, 0, depth + 1, nodes, value.args, end)) {
+      return false;
+    }
+    value.size = at - start;
+    out = std::move(value);
+    return true;
+  }
+
+  bool ParseRoleRotation(size_t& at, size_t depth, size_t& nodes, EffectValue& out, size_t end) {
+    if (depth > kMaxRoleExpressionDepth) {
+      m_roleDepthExceeded = true;
+      return false;
+    }
+    if (!SpanFits(at, 4, end) || !ConsumeRoleNode(depth, nodes)) {
+      return false;
+    }
+    const size_t start = at;
+    if (FourCCAt(at) != FourCCOf("REUL")) {
+      return false;
+    }
+
+    EffectValue rotation;
+    rotation.kind = EffectValue::Kind::Element;
+    rotation.fourcc = FourCCOf("REUL");
+    rotation.offset = start;
+    at += 4;
+    // The source calls GetRealElement three times. Reuse only the unique typed-R
+    // role grammar; Element() and unknown-arity guesses are not valid here.
+    for (size_t i = 0; i < 3; ++i) {
+      EffectValue real;
+      if (!ParseRoleTyped(at, 'R', depth + 1, nodes, real, end)) {
+        return false;
+      }
+      rotation.args.push_back(std::move(real));
+    }
+
+    // GetRotationElement reads and stores one ERotationOrder byte after the
+    // three GetRealElement values. QuatGeneric has the six source enum cases
+    // 0..5; reject the fallback case rather than treating it as another order.
+    if (!SpanFits(at, 1, end) || !ConsumeRoleNode(depth + 1, nodes)) {
+      return false;
+    }
+    const uint8_t order = m_data[at];
+    if (order >= kEulerRotationOrderCount) {
+      return false;
+    }
+    EffectValue enumValue;
+    enumValue.kind = EffectValue::Kind::Byte;
+    enumValue.word = order;
+    enumValue.offset = at;
+    enumValue.size = 1;
+    rotation.args.push_back(std::move(enumValue));
+    ++at;
+    rotation.size = at - start;
+    out = std::move(rotation);
+    return true;
+  }
+
+  bool ParseRoleKeyframes(size_t& at, size_t keySize, size_t depth, size_t& nodes, EffectValue& out,
+                          size_t end) {
+    // CIE/CRE/CVE/CCE KEYE and KEYP constructors read the same 18-byte field
+    // header, then rstl::vector<T>: a u32 count followed by exactly one T per
+    // key. The caller passes the factory's T size; do not backtrack over the
+    // converter's generic 4/8/12/16-byte candidates or KEYF's 26-byte header.
+    constexpr size_t kKeyEmitterFields = 18;
+    constexpr size_t kCountBytes = 4;
+    constexpr size_t kKeyVectorHeader = kKeyEmitterFields + kCountBytes;
+    if (keySize == 0 || !ConsumeRoleNode(depth, nodes) || !SpanFits(at, kKeyVectorHeader, end)) {
+      return false;
+    }
+    const uint32_t count = ReadLE32(m_data + at + kKeyEmitterFields);
+    if (count > kMaxRoleValueNodes || size_t(count) > kMaxRoleValueNodes - nodes) {
+      m_roleNodeBudgetExceeded = true;
+      return false;
+    }
+    const size_t dataAt = at + kKeyVectorHeader;
+    if (size_t(count) > (end - dataAt) / keySize) {
+      return false;
+    }
+    out.kind = EffectValue::Kind::Keys;
+    out.offset = at;
+    out.size = kKeyVectorHeader + size_t(count) * keySize;
+    at += out.size;
+    nodes += size_t(count);
+    return true;
+  }
+
+  struct RetailWalkResult {
+    unsigned solutions = 0; // capped at two: multiple valid parses are ambiguous
+    unsigned linkCount = 0;
+    uint32_t link = 0;
+    bool hasLink = false;
+  };
+
+  static void MergeRetail(RetailWalkResult& into, const RetailWalkResult& from) {
+    if (from.solutions == 0) {
+      return;
+    }
+    if (into.solutions == 0) {
+      into = from;
+    } else {
+      into.solutions = 2;
+    }
+  }
+
+  RetailWalkResult WalkRetail(size_t at, uint32_t owner, uint32_t targetField, unsigned linkCount,
+                              uint32_t link, bool hasLink, size_t depth) {
+    if (depth > 1024 || at > m_size || m_size - at < 4) {
+      RetailFail(at, "truncated field header");
+      return {};
+    }
+    const uint32_t field = FourCCAt(at);
+    if (field == FourCCOf("_END")) {
+      // The game factories return at _END and leave any resource tail unread.
+      // Match that boundary; importantly, never inspect trailing bytes for a
+      // second role field.
+      return {1, linkCount, link, hasLink};
+    }
+
+    RetailValue value;
+    if (field == 0 || !RetailFieldValue(owner, field, value)) {
+      RetailFail(at, field == 0 ? "invalid field FourCC" : "unknown factory field " + EffectFourCCString(field));
+      return {};
+    }
+    const size_t valueAt = at + 4;
+    if (value == RetailValue::Asset) {
+      if (m_size - valueAt < 4) {
+        RetailFail(at, "truncated asset field type");
+        return {};
+      }
+      const uint32_t type = FourCCAt(valueAt);
+      if (type == 0) {
+        RetailFail(at, "invalid asset field type FourCC");
+        return {};
+      }
+      const bool present = type != FourCCOf("NONE");
+      const size_t next = valueAt + 4 + (present ? 4 : 0);
+      if (next > m_size) {
+        RetailFail(at, "truncated asset id");
+        return {};
+      }
+      const bool isTarget = field == targetField;
+      const unsigned nextCount = linkCount + unsigned(isTarget);
+      const uint32_t nextLink = isTarget && present ? port::ReadBE32(m_data + valueAt + 4) : link;
+      const bool nextHasLink = isTarget ? present : hasLink;
+      return WalkRetail(next, owner, targetField, nextCount, nextLink, nextHasLink, depth + 1);
+    }
+    if (value == RetailValue::Bool || value == RetailValue::RawReal) {
+      const size_t bytes = value == RetailValue::Bool ? 5 : 8;
+      if (m_size - valueAt < bytes || FourCCAt(valueAt) == 0) {
+        RetailFail(at, value == RetailValue::Bool ? "truncated boolean field" : "truncated raw-real field");
+        return {};
+      }
+      return WalkRetail(valueAt + bytes, owner, targetField, linkCount, link, hasLink, depth + 1);
+    }
+
+    const char type = value == RetailValue::Int ? 'I' : value == RetailValue::Real ? 'R'
+                      : value == RetailValue::Vector ? 'V' : value == RetailValue::ModVector ? 'M' : 'C';
+    RetailWalkResult result;
+    const Ends ends = Typed(valueAt, TypeIndex(type));
+    if (ends.empty()) {
+      RetailFail(at, "unsupported or truncated typed field " + EffectFourCCString(field));
+    }
+    for (size_t next : ends) {
+      if (next <= valueAt || next > m_size) {
+        continue;
+      }
+      MergeRetail(result, WalkRetail(next, owner, targetField, linkCount, link, hasLink, depth + 1));
+      if (result.solutions > 1) {
+        break;
+      }
+    }
+    return result;
+  }
+
+  void RetailFail(size_t at, std::string message) {
+    if (m_retailFailure.empty() || at >= m_retailFailureAt) {
+      m_retailFailureAt = at;
+      m_retailFailure = std::move(message);
+    }
+  }
+
   // TMTR: the elements, in file order (six per UV set). PMTR/SMTR: one Word
   // per entry, `fourcc` = its group (0-4); PMTR `word` = b0 | b1 << 8 | b2 << 16
   // from the 3-byte trailer, SMTR `word` = the parameter id as the file's four
@@ -1157,6 +1842,12 @@ private:
   const uint8_t* m_data;
   size_t m_size;
   const Grammar& m_grammar;
+  bool m_reversedFourCC;
+  bool m_strictRetail;
+  bool m_roleDepthExceeded = false;
+  bool m_roleNodeBudgetExceeded = false;
+  size_t m_retailFailureAt = 0;
+  std::string m_retailFailure;
   std::unordered_map<size_t, Ends> m_elements;
   std::unordered_map<uint64_t, Ends> m_typed;
   std::unordered_map<uint64_t, Ends> m_sequences;
@@ -1310,6 +2001,67 @@ bool ParseEffect(const uint8_t* data, size_t size, EffectNode& out, std::string&
   }
   parser.BuildNode(kRootAt, EffectGuid{}, out, true);
   return true;
+}
+
+bool ParseRemasteredRoleAsset(const uint8_t* data, size_t size, uint32_t expectedForm, EffectNode& out,
+                             std::string& error) {
+  out = EffectNode();
+  constexpr size_t kFormHeader = 32;
+  constexpr size_t kChunkHeader = 24;
+  constexpr size_t kDescPrefix = 4;
+  error.clear();
+  if (data == nullptr || size < kFormHeader + kChunkHeader + kDescPrefix + 9 ||
+      (expectedForm != EffectFourCC("WPSM") && expectedForm != EffectFourCC("CRSM")) ||
+      std::memcmp(data, "RFRM", 4) != 0 || port::ReadBE32(data + 20) != expectedForm) {
+    error = "not the expected RFRM role asset";
+    return false;
+  }
+  const uint64_t formSize = port::ReadLE64(data + 4);
+  if (formSize < kChunkHeader || formSize > size - kFormHeader) {
+    error = "RFRM form size is truncated or out of bounds";
+    return false;
+  }
+  const size_t formEnd = kFormHeader + static_cast<size_t>(formSize);
+  if (port::ReadBE32(data + kFormHeader) != EffectFourCC("DESC")) {
+    error = "RFRM role asset has no DESC chunk";
+    return false;
+  }
+  const uint64_t chunkSize = port::ReadLE64(data + kFormHeader + 4);
+  const uint64_t skip = port::ReadLE64(data + kFormHeader + 16);
+  if (skip > formSize - kChunkHeader || chunkSize < kDescPrefix + 9 ||
+      chunkSize != formSize - kChunkHeader - skip) {
+    error = "DESC chunk size is truncated or inconsistent with the RFRM form";
+    return false;
+  }
+  const size_t chunkDataAt = kFormHeader + kChunkHeader;
+  if (skip > size - chunkDataAt) {
+    error = "DESC skip is out of bounds";
+    return false;
+  }
+  const size_t chunkDataEnd = chunkDataAt + static_cast<size_t>(skip);
+  if (chunkDataEnd > formEnd || kDescPrefix > formEnd - chunkDataEnd) {
+    error = "DESC prefix is truncated or out of bounds";
+    return false;
+  }
+  const size_t rootAt = chunkDataEnd + kDescPrefix;
+  Parser parser(data, formEnd);
+  if (!parser.StrictRoleRoot(rootAt, expectedForm, formEnd, out, error)) {
+    out = EffectNode();
+    return false;
+  }
+  return true;
+}
+
+bool ReadRetailRoleAssetId(const uint8_t* data, size_t size, uint32_t expectedClass, uint32_t field,
+                           uint32_t& out, std::string* error) {
+  if (data == nullptr || size < 8) {
+    if (error != nullptr) {
+      *error = "retail resource is null or truncated";
+    }
+    return false;
+  }
+  Parser parser(data, size, false, true);
+  return parser.RetailRoleId(expectedClass, field, out, error);
 }
 
 bool ParseSpawnTable(const uint8_t* data, size_t size, const EffectProperty& kssm, EffectSpawnTable& out) {

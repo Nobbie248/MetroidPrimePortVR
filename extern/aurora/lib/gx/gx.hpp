@@ -48,7 +48,6 @@ constexpr float GX_LARGE_NUMBER = -1048576.0f;
 namespace aurora::gx {
 constexpr bool EnableNormalVisualization = false;
 constexpr bool EnableDebugPrints = false;
-constexpr bool UsePerPixelLighting = false;
 constexpr bool UseReversedZ = true;
 
 constexpr u32 MaxTextures = GX_MAX_TEXMAP;
@@ -366,15 +365,17 @@ struct GXState {
     u32 height = 0;
     GXTexFmt format = GX_TF_I4;
     bool mips = false;
+    // The texture holds the linear RGBA16F scene (GXPortCopyScene in an HDR pass), not a GX copy.
+    bool linear = false;
 
     bool operator==(const CopyTextureKey& rhs) const {
       return dest == rhs.dest && width == rhs.width && height == rhs.height && format == rhs.format &&
-             mips == rhs.mips;
+             mips == rhs.mips && linear == rhs.linear;
     }
 
     template <typename H>
     friend H AbslHashValue(H h, const CopyTextureKey& key) {
-      return H::combine(std::move(h), key.dest, key.width, key.height, key.format, key.mips);
+      return H::combine(std::move(h), key.dest, key.width, key.height, key.format, key.mips, key.linear);
     }
   };
 
@@ -456,7 +457,7 @@ struct GXState {
   u32 pbrVolume = 0; // GX_AURORA_SET_PBR_VOLUME
   std::array<Vec4<float>, 6> pbrVolumeRows{}; // see GXSetPBRVolume
   u32 pbrLightmap = 0; // GX_AURORA_SET_PBR_LIGHTMAP
-  Vec4<float> pbrLightmapRect{};                  // offU, offV, scale (0: off), level
+  Vec4<float> pbrLightmapRect{};                  // offU, offV, scale (0: one texel), level (0: off)
   std::array<Vec4<float>, 3> pbrLightmapAxes{};   // xyz: a row taking a view-space normal to the lightmap's axes
   Vec4<float> pbrRoomLights{}; // GX_AURORA_PORT_ROOM_LIGHTS: x the first record (u32 bits, in words), y the count
   u8 pbrLightmapAttr = GX_VA_NULL; // GX_AURORA_SET_PBR_LIGHTMAP_ATTR
@@ -467,6 +468,10 @@ struct GXState {
   // the top strength.
   std::array<Vec4<float>, 3> pbrBacklightLights{};
   Vec4<float> pbrLightScale{1.f, 1.f, 0.f, 0.f}; // GX_AURORA_SET_PBR_LIGHT_SCALE: diffuse, f0, -, fade
+  // GX_AURORA_SET_PBR_MODEL_MODULATION: the diffuse and incandescence vectors, and the coverage (x)
+  Vec4<float> pbrModelDiffuse{1.f, 1.f, 1.f, 1.f};
+  Vec4<float> pbrModelIncan{0.f, 0.f, 0.f, 1.f};
+  Vec4<float> pbrModelCoverage{1.f, 0.f, 0.f, 0.f};
   std::array<Vec4<float>, 8> pbrShield{}; // GX_AURORA_SET_PBR_SHIELD: CCH0..6, then AUVI xyz + DIFC.w
   // GX_AURORA_SET_PBR_LIGHT_HDR, per light: colour (rgb, falloff + 1; w 0 = off), then
   // (view position, r0), then (r1, -, -, -).
@@ -483,7 +488,16 @@ struct GXState {
   bool shadowCaster = false;
   bool shadowCasterOnly = false; // they cast but aren't drawn (GXPortSetShadowCasterOnly)
   bool shadowActive = false;
-  std::array<Vec4<float>, 10> shadowUniform{};
+  std::array<Vec4<float>, 36> shadowUniform{};
+  // GX_AURORA_PORT_ACTOR_SHADOW: actorLayer >= 0 while an actor's casters are recorded (into that
+  // layer of the actor maps; the sun's state is saved in actorSaved* meanwhile); actorDecal while
+  // the receivers' decal draws are.
+  int actorLayer = -1;
+  bool actorDecal = false;
+  bool actorSavedCaster = false;
+  bool actorSavedCasterOnly = false;
+  bool actorSavedActive = false;
+  std::array<Vec4<float>, 36> actorSavedUniform{};
 
   // GX2 polygon offset state
   f32 frontOffset = 0.0f;
@@ -507,6 +521,7 @@ struct GXState {
   bool texCopyDstWide = false;
   bool texCopyMips = false; // GXSetTexCopyDst mipmap flag: the copy gets a full mip chain
   const void* texCopyDest = nullptr;
+  bool copySceneLinear = false; // GX_AURORA_PORT_COPY_SCENE: copies are linear scene copies (GXPortCopyScene)
   absl::flat_hash_map<const void*, CopyTextureRef> copyTextures;
   absl::flat_hash_map<CopyTextureKey, CopyTextureRef> copyTextureCache;
 
@@ -637,7 +652,9 @@ struct ShaderConfig {
   // endianness.
   u8 pbrBindPos : 1 = false;
   u8 pbrBindLe : 1 = false;
-  u8 pad1 : 1 = 0;
+  // The draw writes the RGBA16F HDR scene (gfx::scene_hdr_pass_active): exposed linear light, not
+  // display sRGB. The old padding bit, so an LDR config keeps its bytes and cache keys.
+  u8 sceneHdr : 1 = false;
   u8 pbr = 0; // GX_AURORA_SET_PBR
   u8 sdf = 0; // GX_AURORA_SET_SDF
   u8 depthOnly = 0; // pass 1 of GX_AURORA_PORT_DEPTH_PREPASS: the colour is not written
@@ -667,7 +684,8 @@ struct ShaderConfig {
   // The draw reads native vertex attributes (GXState::nativeVertices: the geometry cache's
   // resident static world records) instead of fetching them from vbuf.
   u8 nativeVertices : 1 = false;
-  u8 pad2 : 2 = 0;
+  u8 perPixelLight : 1 = false;
+  u8 actorDecal : 1 = false;
   // 12 bytes so far, a multiple of the u32 fields' alignment: the struct has no padding
   // (memcmp and hash; the static_asserts below).
   std::array<AttrConfig, MaxVtxAttr> attrs;
@@ -701,8 +719,10 @@ static_assert(offsetof(ShaderConfig, pbrLightmapAttr) == 8);
 static_assert(offsetof(ShaderConfig, hudSample) == 9);
 // Whether a draw samples the sun's shadow map: a lit PBR surface drawn in colour without per-pixel fog.
 inline bool shadow_receives(const ShaderConfig& sc) noexcept {
-  return sc.shadow && sc.pbr != 0 && sc.volFog == VolFogNone && sc.depthOnly == 0 && sc.lineMode == 0 && !sc.drawId;
+  return sc.shadow && (sc.pbr != 0 || sc.actorDecal != 0) && sc.volFog == VolFogNone && sc.depthOnly == 0 && sc.lineMode == 0 && !sc.drawId;
 }
+// Whether a draw is the actor shadow decal (samples gfx/actor_shadow.hpp's maps).
+inline bool actor_decal(const ShaderConfig& sc) noexcept { return sc.actorDecal != 0 && sc.shadow; }
 
 // Group 2's layout for a shader. Without PBR or volumetric fog a shader declares nothing past the GX
 // textures (bindings 0-15), so it takes the Lean layout: Dawn tracks every texture of a bind group
@@ -745,6 +765,8 @@ struct ShaderInfo {
   bool usesVolFog : 1 = false;
   bool usesShadow : 1 = false;    // ShaderConfig::shadow: the shadow uniforms and vs_shadow
   bool shadowReceive : 1 = false; // shadow_receives: group 2 uses the shadow layout
+  bool actorDecal : 1 = false;    // actor_decal: group 2 uses the shadow layout with the actor maps
+  bool usesHdrTone : 1 = false;   // ShaderConfig::sceneHdr without pbr: the hdr_tone uniform (GXState::pbrTone)
 };
 // As texture_layout(const ShaderConfig&), from the info built of that config.
 inline TextureLayout texture_layout(const ShaderInfo& info) noexcept {
@@ -757,9 +779,32 @@ struct BindGroupRanges {
   std::array<gfx::Range, MaxIndexAttr> vaRanges{};
 };
 void populate_pipeline_config(PipelineConfig& config, GXPrimitive primitive, GXVtxFmt fmt) noexcept;
+// aurora_set_per_pixel_lighting; any thread.
+void set_per_pixel_lighting(bool enabled) noexcept;
+bool per_pixel_lighting() noexcept;
+// While set, every draw's pipeline lookup joins the front of the compile queue and waits for it
+// (see gfx::PipelinePriority::Blocking): the draws of the passes that set it are never skipped for a
+// pipeline that is still compiling. The GPU self-test sets it for its own passes; off by default.
+void set_blocking_pipelines(bool enabled) noexcept;
+bool blocking_pipelines() noexcept;
+// ShaderConfig::perPixelLight for a config with its other fields set: a PBR draw shades per
+// pixel already (and has no interpolators to spare).
+inline bool wants_per_pixel_light(const ShaderConfig& config) noexcept {
+  if (!per_pixel_lighting() || config.pbr != 0) {
+    return false;
+  }
+  for (const auto& cc : config.colorChannels) {
+    if (cc.lightingEnabled) {
+      return true;
+    }
+  }
+  return false;
+}
 wgpu::RenderPipeline build_pipeline(const PipelineConfig& config, ArrayRef<wgpu::VertexBufferLayout> vtxBuffers,
                                     wgpu::ShaderModule shader, const char* label) noexcept;
 std::string build_shader_source(const ShaderConfig& config) noexcept;
+// Whether the config's shader has the alpha-tested sun shadow caster (shadowPass 2: vs_shadow_cut, fs_shadow).
+bool shader_has_cut_caster(const ShaderConfig& config) noexcept;
 wgpu::ShaderModule build_shader(const ShaderConfig& config) noexcept;
 // Shader debugging (MP_WGSL_DUMP / MP_WGSL_OVERRIDE, console `shader`). dump_shaders writes every module built so
 // far to dir (and keeps writing new ones) and returns how many files it made; set_shader_override_dir turns the

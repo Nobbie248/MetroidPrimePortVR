@@ -21,6 +21,10 @@ namespace PortDebug {
 // CStateManager::Update). Null before gameplay starts.
 void SetStateManager(CStateManager* mgr);
 CStateManager* StateManager();
+// The "quick_resume" setting: write a resume state on quit or background.
+bool QuickResume();
+// The "savestate_room_state" setting: save states keep enemies and room objects.
+bool SaveStateRoomState();
 // Where the world is drawn from and which way it looks (the free camera's while it is
 // on); false outside a world.
 bool ViewRay(float origin[3], float forward[3]);
@@ -156,6 +160,10 @@ void SetFullscreen(bool enabled);
 // 0 = auto (native, driven by the display scale), otherwise a fixed multiplier.
 float RenderScale();
 void SetRenderScale(float scale);
+// Photo mode captures: the configured scale (1 when auto), and a temporary override
+// (0 = none) that also holds dynamic resolution still.
+float BaseRenderScale();
+void SetCaptureRenderScale(float scale);
 // Dynamic resolution: draws the EFB between DynamicResMin and RenderScale to
 // hold DynamicResTarget fps (0 = the frame cap). False when off.
 bool DynamicRes();
@@ -202,12 +210,34 @@ const int kHudScaleMin = 50;
 const int kHudScaleMax = 100;
 int HudScale();
 void SetHudScale(int percent);
+// How far the widescreen HUD spread moves the scan visor's side panels and their images, in
+// percent of the full spread (0 keeps them at their 4:3 place near the centre, 100 takes them
+// out to the screen edges with the rest of the HUD). Touch controls cover the edges on phones.
+const int kScanSpreadMin = 0;
+const int kScanSpreadMax = 100;
+int ScanSpread();
+void SetScanSpread(int percent);
 // The centre crosshair (free aim, mouse aim, twin stick): opacity in percent,
 // and an optional colour that replaces the game's (false = the game's own).
 const int kCrosshairOpacityMin = 0;
 const int kCrosshairOpacityMax = 100;
 int CrosshairOpacity();
 bool CrosshairColor(float rgb[3]);
+// Auto-aim: without Lock-On the gun picks the target nearest the screen centre
+// (CPlayer::UpdateAimTarget). Off = aim only at a locked target. On under Original experience.
+bool AutoAim();
+// Scan visor speed in percent (scan_speed=, MP_SCAN_SPEED); ScanSpeed() is the factor on the
+// scan timer in CPlayer::UpdateScanningState. 1 under Original experience.
+const int kScanSpeedMin = 100;
+const int kScanSpeedMax = 500;
+float ScanSpeed();
+// The next-target reticles (combat seeker, X-ray ring, thermal crosshair). Off hides them;
+// lock-on and scan reticles stay. On under Original experience.
+bool SecondaryCrosshairs();
+// Menus and the map read a remapped pad's standard buttons (F1 Controls > Remap).
+bool MenuStandardButtons();
+void SetMenuStandardButtons(bool enabled);
+void SetPointerMenus(bool enabled); // the pointer_menus setting; read with PortPointer::Enabled()
 // Hide the helmet frame (the visor rim and its glow and lights).
 bool HideHelmet();
 void SetHideHelmet(bool enabled);
@@ -246,15 +276,27 @@ struct ScopedPhaseTimer {
 // not changed.
 bool RevealMap();
 void SetRevealMap(bool enabled);
-// A white dot on the map for each item pickup not yet collected. Randomizer
-// and Archipelago games force it on (PortMapPickups::Active).
-bool MapPickups();
-void SetMapPickups(bool enabled);
+// Pickup marking on the map (PortMapPickups): Off; Seen draws a dot for each
+// uncollected pickup the player has laid eyes on; Rooms tints the rooms that
+// still hold an uncollected pickup; All draws a dot for every uncollected
+// pickup. The saved value 1 (the old on/off setting) is All.
+// The values are stored in the config: don't reorder or renumber.
+enum EMapPickups { kMapPickups_Off, kMapPickups_All, kMapPickups_Seen, kMapPickups_Rooms };
+EMapPickups MapPickups();
+void SetMapPickups(EMapPickups mode);
 // In an Archipelago game, colour the dots by the seed's logic like a tracker
 // (green in logic, yellow sequence break, blue visible only, red out of reach,
 // grey checked). On by default; off gives the plain white dots.
 bool MapLogicColors();
 void SetMapLogicColors(bool enabled);
+// The dot's shape tells a major item from a minor one, and a collected pickup
+// stays as a grey cross (PortMapPickups::Kinds). On by default.
+bool MapPickupKinds();
+void SetMapPickupKinds(bool enabled);
+// In Seen, rooms a map station (or Reveal map) maps show all their pickups.
+// On by default.
+bool MapStationPickups();
+void SetMapStationPickups(bool enabled);
 // The apworld's staggered_suit_damage, which the server doesn't send: 0 the
 // game's rule, 1 progressive (the apworld's default, and the port's), 2
 // additive. Only an Archipelago seed uses it.
@@ -266,6 +308,10 @@ void SetApSuitDamage(int mode);
 // (PortSkipCutscenes::Active).
 bool SkippableCutscenes();
 void SetSkippableCutscenes(bool enabled);
+// The stored 1.00 sequence-break compatibility choice (raw, not the effective
+// policy). Randomizer and Archipelago games force it on at use.
+bool Revision100Compatibility();
+void SetRevision100Compatibility(bool enabled);
 // The language of the game's text: "" for the disc's English, else one of the
 // codes in PortRemastered::kTextLanguages, which a Remastered import adds to the
 // string tables. A table without it shows English. Read at every
@@ -278,6 +324,12 @@ void SetTextLanguage(const char* code);
 enum EElevatorRide { kElevatorRide_Original, kElevatorRide_Fast, kElevatorRide_Skip };
 EElevatorRide ElevatorRide();
 void SetElevatorRide(EElevatorRide mode);
+// The Nintendo, Retro and Dolby logos at launch (CSplashScreen). Skippable ends
+// the current one with a short fade on A or Start; Off goes straight to the
+// front end. Original experience shows them in full.
+enum EBootLogos { kBootLogos_Show, kBootLogos_Skippable, kBootLogos_Off };
+EBootLogos BootLogos();
+void SetBootLogos(EBootLogos mode);
 // First-person vertical field of view in degrees (retail 55). The arm cannon is
 // drawn at the retail FOV whatever this is, like a view-model FOV.
 const float kFovRetail = 55.f;
@@ -285,12 +337,30 @@ const float kFovMin = 45.f;
 const float kFovMax = 90.f;
 float FirstPersonFov();
 void SetFirstPersonFov(float degrees);
+// Arm cannon offset from its retail place, in metres along the camera's right,
+// forward and up axes (issue #72, like PrimeHack's). It moves the real gun, so
+// shots leave from the new muzzle. Zero in the original experience.
+const float kGunOffsetMax = 1.f;
+void GunOffset(float out[3]);
+void SetGunOffset(const float offset[3]);
 // Multisample anti-aliasing (1 = off, or 4) and the max texture anisotropy
 // (1-16, retail-style mipmapped textures ask for the max). Applied next frame.
 int Msaa();
 void SetMsaa(int samples);
 int Anisotropy();
 void SetAnisotropy(int level);
+// Setting `per_pixel_lighting` (default off, off in the original experience): GX
+// lights summed per pixel instead of per vertex. Lit pipelines rebuild on next use.
+bool PerPixelLighting();
+void SetPerPixelLighting(bool enabled);
+// Setting `sun_shadows` (default on): the 4-cascade sun shadow in outdoor rooms. Remastered
+// draws none; off gives PortSetupShadow distance 0, as in a room with no sun.
+bool SunShadows();
+void SetSunShadows(bool enabled);
+// Setting `projected_shadows` (default on): Remastered's projected actor shadows (CSimpleShadow decal
+// mode); only active with Remastered world geometry, else the retail blob quad is drawn.
+bool ProjectedShadows();
+void SetProjectedShadows(bool enabled);
 // Setting `opengles`: start on Dawn's OpenGL ES backend instead of Vulkan, for
 // drivers that draw wrong on Vulkan (Adreno 7xx, issue #7). Read at window
 // creation, so it takes a restart; aurora falls back to Vulkan if it fails.
@@ -408,12 +478,15 @@ bool StartRemasteredImport(const std::string& image, const std::string& keys);
 // the console. Each returns a message for the user. Imports are refused in
 // game; `path` may be a .gci, a raw card image, a folder of .gci files or an
 // Android content:// URI, and an export to a path ending in .raw writes a card
-// image instead of .gci files.
+// image instead of .gci files. `format` picks what an export writes: "" (the
+// card's files as they are), "usa" or "pal" (the save converted to that
+// GameCube release; Dolphin's card of that region) or "trilogy" (the newest
+// save written into the Wii Trilogy's save.bin at `dest`, or Dolphin's).
 std::string CardList();
 std::string CardImport(const std::string& path);
-std::string CardExport(const std::string& dest);
+std::string CardExport(const std::string& dest, const std::string& format = "");
 std::string CardImportDolphin();
-std::string CardExportDolphin();
+std::string CardExportDolphin(const std::string& format = "");
 // Cheat: the player takes no damage (F1 > Debug > Cheats, MP_GODMODE, console `god`).
 bool Invulnerable();
 void SetInvulnerable(bool enabled);
@@ -491,6 +564,24 @@ bool MouseInvertX();
 bool MouseInvertY();
 bool MouseButtons();
 bool MouseCrosshair();
+// The free-aim crosshair under direct aim: the setting, or always with pointer aim.
+bool AimCrosshair();
+// Pointer aim (Trilogy style, any direct aim): the mouse, right stick, gyro or a
+// touch drag moves a pointer and the view turns once it passes the dead box
+// (percent of the half view) at up to PointerAimTurn degrees/second. Shots and
+// the gun follow the pointer.
+bool PointerAim();
+void SetPointerAim(bool on);
+int PointerAimBox();
+int PointerAimTurn();
+// The pointer (-1..1 of the half view, right/down positive) as of the last tick;
+// false (and centre) unless it steered that tick's free look.
+bool PointerAimPosition(float& x, float& y);
+// The same, plus the travel since the tick, for drawing; fraction is the part of
+// the tick shown (CCameraManager::GetPresentationInterpolation).
+bool PresentedPointerAimPosition(float fraction, float& x, float& y);
+// Places the pointer (console `pointeraim <x> <y>`); the next tick's look may re-centre it.
+void SetPointerAimPosition(float x, float y);
 // Crosshair size in percent while mouse aim or twin stick is on (the retail
 // free-aim crosshair is sized for a held R, and it stays up the whole time
 // under those modes). Retail R free-aim keeps 100.
@@ -535,6 +626,11 @@ void SetTouchAim(bool on);
 float TouchAimSpeed();
 void SetTouchAimSpeed(float pixelsPerDp);
 void AddTouchAim(float dxDp, float dyDp);
+// A quick swipe up on the touch aim area (the overlay detects it): requests the
+// Spring Ball when "Spring Ball on swipe up" is on. Thread-safe.
+bool SpringBallSwipe();
+void SetSpringBallSwipe(bool enabled);
+void TouchSpringSwipe();
 // GameCube scheme (neither mouse aim nor twin stick): CPlayer turns by the touch
 // travel and holds a free-look pitch while a touch-aim finger is down.
 // TakeTouchLook returns this tick's world yaw/pitch change in radians (once per
@@ -561,9 +657,12 @@ bool TouchVisorTapScan();
 void SetTouchVisorTapScan(bool on);
 void SetWheelState(uint32_t mask);
 uint32_t WheelState();
-// CInGameGuiManager publishes each frame whether the pause menu is up (stale = closed).
-void SetPauseScreenOpen(bool open);
+// CInGameGuiManager publishes each frame whether the pause menu is up (stale = closed),
+// and whether a paused dialog (save station, upgrade message) is.
+void SetPauseScreenOpen(bool open, bool dialog);
 bool PauseScreenOpen();
+// The pause menu or a paused dialog: input reads the Menu rows there (issue #93).
+bool PausedMenuOpen();
 void RequestVisor(int visor);
 void RequestBeam(int beam);
 // The HUD's beam/visor menu icons for the touch wheels (Android), decoded to RGBA8 when the HUD

@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 //
-// Whether a disc image is one the game will boot: Metroid Prime USA 1.00
-// (GM8E01) or PAL (GM8P01, experimental), disc 0, revision 0, as
+// Whether a disc image is one the game will boot: Metroid Prime USA 1.00/1.01/1.02
+// (GM8E01, revisions 0-2) or PAL (GM8P01, revision 0), disc 0, as
 // platform/disc.cpp PortDisc::IsAccepted takes them (main.cpp checks the
 // mounted disc again; USA 1.01 and 1.02 boot only under MP_DISC_ANY_VERSION,
 // which is left to the game), in a format the port opens (main.cpp IsDiscImage).

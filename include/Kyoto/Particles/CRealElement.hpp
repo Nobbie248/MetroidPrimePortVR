@@ -218,8 +218,8 @@ public:
   bool GetValue(int frame, float& valOut) const override;
 };
 
-// Port-only DFCS/DFCP: a clamped ramp of the depth along the camera's forward axis, 0 at A and 1
-// at B, measured from the system origin (DFCS) or the current particle (DFCP).
+// Port-only DFCS/DFCP: a clamped ramp of the depth along the camera's forward axis, 1 at A and 0
+// at B (Remastered 0x298f44), measured from the system origin (DFCS) or the current particle (DFCP).
 class CREDistanceFromCameraBlend : public CRealElement {
   CRealElement* x4_a;
   CRealElement* x8_b;
@@ -229,6 +229,8 @@ public:
   CREDistanceFromCameraBlend(CRealElement* a, CRealElement* b, bool particle);
   ~CREDistanceFromCameraBlend() override;
   bool GetValue(int frame, float& valOut) const override;
+  // The blend for a camera depth d and the two child values.
+  static float DistanceBlend(float d, float a, float b);
 };
 #endif
 

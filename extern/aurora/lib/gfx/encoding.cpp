@@ -544,16 +544,25 @@ void render(wgpu::CommandEncoder& cmd, FramePacket& frame, RenderPass& passInfo,
     if (isDepth && passInfo.msaaSamples > 1) {
       Log.fatal("Depth tex copies from multisampled EFB targets are not supported");
     }
+    // Depth copies read the depth buffer, which an HDR scene pass leaves as it is.
+    const auto domain = isDepth ? tex_copy_conv::CopyDomain::Display : passInfo.resolveDomain;
     const tex_copy_conv::ConvRequest convReq{
         .fmt = passInfo.resolveFormat,
         .srcView = isDepth ? passInfo.copySourceDepthView : passInfo.copySourceView,
         .uniformRange = passInfo.resolveUniformRange,
         .dst = passInfo.resolveTarget,
         .sampleFilter = needsScaling ? tex_copy_conv::SampleFilter::Linear : tex_copy_conv::SampleFilter::Nearest,
+        .domain = domain,
+        .toneRange = passInfo.resolveToneRange,
     };
+    // A raw copy only between equal formats in the same domain: an HDR display copy always
+    // post-tones, and RGBA16F never goes to an 8-bit texture as is.
+    const bool rawCopy = domain == tex_copy_conv::CopyDomain::Display ||
+                         (domain == tex_copy_conv::CopyDomain::Linear &&
+                          passInfo.copySourceTexture.GetFormat() == passInfo.resolveTarget->format);
     if (needsConversion) {
       tex_copy_conv::run(cmd, convReq);
-    } else if (needsScaling) {
+    } else if (needsScaling || !rawCopy) {
       tex_copy_conv::blit(cmd, convReq);
     } else {
       const webgpu::gpu_prof::Zone zone{cmd, "EFB copy"};
@@ -600,6 +609,10 @@ void render(wgpu::CommandEncoder& cmd, FramePacket& frame, RenderPass& passInfo,
                                      .uniformRange = passInfo.resolveMipsUniformRange,
                                      .dst = level(m),
                                      .sampleFilter = tex_copy_conv::SampleFilter::Linear,
+                                     // A linear copy's levels stay RGBA16F; display copies are 8-bit.
+                                     .domain = domain == tex_copy_conv::CopyDomain::Linear
+                                                   ? tex_copy_conv::CopyDomain::Linear
+                                                   : tex_copy_conv::CopyDomain::Display,
                                  });
       }
     }

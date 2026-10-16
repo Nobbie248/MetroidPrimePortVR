@@ -30,6 +30,9 @@ public:
                             const CColor& inactiveColor) override;
   void UpdateRightLogHighlight(bool active, int idx, const CColor& activeColor,
                                const CColor& inactiveColor) override;
+#ifdef TARGET_PC
+  void PortPointerInput(CFinalInput& input) override;
+#endif
 
   CInventoryScreen(const CStateManager& mgr, CGuiFrame& frame, const CStringTable& pauseStrg,
                    const CDependencyGroup& suitDgrp, const CDependencyGroup& ballDgrp);

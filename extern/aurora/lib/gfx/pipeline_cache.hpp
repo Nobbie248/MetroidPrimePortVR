@@ -34,6 +34,12 @@ enum class ShaderType : uint8_t {
   Water = 4,
 };
 
+enum class PipelinePriority {
+  Background, // loaded from cache
+  Normal,     // async skip draw
+  Blocking,   // block until compiled
+};
+
 using NewPipelineCallback = std::function<wgpu::RenderPipeline()>;
 
 void initialize_pipeline_cache();
@@ -47,6 +53,12 @@ void end_pipeline_frame();
 
 template <typename Config>
 PipelineRef find_pipeline(ShaderType type, const Config& config, NewPipelineCallback&& cb);
+
+// As above, with an explicit priority. A Blocking lookup takes a queued build to the front of the
+// queue and waits for it, so a caller that must not lose its draw (the GPU self-test) finds the
+// pipeline built when it returns; Normal is the default, async, build-ahead-a-frame behaviour.
+PipelineRef find_pipeline(ShaderType type, const gx::PipelineConfig& config, NewPipelineCallback&& cb,
+                          PipelinePriority priority);
 
 bool get_pipeline(PipelineRef ref, wgpu::RenderPipeline& pipeline);
 

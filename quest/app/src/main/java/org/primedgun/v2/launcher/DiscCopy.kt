@@ -23,7 +23,7 @@ import org.primedgun.v2.R
  * does for upstream's phone build, which copies picks to the same name.
  *
  * Before copying, the image's first bytes go through the PC launcher's disc check
- * (Metroid Prime USA 1.00 or PAL, revision 0, in a format the port reads), so a wrong pick costs
+ * (Metroid Prime USA 1.00/1.01/1.02 or PAL, revision 0, in a format the port reads), so a wrong pick costs
  * no copy. The copy goes to disc.iso.part and is renamed over disc.iso when complete,
  * so an interrupted copy never replaces a good disc, and the copy passes the game's own
  * check before it does. [DiscCopyService] runs it in the foreground; the state lives

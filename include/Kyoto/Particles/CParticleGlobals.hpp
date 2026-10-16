@@ -66,6 +66,23 @@ public:
   // PIRN is evaluating per-particle elements (null otherwise). IRND elements then give a value
   // fixed per (particle, element) instead of relying on being read at frame 0.
   static const CElementGen::CParticle* xPortIrndParticle;
+  // port-only: what Remastered's DFCS/DFCP (0x299134 / 0x299064) read from a swoosh's context: the
+  // swoosh's local->world transform (T(global) * R(global orientation) * S(global scale), the
+  // BuildTransform4f of its registers), the swoosh's local translation (DFCS) and the position of
+  // the segment being evaluated (DFCP, segment +0xc). Null outside a swoosh evaluation.
+  struct SPortSwooshEval {
+    CTransform4f worldFromLocal;
+    CVector3f systemLocal;
+    const CVector3f* segmentPos;
+  };
+  static const SPortSwooshEval* xPortSwooshEval;
+  struct PortSwooshEvalScope {
+    const SPortSwooshEval* prev;
+    explicit PortSwooshEvalScope(const SPortSwooshEval* eval) : prev(xPortSwooshEval) {
+      xPortSwooshEval = eval;
+    }
+    ~PortSwooshEvalScope() { xPortSwooshEval = prev; }
+  };
   // A deterministic uniform in [0, 1) from the particle's seed and the element's address, and the
   // raw 32-bit hash it comes from.
   static u32 PortIrndBits(const CElementGen::CParticle* particle, const void* element);

@@ -222,6 +222,13 @@ public:
 
   float GetUVTime() const { return x11c_uvT; }
 
+#ifdef TARGET_PC
+  // Port: how far the presented frame trails the last tick's water clocks
+  // ((1 - t) * that tick's dt), so draws can subtract it and ripples, UV
+  // scroll and turbulence move between ticks. 0 when not blending.
+  static float PortPresentLag();
+#endif
+
   static uint GetFreqTableIndex(float);
   static void SetupRippleMap();
   static CFluidProfile sProfile;

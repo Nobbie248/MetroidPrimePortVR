@@ -14,6 +14,7 @@
 #include "../gfx/stereo_multiview.hpp"
 #include "../gfx/stereo_shadow.hpp"
 #include "../gfx/shadow.hpp"
+#include "../gfx/actor_shadow.hpp"
 #include "../gfx/volfog.hpp"
 #include "../gfx/texture.hpp"
 #include "gx_fmt.hpp"
@@ -243,7 +244,15 @@ wgpu::PrimitiveState to_primitive_state(GXCullMode gx_cullMode) {
       .cullMode = cullMode,
   };
 }
+std::atomic_bool sPerPixelLighting{false};
+std::atomic_bool sBlockingPipelines{false};
 } // namespace
+
+void set_per_pixel_lighting(bool enabled) noexcept { sPerPixelLighting.store(enabled, std::memory_order_relaxed); }
+bool per_pixel_lighting() noexcept { return sPerPixelLighting.load(std::memory_order_relaxed); }
+
+void set_blocking_pipelines(bool enabled) noexcept { sBlockingPipelines.store(enabled, std::memory_order_relaxed); }
+bool blocking_pipelines() noexcept { return sBlockingPipelines.load(std::memory_order_relaxed); }
 
 void set_viewport_policy(AuroraViewportPolicy policy) noexcept {
   sPendingViewportPolicy.store(policy, std::memory_order_release);
@@ -371,26 +380,36 @@ wgpu::RenderPipeline build_pipeline(const PipelineConfig& config, ArrayRef<wgpu:
                                     wgpu::ShaderModule shader, const char* label) noexcept {
   ZoneScoped;
   if (config.shadowPass != 0) {
-    // The sun's shadow map: depth only, both faces, with a slope bias against acne.
+    // The sun's shadow map: depth only, culled as the draw is, with Remastered's shadow pass bias
+    // (2 units, slope 4, no clamp).
     const wgpu::DepthStencilState depthStencil{
         .format = gfx::shadow::MapFormat,
         .depthWriteEnabled = true,
         .depthCompare = wgpu::CompareFunction::Less,
         .depthBias = 2,
-        .depthBiasSlopeScale = 2.0f,
+        .depthBiasSlopeScale = 4.0f,
+    };
+    // Pass 2 alpha-tests (a Remastered cutout): its fragment stage samples the draw's own textures, so it
+    // takes the colour pass's plain texture layout (never the receiver one, which holds this map) and has no colour target.
+    const bool cut = config.shadowPass == 2;
+    const wgpu::FragmentState cutFragment{
+        .module = shader,
+        .entryPoint = "fs_shadow",
+        .targetCount = 0,
     };
     const wgpu::RenderPipelineDescriptor descriptor{
         .label = label,
-        .layout = sShadowPipelineLayout,
+        .layout = cut ? sPipelineLayout : sShadowPipelineLayout,
         .vertex =
             {
                 .module = shader,
-                .entryPoint = "vs_shadow",
+                .entryPoint = cut ? "vs_shadow_cut" : "vs_shadow",
                 .bufferCount = static_cast<uint32_t>(vtxBuffers.size()),
                 .buffers = vtxBuffers.data(),
             },
-        .primitive = to_primitive_state(GX_CULL_NONE),
+        .primitive = to_primitive_state(config.cullMode),
         .depthStencil = &depthStencil,
+        .fragment = cut ? &cutFragment : nullptr,
     };
     return g_device.CreateRenderPipeline(&descriptor);
   }
@@ -408,7 +427,8 @@ wgpu::RenderPipeline build_pipeline(const PipelineConfig& config, ArrayRef<wgpu:
   const auto blendState =
       to_blend_state(config.blendMode, config.blendFacSrc, config.blendFacDst, config.blendOp, config.dstAlpha);
   const std::array colorTargets{wgpu::ColorTargetState{
-      .format = g_graphicsConfig.surfaceConfiguration.format,
+      // The HDR scene's RGBA16F target is a different format from every other pass's.
+      .format = config.shaderConfig.sceneHdr ? webgpu::SceneHdrFormat : g_graphicsConfig.surfaceConfiguration.format,
       .blend = &blendState,
       .writeMask = to_write_mask(config.colorUpdate, config.alphaUpdate),
   }};
@@ -496,6 +516,9 @@ void populate_pipeline_config(PipelineConfig& config, GXPrimitive primitive, GXV
 
   const auto& vtxFmt = g_gxState.vtxFmts[fmt];
   config.shaderConfig = {};
+  // From the pass being recorded (the replayed FIFO's), so an offscreen pass or the next frame's
+  // LDR scene never takes an HDR pipeline.
+  config.shaderConfig.sceneHdr = gfx::scene_hdr_pass_active();
   config.shaderConfig.fogType = g_gxState.fog.type;
   config.shaderConfig.fogRangeEnabled = g_gxState.fog.rangeEnabled;
   config.shaderConfig.pbr = g_gxState.pbr;
@@ -608,6 +631,7 @@ void populate_pipeline_config(PipelineConfig& config, GXPrimitive primitive, GXV
       };
     }
   }
+  config.shaderConfig.perPixelLight = wants_per_pixel_light(config.shaderConfig);
   for (u8 i = 0; i < g_gxState.numTexGens; ++i) {
     config.shaderConfig.tcgs[i] = g_gxState.tcgs[i];
   }
@@ -634,6 +658,32 @@ void populate_pipeline_config(PipelineConfig& config, GXPrimitive primitive, GXV
   }
   config.shaderConfig.volFog = drawId ? VolFogNone : vol_fog_mode(depthOnly);
   config.shaderConfig.shadow = g_gxState.shadowCaster && g_gxState.shadowActive && config.shaderConfig.lineMode == 0;
+  if (g_gxState.actorDecal && config.shaderConfig.shadow && !drawId && !depthOnly) {
+    // Remastered's actor shadow decal: the receiver's geometry multiplies the frame by the shadow
+    // alone, so none of the draw's own shading, fog or PBR reaches the shader.
+    auto& sc = config.shaderConfig;
+    sc.actorDecal = 1;
+    sc.pbr = 0;
+    sc.pbrKind = 0;
+    sc.pbrBindPos = false;
+    sc.pbrBindLe = false;
+    sc.pbrLightmapAttr = GX_VA_NULL;
+    sc.sdf = 0;
+    sc.hudSample = 0;
+    sc.perPixelLight = 0;
+    sc.fogType = GX_FOG_NONE;
+    sc.fogRangeEnabled = false;
+    sc.volFog = VolFogNone;
+    sc.alphaCompare = {};
+    sc.numIndStages = 0;
+    sc.indStages = {};
+    for (auto& ts : sc.tevStages) {
+      ts = {};
+    }
+    sc.tevStageCount = 1;
+  } else if (g_gxState.actorDecal) {
+    config.shaderConfig.shadow = false;
+  }
   // Field by field: an aggregate assignment would copy the 2.7 KB shader config twice more on
   // every pipeline switch. Every field outside shaderConfig is written here.
   config.version = GXPipelineConfigVersion;
@@ -651,6 +701,18 @@ void populate_pipeline_config(PipelineConfig& config, GXPrimitive primitive, GXV
   config.shadowPass = 0;
   config.depthCompare = g_gxState.depthCompare;
   config.depthUpdate = g_gxState.depthUpdate && !depthEqual;
+  if (config.shaderConfig.actorDecal != 0) {
+    // Framebuffer *= the decal (DstColor, Zero), LEQUAL against the world's depth without writing,
+    // back faces culled; the pipeline state of Remastered's actor shadow draw.
+    config.blendMode = GX_BM_BLEND;
+    config.blendFacSrc = GX_BL_SRCCLR;
+    config.blendFacDst = GX_BL_ZERO;
+    config.depthFunc = GX_LEQUAL;
+    config.depthCompare = true;
+    config.depthUpdate = false;
+    // The receiver keeps its own cull (back faces for the world's geometry), as Remastered's
+    // decal draw does.
+  }
   config.alphaUpdate = g_gxState.alphaUpdate && !depthOnly;
   config.colorUpdate = g_gxState.colorUpdate && !depthOnly;
   static_assert(sizeof(PipelineConfig) == sizeof(ShaderConfig) + 13 * sizeof(uint32_t) + 4 * sizeof(bool),
@@ -710,7 +772,10 @@ gfx::BindGroupRef build_texture_bind_group(const ShaderInfo& info, const ViewFor
     textureEntries[kVolFogFroxelBinding].textureView = gfx::volfog::froxel_view().Get();
     textureEntries[kVolFogSamplerBinding].binding = kVolFogSamplerBinding;
     textureEntries[kVolFogSamplerBinding].sampler = gfx::volfog::sampler().Get();
-    if (info.shadowReceive) {
+    if (info.shadowReceive && info.actorDecal) {
+      textureEntries[kShadowMapBinding].textureView = gfx::actor_shadow::map_view().Get();
+      textureEntries[kShadowSamplerBinding].sampler = gfx::actor_shadow::sampler().Get();
+    } else if (info.shadowReceive) {
       textureEntries[kShadowMapBinding].textureView = gfx::shadow::map_view().Get();
       textureEntries[kShadowSamplerBinding].sampler = gfx::shadow::sampler().Get();
     }
@@ -1022,7 +1087,7 @@ void initialize() noexcept {
         .texture =
             {
                 .sampleType = wgpu::TextureSampleType::Depth,
-                .viewDimension = wgpu::TextureViewDimension::e2D,
+                .viewDimension = wgpu::TextureViewDimension::e2DArray,
             },
     };
     textureEntries[kShadowSamplerBinding] = {
@@ -1123,6 +1188,7 @@ void shutdown() noexcept {
   g_gxState.loadedTextures.fill({});
   g_gxState.loadedTluts.fill({});
   clear_copy_texture_cache();
+  g_gxState.copySceneLinear = false;
   texture::shutdown();
 }
 } // namespace aurora::gx

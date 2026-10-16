@@ -83,6 +83,8 @@ public:
   // LoadLight clears a slot it loads). A PBR draw lit by a room's baked light leaves them
   // out, as Remastered lights actors by the bake and runtime lights alone.
   static uint sPortAreaLights;
+  // Light slots the TEV fallback of a baked-lit PBR material leaves off its channel 0.
+  static uint sPortTevLightSkip;
   // Port: whether the material draws differently once its model's vertices are moved into
   // world space and drawn with an identity model matrix (port_room_geo.cpp's merged props):
   // reflections and UV animation mode 6 place the texture by the model matrix itself.

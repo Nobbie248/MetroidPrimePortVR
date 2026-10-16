@@ -20,6 +20,11 @@
 #include <dolphin/gx/GXAurora.h>
 #endif
 
+#ifdef TARGET_PC
+#include "MetroidPrime/Factories/CScannableObjectInfo.hpp"
+#include "port_debug.h"
+#endif
+
 static const char skDecoWidgetName[] = "basewidget_deco";
 static const char skBarDecoWidgetName[] = "basewidget_tickdeco0";
 static const char skPivotWidgetName[] = "basewidget_pivot";
@@ -120,6 +125,14 @@ void CHudDecoInterfaceCombat::Update(float dt, const CStateManager& mgr) {
       CSamusHud::BuildFinalCameraTransform(x4_rotation, x14_pivotPosition + x20_offset, x2c_camPos),
       x2c_camPos);
 }
+
+#ifdef TARGET_PC
+void CHudDecoInterfaceCombat::PortApplyHudLag() {
+  x6c_camera->SetHudO2WTransform(
+      CSamusHud::BuildFinalCameraTransform(x4_rotation, x14_pivotPosition + x20_offset, x2c_camPos),
+      x2c_camPos);
+}
+#endif
 
 void CHudDecoInterfaceCombat::UpdateCameraDebugSettings(float fov, float y, float z) {
   CGuiCamera::UCameraParms parms = x6c_camera->GetParms();
@@ -226,6 +239,16 @@ void CHudDecoInterfaceXRay::Update(float dt, const CStateManager& mgr) {
       CTransform4f(CMatrix3f::Scale(x4_seekerScale) * x3c_reticuleXf, x60_seekerPosition));
 }
 
+#ifdef TARGET_PC
+void CHudDecoInterfaceXRay::PortApplyHudLag() {
+  xa0_camera->SetHudO2WTransform(
+      CSamusHud::BuildFinalCameraTransform(x8_rotation, x18_pivotPosition + x24_offset, x30_camPos),
+      x30_camPos);
+  xa8_basewidget_seeker->SetO2PTransform(
+      CTransform4f(CMatrix3f::Scale(x4_seekerScale) * x3c_reticuleXf, x60_seekerPosition));
+}
+#endif
+
 void CHudDecoInterfaceXRay::UpdateCameraDebugSettings(float fov, float y, float z) {
   CGuiCamera::UCameraParms parms = xa0_camera->GetParms();
   parms.perspective.fov = fov;
@@ -302,6 +325,18 @@ CHudDecoInterfaceScan::CHudDecoInterfaceScan(CGuiFrame& hud)
                                              x24c_basewidget_leftside->RotateO2P(sidesPos));
   x250_basewidget_rightside->SetLocalPosition(x224_rightsidePosition -
                                               x250_basewidget_rightside->RotateO2P(sidesPos));
+#ifdef TARGET_PC
+  // Issue #56: on a wide screen the side panels and the scan images can be kept nearer the
+  // centre, out from under a phone's touch controls (setting scan_spread).
+  float (*const scanSpread)() = [] {
+    return static_cast< float >(PortDebug::ScanSpread()) / 100.f;
+  };
+  hud.SetSpreadWeightTree(x24c_basewidget_leftside, scanSpread);
+  hud.SetSpreadWeightTree(x250_basewidget_rightside, scanSpread);
+  for (int i = 0; i < 20; ++i) {
+    hud.SetSpreadWeightTree(hud.FindWidget(CScannableObjectInfo::GetImagePaneName(i)), scanSpread);
+  }
+#endif
   UpdateHudAlpha();
 }
 
@@ -423,6 +458,15 @@ void CHudDecoInterfaceScan::Update(float dt, const CStateManager& mgr) {
   x10_loadedScanHudFlat->Update(dt);
   UpdateScanDisplay(mgr, dt);
 }
+
+#ifdef TARGET_PC
+void CHudDecoInterfaceScan::PortApplyHudLag() {
+  x244_camera->SetHudO2WTransform(
+      CSamusHud::BuildFinalCameraTransform(x1e4_rotation, x1f4_pivotPosition + x200_offset,
+                                           x20c_camPos),
+      x20c_camPos);
+}
+#endif
 
 void CHudDecoInterfaceScan::Draw() const {
 #ifdef TARGET_PC
@@ -668,6 +712,15 @@ void CHudDecoInterfaceThermal::Update(float dt, const CStateManager& mgr) {
       x2c_camPos);
   x7c_basewidget_reticle->SetO2PTransform(CTransform4f(x38_reticuleXf, x5c_reticulePosition));
 }
+
+#ifdef TARGET_PC
+void CHudDecoInterfaceThermal::PortApplyHudLag() {
+  x74_camera->SetHudO2WTransform(
+      CSamusHud::BuildFinalCameraTransform(x4_rotation, x14_pivotPosition + x20_offset, x2c_camPos),
+      x2c_camPos);
+  x7c_basewidget_reticle->SetO2PTransform(CTransform4f(x38_reticuleXf, x5c_reticulePosition));
+}
+#endif
 
 void CHudDecoInterfaceThermal::UpdateCameraDebugSettings(float fov, float y, float z) {
   CGuiCamera::UCameraParms parms = x74_camera->GetParms();

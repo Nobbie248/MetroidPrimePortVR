@@ -1,0 +1,79 @@
+#ifndef _CPARTICLEELECTRIC2PORT
+#define _CPARTICLEELECTRIC2PORT
+
+#include <vector>
+
+#include "Kyoto/Graphics/CColor.hpp"
+#include "Kyoto/Math/CAABox.hpp"
+#include "Kyoto/Math/CTransform4f.hpp"
+#include "Kyoto/Math/CVector3f.hpp"
+#include "port_electric2_math.h"
+
+class CElectricDescription;
+
+// Remastered CParticleElectric2 (ELC2): camera-facing bolts baked into world space at creation
+// (CreateNewParticles 0xb76508), aged and re-evaluated per substep (UpdateElectricalEffects
+// 0xb757a4, UpdateBolt 0xb77638) and drawn as SIDE 2 ribbons (UpdateRenderData_Electric2
+// 0x2b8694). A CParticleElectric whose description carries the PEL2 marker owns one and
+// delegates its update, bounds and render to it.
+class CParticleElectric2Port {
+public:
+  // Per-call view of the owner's state.
+  struct Ctx {
+    CTransform4f xf = CTransform4f::Identity(); // global * local transform
+    CVector3f globalScale{1.f, 1.f, 1.f};
+    CVector3f localScale{1.f, 1.f, 1.f};
+    CColor modu = CColor::White();
+    const CVector3f* ipos = nullptr; // overrides (SetOverrideIPos etc.)
+    const CVector3f* ivel = nullptr;
+    const CVector3f* fpos = nullptr;
+    const CVector3f* fvel = nullptr;
+  };
+
+  explicit CParticleElectric2Port(const CElectricDescription& desc);
+
+  // One 1/60 s substep at `frame`: ages and updates the bolts, then (emitting) spawns new ones.
+  void Step(int frame, bool emitting, const Ctx& ctx);
+  // CreateNewParticles for `count` bolts, ignoring GRAT.
+  void Create(int frame, int count, const Ctx& ctx);
+
+  int BoltCount() const { return int(mBolts.size()); }
+  int LineCount() const;
+  int NodeCount() const { return mNodes; }
+  int PointCount() const;
+  int MaxBolts() const { return mMaxBolts; }
+  CAABox Bounds() const;
+  // Draws all bolts as ribbons; the caller has set the GX state.
+  void Render(int frame, const CTransform4f& view);
+
+  struct Bolt {
+    std::vector< std::vector< PortElectric2::V3 > > lines; // world space; [0] is the primary
+    int life = 1;
+    int startFrame = 0;
+    int endFrame = 1;
+    float leftRad = 0.f;
+    float rightRad = 0.f;
+    float color[4] = {1.f, 1.f, 1.f, 1.f};
+    float iten = 1.f;
+    float vpmt[4][4] = {};
+  };
+  const std::vector< Bolt >& Bolts() const { return mBolts; }
+
+private:
+  void CreateBolt(int frame, const Ctx& ctx);
+  void MakeBranches(const std::vector< PortElectric2::V3 >& parent, float amp, float ampd, int depth, int maxDepth,
+                    const PortElectric2::BoltParams& prm, std::vector< std::vector< PortElectric2::V3 > >& out,
+                    int frame);
+  void UpdateBolt(Bolt& bolt, int frame);
+
+  const CElectricDescription* mDesc;
+  PortElectric2::Rng mRng;
+  int mNodes = 8;
+  int mSide = 2;
+  int mMaxBolts = 1;
+  float mRem = 0.f;
+  CColor mModu = CColor::White();
+  std::vector< Bolt > mBolts;
+};
+
+#endif // _CPARTICLEELECTRIC2PORT

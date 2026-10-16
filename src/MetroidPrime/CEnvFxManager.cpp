@@ -38,8 +38,26 @@
 
 #include <float.h>
 
+#ifdef TARGET_PC
+#include "MetroidPrime/CActor.hpp"
+#include "port_debug.h"
+#endif
+
 static const float gkReal32Max = FLT_MAX;
 static float g_SnowForces[256][2];
+
+#ifdef TARGET_PC
+// Snow presentation smoothing for the grid being drawn: each flake is drawn
+// back * its last step behind its sim position (CEnvFxManager::Render).
+static float sPortSnowBack = 0.f;
+static const CVectorFixed8_8* sPortSnowSteps = nullptr;
+static int sPortSnowFirst = 0;
+
+static short PortStepBack(short v, short step) {
+  const float back = sPortSnowBack * static_cast< float >(step);
+  return static_cast< short >(v - static_cast< short >(back + (back >= 0.f ? 0.5f : -0.5f)));
+}
+#endif
 
 CEnvFxManagerGrid::CEnvFxManagerGrid(const CVector2i& position, const CVector2i& extent,
                                      const rstl::vector< CVectorFixed8_8 >& initialParticles,
@@ -67,7 +85,13 @@ CEnvFxManager::CEnvFxManager()
 , xb68_envRainSplashId(kInvalidUniqueId)
 , xb6a_rainSoundActive(false)
 , xb74_txtrSnowFlake(TLockedToken< CTexture >(gpSimplePool->GetObj("TXTR_SnowFlake")))
-, xc48_underwaterFlake(TLockedToken< CTexture >(gpSimplePool->GetObj("TXTR_UnderwaterFlake"))) {
+, xc48_underwaterFlake(TLockedToken< CTexture >(gpSimplePool->GetObj("TXTR_UnderwaterFlake")))
+#ifdef TARGET_PC
+, xPortStepGeneration(0)
+, xPortStepType(kEFX_None)
+, xPortSnowFirst(0)
+#endif
+{
   CRandom16 random(0);
   for (int i = 0; i < 8; ++i) {
     for (int j = 0; j < 8; ++j) {
@@ -137,6 +161,14 @@ void CEnvFxManagerGrid::RenderSnowParticles(const CTransform4f& camXf) {
   for (int i = particleCount - 1; i >= 0; --i) {
     CVectorFixed8_8 p = x1c_particles[i];
 #ifdef TARGET_PC
+    if (sPortSnowSteps != nullptr) {
+      // UpdateSnowParticles gives particle j force (first + size-1-j) & 0xff.
+      const CVectorFixed8_8& step =
+          sPortSnowSteps[(sPortSnowFirst + (particleCount - 1 - i)) & 0xff];
+      p.x = PortStepBack(p.x, step.x);
+      p.y = PortStepBack(p.y, step.y);
+      p.z = PortStepBack(p.z, step.z);
+    }
     if (vrBillboards) {
       RenderVrFlake(camXf, model, inverse, p, 0.2f);
       continue;
@@ -353,6 +385,24 @@ void CEnvFxManager::Update(float dt, CStateManager& mgr) {
 
     rstl::reserved_vector< CVectorFixed8_8, 256 > snowForces;
     CalculateSnowForces(zVec, snowForces, fxType, oopbtws, dt);
+#ifdef TARGET_PC
+    // Each particle's world step this tick: zVec only keeps the particles in
+    // place while the grid follows the camera in z.
+    xPortStepGeneration = CActor::PortTickGeneration();
+    xPortStepType = fxType;
+    xPortStep = CVectorFixed8_8();
+    xPortSnowSteps.clear();
+    xPortSnowFirst = static_cast< int >(x28_firstSnowForce);
+    if (fxType == kEFX_Rain) {
+      xPortStep.z = real_to_fixed8_8(-40.f * dt * oopbtws.GetZ());
+    } else if (fxType == kEFX_UnderwaterFlake) {
+      xPortStep.z = real_to_fixed8_8(0.5f * dt);
+    } else if (fxType == kEFX_Snow) {
+      for (int i = 0; i < snowForces.size(); ++i) {
+        xPortSnowSteps.push_back(snowForces[i] - zVec);
+      }
+    }
+#endif
 
     CTransform4f xf = GetParticleBoundsToWorldTransform();
     CTransform4f invXf = xf.GetInverse();
@@ -788,6 +838,28 @@ void CEnvFxManager::Render(const CStateManager& mgr) {
       CGraphics::SetCullMode(kCM_None);
       gpRender->SetDepthReadWrite(true, false);
       CTransform4f xf = GetParticleBoundsToWorldTransform();
+#ifdef TARGET_PC
+      // Between ticks, draw every particle 1 - t of its last step back, as
+      // particle generators are (docs/FRAME_INTERPOLATION.md). Rain and
+      // underwater flakes all move alike, so the grid frame moves instead.
+      sPortSnowSteps = nullptr;
+      {
+        const float t = CCameraManager::GetPresentationInterpolation();
+        if (t >= 0.f && t < 1.f && PortDebug::ParticleInterpolation() &&
+            xPortStepGeneration == CActor::PortTickGeneration() && xPortStepType == fxType) {
+          const float back = 1.f - t;
+          if (fxType == kEFX_Snow) {
+            if (xPortSnowSteps.size() == 256) {
+              sPortSnowBack = back;
+              sPortSnowSteps = xPortSnowSteps.data();
+              sPortSnowFirst = xPortSnowFirst;
+            }
+          } else {
+            xf = xf * CTransform4f::Translate(0.f, 0.f, -back * fixed8_8_to_real(xPortStep.z));
+          }
+        }
+      }
+#endif
       CTransform4f invXf = xf.GetInverse();
       CTransform4f camXf = mgr.GetCameraManager()->GetCurrentCameraTransform(mgr);
 #ifdef TARGET_PC
@@ -809,6 +881,9 @@ void CEnvFxManager::Render(const CStateManager& mgr) {
       for (int i = 0; i < x50_grids.size(); ++i) {
         x50_grids[i].Render(xf, invXf, camXf, x30_fxDensity, fxType);
       }
+#ifdef TARGET_PC
+      sPortSnowSteps = nullptr;
+#endif
       CGraphics::SetCullMode(kCM_Front);
       if (fxType == kEFX_UnderwaterFlake) {
         SetupDefaultTevSwapMode();

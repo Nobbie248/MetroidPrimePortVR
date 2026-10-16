@@ -78,6 +78,7 @@ public:
     xPortHdrR0 = r0;
     xPortHdrR1 = r1;
     xPortHdrFalloff = falloff;
+    xPortHdrHasBoundsRadius = false;
   }
   void ClearPortHdr() { xPortHdrR1 = 0.f; }
   bool HasPortHdr() const { return xPortHdrR1 > 0.f; }
@@ -86,6 +87,12 @@ public:
   float GetPortHdrR0() const { return xPortHdrR0; }
   float GetPortHdrR1() const { return xPortHdrR1; }
   EPortHdrFalloff GetPortHdrFalloff() const { return xPortHdrFalloff; }
+  // Opt-in bound for marked nested Remastered point lights. Ordinary HDR and GX
+  // lights keep CalculateLightRadius()'s existing behavior.
+  void SetPortHdrBoundsRadius(float radius) {
+    xPortHdrBoundsRadius = radius;
+    xPortHdrHasBoundsRadius = true;
+  }
 #endif
 
 private:
@@ -112,6 +119,8 @@ private:
   float xPortHdrR0 = 0.f;
   float xPortHdrR1 = 0.f;
   EPortHdrFalloff xPortHdrFalloff = kPHF_None;
+  float xPortHdrBoundsRadius = 0.f;
+  bool xPortHdrHasBoundsRadius = false;
 #endif
 };
 CHECK_SIZEOF(CLight, 0x50)

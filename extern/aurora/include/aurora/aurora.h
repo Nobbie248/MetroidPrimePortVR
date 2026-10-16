@@ -205,6 +205,13 @@ typedef struct {
   int32_t d3d12AdapterLuidHigh;
 
   /*
+   * Like frameBufferScale, for the array (storage) buffer alone: 8 MiB at 1. 0 follows
+   * frameBufferScale. Room geometry kept resident only sends the arrays that miss its
+   * region, but those can outgrow the vertex scale.
+   */
+  uint32_t frameStorageScale;
+
+  /*
    * MiB of the shared vertex, index and array buffers set aside for data kept across frames
    * (GXPortRetainResident), on top of what a frame holds. 0 sets none aside; the device's
    * limits may allow less.
@@ -327,6 +334,8 @@ void aurora_set_background_input(bool value);
 void aurora_set_resampler(AuroraSampler sampler);
 /** Sets MSAA samples (1 or 4) and max texture anisotropy (1-16); applied at the next frame start. */
 void aurora_set_graphics_quality(uint32_t msaa, uint16_t maxTextureAnisotropy);
+/** Evaluates GX lighting per pixel instead of per vertex (default off); lit pipelines rebuild on next use. */
+void aurora_set_per_pixel_lighting(bool enabled);
 /** Sets the clock timescale. Default 1.0f. 0.0f is paused. Range 0.0f-16.0f. */
 void aurora_set_timescale(float scale);
 
@@ -355,9 +364,10 @@ float aurora_get_timescale();
  * GPU self-test: renders known patterns offscreen through the game's GX path, reads them back and logs
  * "gpu selftest: <case>: PASS/FAIL" lines. Call inside a frame (after aurora_begin_frame, before the frame's
  * own draws); it changes GX state, so the caller must reset its cached state afterwards. Returns false if a
- * run is already pending or the test could not start. Results arrive a frame or two later. Pipelines compile
- * asynchronously and skip draws until ready, so call once with warmup (nothing logged), wait for
- * queuedPipelines to drain, then call again for the real run.
+ * run is already pending or the test could not start. Results arrive a frame or two later. Each case's
+ * pipeline is waited for (a blocking lookup, so a compile can delay the call), so no case's draw is
+ * skipped for a pipeline that is not ready: call once with warmup (nothing logged) to build and wait for
+ * the cases' pipelines, then call again for the real run.
  */
 bool aurora_gpu_selftest_run(bool warmup);
 bool aurora_gpu_selftest_pending();

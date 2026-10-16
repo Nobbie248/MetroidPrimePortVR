@@ -16,9 +16,11 @@
 
 #ifdef TARGET_PC
 #include "port_tick_pair.h"
+#include <memory>
 #endif
 
 class CElectricDescription;
+class CParticleElectric2Port;
 class CElementGen;
 class CParticleSwoosh;
 
@@ -167,12 +169,17 @@ private:
   // Presentation smoothing (particle_interpolation): the line transform the
   // last two ticks drew. Child swooshes and generators smooth themselves.
   PortTickPair< CTransform4f > xPortLineXf{CTransform4f::Identity()};
+  // Remastered ELC2 implementation, set when the description carries the PEL2 marker.
+  std::unique_ptr< CParticleElectric2Port > xPortElc2;
+  void PortElc2Step(bool emitting);
 #endif
 
   static ushort sSeed;
 };
+#ifndef TARGET_PC
 CHECK_SIZEOF(CParticleElectric, 0x458)
 NESTED_CHECK_SIZEOF(CParticleElectric, CLineManager, 0x40)
 NESTED_CHECK_SIZEOF(CParticleElectric, CParticleElectricManager, 0x18)
+#endif
 
 #endif // _CPARTICLEELECTRIC

@@ -28,6 +28,9 @@ public:
   EQuitAction Update(float dt);
   void Draw() const;
   void ProcessUserInput(const CFinalInput& input);
+#ifdef TARGET_PC
+  CGuiTableGroup* PortTable() const { return x14_tablegroup_quitgame; }
+#endif
 
 private:
   EQuitType x0_type;

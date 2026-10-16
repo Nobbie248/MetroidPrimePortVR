@@ -40,6 +40,8 @@ typedef struct {
 void aurora_get_texture_stats(AuroraTextureStats* out);
 // The AuroraConfig::frameBufferScale in use: the device may allow less than was asked for.
 uint32_t aurora_get_frame_buffer_scale();
+// The AuroraConfig::frameStorageScale in use (the array buffer's, in units of its 8 MiB at 1).
+uint32_t aurora_get_frame_storage_scale();
 // The MiB set aside for AuroraConfig::residentGeometryMiB: the device may allow less.
 uint32_t aurora_get_resident_geometry_mib();
 // The bytes of it in use, as of the last frame processed.

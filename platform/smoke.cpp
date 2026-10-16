@@ -739,7 +739,8 @@ void PortSmokeMouseAfterUpdate(CStateManager& mgr) {
     if (sMouseTicks >= 21 && sMouseTicks <= 31) sStrafedBeforeUI = true;
     if (sMouseTicks >= 391 && sMouseTicks <= 401) sStrafedAfterUI = true;
   }
-  MouseCheck(!PortDebug::MouseCrosshair() || player.IsCrosshairsOpen(), "mouse-aim crosshair was not requested");
+  MouseCheck(!PortDebug::AimCrosshair() || !player.MouseLookIsFree(mgr) || player.IsCrosshairsOpen(),
+             "mouse-aim crosshair was not requested");
   const CVector3f forward = mgr.GetCameraManager()->GetFirstPersonCamera()->GetGunFollowTransform().GetForward();
   const float yaw = PortDebug::AimYaw(), pitch = PortDebug::AimPitch();
   const CVector3f aim(-std::sin(yaw) * std::cos(pitch), std::cos(yaw) * std::cos(pitch), std::sin(pitch));

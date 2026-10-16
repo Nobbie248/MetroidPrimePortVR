@@ -400,12 +400,6 @@ static auto find_pending_pipeline(Queue& queue, PipelineRef hash) {
   return std::find_if(queue.begin(), queue.end(), [=](const PendingPipeline& pending) { return pending.hash == hash; });
 }
 
-enum class PipelinePriority {
-  Background, // loaded from cache
-  Normal,     // async skip draw
-  Blocking,   // block until compiled
-};
-
 static PendingPipeline* touch_pending_pipeline(PipelineRef hash, PipelinePriority priority) {
   auto priorityIt = find_pending_pipeline(g_pipelineQueue, hash);
   if (priorityIt != g_pipelineQueue.end()) {
@@ -1455,6 +1449,11 @@ PipelineRef find_pipeline(ShaderType type, const clear::PipelineConfig& config, 
 template <>
 PipelineRef find_pipeline(ShaderType type, const gx::PipelineConfig& config, NewPipelineCallback&& cb) {
   return find_pipeline_impl(type, config, std::move(cb));
+}
+
+PipelineRef find_pipeline(ShaderType type, const gx::PipelineConfig& config, NewPipelineCallback&& cb,
+                          PipelinePriority priority) {
+  return find_pipeline_impl(type, config, std::move(cb), priority);
 }
 
 bool touch_pipeline(PipelineRef ref) {

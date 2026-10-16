@@ -93,10 +93,15 @@ CStringTable::CStringTable(CInputStream& in) : x0_stringCount(0), x4_data(NULL) 
 
 #ifdef TARGET_PC
   // Every section is decoded, so a language change shows in tables that are
-  // already loaded. The first one listed is the fallback.
+  // already loaded. ENGL is the fallback, else the first one listed: some PAL
+  // tables (Chozo Lore scans) list FREN first.
   std::vector< int > order;
+  int native = 0;
   for (int i = 0; i < langCount; ++i) {
     order.push_back(i);
+    if (langOffsets[i].first == mCurrentLanguage && langOffsets[native].first != mCurrentLanguage) {
+      native = i;
+    }
   }
   std::stable_sort(order.begin(), order.end(), [&](int a, int b) {
     return langOffsets[a].second < langOffsets[b].second;
@@ -115,7 +120,7 @@ CStringTable::CStringTable(CInputStream& in) : x0_stringCount(0), x4_data(NULL) 
     rstl::vector< uchar > data(dataLen, uchar(0));
     in.ReadBytes(data.data(), dataLen);
     pos += sizeof(uint) + dataLen;
-    if (i == 0) {
+    if (i == native) {
       haveFirst = DecodeSection(data, x0_stringCount, mNativeStrings);
     } else {
       PortSection section;

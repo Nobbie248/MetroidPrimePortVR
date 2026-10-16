@@ -33,11 +33,11 @@ DiscInfo FromHeader(const uint8_t* header) {
   DiscInfo info;
   info.gameId.assign(reinterpret_cast<const char*>(header), 6);
   info.revision = header[7];
-  // PortDisc::Identify: USA (GM8E01) or PAL (GM8P01), disc 0; only revision 0
-  // of either is accepted (IsAccepted).
+  // Keep the launcher in step with PortDisc::IsAccepted: USA revisions 0-2,
+  // or PAL revision 0, on disc 0.
   if ((info.gameId != "GM8E01" && info.gameId != "GM8P01") || header[6] != 0) {
     info.check = DiscCheck::WrongGame;
-  } else if (header[7] != 0) {
+  } else if (info.gameId == "GM8E01" ? header[7] > 2 : header[7] != 0) {
     info.check = DiscCheck::WrongRevision;
   } else {
     info.check = DiscCheck::Ok;

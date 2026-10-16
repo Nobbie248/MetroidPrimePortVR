@@ -1690,22 +1690,27 @@ static void draw_box_or_model(const CAABox& aabb, const CModel* model, const CTr
 namespace {
 // The thermal blend samples a random main-memory address on GameCube to produce
 // noise. The port's renderer dereferences the texture source, so hand it a real
-// scratch buffer of noise instead of a fake address.
+// scratch buffer of noise instead of a fake address. The seed picks one of a few fixed frames:
+// new noise every frame is a new texture every frame, which the renderer keeps alive for
+// seconds (gigabytes of GPU memory within ten seconds, issue #95).
 void* ThermalNoiseTextureData(uint seed, int width, int height) {
+  const int kFrames = 8;
   const size_t bytes =
       static_cast< size_t >(((width + 7) & ~7) * ((height + 3) & ~3));
-  static std::vector< uchar > sNoise;
-  if (sNoise.size() < bytes) {
-    sNoise.resize(bytes);
+  static std::vector< uchar > sNoise[kFrames];
+  if (sNoise[0].size() != bytes) {
+    for (int f = 0; f < kFrames; ++f) {
+      sNoise[f].resize(bytes);
+      uint state = static_cast< uint >(f) * 0x9E3779B9u + 1u;
+      for (size_t i = 0; i < bytes; ++i) {
+        state ^= state << 13;
+        state ^= state >> 17;
+        state ^= state << 5;
+        sNoise[f][i] = static_cast< uchar >(state);
+      }
+    }
   }
-  uint state = seed | 1u;
-  for (size_t i = 0; i < bytes; ++i) {
-    state ^= state << 13;
-    state ^= state >> 17;
-    state ^= state << 5;
-    sNoise[i] = static_cast< uchar >(state);
-  }
-  return sNoise.data();
+  return sNoise[seed % kFrames].data();
 }
 } // namespace
 
@@ -1949,6 +1954,15 @@ void CCubeRenderer::ReallyRenderFogVolume(const CColor& color, const CAABox& aab
 
   int maxChunkW = 0x140;
   int maxChunkH = 0xe0;
+#ifdef TARGET_PC
+  // The GC tiles the fog into 320x224 chunks only because two chunk copies
+  // fit in the spare buffer. On PC each copy breaks the render pass (a full
+  // framebuffer store and reload, plus an MSAA resolve), so tiling made acid,
+  // lava and water fog cost ~8 pass breaks per volume per frame (issue #111).
+  // One chunk covering the viewport gives the same result with two copies.
+  maxChunkW = vpWidth;
+  maxChunkH = vpHeight;
+#endif
   int chunkH = maxChunkH;
   int chunkW = maxChunkW;
   int drawLeft = 0;

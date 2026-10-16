@@ -136,6 +136,11 @@ public:
   u8 xPortXfmd = kPortXfmdRetail;
   // port-only PIRN: a converted Remastered effect, whose nested IRND elements are stable per particle
   bool xPortIrnd = false;
+  // Exact-source nested Remastered point-light metadata (PHDR/PIR0/POR0). The
+  // radius elements are owned here and evaluated by the live generator.
+  bool xPortNestedHdrLight = false;
+  CRealElement* xPortNestedLightInnerRadius = nullptr;
+  CRealElement* xPortNestedLightOuterRadius = nullptr;
   // port-only PVRT: Remastered particle variables (names, types, defaults)
   std::unique_ptr< CPortVarTable > xPortVars;
   // port-only PFCM: each model particle is turned to face the camera before PMRT

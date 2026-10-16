@@ -205,6 +205,47 @@ CScriptDoor::EDoorOpenCondition CScriptDoor::GetDoorOpenCondition(CStateManager&
 
   CGameArea* area = mgr.World()->Area(connectedArea);
   if (!area->IsLoaded()) {
+#ifdef TARGET_PC
+    // Issue #88: a room stays loaded behind a door that closed because another
+    // door opened. Streaming a third room on top can fill the 1024-entry object
+    // list (PCA + Phazon Processing Center + Elite Quarters in backwards Lower
+    // Mines), and AllocateUniqueId then hangs in the error handler. Release
+    // those rooms first, as the doorway trigger's SetToZero would; TravelToArea
+    // deallocates them before it streams the new one. Only in PCA, the one room
+    // where this can happen, so every other door keeps the original behaviour.
+    const CAssetId kProcessingCenterAccess = 0xED6DE73B;
+    if (mgr.GetNextAreaId() == dock->GetAreaId() &&
+        mgr.GetWorld()->GetAreaAlways(dock->GetAreaId()).IGetAreaAssetId() ==
+            kProcessingCenterAccess) {
+      bool otherOpen = false;
+      CObjectList& doors = mgr.ObjectListById(kOL_PlatformAndDoor);
+      for (int i = doors.GetFirstObjectIndex(); i != -1; i = doors.GetNextObjectIndex(i)) {
+        const CScriptDoor* const door = TCastToConstPtr< CScriptDoor >(doors[i]);
+        if (!door || door == this || door->GetCurrentAreaId() != dock->GetAreaId()) {
+          continue;
+        }
+        CScriptDock* const other = TCastToPtr< CScriptDock >(mgr.ObjectById(door->mDockId));
+        if (!other || other == dock || other->GetAreaId() != dock->GetAreaId()) {
+          continue;
+        }
+        const IGameArea::Dock& otherDock =
+            mgr.GetWorld()->GetAreaAlways(other->GetAreaId()).GetDock(other->GetDockId());
+        const int ref = other->GetDockReference(mgr);
+        if (!otherDock.GetShouldLoadOther(ref) || otherDock.GetConnectedAreaId(ref) == connectedArea) {
+          continue;
+        }
+        if (door->mIsOpen || door->mWasOpen) {
+          otherOpen = true;
+        } else {
+          PortLogDoorEvent(GetUniqueId(), "released the room behind a closed door");
+          mgr.DeliverScriptMsg(other, GetUniqueId(), kSM_SetToZero);
+        }
+      }
+      if (otherOpen) {
+        return DOOR_WAIT("otherDoorFirst");
+      }
+    }
+#endif
     mgr.DeliverScriptMsg(dock, GetUniqueId(), kSM_SetToMax);
     return DOOR_WAIT("areaLoad");
   }
@@ -295,6 +336,17 @@ void CScriptDoor::OpenDoor(TUniqueId uid, CStateManager& mgr) {
     }
   }
 }
+
+#ifdef TARGET_PC
+void CScriptDoor::PortRestoreOpen(bool open) {
+  mIsOpen = open;
+  mWasOpen = open;
+  mConditionsMet = false;
+  mClosing = false;
+  mDoClose = false;
+  SetDoorAnimation(open ? kDAT_Open : kDAT_Close);
+}
+#endif
 
 void CScriptDoor::SetDoorAnimation(EDoorAnimType state) {
   mDoorState = state;

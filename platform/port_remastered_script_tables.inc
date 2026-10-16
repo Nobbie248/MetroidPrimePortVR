@@ -305,6 +305,7 @@ static const RemasteredScriptEvent kRemasteredScriptEvents[] = {
     {0xd898656d, 0xee441b1b, 1},  // Waypoint Arrived
     {0xdb389155, 0x01e6f2b3, 1},  // PlayerActorMP1 Arrived
     {0xdb389155, 0x5316c4ad, 7},  // PlayerActorMP1 MaxReached
+    {0xdcb49607, 0x049d7160, 23},  // DamageableTriggerMP1 InvulnDamage
     {0xdcb49607, 0x0991107c, 22},  // DamageableTriggerMP1 Damage
     {0xdcb49607, 0x0c8447a8, 14},  // DamageableTriggerMP1 Dead
     {0xdcb49607, 0xa8b512bb, 7},  // DamageableTriggerMP1 MaxReached

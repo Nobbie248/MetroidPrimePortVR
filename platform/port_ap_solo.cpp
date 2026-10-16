@@ -317,6 +317,14 @@ void Server::Handle(const PortJson::Value& packet) {
     }
     out += "}}";
     Queue(out);
+  } else if (command == "Set") {
+    // Only the client's room name is ever set (PortAp's RoomKey). A seed file
+    // is one room for good, so the name is fixed rather than stored.
+    const PortJson::Value* wantReply = packet.Find("want_reply");
+    if (wantReply != nullptr && wantReply->IsBool() && wantReply->AsBool())
+      Queue("{\"cmd\":\"SetReply\",\"key\":" + port::JsonQuote(packet.StringOr("key")) +
+            ",\"value\":\"solo\",\"original_value\":\"solo\",\"slot\":" + std::to_string(kSlot) +
+            "}");
   } else if (command == "GetDataPackage") {
     // The client has the built-in names for Metroid Prime already.
     Queue("{\"cmd\":\"DataPackage\",\"data\":{\"games\":{}}}");

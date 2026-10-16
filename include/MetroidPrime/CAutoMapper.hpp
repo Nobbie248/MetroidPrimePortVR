@@ -164,6 +164,12 @@ public:
                                                            const CQuaternion& rot, int area) const;
   void LeaveMapScreenState();
   void ProcessMapScreenInput(const CFinalInput& input, const CStateManager& mgr);
+#ifdef TARGET_PC
+  // Port: mouse and touch on the map screen (port_pointer_menu.h).
+  void PortPointerInput(CFinalInput& input, const CStateManager& mgr);
+  void PortRecordPointerHits(const CStateManager& mgr, const CTransform4f& planeXf,
+                             const CTransform4f& mapXf) const;
+#endif
   static CQuaternion GetMiniMapCameraOrientation(const CStateManager& stateMgr);
 #ifdef TARGET_PC
   // PortVr: the next Draws build the map as a 3D map held in the headset's view

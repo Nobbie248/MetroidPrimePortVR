@@ -2,6 +2,9 @@
 // bind group path the game uses, reads the pixels back and compares them with analytic expectations.
 // Written for driver bugs that only show on some GPUs (issues #7, #8): each case exercises one feature,
 // so a FAIL line names the broken part. Results are logged and kept for the debug UI.
+// Every case's pipeline is waited for (blocking lookups, see BlockingPipelines): without that, a case
+// whose pipeline happens to still be compiling reads back as "drew nothing" and the test reports a
+// device bug that is really the test's own race (issue #124).
 #include <aurora/aurora.h>
 #include <aurora/gfx.hpp>
 
@@ -55,6 +58,17 @@ struct CaseResult {
 };
 
 enum class Phase { Idle, Pending };
+
+// While this is alive, every draw's pipeline lookup waits for its pipeline (gx::set_blocking_pipelines),
+// so a case's draw is never skipped for a pipeline that has not finished compiling. A skipped draw
+// reads back as "the case drew nothing", which is what a device bug looks like too: the test is only
+// meaningful with this set (see aurora_gpu_selftest_run).
+struct BlockingPipelines {
+  BlockingPipelines() { gx::set_blocking_pipelines(true); }
+  ~BlockingPipelines() { gx::set_blocking_pipelines(false); }
+  BlockingPipelines(const BlockingPipelines&) = delete;
+  BlockingPipelines& operator=(const BlockingPipelines&) = delete;
+};
 
 struct State {
   std::mutex mutex;
@@ -683,6 +697,7 @@ bool aurora_gpu_selftest_run(bool warmup) {
 
   std::vector<CaseResult> results(CaseCount);
   std::vector<Image> expected(CaseCount);
+  const BlockingPipelines blockingPipelines;
   for (size_t i = 0; i < CaseCount; ++i) {
     const auto t0 = Clock::now();
     GXCreateFrameBuffer(Size, Size);

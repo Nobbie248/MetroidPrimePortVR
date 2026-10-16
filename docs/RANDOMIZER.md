@@ -92,10 +92,11 @@ the totem cinematic. Every totem lights (found artifacts) or shows its hint each
 time the room loads, and holding all twelve arms the cinematic's trigger, whose
 end still starts the Meta Ridley fight.
 
-The map and minimap show a plain white dot for every location not yet
-collected (`PortMapPickups`, `CMapWorld::DrawPortPickups`), as randomprime's do.
-It is always white, so the map never gives away what an item is. Normal games
-can turn it on too (`map_pickups`, see `docs/NATIVE_PORT.md`).
+With `map_pickups` set to All, the map and minimap show a plain white dot for
+every location not yet collected (`PortMapPickups`, `CMapWorld::DrawPortPickups`),
+as randomprime's do. It is always white, so the map never gives away what an
+item is. It is a setting like in normal games, off by default (modes: see
+`docs/SETTINGS.md`).
 
 Items are named after `CPlayerState::EItemType` without the `kIT_` prefix:
 `Missiles`, `EnergyTanks`, `MorphBall`, `PowerBombs`, `Newborn` (artifacts), and

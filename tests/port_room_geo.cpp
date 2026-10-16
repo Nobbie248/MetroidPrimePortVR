@@ -1,4 +1,5 @@
 #include "port_room_geo.h"
+#include "port_maya_spline.h"
 
 #include <cmath>
 #include <cstdio>
@@ -98,6 +99,24 @@ void TestVersion1() {
   Check(!PortRoomGeo::Parse(file, out, error), "unknown version rejected");
 }
 
+// A scaling joint's clip keeps its stretch through the file and rejects a truncated one.
+void TestAnimStretch() {
+  std::vector<PortRoomGeo::Instance> in;
+  in.push_back(MakeInstance(0x11111111, 1.f));
+  in[0].anim.emplace_back();
+  in[0].anim[0].fps = 30.f;
+  in[0].anim[0].keys = {0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 1, 0, 0, 1};
+  in[0].anim[0].stretch = {2, 0, 0, 0, 1, 0, 0, 0, 1, 1.5f, 0, 0.25f, 0, 0.5f, 0, 0, 0, 1};
+  std::vector<PortRoomGeo::Instance> out;
+  std::string error;
+  const std::vector<uint8_t> file = PortRoomGeo::Write(in);
+  Check(PortRoomGeo::Parse(file, out, error) && out.size() == 1 && out[0].anim.size() == 1 &&
+            out[0].anim[0].stretch == in[0].anim[0].stretch && out[0].anim[0].keys == in[0].anim[0].keys,
+        "stretch round trip");
+  std::vector<uint8_t> cut(file.begin(), file.end() - 4);
+  Check(!PortRoomGeo::Parse(cut, out, error), "truncated stretch rejected");
+}
+
 // The animation section, alone and after the script and glow sections.
 void TestAnim() {
   std::vector<PortRoomGeo::Instance> in;
@@ -175,7 +194,7 @@ void TestClips() {
   std::vector<PortRoomGeo::Instance> out;
   std::string error;
   const std::vector<uint8_t> file = PortRoomGeo::Write(in);
-  Check(file.size() > 8 && file[4] == 10, "version 10 written");
+  Check(file.size() > 8 && file[4] == 12, "version 12 written");
   Check(PortRoomGeo::Parse(file, out, error), "clips file parses");
   Check(out.size() == 2 && out[0].anim.empty() && !out[0].animOnShow && out[1].animOnShow &&
             out[1].anim.size() == 2 && out[1].anim[0].fps == 24.f && !out[1].anim[0].loop &&
@@ -289,6 +308,18 @@ void TestLightmap() {
   std::vector<uint8_t> bad = file;
   bad[4] = 9;
   Check(!PortRoomGeo::Parse(bad, out, error), "lightmap: section in a version 9 file rejected");
+
+  // A scale of 0 with an offset is a one-texel lookup (Remastered's props), kept on its own.
+  in[1].lightmap[2] = 0.f;
+  const std::vector<uint8_t> texel = PortRoomGeo::Write(in);
+  Check(texel.size() == plain + 8 + 24 && PortRoomGeo::Parse(texel, out, error) && out.size() == 2 &&
+            out[1].lightmap[0] == 0.25f && out[1].lightmap[1] == 0.5f && out[1].lightmap[2] == 0.f &&
+            PortRoomGeo::HasLightmapLookup(out[1].lightmap) && !PortRoomGeo::HasLightmapLookup(out[0].lightmap),
+        "lightmap: one-texel lookup round trip");
+  const float negative[3] = {0.25f, 0.5f, -1.f};
+  const float nan[3] = {0.25f, std::nanf(""), 0.125f};
+  Check(!PortRoomGeo::HasLightmapLookup(negative) && !PortRoomGeo::HasLightmapLookup(nan),
+        "lightmap: negative or non-finite lookups rejected");
 }
 
 // The glow section, alone and after the script section.
@@ -515,6 +546,108 @@ void TestLods() {
   bad[1].levels.clear();
   Check(!PortRoomGeo::ParseLods(PortRoomGeo::WriteLods(bad), out, error), "model without levels rejected");
 }
+void PutFloat(std::vector<uint8_t>& out, float value) {
+  uint32_t u;
+  std::memcpy(&u, &value, 4);
+  Put32(out, u);
+}
+
+// Ice Shorelines' waterfall spline: (0, -2) linear, (2, -0.13) and (12, -0.13) flat, (16.5, -2)
+// linear; constant before and after.
+std::vector<uint8_t> WaterfallSpline() {
+  const float knots[4][2] = {{0.f, -2.f}, {2.f, -0.13f}, {12.f, -0.13f}, {16.5f, -2.f}};
+  const uint8_t type[4] = {0, 1, 1, 0};
+  std::vector<uint8_t> out;
+  Put32(out, 4);
+  for (int i = 0; i < 4; ++i) {
+    PutFloat(out, knots[i][0]);
+    PutFloat(out, knots[i][1]);
+    out.push_back(type[i]);
+    out.push_back(type[i]);
+  }
+  PutFloat(out, -2.f);
+  PutFloat(out, 0.f);
+  out.push_back(0);
+  out.push_back(0);
+  out.push_back(0);
+  return out;
+}
+
+void TestSpline() {
+  const std::vector<uint8_t> bytes = WaterfallSpline();
+  PortMayaSpline spline;
+  size_t used = 0;
+  Check(spline.Load(bytes.data(), bytes.size(), &used) && used == bytes.size(), "spline loads");
+  const struct {
+    float t, v;
+  } expected[] = {{0.f, -2.f}, {1.f, -0.8312f}, {2.f, -0.13f}, {12.f, -0.13f}, {14.25f, -0.8312f}, {16.5f, -2.f}, {20.f, -2.f}};
+  for (const auto& e : expected) {
+    const float v = spline.Eval(e.t);
+    if (std::fabs(v - e.v) > 0.005f) {
+      std::fprintf(stderr, "t=%g: %g, expected %g\n", e.t, v, e.v);
+    }
+    Check(std::fabs(v - e.v) <= 0.005f, "spline value");
+  }
+}
+
+// A driver on an instance, written and read back; files without one, and the older ones, load.
+void TestDrivers() {
+  std::vector<PortRoomGeo::Instance> in;
+  in.push_back(MakeInstance(0x11111111, 1.f));
+  PortRoomGeo::Instance driven = MakeInstance(0x22222222, 2.f);
+  driven.active = false;
+  PortRoomGeo::Instance::Driver d;
+  d.slot = 3;
+  d.sender = 0x0c1a01b0;
+  d.state = 9;
+  d.delay = 1.25f;
+  d.spline = WaterfallSpline();
+  driven.drivers.push_back(d);
+  in.push_back(driven);
+  in.push_back(MakeInstance(0x33333333, 3.f));
+
+  std::vector<PortRoomGeo::Instance> out;
+  std::string error;
+  Check(PortRoomGeo::Parse(PortRoomGeo::Write(in), out, error), "driver file parses");
+  Check(out.size() == 3 && out[0].drivers.empty() && out[2].drivers.empty() && out[1].drivers.size() == 1,
+        "one driven instance");
+  if (out.size() == 3 && out[1].drivers.size() == 1) {
+    const PortRoomGeo::Instance::Driver& r = out[1].drivers[0];
+    Check(r.slot == 3 && r.sender == d.sender && r.state == 9 && r.delay == 1.25f && r.spline == d.spline,
+          "driver fields");
+    Check(!out[1].active && out[1].model == 0x22222222, "driven instance fields");
+  }
+
+  in[1].drivers.clear();
+  const std::vector<uint8_t> without = PortRoomGeo::Write(in);
+  Check(PortRoomGeo::Parse(without, out, error) && out.size() == 3 && out[1].drivers.empty(), "no drivers");
+  std::vector<uint8_t> with = PortRoomGeo::Write({in[0], driven});
+  Check(with.size() > PortRoomGeo::Write({in[0], in[1]}).size(), "the section is only written for drivers");
+
+  // A delay past the 16 bit field is clamped on write, not wrapped.
+  in[1].drivers.push_back(d);
+  in[1].drivers[0].delay = 1000.f;
+  Check(PortRoomGeo::Parse(PortRoomGeo::Write(in), out, error) && out[1].drivers.size() == 1 &&
+            std::fabs(out[1].drivers[0].delay - PortRoomGeo::kMaxDriverDelay) < 0.01f,
+        "an over-long delay clamps");
+  in[1].drivers.clear();
+
+  // A shown driven instance with no start (a save state reset the scripts) starts now; a started
+  // one keeps its start; a hidden one waits.
+  Check(PortRoomGeo::DriverStartAt(true, 1e300, 42.0) == 42.0, "shown without a start fades from now");
+  Check(PortRoomGeo::DriverStartAt(true, 40.0, 42.0) == 40.0, "a started driver keeps its start");
+  Check(PortRoomGeo::DriverStartAt(false, 1e300, 42.0) == 1e300, "a hidden one waits");
+
+  // A version 10 file (the version word 10, no WDRV) still loads.
+  std::vector<uint8_t> old = without;
+  old[4] = 10;
+  Check(PortRoomGeo::Parse(old, out, error) && out.size() == 3 && out[1].drivers.empty(), "version 10 loads");
+
+  // A damaged section is refused.
+  std::vector<uint8_t> bad = PortRoomGeo::Write({driven});
+  bad.resize(bad.size() - 3);
+  Check(!PortRoomGeo::Parse(bad, out, error), "truncated driver refused");
+}
 } // namespace
 
 int main() {
@@ -524,11 +657,14 @@ int main() {
   TestScript();
   TestGlow();
   TestAnim();
+  TestAnimStretch();
   TestClips();
   TestSky();
   TestHide();
   TestLightmap();
   TestLods();
+  TestSpline();
+  TestDrivers();
   uint32_t id = 0;
   Check(PortRoomGeo::ParseFileName("1a2B3c4D.ROOMGEO", id) && id == 0x1A2B3C4D, "file name");
   if (sFailures == 0) {

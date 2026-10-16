@@ -44,6 +44,11 @@ public:
                                     const CColor& inactiveColor) {}
   virtual void UpdateRightLogHighlight(bool active, int idx, const CColor& activeColor,
                                        const CColor& inactiveColor) {}
+#ifdef TARGET_PC
+  // Port: turns this frame's pointer input into presses on input (a copy that
+  // ProcessInput then gets), or acts on it directly.
+  virtual void PortPointerInput(CFinalInput& input);
+#endif
 
   CPauseScreenBase(const CStateManager& mgr, CGuiFrame& frame, const CStringTable& pauseStrg);
   bool ShouldExitPauseScreen() const;

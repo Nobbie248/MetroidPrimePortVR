@@ -2,10 +2,13 @@
 
 #include "port_remastered_effect_convert.h"
 
+#include <algorithm>
 #include <cstdio>
 #include <cstring>
 #include <map>
+#include <set>
 #include <string>
+#include <tuple>
 #include <vector>
 
 using namespace PortRemastered;
@@ -21,6 +24,9 @@ void Check(bool condition, const char* what) {
 }
 
 constexpr uint32_t kGenp = EffectFourCC("GENP");
+constexpr uint32_t kElsm = EffectFourCC("ELSM");
+constexpr uint32_t kSwsh = EffectFourCC("SWSH");
+constexpr uint32_t kSwhc = EffectFourCC("SWHC");
 constexpr uint32_t kMati = EffectFourCC("MATI");
 constexpr uint32_t kTxtr = EffectFourCC("TXTR");
 
@@ -30,10 +36,34 @@ void Put32(std::vector<uint8_t>& out, uint32_t value) {
   }
 }
 
+void Put64(std::vector<uint8_t>& out, uint64_t value) {
+  for (int i = 0; i < 8; ++i) {
+    out.push_back(uint8_t(value >> (i * 8)));
+  }
+}
+
+void Set32(std::vector<uint8_t>& out, size_t at, uint32_t value) {
+  for (int i = 0; i < 4; ++i) out.at(at + size_t(i)) = uint8_t(value >> (i * 8));
+}
+
+void Set64(std::vector<uint8_t>& out, size_t at, uint64_t value) {
+  for (int i = 0; i < 8; ++i) out.at(at + size_t(i)) = uint8_t(value >> (i * 8));
+}
+
+uint64_t Get64(const std::vector<uint8_t>& data, size_t at) {
+  uint64_t value = 0;
+  for (int i = 0; i < 8; ++i) value |= uint64_t(data.at(at + size_t(i))) << (i * 8);
+  return value;
+}
+
 void PutFourCC(std::vector<uint8_t>& out, const char* text) {
   for (int i = 3; i >= 0; --i) {
     out.push_back(uint8_t(text[i]));
   }
+}
+
+void PutRawFourCC(std::vector<uint8_t>& out, const char* text) {
+  out.insert(out.end(), text, text + 4);
 }
 
 void PutProperty(std::vector<uint8_t>& out, const char* name, uint8_t tag) {
@@ -45,6 +75,137 @@ void PutGenerator(std::vector<uint8_t>& out, bool root) {
   PutFourCC(out, "GPSM");
   out.resize(out.size() + 17);
   Put32(out, root ? 1 : 0);
+}
+
+void PutGuid(std::vector<uint8_t>& out, const EffectGuid& id);
+EffectGuid Fresh(uint8_t seed);
+
+std::vector<uint8_t> MakeChildForm(const char* form) {
+  std::vector<uint8_t> out(0x3c, 0);
+  std::memcpy(out.data(), "RFRM", 4);
+  std::memcpy(out.data() + 0x14, form, 4);
+  Set32(out, 24, 61);
+  Set32(out, 28, 62);
+  std::memcpy(out.data() + 0x20, "DESC", 4);
+  Set32(out, 44, 1);
+  std::memcpy(out.data() + 0x38, "\x19\x6e\x01\x00", 4);
+  PutFourCC(out, form);
+  out.resize(0x3c + 21, 0);
+  return out;
+}
+
+void FinishChildForm(std::vector<uint8_t>& out) {
+  Set64(out, 4, out.size() - 32);
+  Set64(out, 36, out.size() - 56);
+}
+
+void AppendExtractedFoot(std::vector<uint8_t>& out) {
+  const size_t start = out.size();
+  out.resize(start + 32, 0);
+  std::memcpy(out.data() + start, "RFRM", 4);
+  std::memcpy(out.data() + start + 20, "FOOT", 4);
+  Set32(out, start + 24, 1);
+  Set32(out, start + 28, 1);
+  const auto appendChunk = [&](const char* id, size_t payloadSize) {
+    PutRawFourCC(out, id);
+    Put64(out, payloadSize);
+    Put32(out, 0);
+    Put64(out, 0);
+    out.resize(out.size() + payloadSize, 0);
+  };
+  appendChunk("AINF", 28);
+  appendChunk("META", 8);
+  Set64(out, start + 4, out.size() - start - 32);
+}
+
+std::vector<uint8_t> MakeElectric(const EffectGuid& swoosh, int references = 1) {
+  std::vector<uint8_t> out = MakeChildForm("ELSM");
+  for (int i = 0; i < references; ++i) {
+    PutProperty(out, "SSWH", 0);
+    PutGuid(out, swoosh);
+  }
+  PutProperty(out, "_END", 4);
+  FinishChildForm(out);
+  return out;
+}
+
+std::vector<uint8_t> MakeElectricRefs(const std::vector<EffectGuid>& swooshes) {
+  std::vector<uint8_t> out = MakeChildForm("ELSM");
+  for (const EffectGuid& swoosh : swooshes) {
+    PutProperty(out, "SSWH", 0);
+    PutGuid(out, swoosh);
+  }
+  PutProperty(out, "_END", 4);
+  FinishChildForm(out);
+  return out;
+}
+
+std::vector<uint8_t> MakeSwoosh() {
+  std::vector<uint8_t> out = MakeChildForm("SWSH");
+  PutProperty(out, "LENG", 1);
+  PutFourCC(out, "CNST");
+  Put32(out, 1);
+  PutProperty(out, "_END", 4);
+  FinishChildForm(out);
+  AppendExtractedFoot(out);
+  return out;
+}
+
+std::vector<uint8_t> MakeSwooshWithSswh(const EffectGuid& nestedSwoosh) {
+  std::vector<uint8_t> out = MakeChildForm("SWSH");
+  PutProperty(out, "LENG", 1);
+  PutFourCC(out, "CNST");
+  Put32(out, 1);
+  PutProperty(out, "SSWH", 0);
+  PutGuid(out, nestedSwoosh);
+  PutProperty(out, "_END", 4);
+  FinishChildForm(out);
+  AppendExtractedFoot(out);
+  return out;
+}
+
+std::vector<uint8_t> MakeSwooshWithTrailingPayload(const std::vector<uint8_t>& payload) {
+  std::vector<uint8_t> out = MakeSwoosh();
+  const size_t formEnd = 32 + size_t(Get64(out, 4));
+  out.resize(formEnd);
+  out.insert(out.end(), payload.begin(), payload.end());
+  FinishChildForm(out);
+  AppendExtractedFoot(out);
+  return out;
+}
+
+std::vector<uint8_t> MakeGeneratorWithEmbeddedSwoosh(const EffectGuid& child) {
+  std::vector<uint8_t> out(0x3c, 0);
+  std::memcpy(out.data(), "RFRM", 4);
+  std::memcpy(out.data() + 0x14, "GENP", 4);
+  PutGenerator(out, true);
+  PutProperty(out, "SSWH", 0);
+  PutGuid(out, child);
+  PutProperty(out, "_END", 4);
+  Put32(out, 1);
+  PutGuid(out, child);
+  PutFourCC(out, "SWSH");
+  out.resize(out.size() + 17, 0);
+  PutProperty(out, "LENG", 1);
+  PutFourCC(out, "CNST");
+  Put32(out, 1);
+  PutProperty(out, "_END", 4);
+  return out;
+}
+
+std::vector<uint8_t> MakeGeneratorWithWrongSwooshChild(const EffectGuid& child) {
+  std::vector<uint8_t> out(0x3c, 0);
+  std::memcpy(out.data(), "RFRM", 4);
+  std::memcpy(out.data() + 0x14, "GENP", 4);
+  PutGenerator(out, true);
+  PutProperty(out, "SSWH", 0);
+  PutGuid(out, child);
+  PutProperty(out, "_END", 4);
+  Put32(out, 1);
+  PutGuid(out, child);
+  PutGenerator(out, false);
+  PutProperty(out, "_END", 4);
+  return out;
 }
 
 void PutGuid(std::vector<uint8_t>& out, const EffectGuid& id) { out.insert(out.end(), id.begin(), id.end()); }
@@ -77,6 +238,12 @@ EffectGuid Fresh(uint8_t seed) {
 }
 
 uint32_t Be32(const uint8_t* p) { return uint32_t(p[0]) << 24 | uint32_t(p[1]) << 16 | uint32_t(p[2]) << 8 | p[3]; }
+
+std::string HexId(uint32_t id) {
+  char text[9];
+  std::snprintf(text, sizeof(text), "%08X", id);
+  return text;
+}
 
 // An effect carried over from retail PART 0x00001234: an embedded child it
 // spawns through ICTS, and a material instance whose texture is Remastered's own.
@@ -206,6 +373,421 @@ void TestImport() {
   Check(txtr.size() > 12 && Be32(txtr.data()) == 9 && (txtr[4] << 8 | txtr[5]) == 64 && (txtr[6] << 8 | txtr[7]) == 64,
         "the texture's TXTR is an RGBA8 stub of 64");
 }
+
+struct ExternalRun {
+  EffectImportResult result;
+  std::map<std::string, std::vector<uint8_t>> written;
+  std::vector<EffectReportRow> rows;
+  int childReads = 0;
+  int childWriteAttempts = 0;
+};
+
+ExternalRun RunExternal(const std::vector<uint32_t>& retailIds, const EffectGuid& storedSwoosh, uint32_t childType,
+                        const std::vector<uint8_t>& childData, int references = 1, bool failSwhcWrite = false,
+                        const std::vector<uint32_t>& extraRetailIds = {}, bool failChildRead = false) {
+  std::map<EffectGuid, std::vector<uint8_t>> parents;
+  std::map<EffectGuid, uint32_t> parentRetail;
+  for (uint32_t retail : retailIds) {
+    const EffectGuid id = Swap(Legacy(retail));
+    parents[id] = MakeElectric(storedSwoosh, references);
+    parentRetail[id] = retail;
+  }
+  const EffectGuid childPak = Swap(storedSwoosh);
+  std::set<uint32_t> taken(retailIds.begin(), retailIds.end());
+  taken.insert(extraRetailIds.begin(), extraRetailIds.end());
+  bool forceCollision = true;
+  ExternalRun out;
+  EffectImportIO io;
+  for (const auto& [id, bytes] : parents) {
+    (void)bytes;
+    io.effects.push_back(id);
+  }
+  io.read = [&](uint32_t type, const EffectGuid& id, std::vector<uint8_t>& data, std::string& error) {
+    if (type == kElsm && parents.count(id) != 0) {
+      data = parents.at(id);
+      return true;
+    }
+    if (type == kSwsh && id == childPak) {
+      ++out.childReads;
+      if (failChildRead) {
+        error = "fixture read failure";
+        return false;
+      }
+      data = childData;
+      return true;
+    }
+    error = "not in the fixture";
+    return false;
+  };
+  io.typeOf = [&](const EffectGuid& id) -> uint32_t {
+    if (parentRetail.count(id) != 0) return kElsm;
+    return id == childPak ? childType : 0;
+  };
+  io.retailId = [&](uint32_t id) { return taken.count(id) != 0; };
+  io.freshId = [&](uint32_t seed) {
+    uint32_t id = seed;
+    if (forceCollision) {
+      // Mirror the production allocator's reserved-id handling on the first
+      // external child, then keep every generated id unique in this import.
+      taken.insert(id);
+      forceCollision = false;
+    }
+    while (id == 0 || id == 0xFFFFFFFFu || taken.count(id) != 0) ++id;
+    taken.insert(id);
+    return id;
+  };
+  io.write = [&](const std::string& name, const std::vector<uint8_t>& data) {
+    if (name.size() >= 5 && name.substr(name.size() - 5) == ".SWHC") {
+      ++out.childWriteAttempts;
+      if (failSwhcWrite) return false;
+    }
+    out.written[name] = data;
+    return true;
+  };
+  io.report = [&](const EffectReportRow& row) { out.rows.push_back(row); };
+  out.result = ImportEffects(io);
+  return out;
+}
+
+ExternalRun RunGenerator(uint32_t retail, const std::vector<uint8_t>& source) {
+  const EffectGuid parent = Swap(Legacy(retail));
+  ExternalRun out;
+  EffectImportIO io;
+  io.effects = {parent};
+  io.read = [&](uint32_t type, const EffectGuid& id, std::vector<uint8_t>& data, std::string& error) {
+    if (type == kGenp && id == parent) {
+      data = source;
+      return true;
+    }
+    error = "not in the fixture";
+    return false;
+  };
+  io.typeOf = [&](const EffectGuid& id) { return id == parent ? kGenp : 0; };
+  io.retailId = [&](uint32_t id) { return id == retail; };
+  io.freshId = [](uint32_t seed) { return seed == 0 ? 1u : seed; };
+  io.write = [&](const std::string& name, const std::vector<uint8_t>& data) {
+    out.written[name] = data;
+    return true;
+  };
+  io.report = [&](const EffectReportRow& row) { out.rows.push_back(row); };
+  out.result = ImportEffects(io);
+  return out;
+}
+
+bool SwooshIdInElectric(const std::vector<uint8_t>& data, uint32_t& id) {
+  std::vector<RetailPartProperty> properties;
+  std::string error;
+  if (!SplitRetailEffect(EffectFourCC("ELSC"), data.data(), data.size(), properties, error)) return false;
+  for (const RetailPartProperty& property : properties) {
+    if (property.fourcc == EffectFourCC("SSWH") && property.value.size() == 8) {
+      id = Be32(property.value.data() + 4);
+      return true;
+    }
+  }
+  return false;
+}
+
+void TestExternalSwoosh() {
+  const EffectGuid storedSwoosh = Fresh(0x32);
+  const std::vector<uint32_t> parents = {0x1234, 0x2345};
+  const std::vector<uint8_t> source = MakeSwoosh();
+  EffectNode sourceTree;
+  std::string sourceError;
+  Check(ParseEffect(source.data(), source.size(), sourceTree, sourceError) && sourceTree.form == kSwsh &&
+            sourceTree.children.empty(),
+        "a production-shaped standalone SWSH with the extracted FOOT framing parses without child-list support");
+  const ExternalRun first = RunExternal(parents, storedSwoosh, kSwsh, source);
+  const ExternalRun again = RunExternal(parents, storedSwoosh, kSwsh, source);
+  Check(first.result.candidates == 2 && first.result.written == 2 && first.result.failed == 0,
+        "both ELSM parents import with their external swoosh");
+  Check(first.childReads == 2 && first.childWriteAttempts == 2, "each parent converts and writes one SWHC");
+  Check(first.written.size() == 4 && first.written.count("00001234.ELSC") && first.written.count("00002345.ELSC"),
+        "both ELSC roots and two external SWHCs are emitted");
+  std::vector<uint32_t> swooshIds;
+  for (uint32_t retail : parents) {
+    const std::string rootName = retail == 0x1234 ? "00001234.ELSC" : "00002345.ELSC";
+    uint32_t id = 0;
+    Check(SwooshIdInElectric(first.written.at(rootName), id), "converted ELSC retains its SSWH property");
+    swooshIds.push_back(id);
+    const std::string childName = HexId(id) + ".SWHC";
+    Check(first.written.count(childName) == 1, "the ELSC SSWH id has a corresponding SWHC file");
+    std::vector<RetailPartProperty> properties;
+    std::string error;
+    Check(SplitRetailEffect(kSwhc, first.written.at(childName).data(), first.written.at(childName).size(), properties,
+                            error),
+          "the external child is a valid converted SWHC");
+  }
+  Check(swooshIds.size() == 2 && swooshIds[0] != swooshIds[1],
+        "the same external child gets parent-specific ids without colliding with retail roots");
+  Check(first.written == again.written, "external SWHC ids and output are deterministic across imports");
+  Check(first.rows.size() == 2 && first.rows[0].kinds.find("SWHC:1") != std::string::npos,
+        "the effects report accounts for the external SWHC");
+
+  const ExternalRun duplicate = RunExternal({0x1234}, storedSwoosh, kSwsh, source, 2);
+  Check(duplicate.result.written == 1 && duplicate.result.failed == 0 && duplicate.childReads == 1 &&
+            duplicate.childWriteAttempts == 1,
+        "duplicate SSWH references deduplicate conversion and output within their parent");
+
+  const EffectGuid carriedSwoosh = Legacy(0x5678);
+  const ExternalRun carried = RunExternal({0x1234}, carriedSwoosh, kSwsh, {}, 1, false, {0x5678});
+  uint32_t carriedId = 0;
+  Check(carried.result.written == 1 && carried.childReads == 0 && carried.childWriteAttempts == 0 &&
+            carried.written.count("00005678.SWHC") == 0 &&
+            SwooshIdInElectric(carried.written.at("00001234.ELSC"), carriedId) && carriedId == 0x5678,
+        "a carried-over SWHC keeps precedence over the external lookup");
+}
+
+void TestExternalSwooshFailures() {
+  const EffectGuid storedSwoosh = Fresh(0x35);
+  for (const auto& [type, data, reason] : std::vector<std::tuple<uint32_t, std::vector<uint8_t>, const char*>>{
+           {0, MakeSwoosh(), "is missing"}, {kMati, MakeSwoosh(), "has type MATI"},
+           {kSwsh, std::vector<uint8_t>{'R', 'F', 'R', 'M'}, "parse"},
+           {kSwsh, MakeElectric(EffectGuid{}), "expected SWSH"}}) {
+    const ExternalRun failed = RunExternal({0x1234}, storedSwoosh, type, data);
+    Check(failed.result.written == 0 && failed.result.failed == 1 && failed.written.count("00001234.ELSC") == 0,
+          "missing, wrong-type, and truncated external children fail closed");
+    Check(failed.rows.size() == 1 && failed.rows[0].result == "failed" &&
+              failed.rows[0].reason.find(reason) != std::string::npos,
+          "external dependency failure has a clear report reason");
+  }
+
+  const ExternalRun failedWrite = RunExternal({0x1234}, storedSwoosh, kSwsh, MakeSwoosh(), 2, true);
+  Check(failedWrite.result.failed == 1 && failedWrite.childWriteAttempts == 1 &&
+            failedWrite.written.count("00001234.ELSC") == 0,
+        "a failed child write is not retried and never leaves a parent ELSC reference");
+
+  const ExternalRun failedRead = RunExternal({0x1234}, storedSwoosh, kSwsh, MakeSwoosh(), 1, false, {}, true);
+  Check(failedRead.result.failed == 1 && failedRead.written.count("00001234.ELSC") == 0 &&
+            failedRead.rows[0].reason.find("read failed") != std::string::npos,
+        "a failed source read has a distinct report and emits no parent ELSC");
+
+  for (const std::vector<uint8_t>& trailing :
+       std::vector<std::vector<uint8_t>>{{0x01, 0x00, 0x00, 0x00},
+                                         {0x01, 0x00, 0x00, 0x00, 0xaa, 0xbb, 0xcc, 0xdd,
+                                          'E', 'P', 'O', 'N'}}) {
+    const ExternalRun malformed =
+        RunExternal({0x1234}, storedSwoosh, kSwsh, MakeSwooshWithTrailingPayload(trailing));
+    Check(malformed.result.failed == 1 && malformed.written.count("00001234.ELSC") == 0 &&
+              malformed.childWriteAttempts == 0 && malformed.rows.size() == 1 &&
+              malformed.rows[0].reason.find("unparsed dependency or trailing payload") != std::string::npos,
+          "truncated or unrecognized trailing child-table payload fails before parent or child output");
+  }
+  std::vector<uint8_t> fakeFoot = MakeSwoosh();
+  fakeFoot.push_back(0xff);
+  const ExternalRun invalidFoot = RunExternal({0x1234}, storedSwoosh, kSwsh, fakeFoot);
+  Check(invalidFoot.result.failed == 1 && invalidFoot.written.count("00001234.ELSC") == 0 &&
+            invalidFoot.childWriteAttempts == 0 &&
+            invalidFoot.rows[0].reason.find("bounded extracted FOOT") != std::string::npos,
+        "arbitrary bytes after an otherwise valid extracted FOOT are not accepted as footer data");
+
+  std::vector<uint8_t> legacyWithTrailing = MakeElectric(EffectGuid{});
+  legacyWithTrailing.insert(legacyWithTrailing.end(), {0xde, 0xad, 0xbe, 0xef});
+  EffectNode legacyTree;
+  std::string legacyError;
+  Check(ParseEffect(legacyWithTrailing.data(), legacyWithTrailing.size(), legacyTree, legacyError) &&
+            legacyTree.form == kElsm,
+        "the legacy non-external-SSWH ELSM parser still accepts its established trailing data");
+
+  const EffectGuid nestedSwoosh = Fresh(0x78);
+  const std::vector<uint8_t> nestedSource = MakeSwooshWithSswh(nestedSwoosh);
+  EffectNode nestedTree;
+  std::string nestedParseError;
+  Check(ParseEffect(nestedSource.data(), nestedSource.size(), nestedTree, nestedParseError) &&
+            nestedTree.children.empty() &&
+            std::any_of(nestedTree.properties.begin(), nestedTree.properties.end(),
+                        [](const EffectProperty& property) { return property.fourcc == EffectFourCC("SSWH"); }),
+        "an SWSH's own SSWH dependency parses as a property, without synthetic descendant support");
+  const ExternalRun nested = RunExternal({0x1234}, storedSwoosh, kSwsh, nestedSource);
+  Check(nested.result.failed == 1 && nested.written.count("00001234.ELSC") == 0 &&
+            nested.childWriteAttempts == 0 && nested.rows.size() == 1 &&
+            nested.rows[0].reason.find("nested SSWH") != std::string::npos,
+        "an unsupported nested SSWH dependency rejects the parent before any child or root is written");
+
+  const EffectGuid mismatchedChild = Fresh(0x79);
+  const ExternalRun mismatch = RunGenerator(0x1234, MakeGeneratorWithWrongSwooshChild(mismatchedChild));
+  Check(mismatch.result.failed == 1 && mismatch.result.written == 0 && mismatch.written.empty() &&
+            mismatch.rows.size() == 1 &&
+            mismatch.rows[0].reason.find("conflicts with embedded PART") != std::string::npos,
+        "a parent SSWH that aliases an embedded non-SWHC child fails closed without writing the parent");
+
+  const EffectGuid parentId = Fresh(0x42);
+  const EffectGuid selfReference = Swap(parentId);
+  std::vector<EffectReportRow> cycleRows;
+  EffectImportIO cycleIO;
+  cycleIO.effects = {parentId};
+  cycleIO.pairings = {{parentId, 0x1234, "fixture"}};
+  cycleIO.read = [&](uint32_t type, const EffectGuid& id, std::vector<uint8_t>& data, std::string& error) {
+    if (type == kElsm && id == parentId) {
+      data = MakeElectric(selfReference);
+      return true;
+    }
+    error = "unexpected dependency read";
+    return false;
+  };
+  cycleIO.typeOf = [&](const EffectGuid& id) { return id == parentId ? kElsm : 0; };
+  cycleIO.retailId = [](uint32_t id) { return id == 0x1234; };
+  cycleIO.freshId = [](uint32_t seed) { return seed == 0 ? 1u : seed; };
+  cycleIO.write = [](const std::string&, const std::vector<uint8_t>&) { return true; };
+  cycleIO.report = [&](const EffectReportRow& row) { cycleRows.push_back(row); };
+  const EffectImportResult cycle = ImportEffects(cycleIO);
+  Check(cycle.failed == 1 && cycle.written == 0 && cycleRows.size() == 1 &&
+            cycleRows[0].reason.find("cycle") != std::string::npos,
+        "a self-referential SSWH dependency is rejected before reading or writing it");
+
+  std::vector<EffectGuid> dependencies;
+  std::map<EffectGuid, std::vector<uint8_t>> dependencyData;
+  std::map<EffectGuid, uint32_t> dependencyTypes;
+  for (uint8_t i = 0; i < 17; ++i) {
+    const EffectGuid stored = Fresh(uint8_t(0x70 + i));
+    dependencies.push_back(stored);
+    dependencyData[Swap(stored)] = MakeSwoosh();
+    dependencyTypes[Swap(stored)] = kSwsh;
+  }
+  const EffectGuid boundedParent = Swap(Legacy(0x3456));
+  const std::vector<uint8_t> boundedData = MakeElectricRefs(dependencies);
+  int boundedWrites = 0;
+  EffectImportIO boundedIO;
+  boundedIO.effects = {boundedParent};
+  boundedIO.read = [&](uint32_t type, const EffectGuid& id, std::vector<uint8_t>& data, std::string& error) {
+    if (type == kElsm && id == boundedParent) {
+      data = boundedData;
+      return true;
+    }
+    if (type == kSwsh && dependencyData.count(id) != 0) {
+      data = dependencyData.at(id);
+      return true;
+    }
+    error = "unexpected dependency";
+    return false;
+  };
+  boundedIO.typeOf = [&](const EffectGuid& id) {
+    return id == boundedParent ? kElsm : dependencyTypes.count(id) ? dependencyTypes.at(id) : 0;
+  };
+  boundedIO.retailId = [](uint32_t id) { return id == 0x3456; };
+  boundedIO.freshId = [](uint32_t seed) { return seed == 0 ? 1u : seed; };
+  boundedIO.write = [&](const std::string&, const std::vector<uint8_t>&) {
+    ++boundedWrites;
+    return true;
+  };
+  const EffectImportResult bounded = ImportEffects(boundedIO);
+  Check(bounded.failed == 1 && bounded.written == 0 && boundedWrites == 0,
+        "external SSWH traversal fails closed at its fixed dependency bound");
+}
+
+void TestEmbeddedSwooshPrecedence() {
+  const EffectGuid child = Fresh(0x38);
+  const EffectGuid parent = Swap(Legacy(0x1234));
+  const std::vector<uint8_t> data = MakeGeneratorWithEmbeddedSwoosh(child);
+  std::map<std::string, std::vector<uint8_t>> written;
+  EffectImportIO io;
+  io.effects = {parent};
+  io.read = [&](uint32_t type, const EffectGuid& id, std::vector<uint8_t>& out, std::string& error) {
+    if (type == kGenp && id == parent) {
+      out = data;
+      return true;
+    }
+    error = "unexpected asset read";
+    return false;
+  };
+  io.typeOf = [](const EffectGuid&) { return 0; };
+  io.retailId = [](uint32_t id) { return id == 0x1234; };
+  io.freshId = [](uint32_t seed) { return seed; };
+  io.write = [&](const std::string& name, const std::vector<uint8_t>& bytes) {
+    written[name] = bytes;
+    return true;
+  };
+  const EffectImportResult result = ImportEffects(io);
+  uint32_t swooshId = 0;
+  Check(result.written == 1 && result.failed == 0 && written.count("00001234.PART") == 1,
+        "the embedded-child regression still imports its GENP root");
+  Check(result.parts == 2 && written.size() == 2,
+        "the embedded SSWH target is emitted as a separate child part");
+  if (written.count("00001234.PART") == 0) return;
+  std::vector<RetailPartProperty> properties;
+  std::string error;
+  const auto& root = written.at("00001234.PART");
+  bool linked = false;
+  Check(SplitRetailPart(root.data(), root.size(), properties, error), "embedded test root reads as PART");
+  for (const RetailPartProperty& property : properties) {
+    if (property.fourcc == EffectFourCC("SSWH") && property.value.size() == 8) {
+      swooshId = Be32(property.value.data() + 4);
+      linked = written.count(HexId(swooshId) + ".SWHC") == 1;
+    }
+  }
+  Check(linked, "an embedded SWSH keeps the existing embedded ID resolution and file");
+  if (linked) {
+    const auto& swoosh = written.at(HexId(swooshId) + ".SWHC");
+    std::vector<RetailPartProperty> childProperties;
+    Check(SplitRetailEffect(kSwhc, swoosh.data(), swoosh.size(), childProperties, error),
+          "the linked embedded SWHC is a valid converted child");
+  }
+}
+
+void TestEmbeddedAndExternalIdsDoNotCollide() {
+  const EffectGuid embeddedStored = Fresh(0x41);
+  const EffectGuid externalStored = Fresh(0x52);
+  const EffectGuid generatorId = Swap(Legacy(0x1234));
+  const EffectGuid electricId = Swap(Legacy(0x2345));
+  const EffectGuid externalPak = Swap(externalStored);
+  const std::vector<uint8_t> generator = MakeGeneratorWithEmbeddedSwoosh(embeddedStored);
+  const std::vector<uint8_t> electric = MakeElectric(externalStored);
+  const std::vector<uint8_t> externalSource = MakeSwoosh();
+  std::map<std::string, std::vector<uint8_t>> written;
+  std::set<uint32_t> taken = {0x1234, 0x2345};
+  EffectImportIO io;
+  io.effects = {generatorId, electricId};
+  io.read = [&](uint32_t type, const EffectGuid& id, std::vector<uint8_t>& data, std::string& error) {
+    if (type == kGenp && id == generatorId) data = generator;
+    else if (type == kElsm && id == electricId) data = electric;
+    else if (type == kSwsh && id == externalPak) data = externalSource;
+    else {
+      error = "not in the fixture";
+      return false;
+    }
+    return true;
+  };
+  io.typeOf = [&](const EffectGuid& id) -> uint32_t {
+    if (id == generatorId) return kGenp;
+    if (id == electricId) return kElsm;
+    return id == externalPak ? kSwsh : 0;
+  };
+  io.retailId = [&](uint32_t id) { return id == 0x1234 || id == 0x2345; };
+  io.freshId = [&](uint32_t) {
+    // Force the external dependency to collide with the already allocated
+    // embedded child; the shared allocator must advance to a distinct id.
+    uint32_t id = 0x00ABC000;
+    while (taken.count(id) != 0) ++id;
+    taken.insert(id);
+    return id;
+  };
+  io.write = [&](const std::string& name, const std::vector<uint8_t>& data) {
+    written[name] = data;
+    return true;
+  };
+  const EffectImportResult result = ImportEffects(io);
+  uint32_t embeddedId = 0;
+  uint32_t externalId = 0;
+  std::vector<RetailPartProperty> partProperties;
+  std::vector<RetailPartProperty> electricProperties;
+  std::string error;
+  const bool generatorValid = written.count("00001234.PART") != 0 &&
+      SplitRetailPart(written["00001234.PART"].data(), written["00001234.PART"].size(), partProperties, error);
+  const bool electricValid = written.count("00002345.ELSC") != 0 &&
+      SplitRetailEffect(EffectFourCC("ELSC"), written["00002345.ELSC"].data(),
+                        written["00002345.ELSC"].size(), electricProperties, error);
+  for (const RetailPartProperty& property : partProperties)
+    if (property.fourcc == EffectFourCC("SSWH") && property.value.size() == 8)
+      embeddedId = Be32(property.value.data() + 4);
+  for (const RetailPartProperty& property : electricProperties)
+    if (property.fourcc == EffectFourCC("SSWH") && property.value.size() == 8)
+      externalId = Be32(property.value.data() + 4);
+  Check(result.written == 2 && result.failed == 0 && generatorValid && electricValid,
+        "embedded and external swoosh parents both import");
+  Check(embeddedId == 0x00ABC000 && externalId == 0x00ABC001 && embeddedId != externalId,
+        "the external child advances past a colliding embedded-child id");
+  Check(written.count("00ABC000.SWHC") == 1 && written.count("00ABC001.SWHC") == 1,
+        "both root references resolve to the distinct emitted SWHC files");
+}
 // A generator whose material has no texture that converts would lose its
 // TEXR: the import keeps the disc's PART and writes nothing.
 void TestLostTexture() {
@@ -294,6 +876,10 @@ void TestNamedEffect() {
 
 int main() {
   TestImport();
+  TestExternalSwoosh();
+  TestExternalSwooshFailures();
+  TestEmbeddedSwooshPrecedence();
+  TestEmbeddedAndExternalIdsDoNotCollide();
   TestLostTexture();
   TestNamedEffect();
   if (sFailures != 0) {

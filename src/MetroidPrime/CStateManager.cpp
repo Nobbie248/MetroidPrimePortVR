@@ -1,5 +1,6 @@
 #define CSTATEMANAGER_OUT_OF_LINE_GETPLAYER
 #include "MetroidPrime/CStateManager.hpp"
+#include "port_actor_shadow.h"
 #include "port_apclient.h"
 #include "port_collision_view.h"
 #include "port_debug.h"
@@ -9,6 +10,7 @@
 #include "MetroidPrime/Enemies/CAi.hpp"
 #include "vr/vr_view.h"
 #endif
+#include "port_photo.h"
 #include "port_discord.h"
 #include "port_hold_toggle.h"
 #include "port_livesplit.h"
@@ -123,6 +125,11 @@
 #include "Kyoto/CFrameDelayedKiller.hpp"
 
 const int gkPVSEnabled = 1;
+
+#ifdef TARGET_PC
+// Tick generation (CActor::PortTickGeneration) of the last TickSimTime.
+static uint sPortSimTimeGeneration = 0;
+#endif
 
 namespace {
 class area_sorter {
@@ -1470,6 +1477,7 @@ void CStateManager::Update(float dt) {
     return;
   }
   CGraphics::TickSimTime(dt);
+  sPortSimTimeGeneration = CActor::PortTickGeneration();
 #endif
 
 #ifdef TARGET_PC
@@ -1740,7 +1748,8 @@ static void ApplyHoldToggle(CFinalInput& input, const CPlayer* player,
   const bool locked = orbit == CPlayer::kOS_OrbitObject ||
                       orbit == CPlayer::kOS_ForcedOrbitObject || orbit == CPlayer::kOS_Grapple;
   const PortHoldToggle::Output outL =
-      sLockOn.Update(unmorphed && PortDebug::LockOnToggle(), heldL, pressL, locked);
+      sLockOn.Update(unmorphed && PortDebug::LockOnToggle(), heldL, pressL, locked,
+                     input.Time());
   if (sLockOn.Latched() || outL.held != heldL) {
     input.PortSetL(outL.held, outL.pressed);
   }
@@ -1768,7 +1777,7 @@ void CStateManager::ProcessInput(const CFinalInput& input) {
     }
 #ifdef TARGET_PC
     // The debug free camera flies on the pad; the player stands still meanwhile.
-    if (PortFreeCam::Input(input)) {
+    if (PortPhoto::Input(input)) {
       disableInput = true;
     }
 #endif
@@ -2625,12 +2634,31 @@ void CStateManager::PreRender() {
   xf7c_projectedShadow = nullptr;
 
   x850_world->PreRender();
+#ifdef TARGET_PC
+  {
+    // Port: Remastered's shader clock (wind, Phazon) reads the presented time
+    // between ticks; main.cpp clears it after the draw.
+    const float t = CCameraManager::GetPresentationInterpolation();
+    float lag = 0.f;
+    if (t >= 0.f && t < 1.f && sPortSimTimeGeneration == CActor::PortTickGeneration() &&
+        PortDebug::ParticleInterpolation())
+      lag = (1.f - t) * CGraphics::GetLastSimTimeStep();
+    CGraphics::SetSimTimePresentLag(lag);
+  }
+#endif
   BuildDynamicLightListForWorld();
 
   const CGameCamera& curCam = x870_cameraManager->GetCurrentCamera(*this);
   const CTransform4f curCamXf =
       PortFreeCam::View(x870_cameraManager->GetCurrentCameraTransform(*this));
-  CFrustumPlanes frustum(curCamXf, 0.017453292f * curCam.GetRenderFov(), curCam.GetAspectRatio(),
+#ifdef TARGET_PC
+  const float curRenderFov = PortFreeCam::PresentedFovOverride() > 0.f
+                                 ? CGameCamera::VertPlusFov(PortFreeCam::PresentedFovOverride(), curCam.GetAspectRatio())
+                                 : curCam.GetRenderFov();
+#else
+  const float curRenderFov = curCam.GetRenderFov();
+#endif
+  CFrustumPlanes frustum(curCamXf, 0.017453292f * curRenderFov, curCam.GetAspectRatio(),
                          curCam.GetNearClipDistance(), false, 100.f);
 #ifdef TARGET_PC
   // PortVr: cull against where the head looks, with the headset's wider cone.
@@ -2687,8 +2715,10 @@ CFrustumPlanes CStateManager::SetupViewForDraw(const CViewport& viewport) const 
   const int top = viewport.mTop + (viewport.mHeight - height) / 2;
 
 #ifdef TARGET_PC
-  const float tangent =
-      CMath::SlowTangentR(CMath::Deg2Rad(0.5f * cam.GetRenderFov())) / sPortViewZoom;
+  const float renderFov = PortFreeCam::PresentedFovOverride() > 0.f
+                              ? CGameCamera::VertPlusFov(PortFreeCam::PresentedFovOverride(), cam.GetAspectRatio())
+                              : cam.GetRenderFov();
+  const float tangent = CMath::SlowTangentR(CMath::Deg2Rad(0.5f * renderFov)) / sPortViewZoom;
 #else
   const float tangent = CMath::SlowTangentR(CMath::Deg2Rad(0.5f * cam.GetRenderFov()));
 #endif
@@ -2832,9 +2862,10 @@ CGameArea::CConstChainIterator CWorld::GetAliveAreasEnd() { return skGlobalEnd; 
 // drawn nearer than the world's depth range, is left clear, as Remastered leaves it.
 static std::vector<const PortRoomEnv::FogRegion*> sPortFogRegions;
 
-// Remastered's sun shadow (aurora's gfx/shadow): an orthographic depth map around the camera
-// along the room's directional light, cast and received by the opaque world. MP_SHADOWS=0 turns
-// it off; MP_SHADOW_RADIUS sets the map's half extent, MP_SHADOW_SIZE its resolution. For testing,
+// Remastered's sun shadow (aurora's gfx/shadow): four orthographic depth map cascades over the
+// view along the room's directional light, cast and received by the opaque world. MP_SHADOWS=0
+// turns it off; MP_SHADOW_DISTANCE sets how far it reaches (Remastered's 350), MP_SHADOW_SIZE
+// each cascade's resolution (1024). Uses SetupViewForDraw's perspective. For testing,
 // MP_SHADOW_DIR ("x,y,z", the way the light travels) and MP_SHADOW_COLOR ("r,g,b") override the
 // room's sun.
 // The room's Remastered sun (port_room_env.h), when its import has one.
@@ -2855,11 +2886,11 @@ static bool PortRoomSun(const CGameArea& area, CScriptLayerManager* layers, bool
 static bool PortSetupShadow(const CTransform4f& view, const CGameArea* area, CScriptLayerManager* layers,
                             bool cinematic, bool enabled, bool roomLights) {
   static const bool sOn = port::EnvFlag("MP_SHADOWS", true);
-  static const float sRadius = port::EnvFloat("MP_SHADOW_RADIUS", 40.f);
+  static const float sDistance = port::EnvFloat("MP_SHADOW_DISTANCE", 350.f);
   float dir[3] = {0.f, 0.f, 0.f};
   float color[3] = {0.f, 0.f, 0.f};
-  float radius = 0.f;
-  if (sOn && enabled) {
+  float distance = 0.f;
+  if (sOn && enabled && PortDebug::SunShadows()) {
     static const char* sDirEnv = getenv("MP_SHADOW_DIR");
     static const char* sColorEnv = getenv("MP_SHADOW_COLOR");
     float envDir[3];
@@ -2888,7 +2919,7 @@ static bool PortSetupShadow(const CTransform4f& view, const CGameArea* area, CSc
       }
     }
     if (dir[0] != 0.f || dir[1] != 0.f || dir[2] != 0.f) {
-      radius = sRadius;
+      distance = sDistance;
     }
   }
   // GX's view matrix: the camera's rows (right, up, towards the camera) and their eye offset.
@@ -2905,7 +2936,10 @@ static bool PortSetupShadow(const CTransform4f& view, const CGameArea* area, CSc
     worldToView[r][2] = axes[r][2];
     worldToView[r][3] = -(axes[r][0] * eye.GetX() + axes[r][1] * eye.GetY() + axes[r][2] * eye.GetZ());
   }
-  GXPortSetShadowFrame(worldToView, dir, radius, color);
+  const CGraphics::CProjectionState& proj = CGraphics::GetProjectionState();
+  const float frustum[6] = {proj.GetLeft(), proj.GetRight(), proj.GetTop(),
+                            proj.GetBottom(), proj.GetNear(), proj.GetFar()};
+  GXPortSetShadowFrame(worldToView, frustum, dir, distance, color);
   // Remastered's point and spot lights, in the same view space.
   static std::vector< float > sRoomLights;
   sRoomLights.clear();
@@ -2913,7 +2947,7 @@ static bool PortSetupShadow(const CTransform4f& view, const CGameArea* area, CSc
     PortRoomEnv::RoomLights(worldToView, sRoomLights);
   }
   GXPortSetRoomLights(sRoomLights.data(), u32(sRoomLights.size() / 16));
-  return radius > 0.f;
+  return distance > 0.f;
 }
 
 static void PortDrawVolumetricFog(const CStateManager& mgr, const CTransform4f& view,
@@ -3210,6 +3244,7 @@ void CStateManager::PortCaptureProbeFace() const {
 #endif
 
 #ifdef TARGET_PC
+bool CStateManager::sPortSceneHdrRequest = false;
 float CStateManager::sPortViewZoom = 1.f;
 
 float CStateManager::PortZoomedFov(float fov) {
@@ -3227,10 +3262,24 @@ void CStateManager::DrawWorld() const {
   // A zoomed pass (sharp scan window) draws before the frame's own: the frame's captures and
   // the gun belong to that one.
   const bool portZoomed = sPortViewZoom != 1.f;
+  const bool portSceneHdrRequested = sPortSceneHdrRequest;
+  sPortSceneHdrRequest = false;
   if (!portZoomed)
     PortCaptureProbeFace();
+  // Probe faces are retail/display colour. Start HDR only after the capture and before the
+  // first real world draw; a post from the preceding scan-zoom pass has already returned to LDR.
+  if (portSceneHdrRequested)
+    GXPortSceneHdr(GX_TRUE);
 #endif
+#ifdef TARGET_PC
+  // Port: material UV animations read the presented time between ticks (smooth frames).
+  float portPresentedTime = xf14_curTimeMod900 - CGraphics::GetSimTimePresentLag();
+  if (portPresentedTime < 0.f)
+    portPresentedTime += 900.f;
+  const CTimeProvider timeProvider(portPresentedTime);
+#else
   const CTimeProvider timeProvider(xf14_curTimeMod900);
+#endif
   const CViewport backupViewport = CGraphics::GetViewport();
   const CFrustumPlanes frustum = SetupViewForDraw(backupViewport);
   const CTransform4f backupViewMatrix = CGraphics::GetViewMatrix();
@@ -3257,6 +3306,11 @@ void CStateManager::DrawWorld() const {
   }
 
   const CPlayerState::EPlayerVisor visor = x8b8_playerState->GetActiveVisor(*this);
+#ifdef TARGET_PC
+  // Remastered's per-visor mesh filter for everything this frame draws, thermal's extra passes
+  // included (CCubeModel, PortVisorMesh).
+  CCubeModel::PortSetActiveVisor(static_cast< int >(visor));
+#endif
   uint mask;
   bool thermal = visor == CPlayerState::kPV_Thermal;
   uint targetMask;
@@ -3290,6 +3344,8 @@ void CStateManager::DrawWorld() const {
                       x870_cameraManager->IsInCinematicCamera(), !thermal && visor != CPlayerState::kPV_XRay && !portCollisionOnly,
                       !thermal && visor != CPlayerState::kPV_XRay);
   GXPortSetShadowCaster(portShadow);
+  PortActorShadow::BeginFrame();
+  PortRoomGeo::ClearShadowReceivers();
 #endif
   for (int i = areas.size() - 1; i >= 0; --i) {
     const CGameArea& area = *areas[i];
@@ -3353,6 +3409,58 @@ void CStateManager::DrawWorld() const {
 #endif
   bool morphingPlayerVisible = false;
   rstl::reserved_vector< const CActor*, 1024 > thermalActors;
+#ifdef TARGET_PC
+  // Remastered's sun-shadow caster query has no camera frustum or PVS test; a model casts while
+  // its actor is active and its area is rendered. So an actor of a rendered area that the PVS or
+  // the frustum rejects still casts, as a base model only (no particles, blob shadow or sorted
+  // draw). Player, collision-only view and the room-geometry exclusions as for the visible draw;
+  // renderFirst actors drew already.
+  static const bool sShadowOffscreen = [] {
+    const char* env = getenv("MP_SHADOW_OFFSCREEN_ACTORS");
+    return env == nullptr || atoi(env) != 0;
+  }();
+  static const bool sShadowCheck = [] {
+    const char* env = getenv("MP_SHADOW_ACTOR_CHECK");
+    return env != nullptr && atoi(env) != 0;
+  }();
+  uint portShadowEligible = 0;
+  uint portShadowDrawn = 0;
+  const auto portShadowOffscreen = [&](const CActor& actor, int areaIdx) {
+    if (!sShadowOffscreen || !portShadow || thermal || portCollisionOnly || &actor == x84c_player ||
+        (portRoomGeo[areaIdx] && PortRoomGeo::Hides(*areas[areaIdx], actor.GetEditorId().Value())) ||
+        PortRoomGeo::HidesSky(*areas[areaIdx], actor)) {
+      return;
+    }
+    for (const TUniqueId* f = renderFirst.begin(); f != renderFirst.end(); ++f) {
+      if (*f == actor.GetUniqueId()) {
+        return;
+      }
+    }
+    ++portShadowEligible;
+    CPortActorRenderScope presented(actor);
+    if (actor.PortRenderShadowCaster(*this)) {
+      if (sShadowCheck && portShadowDrawn == 0) {
+        static bool sLogged = false;
+        if (!sLogged) {
+          sLogged = true;
+          const CAABox b = actor.GetModelData()->GetBounds(actor.GetTransform());
+          fprintf(stderr, "shadow-actor-check: first offscreen model draw id=%d bounds=(%.1f %.1f %.1f)-(%.1f %.1f %.1f)\n",
+                  actor.GetUniqueId().Value(), b.GetMinPoint().GetX(), b.GetMinPoint().GetY(),
+                  b.GetMinPoint().GetZ(), b.GetMaxPoint().GetX(), b.GetMaxPoint().GetY(),
+                  b.GetMaxPoint().GetZ());
+        }
+      }
+      ++portShadowDrawn;
+    }
+  };
+#endif
+#ifdef TARGET_PC
+  // The actors an area registered get their shadow maps and decals just before that area's sorted draws:
+  // the decals land on the opaque world and under the transparent surfaces, as in Remastered, while the
+  // buckets are still drawn per area with that area's own fog and light fade.
+  const bool flushShadows = PortActorShadow::Active() && !thermal && visor != CPlayerState::kPV_XRay &&
+                            !portCollisionOnly;
+#endif
   for (int i = 0; i < areas.size(); ++i) {
     const CGameArea& area = *areas[i];
     const CPVSVisSet& set = visibility[i];
@@ -3369,6 +3477,9 @@ void CStateManager::DrawWorld() const {
         const TUniqueId id = actor->GetUniqueId();
         if (!thermal && const_cast< CGameArea& >(area).LookupPVSUniqueID(id) == id) {
           if (set.GetVisible(const_cast< CGameArea& >(area).LookupPVSID(id)) == kVSS_EndOfTree) {
+#ifdef TARGET_PC
+            portShadowOffscreen(*actor, i);
+#endif
             continue;
           }
         }
@@ -3401,6 +3512,11 @@ void CStateManager::DrawWorld() const {
 #endif
             actor->AddToRenderer(frustum, *this);
           }
+#ifdef TARGET_PC
+          if (actor->GetPreRenderClipped()) {
+            portShadowOffscreen(*actor, i);
+          }
+#endif
           if (thermal && (actor->GetThermalFlags() & 2) != 0) {
             thermalActors.push_back(actor);
           }
@@ -3432,6 +3548,11 @@ void CStateManager::DrawWorld() const {
       xf7c_projectedShadow->Render(*this);
     }
 #endif
+#ifdef TARGET_PC
+    if (flushShadows) {
+      PortActorShadow::RenderFrame(*this, backupViewMatrix);
+    }
+#endif
     gpRender->EnablePVS(&set, area.GetId().Value());
 #ifdef TARGET_PC
     // The actors still go through the buckets; only the area's own surfaces stay out.
@@ -3444,6 +3565,19 @@ void CStateManager::DrawWorld() const {
   }
 
 #ifdef TARGET_PC
+  if (sShadowCheck && portShadow && CGraphics::GetFrameCounter() % 300 == 0) {
+    fprintf(stderr, "shadow-actor-check: frame %u offscreen eligible=%u model draws=%u\n",
+            static_cast< uint >(CGraphics::GetFrameCounter()), portShadowEligible,
+            portShadowDrawn);
+  }
+  static const bool sVisorMeshLog = getenv("MP_VISORMESH_LOG") != nullptr;
+  if (sVisorMeshLog && !portZoomed && CGraphics::GetFrameCounter() % 60 == 0) {
+    unsigned visorSkipped = 0, shadowSkipped = 0;
+    CCubeModel::PortTakeVisorSkipCounts(visorSkipped, shadowSkipped);
+    fprintf(stderr, "visor-mesh: frame %u visor %d skipped surfaces: visor bit %u, shadow bit %u\n",
+            static_cast< uint >(CGraphics::GetFrameCounter()), static_cast< int >(visor), visorSkipped,
+            shadowSkipped);
+  }
   if (portShadow) {
     GXPortSetShadowCaster(false);
     GXPortRenderShadowMap();
@@ -3548,7 +3682,7 @@ void CStateManager::DrawWorld() const {
     // FOV (a view-model FOV), so a wide view doesn't shrink it or push it off
     // the screen's corner.
     const CGameCamera& gunCam = x870_cameraManager->GetCurrentCamera(*this);
-    const bool gunFov = x870_cameraManager->IsInFPCamera() &&
+    const bool gunFov = !PortVr::VrImmersive() && x870_cameraManager->IsInFPCamera() &&
                         gunCam.GetFov() != PortDebug::kFovRetail;
     const CGraphics::CProjectionState gunProj = CGraphics::GetProjectionState();
     if (gunFov) {
@@ -3687,7 +3821,20 @@ void CStateManager::BuildDynamicLightListForWorld() {
   for (int idx = list.GetFirstObjectIndex(); idx != -1; idx = list.GetNextObjectIndex(idx)) {
     const CGameLight* light = static_cast< const CGameLight* >(list[idx]);
     if (light && light->GetActive()) {
+#ifdef TARGET_PC
+      // Port: lights follow their actor's presented pose, so moving lights
+      // (the morph ball's glow, projectile lights) glide between ticks.
+      CLight l = light->GetLight();
+      CTransform4f toCur = CTransform4f::Identity();
+      if (light->PortPresentedView(CTransform4f::Identity(), toCur)) {
+        const CTransform4f toPresented = toCur.GetQuickInverse();
+        l.SetPosition(toPresented * l.GetPosition());
+        if (l.GetType() != kLT_Point)
+          l.SetDirection(toPresented.Rotate(l.GetDirection()).AsNormalized());
+      }
+#else
       const CLight& l = light->GetLight();
+#endif
       if (l.GetIntensity() > FLT_EPSILON && l.GetRadius() > FLT_EPSILON) {
         // TODO: This shouldn't be inlined, but currently is.
         x8e0_dynamicLights.push_back(l);
@@ -3774,8 +3921,16 @@ void CStateManager::DrawSpaceWarp(const CVector3f& point, float strength) const 
     gpRender->DrawSpaceWarpWorld(point, viewer, kVrSpaceWarpStrengthScale * strength);
     return;
   }
-#endif
+  // The scene is drawn from the presented camera: carry the point into the
+  // sim camera's frame as the presented one sees it, so the warp stays on it
+  // between ticks. Identity when frames aren't blended.
+  const CVector3f simPoint = x870_cameraManager->GetSimulationCameraTransform(*this) *
+                             (x870_cameraManager->GetCurrentCameraTransform(*this).GetQuickInverse() *
+                              point);
+  gpRender->DrawSpaceWarp(curCam.ConvertToScreenSpace(simPoint), strength);
+#else
   gpRender->DrawSpaceWarp(curCam.ConvertToScreenSpace(point), strength);
+#endif
 }
 
 void CStateManager::TouchSky() const { x850_world->TouchSky(); }

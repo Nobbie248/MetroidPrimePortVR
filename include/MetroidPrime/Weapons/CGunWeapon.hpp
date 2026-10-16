@@ -11,6 +11,7 @@
 #include "MetroidPrime/Weapons/WeaponTypes.hpp"
 
 #include "Kyoto/Math/CAABox.hpp"
+#include "Kyoto/Math/CTransform4f.hpp"
 #include "Kyoto/Math/CVector3f.hpp"
 #include "Kyoto/TToken.hpp"
 
@@ -26,10 +27,22 @@ class CAnimCharacterSet;
 class CWeaponDescription;
 class CElementGen;
 class CRainSplashGenerator;
-class CTransform4f;
 class CModelFlags;
 class CActorLights;
 class SWeaponInfo;
+
+#ifdef TARGET_PC
+namespace NPortChargeFxDetail {
+template < typename Generator >
+void SetLocalLocator(Generator& generator, const CTransform4f& locator) {
+  if (generator.PortIsRemastered()) {
+    generator.SetGlobalOrientAndTrans(locator);
+  } else {
+    generator.SetGlobalTranslation(locator.GetTranslation());
+  }
+}
+} // namespace NPortChargeFxDetail
+#endif
 
 enum EFrozenFxType {
   kFFT_None,
@@ -117,6 +130,10 @@ public:
   bool IsChargeAnimOver() const;
   void UpdateMuzzleFx(const float dt, const CVector3f& scale, const CVector3f& pos,
                       const bool emitting);
+#ifdef TARGET_PC
+  void UpdateMuzzleFx(const float dt, const CVector3f& scale, const CTransform4f& locator,
+                      const bool emitting);
+#endif
   CElementGen* GetChargeMuzzleFx() const;
   void DrawHologram(const CStateManager& mgr, const CTransform4f& xf,
                     const CModelFlags& flags) const;

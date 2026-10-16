@@ -13,6 +13,7 @@
 
 #include <cstdio>
 #include <cstdlib>
+#include <cstring>
 
 #include <algorithm>
 #include <cmath>
@@ -38,12 +39,27 @@ aurora::Vec2<uint32_t> scale_copy_dst(u32 logicalWidth, u32 logicalHeight) {
 } // namespace
 
 namespace aurora::gx {
+// An EFB copy of the HDR scene keeps the tone curve as it is now; linear: GXPortCopyScene's.
+static gfx::ResolveHdr resolve_hdr(bool linear) noexcept {
+  gfx::ResolveHdr hdr{.linear = linear};
+  static_assert(sizeof(hdr.tone) == sizeof(g_gxState.pbrTone));
+  std::memcpy(hdr.tone.data(), g_gxState.pbrTone.data(), sizeof(hdr.tone));
+  return hdr;
+}
+
 void copy_tex(const void* dest, GXBool clear) noexcept {
   const auto rect = map_logical_scissor(g_gxState.texCopySrc);
   const auto [dstWidth, dstHeight] = scale_copy_dst(g_gxState.texCopyDstWidth, g_gxState.texCopyDstHeight);
   const auto texCopyFmt = g_gxState.texCopyFmt;
-  // A mip chain only for plain colour copies (converted formats keep one level).
-  const bool copyMips = g_gxState.texCopyMips && !gfx::tex_copy_conv::needs_conversion(texCopyFmt);
+  // GXPortCopyScene in the HDR scene's own pass, of a plain colour format: the linear RGBA16F
+  // scene, in its own texture (the key's linear), never RGB565's 8-bit conversion. Every other
+  // copy, of the HDR scene too, is the display copy it always was.
+  const bool linear = g_gxState.copySceneLinear && gfx::scene_hdr_pass_active() && !is_depth_format(texCopyFmt) &&
+                      (texCopyFmt == GX_TF_RGB565 || !gfx::tex_copy_conv::needs_conversion(texCopyFmt));
+  // A mip chain only for plain colour copies (converted formats keep one level). A linear copy is
+  // never converted (RGB565's is RGBA16F with alpha 1), so it keeps the chain it asked for.
+  const bool copyMips =
+      g_gxState.texCopyMips && (linear || !gfx::tex_copy_conv::needs_conversion(texCopyFmt));
   uint32_t mipCount = 1;
   if (copyMips) {
     for (u32 edge = std::max(dstWidth, dstHeight); edge > 1; edge >>= 1) {
@@ -57,6 +73,7 @@ void copy_tex(const void* dest, GXBool clear) noexcept {
       .height = dstHeight,
       .format = texCopyFmt,
       .mips = mipCount > 1,
+      .linear = linear,
   };
   static u64 s_copySerial = 0;
   auto it = g_gxState.copyTextureCache.find(key);
@@ -65,7 +82,15 @@ void copy_tex(const void* dest, GXBool clear) noexcept {
     constexpr size_t kSizesPerDest = 16;
     trim_copy_sizes(dest, kSizesPerDest - 1);
     gfx::TextureHandle handle;
-    if (gfx::tex_copy_conv::needs_conversion(texCopyFmt)) {
+    if (linear) {
+      // RGBA16F; gxFormat only picks the alpha-1 swizzle, as for "Resolved Texture".
+      const auto fmt = texCopyFmt == GX_TF_RGB565 || g_gxState.pixelFmt == GX_PF_RGB8_Z24 ||
+                               g_gxState.pixelFmt == GX_PF_RGB565_Z16
+                           ? GX_TF_RGB565
+                           : GX_TF_RGBA8;
+      handle = gfx::new_render_texture(dstWidth, dstHeight, fmt, "Linear Scene Copy", mipCount,
+                                       wgpu::TextureFormat::RGBA16Float);
+    } else if (gfx::tex_copy_conv::needs_conversion(texCopyFmt)) {
       handle = gfx::new_conv_texture(dstWidth, dstHeight, texCopyFmt, "Copy Conv Texture");
     } else {
       // Configure the texture swizzle to use alpha 1.0 if targeting RGB565 or EFB doesn't have alpha
@@ -78,9 +103,9 @@ void copy_tex(const void* dest, GXBool clear) noexcept {
     it = g_gxState.copyTextureCache.emplace(key, GXState::CopyTextureRef{.handle = handle, .revision = 0}).first;
     static const bool logNew = std::getenv("MP_LOG_COPY_TEX") != nullptr;
     if (logNew) {
-      std::fprintf(stderr, "[copytex] new %p %ux%u (logical %ux%u) fmt %u, %zu cached\n", dest, dstWidth, dstHeight,
-                   g_gxState.texCopyDstWidth, g_gxState.texCopyDstHeight, static_cast<unsigned>(texCopyFmt),
-                   g_gxState.copyTextureCache.size());
+      std::fprintf(stderr, "[copytex] new %p %ux%u (logical %ux%u) fmt %u%s, %zu cached\n", dest, dstWidth,
+                   dstHeight, g_gxState.texCopyDstWidth, g_gxState.texCopyDstHeight,
+                   static_cast<unsigned>(texCopyFmt), linear ? " linear" : "", g_gxState.copyTextureCache.size());
     }
   }
   auto& handle = it->second;
@@ -103,8 +128,9 @@ void copy_tex(const void* dest, GXBool clear) noexcept {
   const auto clearDepth = clear && g_gxState.depthUpdate;
   // Cost test 11 measures what the copies' pass breaks cost; a copy that clears still has to.
   if (clear || GXGetPBRCostTest() != 11) {
+    const auto hdr = resolve_hdr(linear);
     gfx::resolve_pass_into(handle.handle, rect, clearColor, clearAlpha, clearDepth, g_gxState.clearColor,
-                           clear_depth_value(), texCopyFmt, -1, mipCount > 1);
+                           clear_depth_value(), texCopyFmt, -1, mipCount > 1, &hdr);
   }
   ++handle.revision;
   handle.lastCopy = ++s_copySerial;
@@ -116,8 +142,9 @@ void copy_tex(const void* dest, GXBool clear) noexcept {
 
 void copy_probe_face(u32 face) noexcept {
   const auto rect = map_logical_scissor(g_gxState.texCopySrc);
+  const auto hdr = resolve_hdr(false);
   gfx::resolve_pass_into(gfx::probe::face(face), rect, true, true, true, g_gxState.clearColor, clear_depth_value(),
-                         GX_TF_RGBA8, static_cast<int>(face % 6));
+                         GX_TF_RGBA8, static_cast<int>(face % 6), false, &hdr);
 }
 } // namespace aurora::gx
 
@@ -256,6 +283,8 @@ static u32 sCopySerial = 0;
 
 u32 GXPortCopySerial(void) { return sCopySerial; }
 
+void __GXPortInvalidateCopySerial() { ++sCopySerial; }
+
 void GXCopyTex(void* dest, GXBool clear) {
   ++sCopySerial;
   GX_WRITE_AURORA(GX_AURORA_LOAD_COPY_DEST);
@@ -266,6 +295,14 @@ void GXCopyTex(void* dest, GXBool clear) {
   SET_REG_FIELD(0, __gx->cpTex, 8, 24, 0x52);
   GX_WRITE_RAS_REG(__gx->cpTex);
   aurora::gx::fifo::publish();
+}
+
+void GXPortCopyScene(void* dest, GXBool clear) {
+  GX_WRITE_AURORA(GX_AURORA_PORT_COPY_SCENE);
+  GX_WRITE_U8(1);
+  GXCopyTex(dest, clear);
+  GX_WRITE_AURORA(GX_AURORA_PORT_COPY_SCENE);
+  GX_WRITE_U8(0);
 }
 
 // TODO GXGetYScaleFactor

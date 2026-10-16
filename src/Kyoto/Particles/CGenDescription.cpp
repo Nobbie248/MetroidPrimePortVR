@@ -107,4 +107,8 @@ CGenDescription::~CGenDescription() {
   for (int i = 0; i < ARRAY_SIZE(skGenOffsets); ++i) {
     delete *element_from_desc(this, skGenOffsets[i]);
   }
+#ifdef TARGET_PC
+  delete xPortNestedLightInnerRadius;
+  delete xPortNestedLightOuterRadius;
+#endif
 }

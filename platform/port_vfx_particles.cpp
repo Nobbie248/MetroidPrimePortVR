@@ -229,7 +229,8 @@ void CElementGen::PortVfxUpdateSystem() {
 bool PortVfxBuildDesc(const CPortVfxData& vfx, const float* vsmt, uint vsmtMask,
                       aurora::gfx::vfx::DrawDesc& desc) {
   const CPortVfxMat& mat = vfx.mat;
-  desc.features = mat.features;
+  desc.features = mat.features & ~uint32_t(aurora::gfx::vfx::AlreadyExposed);
+  desc.alreadyExposed = (mat.features & aurora::gfx::vfx::AlreadyExposed) != 0;
   desc.blend = static_cast< aurora::gfx::vfx::Blend >(mat.blend);
   desc.colorSlot = static_cast< int8_t >(mat.colorSlot);
   desc.opacitySlot = static_cast< int8_t >(mat.opacitySlot);
@@ -569,7 +570,9 @@ void CElementGen::PortRenderMeshesVfx(CPortVfxMeshBatch& batch) {
   // The vertices are in world space already.
   CGraphics::SetModelMatrix(CTransform4f::Identity());
   CGraphics::SetCullMode(kCM_None);
-  CGraphics::SetDepthWriteMode(x26c_28_zTest, kE_LEqual, x26c_26_AAPH ? false : x26c_27_ZBUF);
+  const aurora::gfx::vfx::DepthSelection depth =
+      aurora::gfx::vfx::select_model_depth(desc.blend, x26c_28_zTest, x26c_26_AAPH, x26c_27_ZBUF);
+  CGraphics::SetDepthWriteMode(depth.compare, kE_LEqual, depth.write);
   PortFx::gTriangles += static_cast< uint32_t >(batch.verts.size() / 3);
   ++PortFx::gDraws;
   aurora::gfx::vfx::draw_triangles(desc, batch.verts.data(), static_cast< uint32_t >(batch.verts.size() / 3));

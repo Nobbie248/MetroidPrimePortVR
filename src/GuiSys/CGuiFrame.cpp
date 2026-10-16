@@ -233,10 +233,11 @@ void CGuiFrame::Draw(const CGuiWidgetDrawParms& parms) const {
     return hudScaleXf * spreadView *
            CTransform4f(scale, offset, 0.f, 0.f, 0.f, 1.f, 0.f, 0.f, 0.f, 0.f, 1.f, 0.f) * invView;
   };
-  // `center` is where HUD lag has moved the content's screen centre (CGuiCamera::GetSliceCenter):
-  // the slices are cut about it, so the content keeps its shape while it lags.
+  // The slices are cut in the unlagged (authored) tangents and carried through the HUD lag at the
+  // model's view depth `depth` (CGuiCamera::GetLaggedTangent), so the content keeps its shape while
+  // it lags. Each piece is the linear map through its lagged end points.
   const auto drawSliced = [&](CGuiWidget* widget, const CTransform4f& world, bool curved,
-                              float center) {
+                              float depth) {
     int vpLeft, vpTop, vpWidth, vpHeight;
     CGraphics::GetViewport(vpLeft, vpTop, vpWidth, vpHeight);
     u32 old[4];
@@ -254,30 +255,36 @@ void CGuiFrame::Draw(const CGuiWidgetDrawParms& parms) const {
         widget->DrawWithWorldTransform(parms, sliceXf(scale, offset) * world);
       }
     };
+    const auto lagged = [&](float tangent) { return x14_camera->GetLaggedTangent(tangent, depth); };
+    // Maps the authored span [from, to] onto the warped [fromWarped, toWarped].
+    const auto piece = [&](float from, float to, float fromWarped, float toWarped) {
+      const float source = lagged(from);
+      const float target = lagged(fromWarped);
+      const float scale = (lagged(toWarped) - target) / (lagged(to) - source);
+      draw(target, lagged(toWarped), scale, target - scale * source);
+    };
     float inner, outer;
     x14_camera->GetAspectSlices(inner, outer, curved);
     curved = x14_camera->IsSliceCurved(curved);
-    const float c = center;
-    draw(c - inner, c + inner, 1.f, 0.f);
+    piece(-inner, inner, -inner, inner);
     // The band is one linear piece, or for the eased curve enough chords that the joints don't
-    // show; each maps its authored span onto the warped one, mirrored on the left. Spans are
-    // relative to the centre; the pieces are drawn at their screen tangents.
+    // show; each maps its authored span onto the warped one, mirrored on the left.
     const int pieces = curved ? 16 : 1;
     float from = inner;
     float fromWarped = inner;
-    for (int piece = 1; piece <= pieces; ++piece) {
-      const float to = inner + (outer - inner) * piece / pieces;
+    for (int i = 1; i <= pieces; ++i) {
+      const float to = inner + (outer - inner) * i / pieces;
       const float toWarped = to + x14_camera->GetAspectSliceOffset(to, curved);
-      const float scale = (toWarped - fromWarped) / (to - from);
-      draw(c + fromWarped, c + toWarped, scale, c + fromWarped - scale * (c + from));
-      draw(c - toWarped, c - fromWarped, scale, c - fromWarped - scale * (c - from));
+      piece(from, to, fromWarped, toWarped);
+      piece(-to, -from, -toWarped, -fromWarped);
       from = to;
       fromWarped = toWarped;
     }
+    // The rest slides out with the screen edge (past it, so the scissor reaches the edge).
     const float shift = fromWarped - outer;
     const float edge = 2.f * screenTan;
-    draw(c + fromWarped, edge, 1.f, shift);
-    draw(-edge, c - fromWarped, 1.f, -shift);
+    piece(outer, edge, fromWarped, edge + shift);
+    piece(-edge, -outer, -edge - shift, -fromWarped);
     GXSetScissor(old[0], old[1], old[2], old[3]);
   };
   for (AUTO(it, x2c_widgets.begin()); it != x2c_widgets.end(); ++it) {
@@ -291,6 +298,8 @@ void CGuiFrame::Draw(const CGuiWidgetDrawParms& parms) const {
     }
     const CTransform4f world = widget->GetWorldTransform();
     CVector3f anchor = world.GetTranslation();
+    // A widget moved by only part of the horizontal spread (the scan visor's side panels).
+    const float spreadWeight = mSpreadWeights.empty() ? 1.f : GetSpreadWeight(widget);
     // A cluster member (visor/beam selector) shares its group's anchor, so the cluster moves as
     // one unit instead of each icon and lozenge drifting by its own bounding box.
     const CGuiWidget* group = nullptr;
@@ -380,7 +389,7 @@ void CGuiFrame::Draw(const CGuiWidgetDrawParms& parms) const {
           const float farDepth = bounds.GetMaxPoint().GetY();
           const float quarterWidth = farDepth * authoredQuarterWidthPerDepth;
           const float quarterHeight = farDepth * authoredQuarterHeightPerDepth;
-          const bool spansWidth = spread != 1.f && quarterWidth > 0.f &&
+          const bool spansWidth = spread != 1.f && spreadWeight == 1.f && quarterWidth > 0.f &&
                                   bounds.GetMinPoint().GetX() < -quarterWidth &&
                                   bounds.GetMaxPoint().GetX() > quarterWidth;
           const bool spansHeight = spreadY != 1.f && quarterHeight > 0.f &&
@@ -389,7 +398,7 @@ void CGuiFrame::Draw(const CGuiWidgetDrawParms& parms) const {
 
           if (sliced && spansWidth && bounds.GetMinPoint().GetY() > projection.GetNear()) {
             const CVector3f mid = bounds.GetCenterPoint();
-            drawSliced(widget, world, curved, x14_camera->GetSliceCenter(mid.GetY()));
+            drawSliced(widget, world, curved, mid.GetY());
             continue;
           }
           if (bounds.GetMinPoint().GetY() > projection.GetNear() && (spansWidth || spansHeight)) {
@@ -404,7 +413,7 @@ void CGuiFrame::Draw(const CGuiWidgetDrawParms& parms) const {
     // Never round-trip through SetO2WTransform: its quick parent inverse assumes
     // an orthonormal basis. Even slightly non-unit HUD-lag rotations would then
     // compound scale errors every draw, eventually shrinking the helmet lights.
-    CTransform4f hudXf = x14_camera->GetHudTransform(anchor);
+    CTransform4f hudXf = x14_camera->GetHudTransform(anchor, 1.f, spreadWeight);
     if (group && aboutEye && spread == 1.f && spreadY != 1.f) {
       // A cluster off to the side: the rigid path pitches it to face the eye, which tips its
       // inward-turned cards into a slant against the struts. Sliding it straight down (or up) at
@@ -416,9 +425,7 @@ void CGuiFrame::Draw(const CGuiWidgetDrawParms& parms) const {
     if (curved) {
       const CVector3f eye = invView * anchor;
       if (eye.GetY() > 0.f) {
-        const float center = x14_camera->GetSliceCenter(eye.GetY());
-        hudXf = sliceXf(
-            1.f, x14_camera->GetAspectSliceOffset(eye.GetX() / eye.GetY(), true, center));
+        hudXf = sliceXf(1.f, x14_camera->GetLaggedSliceOffset(eye, true));
       }
     }
     widget->DrawWithWorldTransform(parms, hudXf * world);
@@ -471,6 +478,35 @@ void CGuiFrame::SetSpreadSlideTree(const CGuiWidget* root) {
       }
     }
   }
+}
+
+void CGuiFrame::SetSpreadWeightTree(const CGuiWidget* root, float (*weight)()) {
+  if (!root || !weight) {
+    return;
+  }
+  for (CGuiWidget* widget : x2c_widgets) {
+    for (const CGuiObject* obj = widget; obj; obj = obj->GetParent()) {
+      if (obj == root) {
+        auto it = std::find_if(mSpreadWeights.begin(), mSpreadWeights.end(),
+                               [&](const auto& entry) { return entry.first == widget; });
+        if (it != mSpreadWeights.end()) {
+          it->second = weight;
+        } else {
+          mSpreadWeights.emplace_back(widget, weight);
+        }
+        break;
+      }
+    }
+  }
+}
+
+float CGuiFrame::GetSpreadWeight(const CGuiWidget* widget) const {
+  for (const auto& entry : mSpreadWeights) {
+    if (entry.first == widget) {
+      return std::max(0.f, std::min(1.f, entry.second()));
+    }
+  }
+  return 1.f;
 }
 
 void CGuiFrame::SetSpreadAnchorTree(const CGuiWidget* root) {

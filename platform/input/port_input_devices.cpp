@@ -5,6 +5,8 @@
 #include "port_input_remap_ui.h"
 #include "port_log.h"
 #include "port_paths.h"
+#include "port_photo.h"
+#include "port_pointer.h"
 #include "MetroidPrime/CStateManager.hpp"
 #include "MetroidPrime/Player/CPlayer.hpp"
 #include "MetroidPrime/Player/CPlayerGun.hpp"
@@ -202,23 +204,9 @@ bool TriggerAxisTaken(const PADAxisMapping* axes, u32 axisCount, const PADButton
   return other;
 }
 
-void BindController(Profile& p) {
-  u32 buttonCount = 0;
-  u32 axisCount = 0;
-  const PADButtonMapping* buttons = PADGetButtonMappings(kPort, &buttonCount);
-  const PADAxisMapping* axes = PADGetAxisMappings(kPort, &axisCount);
-  const PADDeadZones* dz = PADGetDeadZones(kPort);
-  // No controller on the port: bind the standard defaults anyway, so the Remap
-  // page shows what a pad would get (nothing reads them until one connects).
-  PADDefaultMapping fallback;
-  if (buttons == nullptr || axes == nullptr) {
-    PADGetDefaultMapping(&fallback, PAD_TYPE_STANDARD);
-    buttons = fallback.buttons;
-    axes = fallback.axes;
-    buttonCount = PAD_BUTTON_COUNT;
-    axisCount = PAD_AXIS_COUNT;
-  }
-
+// One Aurora PAD mapping (buttons, axes, emulated trigger clicks) as bindings.
+void BindMapping(Profile& p, const PADButtonMapping* buttons, u32 buttonCount, const PADAxisMapping* axes,
+                 u32 axisCount, bool emulateTriggers) {
   bool lSet = false;
   bool rSet = false;
   for (u32 i = 0; i < buttonCount; ++i) {
@@ -240,7 +228,7 @@ void BindController(Profile& p) {
     }
     // Aurora's emulated trigger click: a pulled L/R analog presses L/R when no
     // button is mapped to them.
-    if (trigger && (dz == nullptr || dz->emulateTriggers)) {
+    if (trigger && emulateTriggers) {
       const bool left = m.padAxis == PAD_AXIS_TRIGGER_L;
       if (!(left ? lSet : rSet)) {
         Bind(p, left ? Action::PadL : Action::PadR,
@@ -249,6 +237,25 @@ void BindController(Profile& p) {
       }
     }
   }
+}
+
+void BindController(Profile& p) {
+  u32 buttonCount = 0;
+  u32 axisCount = 0;
+  const PADButtonMapping* buttons = PADGetButtonMappings(kPort, &buttonCount);
+  const PADAxisMapping* axes = PADGetAxisMappings(kPort, &axisCount);
+  const PADDeadZones* dz = PADGetDeadZones(kPort);
+  // No controller on the port: bind the standard defaults anyway, so the Remap
+  // page shows what a pad would get (nothing reads them until one connects).
+  PADDefaultMapping fallback;
+  if (buttons == nullptr || axes == nullptr) {
+    PADGetDefaultMapping(&fallback, PAD_TYPE_STANDARD);
+    buttons = fallback.buttons;
+    axes = fallback.axes;
+    buttonCount = PAD_BUTTON_COUNT;
+    axisCount = PAD_AXIS_COUNT;
+  }
+  BindMapping(p, buttons, buttonCount, axes, axisCount, dz == nullptr || dz->emulateTriggers);
 }
 
 void BindKeyboard(Profile& p) {
@@ -372,14 +379,44 @@ void BindPortControls(Profile& p) {
   Bind(p, Action::PadA, Make(Device::Touch, kTouchTurbo), turboHz);
   Bind(p, Action::PadZ, Make(Device::Touch, kTouchMapTap));
 
+  // The port's own keys and the pad's overlay chord. Back + Start is ordered both
+  // ways, so either can be held first; the chord also keeps Start from pausing.
+  Bind(p, Action::PortMenu, Make(Device::Key, SDL_SCANCODE_F1));
+  const Input back = NativeInput(SDL_GAMEPAD_BUTTON_BACK);
+  const Input start = NativeInput(SDL_GAMEPAD_BUTTON_START);
+  if (back.Valid() && start.Valid()) {
+    for (int order = 0; order < 2; ++order) {
+      Binding b;
+      b.action = Action::PortMenu;
+      b.inputs[0] = order == 0 ? back : start;
+      b.inputs[1] = order == 0 ? start : back;
+      b.count = 2;
+      p.bindings.push_back(b);
+    }
+  }
+  Bind(p, Action::SaveState, Make(Device::Key, SDL_SCANCODE_F5));
+  Bind(p, Action::LoadState, Make(Device::Key, SDL_SCANCODE_F9));
+  Bind(p, Action::Screenshot, Make(Device::Key, SDL_SCANCODE_F12));
+  Bind(p, Action::PhotoMode, Make(Device::Key, SDL_SCANCODE_F8));
+
   // The wheel cycles beams, as in PrimeHack (issue #61); retail has no wheel.
+  // With pointer menus, Escape works as on PC: pauses, backs out of menus (B; the
+  // pause screen's top level resumes on it) and closes the map (Z, its exit; Start
+  // does nothing there).
   if (!PortDebug::OriginalExperience()) {
+    if (PortPointer::Enabled()) {
+      const Input esc = Make(Device::Key, SDL_SCANCODE_ESCAPE);
+      BindIn(p, Action::PadStart, esc, PortInput::kCtxGameplay | PortInput::kCtxMorphBall);
+      BindIn(p, Action::PadB, esc, PortInput::kCtxMenu);
+      BindIn(p, Action::PadZ, esc, PortInput::kCtxMap);
+    }
     Bind(p, Action::BeamPrev, Make(Device::MouseWheel, 0, 1));
     Bind(p, Action::BeamNext, Make(Device::MouseWheel, 0, -1));
   }
 
   // Mouse buttons: under mouse aim each does its action (or the beam shift);
-  // out of it the ones on A and B still press them (bombs, boosts, text boxes).
+  // out of it the ones on A and B still press them (bombs, boosts, text boxes),
+  // and in morph ball the ones on Y and R too (power bombs, spider ball).
   for (int i = 0; i < PortInputMap::kMouseButtonCount; ++i) {
     const int action = PortDebug::MouseAction(i);
     if (action == PortInputMap::kMA_Shift) continue; // a beam chord's shift, bound above
@@ -388,6 +425,8 @@ void BindPortControls(Profile& p) {
     Bind(p, a, Make(Device::MouseButton, kMouseGameplay + i));
     if (pad == PAD_BUTTON_A || pad == PAD_BUTTON_B) {
       Bind(p, a, Make(Device::MouseButton, kMouseMenu + i));
+    } else if (pad == PAD_BUTTON_Y || pad == PAD_TRIGGER_R) {
+      BindIn(p, a, Make(Device::MouseButton, kMouseMenu + i), PortInput::kCtxMorphBall);
     }
   }
 }
@@ -396,6 +435,8 @@ float StickValue(s16 raw, u16 deadZone, bool useDeadZones) {
   if (useDeadZones && std::abs(static_cast< int >(raw)) <= deadZone) return 0.f;
   return std::clamp(static_cast< float >(raw) / 32767.f, -1.f, 1.f);
 }
+
+uint16_t GameContexts();
 
 void FillRawState(PortInput::RawState& raw, unsigned mouseHeld, bool focused) {
   int numKeys = 0;
@@ -430,9 +471,11 @@ void FillRawState(PortInput::RawState& raw, unsigned mouseHeld, bool focused) {
     actions[i] = PortDebug::MouseAction(i);
   }
   // Its gate also waits for a release, so a held charge carried into morph ball
-  // doesn't drop a bomb; only the A/B buttons feed it, so a held side button
-  // with nothing to do there doesn't hold it shut.
-  const unsigned menuMask = PortInputMap::MouseButtonsFor(actions, PAD_BUTTON_A | PAD_BUTTON_B);
+  // doesn't drop a bomb; only the buttons with something to do there feed it
+  // (A/B, plus Y/R in morph ball), so a held side button doesn't hold it shut.
+  unsigned menuPad = PAD_BUTTON_A | PAD_BUTTON_B;
+  if ((GameContexts() & PortInput::kCtxMorphBall) != 0) menuPad |= PAD_BUTTON_Y | PAD_TRIGGER_R;
+  const unsigned menuMask = PortInputMap::MouseButtonsFor(actions, menuPad);
   mouse |= (PortDebug::MouseMenuButtons(mouseHeld & menuMask, focused) & PortInputMap::kMouseButtonMask)
            << kMouseMenu;
   if (PortDebug::MouseGameplayActive() && PortDebug::MouseCaptured() && PortDebug::MouseButtons()) {
@@ -474,11 +517,24 @@ s8 StickY(float down, float up) {
   return static_cast< s8 >(std::clamp(static_cast< int >(y), -127, 127));
 }
 
-// One of menu (front end, pause screen), map, morph ball or gameplay; the scan
-// visor adds scan to gameplay.
+// The scan text is up (the scan freeze): it reads A while the lock stays held.
+static bool ScanTextOpen(uint16_t contexts) {
+  return (contexts & PortInput::kCtxMenu) != 0 && (contexts & PortInput::kCtxScan) != 0;
+}
+
+// The scan text's Menu context comes and goes under the held lock: switching it
+// must not consume the lock's input, which the Menu rows also use (issue #103).
+static uint16_t QuietContexts(uint16_t before, uint16_t after) {
+  return ScanTextOpen(before) || ScanTextOpen(after) ? PortInput::kCtxMenu : 0;
+}
+
+// One of menu (front end, pause screen, save station, upgrade message), map, morph
+// ball or gameplay; the scan visor adds scan to gameplay, and the scan text adds
+// menu to that, so its A follows the Menu rows while gameplay keeps the lock
+// (issue #93).
 uint16_t GameContexts() {
   CStateManager* mgr = PortDebug::StateManager();
-  if (mgr == nullptr || PortDebug::PauseScreenOpen()) return PortInput::kCtxMenu;
+  if (mgr == nullptr || PortDebug::PausedMenuOpen()) return PortInput::kCtxMenu;
   if (PortDebug::MapScreenOpen()) return PortInput::kCtxMap;
   if (const CPlayer* player = mgr->GetPlayer()) {
     const CPlayer::EPlayerMorphBallState morph = player->GetMorphballTransitionState();
@@ -486,7 +542,10 @@ uint16_t GameContexts() {
   }
   uint16_t contexts = PortInput::kCtxGameplay;
   const CPlayerState* state = mgr->GetPlayerState();
-  if (state != nullptr && state->GetCurrentVisor() == CPlayerState::kPV_Scan) contexts |= PortInput::kCtxScan;
+  if (state != nullptr && state->GetCurrentVisor() == CPlayerState::kPV_Scan) {
+    contexts |= PortInput::kCtxScan;
+    if (mgr->GetGameState() == CStateManager::kGS_SoftPaused) contexts |= PortInput::kCtxMenu;
+  }
   return contexts;
 }
 
@@ -583,11 +642,26 @@ void RouteDirectActions(const PortInput::Output& out) {
   const int visorDir = out.Pressed(Action::VisorNext) ? 1 : out.Pressed(Action::VisorPrev) ? -1 : 0;
   PushCyclePick(false, visorDir != 0 ? CycleTarget(false, visorDir) : -1);
   if (out.Pressed(Action::SpringBall)) PortDebug::RequestSpringBall();
-  if (out.Pressed(Action::PortMenu)) PortDebug::RequestToggle();
-  if (out.Pressed(Action::SaveState)) PortDebug::RequestSaveStateHotkey(1);
-  if (out.Pressed(Action::LoadState)) PortDebug::RequestSaveStateHotkey(2);
-  if (out.Pressed(Action::Screenshot)) aurora::request_screenshot();
-  if (out.Pressed(Action::ToggleOriginal)) PortDebug::SetOriginalExperience(!PortDebug::OriginalExperience());
+}
+
+// The port's own actions: polled every frame by PollPortActions, not with the game
+// ticks, so they work while the game is paused or the F1 overlay is open.
+bool IsPortAction(Action a) {
+  return a == Action::PortMenu || a == Action::SaveState || a == Action::LoadState || a == Action::Screenshot ||
+         a == Action::ToggleOriginal || a == Action::PhotoMode;
+}
+
+// Keys pressed since the last PollPortActions, added by an SDL event watch: a short
+// tap can begin and end between two frames, so the key state alone misses it.
+std::atomic<uint64_t> sKeyDowns[(PortInput::kKeyCount + 63) / 64]{};
+
+bool SDLCALL KeyDownWatch(void*, SDL_Event* event) {
+  if (event->type != SDL_EVENT_KEY_DOWN || event->key.repeat) return true;
+  const int code = static_cast< int >(event->key.scancode);
+  if (code >= 0 && code < PortInput::kKeyCount) {
+    sKeyDowns[code / 64].fetch_or(uint64_t{1} << (code % 64), std::memory_order_relaxed);
+  }
+  return true;
 }
 
 u8 Trigger(float analog, bool click) {
@@ -773,11 +847,29 @@ std::vector<SPadInfo> ConnectedPads() {
   return pads;
 }
 
+static void BindMenuDefaults(Profile& p);
+
 void BuildBaseProfile(Profile& out) {
   out = Profile{};
   BindController(out);
   BindKeyboard(out);
   BindPortControls(out);
+  BindMenuDefaults(out);
+}
+
+// The Port menu can't be unbound for good: with no key or mouse input left for it
+// (and no pad one while a pad is connected), F1 opens it again, so a hand-edited
+// controls.toml or an unplugged pad can't lock anyone out of the settings.
+void KeepPortMenuReachable(Profile& p) {
+  bool pad = false;
+  for (const Binding& b : p.bindings) {
+    if (b.action != Action::PortMenu || b.count == 0) continue;
+    const PortInput::Family family = PortInput::BindingFamily(b);
+    if (family == PortInput::Family::Keyboard) return;
+    pad = pad || family == PortInput::Family::Pad;
+  }
+  if (pad && SDL_HasGamepad()) return;
+  Bind(p, Action::PortMenu, Make(Device::Key, SDL_SCANCODE_F1));
 }
 
 void BuildProfile(Profile& out) {
@@ -786,6 +878,206 @@ void BuildProfile(Profile& out) {
   sTouchBound.store(TouchBoundMask(user), std::memory_order_relaxed);
   if (user.sel.base != nullptr) PortInput::Overlay(out, *user.sel.base);
   if (user.sel.pad != nullptr) PortInput::Overlay(out, *user.sel.pad);
+  KeepPortMenuReachable(out);
+}
+
+// The PAD buttons menus and the map screen read (confirm, back, page, zoom, the
+// D-pad), each with its own "Menu" action. Start (pause) and Z (map) have none:
+// they keep their gameplay inputs, so the button that opens a screen closes it.
+struct SMenuAction {
+  Action game;
+  Action menu;
+  unsigned padButton; // 0 for the analogs
+};
+constexpr SMenuAction kMenuActions[] = {
+    {Action::PadA, Action::MenuA, PAD_BUTTON_A},
+    {Action::PadB, Action::MenuB, PAD_BUTTON_B},
+    {Action::PadX, Action::MenuX, PAD_BUTTON_X},
+    {Action::PadY, Action::MenuY, PAD_BUTTON_Y},
+    {Action::PadL, Action::MenuL, PAD_TRIGGER_L},
+    {Action::PadR, Action::MenuR, PAD_TRIGGER_R},
+    {Action::LAnalog, Action::MenuLAnalog, 0},
+    {Action::RAnalog, Action::MenuRAnalog, 0},
+    {Action::PadUp, Action::MenuUp, PAD_BUTTON_UP},
+    {Action::PadDown, Action::MenuDown, PAD_BUTTON_DOWN},
+    {Action::PadLeft, Action::MenuLeft, PAD_BUTTON_LEFT},
+    {Action::PadRight, Action::MenuRight, PAD_BUTTON_RIGHT},
+};
+constexpr uint16_t kMenus = PortInput::kCtxMenu | PortInput::kCtxMap;
+
+static const SMenuAction* FindMenuAction(Action a, bool menu) {
+  for (const SMenuAction& m : kMenuActions) {
+    if ((menu ? m.menu : m.game) == a) return &m;
+  }
+  return nullptr;
+}
+
+// Port 0's pad, unless it's missing or the touch overlay's virtual one.
+static SDL_Gamepad* RealPad() {
+  const s32 index = PADGetIndexForPort(kPort);
+  SDL_Gamepad* pad = index >= 0 ? PADGetSDLGamepadForIndex(static_cast< u32 >(index)) : nullptr;
+  return pad == nullptr || SDL_IsJoystickVirtual(SDL_GetGamepadID(pad)) ? nullptr : pad;
+}
+
+// The Menu rows' defaults: the pad type's standard mapping (A confirms, B backs
+// out, the triggers page and zoom), less the buttons and axes the pad lacks (a
+// GameCube-typed pad's L/R clicks, say, so L/R fall back to the trigger click).
+// Without a pad, the standard pad's, so the Remap page shows what one would get.
+static void BindMenuDefaults(Profile& p) {
+  PADDefaultMapping def;
+  SDL_Gamepad* pad = RealPad();
+  PADGetDefaultMapping(&def, pad != nullptr ? PADGetControllerType(kPort) : PAD_TYPE_STANDARD);
+  if (pad != nullptr) {
+    for (PADButtonMapping& m : def.buttons) {
+      if (m.nativeButton < SDL_GAMEPAD_BUTTON_COUNT &&
+          !SDL_GamepadHasButton(pad, static_cast< SDL_GamepadButton >(m.nativeButton))) {
+        m.nativeButton = PAD_NATIVE_BUTTON_INVALID;
+      }
+    }
+    for (PADAxisMapping& m : def.axes) {
+      if (m.nativeAxis.nativeAxis >= 0 && m.nativeAxis.nativeAxis < SDL_GAMEPAD_AXIS_COUNT &&
+          !SDL_GamepadHasAxis(pad, static_cast< SDL_GamepadAxis >(m.nativeAxis.nativeAxis))) {
+        m.nativeAxis.nativeAxis = -1;
+        m.nativeButton = PAD_NATIVE_BUTTON_INVALID;
+      }
+    }
+  }
+  Profile standard;
+  const PADDeadZones* dz = PADGetDeadZones(kPort);
+  BindMapping(standard, def.buttons, PAD_BUTTON_COUNT, def.axes, PAD_AXIS_COUNT,
+              dz == nullptr || dz->emulateTriggers);
+  for (Binding b : standard.bindings) {
+    const SMenuAction* m = FindMenuAction(b.action, false);
+    if (m == nullptr) continue;
+    b.action = m->menu;
+    b.contexts = kMenus;
+    p.bindings.push_back(b);
+  }
+}
+
+// Issue #57: "Separate menu buttons" applies without touch. Issue #84: also without
+// a pad, so keyboard and mouse inputs bound to the Menu rows work (the default rows
+// are pad inputs, inert then).
+static bool MenuButtonsActive() { return PortDebug::MenuStandardButtons() && !PortDebug::TouchActive(); }
+
+// With the option on, menus and the map read the Menu rows instead of the gameplay
+// layout: pad bindings meant for everywhere stop applying there for the buttons
+// those rows cover, and keyboard and mouse bindings for everywhere stop applying
+// there on an input a Menu row uses (bindings the user scoped to menus or the map,
+// Start/Z, the sticks and touch are left alone). Menu rows apply only in menus and
+// the map, and never on Start's or Z's input. With it off, the rows do
+// nothing. Only the game's poll applies this, so the Remap page lists the bindings
+// as saved.
+static void ApplyMenuButtons(Profile& p) {
+  const auto isMenu = [](const Binding& b) { return FindMenuAction(b.action, true) != nullptr; };
+  if (!MenuButtonsActive()) {
+    std::erase_if(p.bindings, isMenu);
+    return;
+  }
+  std::vector< Input > kept;
+  for (Binding& b : p.bindings) {
+    if (isMenu(b)) {
+      b.contexts &= kMenus;
+      if (b.contexts == 0) b.contexts = kMenus;
+      continue;
+    }
+    if (b.count != 1 || (b.contexts & kMenus) == 0) continue;
+    if (b.action == Action::PadStart || b.action == Action::PadZ) {
+      kept.push_back(b.inputs[0]);
+    } else if (IsPadFamily(b.inputs[0]) && FindMenuAction(b.action, false) != nullptr &&
+               b.contexts == PortInput::kCtxAll) {
+      b.contexts &= ~kMenus;
+    }
+  }
+  std::erase_if(p.bindings, [&](const Binding& b) {
+    return isMenu(b) && b.count == 1 && std::find(kept.begin(), kept.end(), b.inputs[0]) != kept.end();
+  });
+  // Issue #84: a key or mouse button on a Menu row replaces what it does in
+  // gameplay while in menus and the map, rather than doing both.
+  std::vector< Input > rows;
+  for (const Binding& b : p.bindings) {
+    if (isMenu(b) && b.count == 1 && !IsPadFamily(b.inputs[0])) rows.push_back(b.inputs[0]);
+  }
+  for (Binding& b : p.bindings) {
+    if (isMenu(b) || b.count != 1 || b.contexts != PortInput::kCtxAll) continue;
+    if (std::find(rows.begin(), rows.end(), b.inputs[0]) != rows.end()) b.contexts &= ~kMenus;
+  }
+}
+
+// A single pad input as the native button the prompts look up, or invalid.
+static u32 PromptNative(const Input& in) {
+  if (in.device == Device::PadButton) {
+    if (in.code < SDL_GAMEPAD_BUTTON_COUNT) return in.code;
+    if (in.code == PAD_RAW_BUTTON_TRIGGER_LEFT || in.code == PAD_RAW_BUTTON_TRIGGER_LEFT_CLICK) {
+      return PAD_NATIVE_BUTTON_TRIGGER_LEFT;
+    }
+    if (in.code == PAD_RAW_BUTTON_TRIGGER_RIGHT || in.code == PAD_RAW_BUTTON_TRIGGER_RIGHT_CLICK) {
+      return PAD_NATIVE_BUTTON_TRIGGER_RIGHT;
+    }
+  } else if (in.device == Device::PadAxis && in.dir >= 0) {
+    if (in.code == SDL_GAMEPAD_AXIS_LEFT_TRIGGER) return PAD_NATIVE_BUTTON_TRIGGER_LEFT;
+    if (in.code == SDL_GAMEPAD_AXIS_RIGHT_TRIGGER) return PAD_NATIVE_BUTTON_TRIGGER_RIGHT;
+  }
+  return PAD_NATIVE_BUTTON_INVALID;
+}
+
+u32 PromptNativeButton(const Input& in) { return PromptNative(in); }
+
+// The polled profile's single-input bindings, for the prompts: Remap edits live
+// only here (controls.toml), not in Aurora's key and pad mapping tables. Set by
+// Poll, read wherever prompts are drawn.
+static std::mutex sPromptMutex;
+static std::vector< Binding > sPromptBindings;
+
+static void UpdatePromptBindings(const Profile& p) {
+  std::vector< Binding > singles;
+  for (const Binding& b : p.bindings) {
+    if (b.count == 1) singles.push_back(b);
+  }
+  std::lock_guard lock(sPromptMutex);
+  sPromptBindings = std::move(singles);
+}
+
+// The first of `actions` with a single input from `family`: one that applies in
+// the current context, else one that applies anywhere outside the user layers.
+static bool PromptInputFor(std::initializer_list< Action > actions, PortInput::Family family, Input& out) {
+  const uint16_t contexts = GameContexts();
+  std::lock_guard lock(sPromptMutex);
+  for (const uint16_t want : {contexts, static_cast< uint16_t >(~PortInput::kCtxLayers)}) {
+    for (const Action a : actions) {
+      for (const Binding& b : sPromptBindings) {
+        if (b.action == a && (b.contexts & want) != 0 && PortInput::BindingFamily(b) == family) {
+          out = b.inputs[0];
+          return true;
+        }
+      }
+    }
+  }
+  return false;
+}
+
+bool PromptButtonInput(unsigned padButton, PortInput::Family family, Input& out) {
+  // Menus and the map read the Menu rows first (present only while "Separate menu
+  // buttons" applies, scoped to those contexts); Start and Z have none. L and R
+  // fall back to their analog.
+  const SMenuAction* menu = nullptr;
+  for (const SMenuAction& m : kMenuActions) {
+    if (m.padButton == padButton) menu = &m;
+  }
+  const Action game = PadBitAction(padButton);
+  if (menu == nullptr) return PromptInputFor({game}, family, out);
+  const bool l = padButton == PAD_TRIGGER_L;
+  const bool r = padButton == PAD_TRIGGER_R;
+  if (l || r) {
+    return PromptInputFor({menu->menu, l ? Action::MenuLAnalog : Action::MenuRAnalog, game,
+                           l ? Action::LAnalog : Action::RAnalog},
+                          family, out);
+  }
+  return PromptInputFor({menu->menu, game}, family, out);
+}
+
+bool PromptAxisInput(PADAxis axis, PortInput::Family family, Input& out) {
+  return PromptInputFor({PadAxisAction(axis)}, family, out);
 }
 
 PADStatus Synthesize(const PortInput::Output& out) {
@@ -796,12 +1088,15 @@ PADStatus Synthesize(const PortInput::Output& out) {
   for (unsigned b : kButtons) {
     if (out.Held(PadBitAction(b))) s.button |= static_cast< u16 >(b);
   }
+  for (const SMenuAction& m : kMenuActions) {
+    if (m.padButton != 0 && out.Held(m.menu)) s.button |= static_cast< u16 >(m.padButton);
+  }
   s.stickX = StickX(out.Value(Action::MainRight), out.Value(Action::MainLeft));
   s.stickY = StickY(out.Value(Action::MainDown), out.Value(Action::MainUp));
   s.substickX = StickX(out.Value(Action::CRight), out.Value(Action::CLeft));
   s.substickY = StickY(out.Value(Action::CDown), out.Value(Action::CUp));
-  s.triggerLeft = Trigger(out.Value(Action::LAnalog), (s.button & PAD_TRIGGER_L) != 0);
-  s.triggerRight = Trigger(out.Value(Action::RAnalog), (s.button & PAD_TRIGGER_R) != 0);
+  s.triggerLeft = Trigger(std::max(out.Value(Action::LAnalog), out.Value(Action::MenuLAnalog)), (s.button & PAD_TRIGGER_L) != 0);
+  s.triggerRight = Trigger(std::max(out.Value(Action::RAnalog), out.Value(Action::MenuRAnalog)), (s.button & PAD_TRIGGER_R) != 0);
   const bool any = s.button != 0 || s.stickX != 0 || s.stickY != 0 || s.substickX != 0 || s.substickY != 0 ||
                    s.triggerLeft != 0 || s.triggerRight != 0;
   // Idle: Aurora still reports the port present when a pad or the keyboard is.
@@ -817,7 +1112,9 @@ SPoll Poll(unsigned mouseHeld, bool focused) {
 
   Profile next;
   BuildProfile(next);
+  ApplyMenuButtons(next);
   if (!sInit || next != sProfile) {
+    UpdatePromptBindings(next);
     sProfile = std::move(next);
     sRuntime.SetProfile(&sProfile);
     sInit = true;
@@ -826,7 +1123,9 @@ SPoll Poll(unsigned mouseHeld, bool focused) {
   PortInput::RawState raw;
   FillRawState(raw, mouseHeld, focused);
   sClockMs += static_cast< double >(PortDebug::TickPeriod()) * 1000.0;
-  const PortInput::Output& out = sRuntime.Poll(raw, GameContexts(), sClockMs);
+  const uint16_t contexts = GameContexts();
+  const PortInput::Output& out =
+      sRuntime.Poll(raw, contexts, sClockMs, QuietContexts(sRuntime.ActiveContexts(), contexts));
   SPoll r;
   if (PortInputRemap::Capturing()) {
     // The F1 Remap page is recording an input: it reaches neither the game nor
@@ -837,7 +1136,65 @@ SPoll Poll(unsigned mouseHeld, bool focused) {
   RouteDirectActions(out);
 
   r.status = Synthesize(out);
+  // The scan text reads only A: the Menu row's, not gameplay's (issue #93). The
+  // other buttons keep gameplay's, so the held lock stays. A mouse button on A
+  // (fire under mouse aim) still turns the page, as it does in the other text
+  // boxes (issue #120).
+  if (ScanTextOpen(contexts) && MenuButtonsActive()) {
+    r.status.button &= static_cast< u16 >(~PAD_BUTTON_A);
+    if (out.Held(Action::MenuA)) r.status.button |= PAD_BUTTON_A;
+    for (int i = 0; i < PortInputMap::kMouseButtonCount; ++i) {
+      if ((raw.mouseButtons & (1u << (kMouseGameplay + i))) != 0 &&
+          PortInputMap::MouseActionInfo(PortDebug::MouseAction(i)).padButton == PAD_BUTTON_A)
+        r.status.button |= PAD_BUTTON_A;
+    }
+  }
+  // Escape there is gameplay's Start (pause), not also the Menu context's B.
+  if (ScanTextOpen(contexts) && raw.keys.test(SDL_SCANCODE_ESCAPE) && PortPointer::Enabled() &&
+      !PortDebug::OriginalExperience())
+    r.status.button &= static_cast< u16 >(~PAD_BUTTON_B);
   return r;
+}
+
+void PollPortActions() {
+  static Profile sFull;
+  static Profile sProfile;
+  static PortInput::Runtime sRuntime;
+  static bool sInit = false;
+  static bool sWatch = false;
+  if (!sWatch) sWatch = SDL_AddEventWatch(KeyDownWatch, nullptr);
+
+  Profile next;
+  BuildProfile(next);
+  if (!sInit || next != sFull) {
+    sFull = std::move(next);
+    sProfile = sFull;
+    std::erase_if(sProfile.bindings, [](const Binding& b) { return !IsPortAction(b.action); });
+    sRuntime.SetProfile(&sProfile);
+    sInit = true;
+  }
+
+  PortInput::RawState raw;
+  ReadRaw(raw);
+  for (size_t w = 0; w < std::size(sKeyDowns); ++w) {
+    uint64_t bits = sKeyDowns[w].exchange(0, std::memory_order_relaxed);
+    while (bits != 0) {
+      const int bit = std::countr_zero(bits);
+      bits &= bits - 1;
+      raw.keys.set(w * 64 + static_cast< size_t >(bit));
+    }
+  }
+  const uint16_t contexts = GameContexts();
+  const PortInput::Output& out = sRuntime.Poll(raw, contexts, static_cast< double >(SDL_GetTicksNS()) / 1e6,
+                                               QuietContexts(sRuntime.ActiveContexts(), contexts));
+  // The F1 Remap page is recording an input: a bound PortMenu would close it.
+  if (PortInputRemap::Capturing()) return;
+  if (out.Pressed(Action::PortMenu)) PortDebug::RequestToggle();
+  if (out.Pressed(Action::SaveState)) PortDebug::RequestSaveStateHotkey(1);
+  if (out.Pressed(Action::LoadState)) PortDebug::RequestSaveStateHotkey(2);
+  if (out.Pressed(Action::Screenshot)) aurora::request_screenshot();
+  if (out.Pressed(Action::PhotoMode)) PortPhoto::RequestToggle();
+  if (out.Pressed(Action::ToggleOriginal)) PortDebug::SetOriginalExperience(!PortDebug::OriginalExperience());
 }
 
 } // namespace PortInputDevices

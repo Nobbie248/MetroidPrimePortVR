@@ -20,7 +20,9 @@
 #include <cstring>
 #include <list>
 #include <optional>
+#include <tuple>
 #include <utility>
+#include <vector>
 
 #if defined(__linux__) || defined(__ANDROID__)
 #include <sys/mman.h>
@@ -136,6 +138,113 @@ uint64_t s_bindGeneration = 1;
 std::atomic<uint64_t> s_pendingInvalidations = 0;
 std::atomic<uint64_t> s_pendingCacheClears = 0;
 TextureStats s_stats;
+
+// Leak detector. A texture object created anew every frame with new content (#95, #107) is
+// uploaded every frame and kept for ObjectCacheIdleFrames, so GPU memory grows until the OS
+// kills the game. Room loads upload in bursts; a leak uploads on most frames, window after
+// window. Nothing is evicted: the detector only logs what is being uploaded.
+constexpr uint64_t LeakWindowFrames = 300;
+constexpr uint64_t LeakWindowUploadFrames = LeakWindowFrames / 2;
+constexpr uint64_t LeakWindowsToWarn = 2;
+constexpr uint64_t LeakWindowsBetweenWarnings = 12;
+
+struct LeakSignatureStats {
+  uint64_t uploads = 0;
+  uint64_t bytes = 0;
+  uintptr_t lastData = 0;
+};
+
+// width, height, format, mip count
+using LeakSignature = std::tuple<u32, u32, u32, u32>;
+
+struct LeakUpload {
+  u32 texObjId = 0;
+  LeakSignature signature;
+  uint64_t bytes = 0;
+  uintptr_t data = 0;
+};
+
+struct LeakDetector {
+  uint64_t frames = 0;
+  uint64_t uploadFrames = 0;
+  uint64_t uploads = 0;
+  uint64_t bytes = 0;
+  uint64_t suspiciousWindows = 0;
+  uint64_t warnings = 0;
+  // This frame's uploads; one destroyed in the same frame (a movie frame) is dropped, as it isn't kept.
+  std::vector<LeakUpload> frameUploads;
+  absl::flat_hash_map<LeakSignature, LeakSignatureStats> signatures;
+};
+LeakDetector s_leak;
+
+uint64_t texture_handle_size(const gfx::TextureHandle& handle) noexcept;
+
+void note_new_object_upload(const GXTexObj_& obj, const gfx::TextureHandle& handle) {
+  s_leak.frameUploads.push_back({
+      .texObjId = obj.texObjId,
+      .signature = {obj.width(), obj.height(), obj.format(), obj.mip_count()},
+      .bytes = texture_handle_size(handle),
+      .data = reinterpret_cast<uintptr_t>(obj.data),
+  });
+}
+
+void forget_destroyed_upload(u32 texObjId) {
+  std::erase_if(s_leak.frameUploads, [texObjId](const LeakUpload& upload) { return upload.texObjId == texObjId; });
+}
+
+void log_suspected_leak() {
+  const auto top = std::max_element(s_leak.signatures.begin(), s_leak.signatures.end(), [](const auto& a, const auto& b) {
+    return a.second.uploads < b.second.uploads;
+  });
+  absl::flat_hash_set<const void*> handles;
+  uint64_t cacheBytes = 0;
+  for (const auto& [_, entry] : s_textureObjectCaches) {
+    if (entry.handle && handles.insert(entry.handle.get()).second) {
+      cacheBytes += texture_handle_size(entry.handle);
+    }
+  }
+  const auto& [width, height, format, mipCount] = top->first;
+  Log.warn("Possible texture leak: new texture objects with new content were uploaded on {}/{} frames for {} windows "
+           "in a row ({} uploads, {} KiB this window). Most uploaded: {}x{} format {} mips {} ({} uploads, {} KiB, "
+           "last data {:#x}). Object cache: {} entries, {} MiB of distinct textures.",
+           s_leak.uploadFrames, s_leak.frames, s_leak.suspiciousWindows, s_leak.uploads, s_leak.bytes / 1024, width,
+           height, format, mipCount, top->second.uploads, top->second.bytes / 1024, top->second.lastData,
+           s_textureObjectCaches.size(), cacheBytes / (1024 * 1024));
+  ++s_leak.warnings;
+}
+
+void update_leak_detector() {
+  ++s_leak.frames;
+  if (!s_leak.frameUploads.empty()) {
+    ++s_leak.uploadFrames;
+    for (const auto& upload : s_leak.frameUploads) {
+      ++s_leak.uploads;
+      s_leak.bytes += upload.bytes;
+      auto& signature = s_leak.signatures[upload.signature];
+      ++signature.uploads;
+      signature.bytes += upload.bytes;
+      signature.lastData = upload.data;
+    }
+    s_leak.frameUploads.clear();
+  }
+  if (s_leak.frames < LeakWindowFrames) {
+    return;
+  }
+  if (s_leak.uploadFrames >= LeakWindowUploadFrames) {
+    ++s_leak.suspiciousWindows;
+    if (s_leak.suspiciousWindows >= LeakWindowsToWarn &&
+        (s_leak.suspiciousWindows - LeakWindowsToWarn) % LeakWindowsBetweenWarnings == 0) {
+      log_suspected_leak();
+    }
+  } else {
+    s_leak.suspiciousWindows = 0;
+  }
+  const uint64_t warnings = s_leak.warnings;
+  const uint64_t suspiciousWindows = s_leak.suspiciousWindows;
+  s_leak = {};
+  s_leak.warnings = warnings;
+  s_leak.suspiciousWindows = suspiciousWindows;
+}
 
 #if DEBUG
 constexpr bool BuildSourceKeyForDebug = true;
@@ -664,8 +773,10 @@ gfx::TextureHandle resolve_static_texture(const GXTexObj_& obj) {
     return {};
   }
 
+  bool knownObject = false;
   if (obj.texObjId != 0) {
     if (const auto it = s_textureObjectCaches.find(obj.texObjId); it != s_textureObjectCaches.end()) {
+      knownObject = true;
       auto& entry = it->second;
       if (entry.handle && entry.texDataVersion == obj.texDataVersion && entry.tlutObjId == 0) {
         entry.lastUsedFrame = s_frameCount;
@@ -710,6 +821,9 @@ gfx::TextureHandle resolve_static_texture(const GXTexObj_& obj) {
       ++s_stats.misses;
       s_stats.uploadBytes += texture_handle_size(handle);
       cache_content_texture(std::move(keys->contentKey), handle);
+      if (!knownObject && obj.texObjId != 0 && !obj.no_cache()) {
+        note_new_object_upload(obj, handle);
+      }
     }
   }
   if (!obj.no_cache()) {
@@ -725,8 +839,10 @@ gfx::TextureHandle resolve_static_palette_texture(const GXTexObj_& obj, const GX
     return {};
   }
 
+  bool knownObject = false;
   if (obj.texObjId != 0) {
     if (const auto it = s_textureObjectCaches.find(obj.texObjId); it != s_textureObjectCaches.end()) {
+      knownObject = true;
       auto& entry = it->second;
       if (entry.handle && entry.texDataVersion == obj.texDataVersion && entry.tlutObjId == tlut.tlutObjId &&
           entry.tlutDataVersion == tlut.tlutDataVersion) {
@@ -777,6 +893,9 @@ gfx::TextureHandle resolve_static_palette_texture(const GXTexObj_& obj, const GX
       ++s_stats.misses;
       s_stats.uploadBytes += texture_handle_size(handle);
       cache_content_texture(std::move(keys->contentKey), handle);
+      if (!knownObject && obj.texObjId != 0 && !obj.no_cache() && !tlut.no_cache()) {
+        note_new_object_upload(obj, handle);
+      }
     }
   }
   if (!obj.no_cache() && !tlut.no_cache()) {
@@ -807,10 +926,13 @@ void end_frame() noexcept {
   s_stats.pendingLoads = streamingStats.pendingLoads;
   s_stats.publishes = streamingStats.publishes;
   s_stats.publishBytes = streamingStats.publishBytes;
+  update_leak_detector();
   ++s_frameCount;
   apply_pending_invalidations();
   sweep_object_caches();
 }
+
+uint64_t leak_warning_count() noexcept { return s_leak.warnings; }
 
 void shutdown() noexcept {
   s_textureObjectCaches.clear();
@@ -826,6 +948,7 @@ void shutdown() noexcept {
   s_pendingInvalidations.store(0, std::memory_order_release);
   s_pendingCacheClears.store(0, std::memory_order_release);
   s_stats = {};
+  s_leak = {};
 }
 
 void set_content_cache_budget_for_testing(uint64_t bytes) noexcept {
@@ -849,6 +972,7 @@ void evict_texture_object(u32 texObjId) noexcept {
     s_textureObjectCaches.erase(it);
     clear_texture_dependency(texObjId, entry);
   }
+  forget_destroyed_upload(texObjId);
   // If there is a loaded slot with this ID, mark it as no_cache to avoid inserting it when it's resolved.
   // This also handles the case where the texture was created, loaded, and immediately destroyed before we resolved it.
   for (auto& obj : g_gxState.loadedTextures) {

@@ -160,6 +160,37 @@ struct Surface {
   int numVertices;
 };
 
+#ifdef TARGET_PC
+void CMapArea::CMapAreaSurface::PortForEachTriangle(void (*fn)(void* ctx, int a, int b, int c),
+                                                    void* ctx) const {
+  const int numSurfaces = CBasics::SwapBytes(*x18_surfOffset);
+  const int* surface = &x18_surfOffset[1];
+  for (int i = 0; i < numSurfaces; ++i) {
+    const uint primType = CBasics::SwapBytes(static_cast< uint >(*surface++));
+    const int numVertices = CBasics::SwapBytes(*surface++);
+    const uchar* d = reinterpret_cast< const uchar* >(surface);
+    surface += ((numVertices + 3) & ~3) / 4;
+    for (int v = 2; v < numVertices; ++v) {
+      switch (primType) {
+      case GX_TRIANGLES:
+        if (v % 3 == 2) {
+          fn(ctx, d[v - 2], d[v - 1], d[v]);
+        }
+        break;
+      case GX_TRIANGLESTRIP:
+        fn(ctx, d[v - 2], d[v - 1], d[v]);
+        break;
+      case GX_TRIANGLEFAN:
+        fn(ctx, d[0], d[v - 1], d[v]);
+        break;
+      default:
+        break;
+      }
+    }
+  }
+}
+#endif
+
 void CMapArea::CMapAreaSurface::Draw(const CVector3f* verts, uint vertexCount, const CColor& surfColor,
                                      const CColor& lineColor, float lineWidth) const {
   bool hasSurfAlpha = surfColor.GetAlpha() > 0.0f;

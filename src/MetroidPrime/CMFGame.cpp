@@ -27,7 +27,9 @@
 #include "rstl/math.hpp"
 
 #include "port_debug.h"
+#include "port_env.h"
 #include "port_freecam.h"
+#include "port_photo.h"
 #include "MetroidPrime/CScriptLayerManager.hpp"
 #include "port_room_env.h"
 #include <dolphin/gx/GXExtra.h>
@@ -136,6 +138,9 @@ CIOWin::EMessageReturn CMFGame::OnMessage(const CArchitectureMessage& message,
     }
     // Fall through.
     case kGFS_InGame:
+#ifdef TARGET_PC
+      PortPhoto::Tick(*mStateManager, mFlowState == kGFS_InGame);
+#endif
       mStateManager->SetRandomAvailable(true);
       switch (mStateManager->GetDeferredStateTransition()) {
       case kSMT_InGame:
@@ -204,9 +209,12 @@ CIOWin::EMessageReturn CMFGame::OnMessage(const CArchitectureMessage& message,
             mStateManager->GetCameraManager()->GetCurrentCamera(*mStateManager);
         const CCinematicCamera* const cineCam = TCastToConstPtr< CCinematicCamera >(camera);
 #ifdef TARGET_PC
+        // Photo mode takes Start (leave) and Z (rise) for itself.
+        const bool photoMode = PortPhoto::Active();
         // A skips a skippable cinematic too (it does nothing else while one plays).
-        const bool skipPress = input.PStart() || (cineCam && input.PA());
+        const bool skipPress = !photoMode && (input.PStart() || (cineCam && input.PA()));
 #else
+        const bool photoMode = false;
         const bool skipPress = input.PStart();
 #endif
         if (skipPress) {
@@ -219,7 +227,7 @@ CIOWin::EMessageReturn CMFGame::OnMessage(const CArchitectureMessage& message,
           } else if (!cineCam) {
             mStateManager->DeferStateTransition(kSMT_PauseGame);
           }
-        } else if (input.PZ() && !cineCam && mStateManager->CanShowMapScreen()) {
+        } else if (!photoMode && input.PZ() && !cineCam && mStateManager->CanShowMapScreen()) {
           mStateManager->DeferStateTransition(kSMT_MapScreen);
         }
       }
@@ -227,7 +235,10 @@ CIOWin::EMessageReturn CMFGame::OnMessage(const CArchitectureMessage& message,
       mStateManager->ProcessInput(input);
       mStateManager->SetRandomAvailable(false);
     }
-    mGuiManager->ProcessControllerInput(*mStateManager, input, queue);
+#ifdef TARGET_PC
+    if (!PortPhoto::Active())
+#endif
+      mGuiManager->ProcessControllerInput(*mStateManager, input, queue);
     break;
   }
   case kAM_FrameEnd:
@@ -243,6 +254,10 @@ CIOWin::EMessageReturn CMFGame::OnMessage(const CArchitectureMessage& message,
 }
 
 void CMFGame::Draw() const {
+#ifdef TARGET_PC
+  // Do not let a request survive a non-game draw (or an early return) into another frame.
+  CStateManager::sPortSceneHdrRequest = false;
+#endif
   if (!mInitialized) {
     return;
   }
@@ -271,9 +286,37 @@ void CMFGame::Draw() const {
 #ifdef TARGET_PC
     // Remastered's bloom and colour grade, over the world and under the visor. Thermal and
     // X-ray draw their own picture, not the room's exposed light, so they keep neither.
-    const auto postProcess = [this](bool measure) {
+    const auto postProcess = [this](bool measure, bool sceneHdr) {
       const CPlayerState::EPlayerVisor visor = mStateManager->GetPlayerState()->GetActiveVisor(*mStateManager);
-      if (visor != CPlayerState::kPV_Thermal && visor != CPlayerState::kPV_XRay) {
+      const bool normalVisor = visor != CPlayerState::kPV_Thermal && visor != CPlayerState::kPV_XRay;
+      if (sceneHdr) {
+        // An HDR request is the captured policy for this world pass. Even if the active visor
+        // changes unexpectedly during drawing, always hand the HDR target back to the display EFB.
+        float threshold = 0.f;
+        float tints[5][3] = {};
+        float tone[3][4] = {};
+        const bool toned = PortRoomEnv::Tone(tone);
+        const bool bloom = normalVisor && toned && PortRoomEnv::Bloom(threshold, tints);
+        struct Layers {
+          CScriptLayerManager* layers;
+          TAreaId area;
+        } layers{mStateManager->WorldLayerState().GetPtr(), mStateManager->GetNextAreaId()};
+        uint32_t gradeA = 0;
+        uint32_t gradeB = 0;
+        float gradeWeight = 0.f;
+        if (normalVisor) {
+          PortRoomEnv::ColorGrade(
+              [](int32_t layer, void* context) {
+                const Layers& l = *static_cast< const Layers* >(context);
+                return l.layers == nullptr || l.area == kInvalidAreaId ||
+                       l.layers->IsLayerActive(l.area, TLayerId(layer));
+              },
+              &layers, gradeA, gradeB, gradeWeight);
+        }
+        GXPortPostProcessScene(bloom, threshold, tints, tone, gradeA, gradeB, gradeWeight,
+                               toned && normalVisor && measure ? PortRoomEnv::MeasureExposure() : 0.f);
+      } else if (normalVisor) {
+        // Keep the non-experimental LDR path and its FIFO commands unchanged.
         float threshold = 0.f;
         float tints[5][3] = {};
         float tone[3][4] = {};
@@ -298,6 +341,24 @@ void CMFGame::Draw() const {
                           toned && measure ? PortRoomEnv::MeasureExposure() : 0.f);
       }
     };
+    const auto drawWorld = [this]() {
+      static const bool hdrSceneEnabled = port::EnvFlag("MP_HDR_SCENE", false);
+      const CPlayerState* playerState = mStateManager->GetPlayerState();
+      const CPlayerState::EPlayerVisor visor = playerState->GetActiveVisor(*mStateManager);
+      const bool supportedVisor = CStateManager::PortIsSceneHdrVisorSupported(
+          visor == CPlayerState::kPV_Combat, visor == CPlayerState::kPV_Scan,
+          visor == CPlayerState::kPV_Thermal, visor == CPlayerState::kPV_XRay);
+      const bool visorTransitioning = playerState->GetIsVisorTransitioning();
+      const bool roomEnvEnabled = hdrSceneEnabled && supportedVisor && !visorTransitioning &&
+                                  PortRoomEnv::Enabled();
+      float tone[3][4] = {};
+      const bool hasRoomTone = roomEnvEnabled && PortRoomEnv::Tone(tone);
+      const bool requestSceneHdr = CStateManager::PortShouldUseSceneHdr(
+          hdrSceneEnabled, roomEnvEnabled, hasRoomTone, supportedVisor, visorTransitioning);
+      CStateManager::sPortSceneHdrRequest = requestSceneHdr;
+      mStateManager->DrawWorld();
+      return requestSceneHdr;
+    };
     // Sharp scan window: the window's picture is the world drawn again through a zoomed
     // camera, instead of the screen's centre stretched (the copy clears the EFB after it).
     float scanZoom = 1.f;
@@ -308,17 +369,26 @@ void CMFGame::Draw() const {
         mGuiManager->PortPlayerVisorDrawn(*mStateManager) &&
         scanVisor->PortScanZoom(*mStateManager, scanZoom, scanWidth, scanHeight)) {
       CStateManager::sPortViewZoom = scanZoom;
-      mStateManager->DrawWorld();
-      postProcess(false);
+      const bool sceneHdr = drawWorld();
+      postProcess(false, sceneHdr);
       mGuiManager->PortDrawScanZoomReticles(*mStateManager);
       CStateManager::sPortViewZoom = 1.f;
       CPlayerVisor::PortCopyScanZoom(scanWidth, scanHeight, scanZoom);
     }
+#else
+    const auto drawWorld = [this]() {
+      mStateManager->DrawWorld();
+      return false;
+    };
 #endif
-    mStateManager->DrawWorld();
+#ifdef TARGET_PC
+    const bool sceneHdr = drawWorld();
+#else
+    drawWorld();
+#endif
     (void)mStateManager->GetPlayer()->IsPlayerDeadEnough();
 #ifdef TARGET_PC
-    postProcess(true);
+    postProcess(true, sceneHdr);
 #endif
   }
 

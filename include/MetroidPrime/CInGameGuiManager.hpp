@@ -32,6 +32,7 @@ class CSaveGameScreen;
 class CGuiWidget;
 class CGuiModel;
 class CGuiCamera;
+class CGuiTextSupport;
 
 class CStateManager;
 class CArchitectureQueue;
@@ -160,6 +161,10 @@ private:
   bool x1f8_25_playerAlive : 1;
   bool x1f8_26_deferTransition : 1;
   bool x1f8_27_inSaveUI : 1;
+  // Port: PAL billboards name a STRG (an intro subtitle), drawn as text as PAL does.
+  rstl::single_ptr< CGuiTextSupport > xPortSubtitle;
+  void PortUpdateSubtitle(const SOnScreenTex& pending, float dt);
+  void PortDrawSubtitle() const;
 };
 CHECK_SIZEOF(CInGameGuiManager, 0x1fc)
 #endif

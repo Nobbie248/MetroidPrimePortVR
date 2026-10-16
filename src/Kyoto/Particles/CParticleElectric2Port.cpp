@@ -1,0 +1,344 @@
+#include "Kyoto/Particles/CParticleElectric2Port.hpp"
+
+#include <algorithm>
+#include <cmath>
+#include <cstdio>
+#include <cstdlib>
+
+#include "Kyoto/Graphics/CGraphics.hpp"
+#include "Kyoto/Particles/CElectricDescription.hpp"
+#include "Kyoto/Particles/CParticleGlobals.hpp"
+#include "Kyoto/Particles/IElement.hpp"
+#include "port_fx_debug.h"
+#include "port_room_env.h"
+#include "port_vfx_particles.h"
+
+using PortElectric2::V3;
+
+namespace {
+float RealOr(const CRealElement* e, int frame, float def) {
+  float v = def;
+  if (e != nullptr) {
+    e->GetValue(frame, v);
+  }
+  return v;
+}
+
+int IntOr(const CIntElement* e, int frame, int def) {
+  int v = def;
+  if (e != nullptr) {
+    e->GetValue(frame, v);
+  }
+  return v;
+}
+
+V3 ToV3(const CVector3f& v) { return {v.GetX(), v.GetY(), v.GetZ()}; }
+CVector3f ToVec(const V3& v) { return CVector3f(v.x, v.y, v.z); }
+} // namespace
+
+CParticleElectric2Port::CParticleElectric2Port(const CElectricDescription& desc) : mDesc(&desc) {
+  mNodes = std::max(1, IntOr(desc.x10_SSEG, 0, 8));
+  if (std::getenv("MP_ELC2_LOG") != nullptr) {
+    std::fprintf(stderr, "elc2: created (nodes %d, vfx %d)\n", mNodes, desc.xPortVfx != nullptr);
+  }
+  mSide = IntOr(desc.xPortSIDE, 0, 2);
+  mMaxBolts = std::clamp(IntOr(desc.xc_SCNT, 0, 1), 1, 32);
+}
+
+int CParticleElectric2Port::LineCount() const {
+  int n = 0;
+  for (const Bolt& b : mBolts) {
+    n += int(b.lines.size());
+  }
+  return n;
+}
+
+int CParticleElectric2Port::PointCount() const {
+  int n = 0;
+  for (const Bolt& b : mBolts) {
+    for (const auto& l : b.lines) {
+      n += int(l.size());
+    }
+  }
+  return n;
+}
+
+CAABox CParticleElectric2Port::Bounds() const {
+  bool any = false;
+  V3 lo, hi;
+  float rad = 0.f;
+  for (const Bolt& b : mBolts) {
+    rad = std::max(rad, std::max(b.leftRad, b.rightRad));
+    for (const auto& l : b.lines) {
+      for (const V3& p : l) {
+        if (!any) {
+          lo = hi = p;
+          any = true;
+          continue;
+        }
+        lo = {std::min(lo.x, p.x), std::min(lo.y, p.y), std::min(lo.z, p.z)};
+        hi = {std::max(hi.x, p.x), std::max(hi.y, p.y), std::max(hi.z, p.z)};
+      }
+    }
+  }
+  if (!any) {
+    return CAABox::MakeNullBox();
+  }
+  return CAABox(CVector3f(lo.x - rad, lo.y - rad, lo.z - rad), CVector3f(hi.x + rad, hi.y + rad, hi.z + rad));
+}
+
+void CParticleElectric2Port::UpdateBolt(Bolt& bolt, int frame) {
+  // UpdateBolt 0xb77638: radii (LLRD copies LRAD to RRAD), colour, material point values.
+  const float rads = RealOr(mDesc->xPortRADS, frame, 1.f);
+  const float lrad = RealOr(mDesc->xPortLRAD, frame, 0.1f);
+  float rrad = RealOr(mDesc->xPortRRAD, frame, 0.1f);
+  if (mDesc->xPortLLRD) {
+    rrad = lrad;
+  }
+  bolt.leftRad = rads * lrad;
+  bolt.rightRad = rads * rrad;
+  float color[4] = {1.f, 1.f, 1.f, 1.f};
+  if (mDesc->x14_COLR != nullptr) {
+    mDesc->x14_COLR->GetValueHdr(frame, color);
+  } else if (mDesc->xPortNCLR != nullptr) {
+    mDesc->xPortNCLR->GetValueHdr(frame, color);
+  }
+  std::copy(color, color + 4, bolt.color);
+  bolt.iten = 1.f;
+  for (auto& row : bolt.vpmt) {
+    std::fill(row, row + 4, 0.f);
+  }
+  if (mDesc->xPortVfx) {
+    PortVfxEvalPoint(*mDesc->xPortVfx, frame, bolt.iten, bolt.vpmt);
+  }
+}
+
+void CParticleElectric2Port::MakeBranches(const std::vector< V3 >& parent, float amp, float ampd, int depth,
+                                          int maxDepth, const PortElectric2::BoltParams& prm,
+                                          std::vector< std::vector< V3 > >& out, int frame) {
+  // CalculatePointsForBoltBranches 0xb745b0. Index choice, length scale and rotation axis are
+  // not confirmed in the decompile.
+  const int parentCount = int(parent.size());
+  if (parentCount < 3) {
+    return;
+  }
+  int count = mDesc->xPortBNDI != nullptr ? IntOr(mDesc->xPortBNDI, frame, 0) : mRng.RangeI(4, 7);
+  count = std::max(0, std::min(count, parentCount - 2));
+  const float amdf = RealOr(mDesc->xPortAMDF, frame, 0.5f);
+  for (int i = 0; i < count; ++i) {
+    const int idx = mRng.RangeI(0, parentCount - 2);
+    const float len = mDesc->xPortBLEN != nullptr ? RealOr(mDesc->xPortBLEN, frame, 0.f) : mRng.RangeF(3.f, 6.f);
+    float ang = mDesc->xPortBANG != nullptr ? RealOr(mDesc->xPortBANG, frame, 0.f) : mRng.RangeF(15.f, 30.f);
+    if (mRng.RangeI(0, 1) != 0) {
+      ang = -ang;
+    }
+    V3 dir = parent[size_t(idx + 1)] - parent[size_t(idx)];
+    if (!PortElectric2::IsNormalizable(dir)) {
+      continue;
+    }
+    dir = PortElectric2::Normalized(dir);
+    const V3 start = parent[size_t(idx)];
+    const V3 end = start + PortElectric2::Rotate(dir * len, prm.camAxis, ang * 0.017453292f);
+    std::vector< V3 > pts;
+    PortElectric2::CalculatePointsForBolt(mRng, prm, start, end, V3{}, V3{}, pts, amp * amdf, ampd);
+    out.push_back(pts);
+    if (depth + 1 < maxDepth) {
+      MakeBranches(pts, amp * amdf, ampd, depth + 1, maxDepth, prm, out, frame);
+    }
+  }
+}
+
+void CParticleElectric2Port::CreateBolt(int frame, const Ctx& ctx) {
+  if (int(mBolts.size()) >= mMaxBolts) {
+    return;
+  }
+  Bolt bolt;
+  bolt.life = std::max(1, IntOr(mDesc->x4_SLIF, frame, 1));
+  bolt.startFrame = frame;
+  bolt.endFrame = frame + bolt.life;
+  CParticleGlobals::SetParticleLifetime(bolt.life);
+  CParticleGlobals::UpdateParticleLifetimeTweenValues(0);
+
+  CVector3f start = CVector3f::Zero(), startDir = CVector3f::Zero();
+  CVector3f end(0.f, 1.f, 0.f), endDir = CVector3f::Zero();
+  if (mDesc->x18_IEMT != nullptr) {
+    mDesc->x18_IEMT->GetValue(frame, start, startDir);
+  }
+  if (mDesc->x1c_FEMT != nullptr) {
+    mDesc->x1c_FEMT->GetValue(frame, end, endDir);
+  }
+  if (ctx.ipos != nullptr) {
+    start = *ctx.ipos;
+  }
+  if (ctx.ivel != nullptr) {
+    startDir = *ctx.ivel;
+  }
+  if (ctx.fpos != nullptr) {
+    end = *ctx.fpos;
+  }
+  if (ctx.fvel != nullptr) {
+    endDir = *ctx.fvel;
+  }
+
+  PortElectric2::BoltParams prm;
+  prm.nodes = mNodes;
+  prm.slvf = RealOr(mDesc->xPortSLVF, frame, 1.f);
+  prm.blnc = RealOr(mDesc->xPortBLNC, frame, 1.f);
+  prm.bcff = RealOr(mDesc->xPortBCFF, frame, 1.f);
+  prm.fplb = mDesc->xPortFPLB;
+  prm.zery = mDesc->x70_ZERY;
+  prm.camAxis = ToV3(ctx.xf.TransposeRotate(CGraphics::GetViewMatrix().GetUp()));
+  if (!PortElectric2::IsNormalizable(prm.camAxis)) {
+    prm.camAxis = V3{0.f, 0.f, 1.f};
+  } else {
+    prm.camAxis = PortElectric2::Normalized(prm.camAxis);
+  }
+
+  const float amp = 2.f * RealOr(mDesc->x20_AMPL, frame, 1.f);
+  const float ampd = RealOr(mDesc->x24_AMPD, frame, 0.f);
+
+  std::vector< std::vector< V3 > > lines(1);
+  PortElectric2::CalculatePointsForBolt(mRng, prm, ToV3(start), ToV3(end), ToV3(startDir), ToV3(endDir), lines[0],
+                                        amp, ampd);
+  const int bdep = IntOr(mDesc->xPortBDEP, frame, 0);
+  if (bdep > 0) {
+    MakeBranches(lines[0], amp, ampd, 0, bdep, prm, lines, frame);
+  }
+
+  // Bake to world space (InitBoltNodePosition 0xb76e18): pos = xf * (pt * scale).
+  const CVector3f scale(ctx.globalScale.GetX() * ctx.localScale.GetX(), ctx.globalScale.GetY() * ctx.localScale.GetY(),
+                        ctx.globalScale.GetZ() * ctx.localScale.GetZ());
+  for (auto& line : lines) {
+    for (V3& p : line) {
+      p = ToV3(ctx.xf * CVector3f(p.x * scale.GetX(), p.y * scale.GetY(), p.z * scale.GetZ()));
+    }
+  }
+  bolt.lines = std::move(lines);
+  UpdateBolt(bolt, frame);
+  mBolts.push_back(std::move(bolt));
+}
+
+void CParticleElectric2Port::Create(int frame, int count, const Ctx& ctx) {
+  for (int i = 0; i < count; ++i) {
+    CreateBolt(frame, ctx);
+  }
+}
+
+void CParticleElectric2Port::Step(int frame, bool emitting, const Ctx& ctx) {
+  mModu = ctx.modu;
+  // UpdateElectricalEffects 0xb757a4
+  for (size_t i = 0; i < mBolts.size();) {
+    Bolt& bolt = mBolts[i];
+    if (frame >= bolt.endFrame) {
+      mBolts.erase(mBolts.begin() + std::ptrdiff_t(i));
+      continue;
+    }
+    CParticleGlobals::SetParticleLifetime(bolt.life);
+    CParticleGlobals::UpdateParticleLifetimeTweenValues(frame - bolt.startFrame);
+    UpdateBolt(bolt, frame);
+    ++i;
+  }
+  if (!emitting) {
+    return;
+  }
+  float rate = 0.f;
+  if (mDesc->x8_GRAT != nullptr && mDesc->x8_GRAT->GetValue(frame, rate)) {
+    mBolts.clear(); // GetValue true = the element is exhausted
+    return;
+  }
+  rate = std::max(rate, 0.f);
+  const int n = int(rate + mRem);
+  mRem = rate + mRem - float(n);
+  Create(frame, n, ctx);
+}
+
+void CParticleElectric2Port::Render(int frame, const CTransform4f& view) {
+  static const bool logElc2 = std::getenv("MP_ELC2_LOG") != nullptr;
+  if (logElc2 && frame % 30 == 0) {
+    std::fprintf(stderr, "elc2: frame %d bolts %zu vfx %d\n", frame, mBolts.size(), mDesc->xPortVfx != nullptr);
+  }
+  if (mBolts.empty() || !mDesc->xPortVfx) {
+    return;
+  }
+  const CPortVfxData& vfx = *mDesc->xPortVfx;
+  if (vfx.mat.version != 2) {
+    return;
+  }
+  float vsmt[19] = {};
+  const uint vsmtMask = PortVfxEvalVsmt(vfx, frame, vsmt);
+  aurora::gfx::vfx::DrawDesc desc;
+  if (!PortVfxBuildDesc(vfx, vsmt, vsmtMask, desc)) {
+    return; // a texture is not streamed in yet
+  }
+  CPortVfxUvXf uvXf;
+  uvXf.Eval(vfx, frame);
+  const float modu[4] = {mModu.GetRed(), mModu.GetGreen(), mModu.GetBlue(), mModu.GetAlpha()};
+  const int tspn = IntOr(mDesc->xPortTSPN, frame, 0);
+  const V3 cameraForward = ToV3(view.GetForward());
+  const int nfom = IntOr(mDesc->xPortNFOM, frame, 0);
+  float tone[3][4];
+  const float exposure = PortRoomEnv::Tone(tone) ? PortRoomEnv::FrameExposure() : 1.f;
+
+  std::vector< aurora::gfx::vfx::Vertex > verts;
+  auto emit = [&](const V3& p, float u, float v, const float color[4], const float extra[4][4]) {
+    aurora::gfx::vfx::Vertex out{};
+    out.pos[0] = p.x;
+    out.pos[1] = p.y;
+    out.pos[2] = p.z;
+    uvXf.Apply(u, v, out.uv);
+    for (int c = 0; c < 4; ++c) {
+      out.color[c] = color[c];
+      for (int k = 0; k < 4; ++k) {
+        out.extra[c][k] = extra[c][k];
+      }
+    }
+    out.vec[2] = 1.f;
+    verts.push_back(out);
+  };
+
+  for (const Bolt& bolt : mBolts) {
+    float color[4];
+    const float iten = PortElectric2::ExposureCompensatedIntensity(bolt.iten, exposure);
+    for (int c = 0; c < 4; ++c) {
+      color[c] = bolt.color[c] * (c < 3 ? iten : 1.f) * modu[c];
+    }
+    for (const auto& line : bolt.lines) {
+      const int n = int(line.size());
+      if (n < 2) {
+        continue;
+      }
+      // UpdateRenderData_Electric2 0x2b8694: u advances 1/TSPN per segment, or 1/nodes when TSPN is absent.
+      const float segLen = tspn > 0 ? 1.f / float(tspn) : 1.f / float(n);
+      std::vector<V3> a(static_cast<size_t>(n)), b(static_cast<size_t>(n));
+      bool validFrame = true;
+      for (int i = 0; i < n; ++i) {
+        V3 width;
+        if (!PortElectric2::Electric2RibbonWidthAxis(line, size_t(i), nfom, mSide, cameraForward, width)) {
+          validFrame = false;
+          break;
+        }
+        PortElectric2::Electric2RibbonSidePoints(line[size_t(i)], width, bolt.leftRad, bolt.rightRad,
+                                                 a[size_t(i)], b[size_t(i)]);
+      }
+      if (!validFrame) {
+        continue;
+      }
+      for (int i = 0; i + 1 < n; ++i) {
+        const float u0 = float(i) * segLen;
+        const float u1 = float(i + 1) * segLen;
+        emit(a[size_t(i)], u0, 0.f, color, bolt.vpmt);
+        emit(b[size_t(i)], u0, 1.f, color, bolt.vpmt);
+        emit(b[size_t(i + 1)], u1, 1.f, color, bolt.vpmt);
+        emit(a[size_t(i + 1)], u1, 0.f, color, bolt.vpmt);
+      }
+    }
+  }
+  constexpr size_t kMaxQuadsPerDraw = 16384;
+  const size_t quads = verts.size() / 4;
+  for (size_t first = 0; first < quads; first += kMaxQuadsPerDraw) {
+    const uint32_t count = static_cast< uint32_t >(std::min(quads - first, kMaxQuadsPerDraw));
+    PortFx::gQuads += count;
+    ++PortFx::gDraws;
+    aurora::gfx::vfx::draw_quads(desc, verts.data() + first * 4, count);
+  }
+}

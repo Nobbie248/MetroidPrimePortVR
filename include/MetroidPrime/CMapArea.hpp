@@ -47,6 +47,10 @@ public:
 
     CVector3f GetNormal() const { return x0_normal; }
     CVector3f GetCenterPosition() const { return xc_centroid; }
+#ifdef TARGET_PC
+    // Calls fn with the vertex indices of each filled triangle Draw emits.
+    void PortForEachTriangle(void (*fn)(void* ctx, int a, int b, int c), void* ctx) const;
+#endif
   };
   enum EVisMode { kVM_Always, kVM_MapStationOrVisit, kVM_Visit, kVM_Never };
 

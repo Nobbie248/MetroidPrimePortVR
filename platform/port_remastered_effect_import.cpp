@@ -3,6 +3,7 @@
 
 #include "port_remastered_effect_convert.h"
 #include "port_remastered_image.h"
+#include "port_bytes.h"
 #include "port_synthetic_effect.h"
 
 #include <algorithm>
@@ -21,9 +22,13 @@ namespace {
 constexpr uint32_t kGenp = EffectFourCC("GENP");
 constexpr uint32_t kMati = EffectFourCC("MATI");
 constexpr uint32_t kPart = EffectFourCC("PART");
+constexpr uint32_t kElsm = EffectFourCC("ELSM");
 constexpr uint32_t kSwsh = EffectFourCC("SWSH");
+constexpr uint32_t kSwhc = EffectFourCC("SWHC");
 constexpr uint32_t kTxtr = EffectFourCC("TXTR");
 constexpr uint32_t kCmdl = EffectFourCC("CMDL");
+constexpr uint32_t kExternalSwooshSalt = 0x53535748u;
+constexpr size_t kMaxExternalSwooshes = 16;
 
 // Effect textures are drawn small; larger ones are scaled down to this side.
 constexpr int kMaxTextureSide = 512;
@@ -91,6 +96,139 @@ bool HasProperty(const EffectNode& node, uint32_t fourcc) {
                      [&](const EffectProperty& property) { return property.fourcc == fourcc; });
 }
 
+bool HasPropertyInTree(const EffectNode& node, uint32_t fourcc) {
+  return HasProperty(node, fourcc) ||
+         std::any_of(node.children.begin(), node.children.end(),
+                     [&](const EffectNode& child) { return HasPropertyInTree(child, fourcc); });
+}
+
+bool ValidateSwooshFooter(const uint8_t* data, size_t size, std::string& error) {
+  constexpr size_t kFormHeaderSize = 32;
+  constexpr size_t kChunkHeaderSize = 24;
+  constexpr uint32_t kAinf = EffectFourCC("AINF");
+  constexpr uint32_t kMeta = EffectFourCC("META");
+  constexpr uint32_t kName = EffectFourCC("NAME");
+  if (size == 0) {
+    return true;
+  }
+  if (size < kFormHeaderSize || std::memcmp(data, "RFRM", 4) != 0 ||
+      std::memcmp(data + 20, "FOOT", 4) != 0 || port::ReadLE64(data + 4) != size - kFormHeaderSize ||
+      port::ReadLE64(data + 12) != 0 || port::ReadLE32(data + 24) != 1 || port::ReadLE32(data + 28) != 1) {
+    error = "trailing bytes are not a bounded extracted FOOT form";
+    return false;
+  }
+
+  size_t at = kFormHeaderSize;
+  bool haveAinf = false;
+  bool haveMeta = false;
+  bool haveName = false;
+  while (at < size) {
+    if (size - at < kChunkHeaderSize) {
+      error = "trailing FOOT has a truncated chunk header";
+      return false;
+    }
+    const uint32_t id = port::ReadBE32(data + at);
+    const uint64_t chunkSize = port::ReadLE64(data + at + 4);
+    if (port::ReadLE32(data + at + 12) != 0 || port::ReadLE64(data + at + 16) != 0 ||
+        chunkSize > size - at - kChunkHeaderSize) {
+      error = "trailing FOOT has an invalid chunk extent";
+      return false;
+    }
+    if (!haveAinf) {
+      if (id != kAinf || chunkSize != 28) {
+        error = "trailing FOOT does not begin with the extracted AINF chunk";
+        return false;
+      }
+      haveAinf = true;
+    } else if (id == kMeta && !haveMeta && !haveName) {
+      haveMeta = true;
+    } else if (id == kName) {
+      haveName = true;
+    } else {
+      error = "trailing FOOT contains an unsupported or out-of-order chunk";
+      return false;
+    }
+    at += kChunkHeaderSize + size_t(chunkSize);
+  }
+  if (!haveAinf) {
+    error = "trailing FOOT has no extracted AINF chunk";
+    return false;
+  }
+  return true;
+}
+
+bool ValidateExternalSwooshExtent(const std::vector<uint8_t>& data, const EffectNode& effect,
+                                  std::string& error) {
+  constexpr size_t kFormHeaderSize = 32;
+  constexpr size_t kDescHeaderSize = 24;
+  constexpr size_t kDescBodyAt = kFormHeaderSize + kDescHeaderSize;
+  constexpr size_t kRootAt = 0x3c;
+  if (data.size() < kRootAt + 5 || std::memcmp(data.data(), "RFRM", 4) != 0 ||
+      std::memcmp(data.data() + 20, "SWSH", 4) != 0) {
+    error = "SWSH has no bounded RFRM/DESC form";
+    return false;
+  }
+  const uint64_t formSize = port::ReadLE64(data.data() + 4);
+  if (formSize > data.size() - kFormHeaderSize) {
+    error = "SWSH RFRM extent exceeds the asset";
+    return false;
+  }
+  const size_t formEnd = kFormHeaderSize + size_t(formSize);
+  if (formEnd < kRootAt + 5 || std::memcmp(data.data() + kFormHeaderSize, "DESC", 4) != 0 ||
+      port::ReadLE64(data.data() + kFormHeaderSize + 4) != formEnd - kDescBodyAt ||
+      port::ReadLE32(data.data() + kFormHeaderSize + 12) != 1 ||
+      port::ReadLE64(data.data() + kFormHeaderSize + 16) != 0) {
+    error = "SWSH DESC chunk does not exactly bound its RFRM form";
+    return false;
+  }
+  if (effect.properties.empty()) {
+    error = "SWSH parser produced no terminal property boundary";
+    return false;
+  }
+  const EffectProperty& last = effect.properties.back();
+  if (last.offset > formEnd || last.size > formEnd - last.offset) {
+    error = "SWSH parsed property extent exceeds its DESC chunk";
+    return false;
+  }
+  const size_t endAt = last.offset + last.size;
+  if (formEnd - endAt != 5 || port::ReadLE32(data.data() + endAt) != EffectFourCC("_END") ||
+      data[endAt + 4] != 4) {
+    error = "SWSH has unparsed dependency or trailing payload before its form end";
+    return false;
+  }
+  if (!ValidateSwooshFooter(data.data() + formEnd, data.size() - formEnd, error)) {
+    error = "SWSH " + error;
+    return false;
+  }
+  return true;
+}
+
+// The asset encodings accepted by the effect converter's typed asset writer.
+// An empty GUID or NONE is a legitimate absent SSWH, not a dependency.
+bool AssetGuid(const std::vector<EffectValue>& value, EffectGuid& out) {
+  if (value.size() == 1 && value[0].kind == EffectValue::Kind::Element &&
+      value[0].fourcc == EffectFourCC("NONE")) {
+    out = {};
+    return true;
+  }
+  if (value.size() == 1 && value[0].kind == EffectValue::Kind::Guid) {
+    out = value[0].guid;
+    return true;
+  }
+  if (value.size() == 1 && value[0].kind == EffectValue::Kind::Element &&
+      value[0].fourcc == EffectFourCC("CNST") && value[0].args.size() == 1 &&
+      value[0].args[0].kind == EffectValue::Kind::Guid) {
+    out = value[0].args[0].guid;
+    return true;
+  }
+  if (value.size() == 2 && value[0].kind == EffectValue::Kind::Byte &&
+      value[1].kind == EffectValue::Kind::Guid) {
+    out = value[1].guid;
+    return true;
+  }
+  return false;
+}
+
 // A generator that drew a texture or a model whose converted PART draws
 // neither, or drew a model and now draws only its material's texture as a
 // sprite (at the sprite's default size, a screen-filling quad): the
@@ -100,6 +238,9 @@ bool LostLook(const EffectNode& node, const std::vector<RetailPartProperty>& par
     return std::any_of(part.begin(), part.end(),
                        [&](const RetailPartProperty& property) { return property.fourcc == fourcc; });
   };
+  if (has(EffectFourCC("PEL2"))) {
+    return false;  // an ELC2 draws through its VMAT, which has no TEXR
+  }
   if (HasProperty(node, EffectFourCC("PMDL"))) {
     return !has(EffectFourCC("PMDL"));
   }
@@ -1005,11 +1146,254 @@ public:
     uint32_t type;
   };
 
+  struct ExternalSwoosh {
+    uint32_t id = 0;
+    EffectNode effect;
+    std::vector<uint8_t> data;
+    std::map<EffectGuid, Child> children;
+    std::vector<ConvertedPart> parts;
+  };
+
   void Children(const EffectNode& node, uint32_t root, std::map<EffectGuid, Child>& out) {
     for (const EffectNode& child : node.children) {
       out.emplace(child.id, Child{m_io.freshId(Hash(child.id, root)), EffectRetailType(child.form)});
       Children(child, root, out);
     }
+  }
+
+  EffectConvertIO ConvertIO(const std::map<EffectGuid, Child>& children,
+                            const std::map<EffectGuid, ExternalSwoosh>& externalSwooshes) {
+    EffectConvertIO io;
+    io.assetId = [&](const EffectGuid& stored, uint32_t type) -> uint32_t {
+      const auto child = children.find(stored);
+      if (child != children.end() && child->second.type == type) {
+        return child->second.id;
+      }
+      // Preserve the established embedded-child then carried-over precedence;
+      // only an otherwise-unresolved ELSM SSWH can use this external map.
+      if (type == kSwhc) {
+        if (const uint32_t carried = Stored(stored, type)) {
+          return carried;
+        }
+        const auto external = externalSwooshes.find(stored);
+        return external == externalSwooshes.end() ? 0 : external->second.id;
+      }
+      return Stored(stored, type);
+    };
+    io.materialTexture = [&](const EffectGuid& material) { return Material(material); };
+    io.flipbook = [&](const EffectGuid& stored) { return Flipbook(Swap(stored)); };
+    io.materialData = [&](const EffectGuid& material) { return MaterialData(material); };
+    io.vfxTexture = [&](const EffectGuid& stored) { return VfxTexture(stored); };
+    if (m_io.modelMesh) {
+      io.modelMesh = [&](uint32_t model) { return m_io.modelMesh(model); };
+    }
+    return io;
+  }
+
+  bool ConvertExternalSwoosh(const EffectGuid& stored, uint32_t retail, ExternalSwoosh& out,
+                             std::string& error) {
+    const EffectGuid id = Swap(stored);
+    if (!m_io.read(kSwsh, id, out.data, error)) {
+      error = "SSWH SWSH read failed" + (error.empty() ? std::string() : ": " + error);
+      return false;
+    }
+    if (!ParseEffect(out.data.data(), out.data.size(), out.effect, error)) {
+      error = "SSWH SWSH parse failed" + (error.empty() ? std::string() : ": " + error);
+      return false;
+    }
+    if (out.effect.form != kSwsh) {
+      error = "SSWH asset parsed as " + EffectFourCCString(out.effect.form) + ", expected SWSH";
+      return false;
+    }
+    if (!ValidateExternalSwooshExtent(out.data, out.effect, error)) {
+      error = "SSWH SWSH terminal extent failed: " + error;
+      return false;
+    }
+    // An SWSH cannot itself add another external electric SSWH edge in this
+    // narrow importer path. Refuse malformed/unknown nested dependency graphs.
+    if (HasPropertyInTree(out.effect, EffectFourCC("SSWH"))) {
+      error = "SSWH SWSH has a nested SSWH dependency (cycle/depth is unsupported)";
+      return false;
+    }
+
+    out.id = m_io.freshId(Hash(stored, retail ^ kExternalSwooshSalt));
+    Children(out.effect, out.id, out.children);
+    const std::map<EffectGuid, ExternalSwoosh> noExternalSwooshes;
+    EffectConvertIO io = ConvertIO(out.children, noExternalSwooshes);
+    out.parts = ConvertEffect(out.effect, out.data.data(), io);
+    std::vector<RetailPartProperty> check;
+    if (out.parts.empty() || out.parts[0].type != kSwhc ||
+        !SplitRetailEffect(kSwhc, out.parts[0].part.data(), out.parts[0].part.size(), check, error)) {
+      error = "SSWH SWSH conversion does not read as a SWHC" + (error.empty() ? std::string() : " (" + error + ")");
+      return false;
+    }
+    for (const ConvertedPart& part : out.parts) {
+      if (!SplitRetailEffect(part.type, part.part.data(), part.part.size(), check, error)) {
+        error = "SSWH converted " + EffectFourCCString(part.type) + " does not read" +
+                (error.empty() ? std::string() : ": " + error);
+        return false;
+      }
+      const EffectNode* node = part.root ? &out.effect : FindNode(out.effect, part.id);
+      if (node != nullptr && !part.placeholder && LostLook(*node, check)) {
+        error = "SSWH converted " + EffectFourCCString(part.type) + " lost its texture or model";
+        return false;
+      }
+    }
+    return true;
+  }
+
+  bool ExternalSwooshes(const EffectNode& parent, const EffectGuid& parentId, uint32_t retail,
+                        const std::map<EffectGuid, Child>& children,
+                        std::map<EffectGuid, ExternalSwoosh>& out, std::string& error) {
+    if (parent.form != kElsm) {
+      return true;
+    }
+    std::set<EffectGuid> resolving;
+    for (const EffectProperty& property : parent.properties) {
+      if (property.fourcc != EffectFourCC("SSWH")) {
+        continue;
+      }
+      EffectGuid stored{};
+      if (!AssetGuid(property.value, stored)) {
+        error = "SSWH is not an asset id";
+        return false;
+      }
+      if (stored == EffectGuid{}) {
+        continue;
+      }
+      const auto embedded = children.find(stored);
+      if (embedded != children.end()) {
+        if (embedded->second.type != kSwhc) {
+          error = "SSWH " + EffectGuidString(stored) + " conflicts with embedded " +
+                  EffectFourCCString(embedded->second.type) + " child; expected SWHC";
+          return false;
+        }
+        continue;
+      }
+      if (Stored(stored, kSwhc) != 0) {
+        continue;
+      }
+      if (Swap(stored) == parentId || resolving.count(stored) != 0) {
+        error = "SSWH dependency cycle at " + EffectGuidString(Swap(stored));
+        return false;
+      }
+      if (out.count(stored) != 0) {
+        continue;
+      }
+      if (out.size() >= kMaxExternalSwooshes) {
+        error = "SSWH exceeds the bounded external swoosh dependency limit";
+        return false;
+      }
+      const EffectGuid id = Swap(stored);
+      const uint32_t foundType = m_io.typeOf ? m_io.typeOf(id) : 0;
+      if (foundType != kSwsh) {
+        error = "SSWH " + EffectGuidString(id) +
+                (foundType == 0 ? " is missing" : " has type " + EffectFourCCString(foundType)) +
+                ", expected SWSH";
+        return false;
+      }
+      resolving.insert(stored);
+      ExternalSwoosh swoosh;
+      if (!ConvertExternalSwoosh(stored, retail, swoosh, error)) {
+        resolving.erase(stored);
+        return false;
+      }
+      resolving.erase(stored);
+      out.emplace(stored, std::move(swoosh));
+    }
+    return true;
+  }
+
+  // assetId() maps a matching embedded GUID to its new retail ID. Prove that
+  // the converter also returned the SWHC part that the child-first writer must
+  // successfully emit before it writes any parent containing that reference.
+  bool ValidateEmbeddedSwooshReferences(const EffectNode& node,
+                                        const std::map<EffectGuid, Child>& children,
+                                        const std::vector<ConvertedPart>& parts, std::string& error) const {
+    for (const EffectProperty& property : node.properties) {
+      if (property.fourcc != EffectFourCC("SSWH")) {
+        continue;
+      }
+      EffectGuid stored{};
+      if (!AssetGuid(property.value, stored)) {
+        error = "SSWH is not an asset id";
+        return false;
+      }
+      if (stored == EffectGuid{}) {
+        continue;
+      }
+      const auto embedded = children.find(stored);
+      if (embedded == children.end()) {
+        continue;
+      }
+      if (embedded->second.type != kSwhc) {
+        error = "SSWH " + EffectGuidString(stored) + " conflicts with embedded " +
+                EffectFourCCString(embedded->second.type) + " child; expected SWHC";
+        return false;
+      }
+      const auto converted = std::find_if(parts.begin(), parts.end(), [&](const ConvertedPart& part) {
+        return !part.root && part.id == stored && part.type == kSwhc;
+      });
+      if (converted == parts.end()) {
+        error = "SSWH embedded SWHC " + EffectGuidString(stored) + " has no converted child";
+        return false;
+      }
+    }
+    for (const EffectNode& child : node.children) {
+      if (!ValidateEmbeddedSwooshReferences(child, children, parts, error)) {
+        return false;
+      }
+    }
+    return true;
+  }
+
+  bool WriteExternalSwooshes(const std::map<EffectGuid, ExternalSwoosh>& swooshes,
+                             EffectReportRow& row, std::string& error) {
+    for (const auto& [source, swoosh] : swooshes) {
+      (void)source;
+      std::vector<RetailPartProperty> check;
+      for (size_t i = 1; i < swoosh.parts.size(); ++i) {
+        const ConvertedPart& part = swoosh.parts[i];
+        const auto child = swoosh.children.find(part.id);
+        if (child == swoosh.children.end() || child->second.type != part.type ||
+            !SplitRetailEffect(part.type, part.part.data(), part.part.size(), check, error) ||
+            !m_io.write(Hex(child->second.id) + "." + EffectFourCCString(part.type), part.part)) {
+          error = "SSWH embedded child " + EffectGuidString(part.id) + " was not written";
+          return false;
+        }
+        ++m_result.parts;
+        m_result.dropped += part.droppedRetail;
+        row.dropped += part.droppedRetail;
+        for (const std::string& line : part.dropped) row.droppedList.push_back(line);
+        for (const std::string& line : part.approximated) row.approximatedList.push_back(line);
+        AddKind(row, part.type);
+      }
+      if (swoosh.parts.empty() ||
+          !m_io.write(Hex(swoosh.id) + ".SWHC", swoosh.parts[0].part)) {
+        error = "SSWH SWHC " + Hex(swoosh.id) + " could not be written";
+        return false;
+      }
+      ++m_result.parts;
+      m_result.dropped += swoosh.parts[0].droppedRetail;
+      row.dropped += swoosh.parts[0].droppedRetail;
+      for (const std::string& line : swoosh.parts[0].dropped) row.droppedList.push_back(line);
+      for (const std::string& line : swoosh.parts[0].approximated) row.approximatedList.push_back(line);
+      AddKind(row, kSwhc);
+    }
+    return true;
+  }
+
+  static void AddKind(EffectReportRow& row, uint32_t type) {
+    const std::string kind = EffectFourCCString(type);
+    const size_t at = row.kinds.find(kind + ":");
+    if (at == std::string::npos) {
+      row.kinds += (row.kinds.empty() ? "" : ",") + kind + ":1";
+      return;
+    }
+    const size_t end = row.kinds.find(',', at);
+    const int count = std::atoi(row.kinds.c_str() + at + 5);
+    row.kinds.replace(at + 5, (end == std::string::npos ? row.kinds.size() : end) - (at + 5),
+                      std::to_string(count + 1));
   }
 
   // Hands one finished row to the report callback.
@@ -1051,21 +1435,15 @@ public:
     }
     std::map<EffectGuid, Child> children;
     Children(effect, retail, children);
-    EffectConvertIO io;
-    io.assetId = [&](const EffectGuid& stored, uint32_t type) -> uint32_t {
-      const auto child = children.find(stored);
-      if (child != children.end() && child->second.type == type) {
-        return child->second.id;
-      }
-      return Stored(stored, type);
-    };
-    io.materialTexture = [&](const EffectGuid& material) { return Material(material); };
-    io.flipbook = [&](const EffectGuid& stored) { return Flipbook(Swap(stored)); };
-    io.materialData = [&](const EffectGuid& material) { return MaterialData(material); };
-    io.vfxTexture = [&](const EffectGuid& stored) { return VfxTexture(stored); };
-    if (m_io.modelMesh) {
-      io.modelMesh = [&](uint32_t model) { return m_io.modelMesh(model); };
+    std::map<EffectGuid, ExternalSwoosh> externalSwooshes;
+    std::string externalError;
+    if (!ExternalSwooshes(effect, id, retail, children, externalSwooshes, externalError)) {
+      ++m_result.failed;
+      Log(name + ": " + externalError);
+      Report(row, "failed", externalError);
+      return;
     }
+    EffectConvertIO io = ConvertIO(children, externalSwooshes);
     const std::vector<ConvertedPart> parts = ConvertEffect(effect, data.data(), io);
     std::vector<RetailPartProperty> check;
     if (parts.empty() || parts[0].type != rootType ||
@@ -1075,6 +1453,12 @@ public:
                               (error.empty() ? "" : " (" + error + ")");
       Log(name + ": " + why);
       Report(row, "failed", why);
+      return;
+    }
+    if (!ValidateEmbeddedSwooshReferences(effect, children, parts, error)) {
+      ++m_result.failed;
+      Log(name + ": " + error);
+      Report(row, "failed", error);
       return;
     }
     for (const ConvertedPart& part : parts) {
@@ -1122,7 +1506,7 @@ public:
     // Children first, so the root never names a child that was not written.
     for (size_t i = 1; i < parts.size(); ++i) {
       const auto child = children.find(parts[i].id);
-      if (child == children.end() ||
+      if (child == children.end() || child->second.type != parts[i].type ||
           !SplitRetailEffect(parts[i].type, parts[i].part.data(), parts[i].part.size(), check, error) ||
           !m_io.write(Hex(child->second.id) + "." + EffectFourCCString(parts[i].type), parts[i].part)) {
         // The root would name a missing child: leave the disc's PART in place.
@@ -1133,6 +1517,12 @@ public:
       }
       ++m_result.parts;
       m_result.dropped += parts[i].droppedRetail;
+    }
+    if (!WriteExternalSwooshes(externalSwooshes, row, error)) {
+      ++m_result.failed;
+      Log(name + ": " + error);
+      Report(row, "failed", error);
+      return;
     }
     std::vector<uint8_t> root = parts[0].part;
     std::vector<RetailPartProperty> converted;
@@ -1185,15 +1575,7 @@ private:
 
 }  // namespace
 
-namespace {
-std::atomic<bool> sEffects{false};
-}  // namespace
-
-bool WantsRemasteredEffects() {
-  return port::EnvFlag("MP_REMASTERED_EFFECTS", sEffects.load());
-}
-
-void SetImportEffects(bool on) { sEffects = on; }
+bool WantsRemasteredEffects() { return port::EnvFlag("MP_REMASTERED_EFFECTS", true); }
 
 EffectImportResult ImportEffects(const EffectImportIO& io) { return Importer(io).Run(); }
 

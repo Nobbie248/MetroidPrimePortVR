@@ -112,6 +112,17 @@ public:
   // Port: records the gun's camera-relative pose before a tick, so frames
   // drawn between ticks can blend the bob and sway (FRAME_INTERPOLATION.md).
   void PortSnapshotPresentedPose(const CStateManager&) const;
+  // Port: the view the gun is drawn under (sim camera, blended pose) in first
+  // person, else worldView.
+  CTransform4f PortGunView(const CStateManager&, const CTransform4f& worldView) const;
+  // Port: the world point pointer aim is on (valid only while pointer aim steers the gun).
+  void PortSetPointerAimPoint(bool valid, const CVector3f& point) {
+    mPortPointerAimValid = valid;
+    mPortPointerAimPoint = point;
+  }
+  // Port: moves a shot's start to where the muzzle is drawn when the gun is drawn at the
+  // retail FOV under a wider or narrower view.
+  void PortShotFromDrawnMuzzle(const CStateManager&, CTransform4f& xf) const;
 #endif
   void GetLctrWithShake(CTransform4f& xfOut, const CModelData&, const rstl::string&, bool, bool);
   void PlayAnim(NWeaponTypes::EGunAnimType type, bool);
@@ -472,6 +483,8 @@ private:
   bool mPortRapidCharge;
   int mPortRapidShots;
   float mPortRapidTimer;
+  bool mPortPointerAimValid;
+  CVector3f mPortPointerAimPoint;
 
   // Port: Remastered's muzzle flashes with no retail counterpart (missile, super missile, ice
   // combo, the per-beam charged-shot flashes), imported as synthetic PARTs. Slot 0 missile,

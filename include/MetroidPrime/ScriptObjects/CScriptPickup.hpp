@@ -22,6 +22,17 @@ class CScriptPickup : public CPhysicsActor {
   bool x28c_24_generated : 1;
   bool x28c_25_inTractor : 1;
   bool x28c_26_enableTractorTest : 1;
+#ifdef TARGET_PC
+  // Map pickup dot of this pickup (-1 none, -2 not looked up yet), the tick
+  // counter that throttles the seen test (map_pickups = Seen), the time since
+  // the last test and how long the pickup has been in sight without a break.
+  int xpc_dotIndex = -2;
+  int xpc_seenTicks = 0;
+  float xpc_seenStep = 0.f;
+  float xpc_seenDwell = 0.f;
+  void PortMarkSeen(float dt, CStateManager& mgr);
+  bool PortInSight(CStateManager& mgr);
+#endif
 
 public:
   CScriptPickup(TUniqueId uid, const rstl::string& name, const CEntityInfo& info,

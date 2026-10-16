@@ -1093,7 +1093,8 @@ void CPlayer::UpdateAimTarget(CStateManager& mgr) {
     x48c_aimTargetTimer = 0.f;
     return;
   }
-  if (!gkAutoAim && gkAutoAimAtOrbitedObject) {
+  // Port: with auto-aim off (F1), aim only at a locked target, as the build-time switch does.
+  if ((!gkAutoAim && gkAutoAimAtOrbitedObject) || !PortDebug::AutoAim()) {
     SetAimTargetId(kInvalidUniqueId);
     x48c_aimTargetTimer = 0.f;
     if (x304_orbitState == kOS_OrbitObject || x304_orbitState == kOS_ForcedOrbitObject) {
@@ -1369,6 +1370,17 @@ void CPlayer::UpdateGrappleState(const CFinalInput& input, CStateManager& mgr) {
     return;
   }
   if (GetOrbitTargetId() == kInvalidUniqueId) {
+#ifdef TARGET_PC
+    // Remastered (CPlayerMP1::UpdateGrappleState 0xc7b5c4) only breaks a grapple
+    // in progress here. It does not re-add the ground collider every tick, so a
+    // jump keeps the off-ground mover until it lands (issue #117).
+    if (MouseControlsAllowed(mgr) && PortDebug::RemasteredMovement()) {
+      if (x3b8_grappleState != kGS_None) {
+        BreakGrapple(kOB_Default, mgr);
+      }
+      return;
+    }
+#endif
     x3b8_grappleState = kGS_None;
     AddMaterial(kMT_GroundCollider, mgr);
     return;

@@ -19,7 +19,8 @@ qt_add_executable(PrimedGun WIN32
     ui/tab_context.cpp
     ui/widgets.cpp
     # The memory-card transfer uses the game's own Dolphin card import.
-    ${PROJECT_SOURCE_DIR}/platform/port_gci.cpp)
+    ${PROJECT_SOURCE_DIR}/platform/port_gci.cpp
+    ${PROJECT_SOURCE_DIR}/platform/port_save_convert.cpp)
 qt_add_resources(PrimedGun "primedgun_assets"
     PREFIX "/"
     BASE assets

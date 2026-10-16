@@ -169,7 +169,7 @@ void LauncherWindow::BuildSetupTab(QTabWidget* tabs) {
   m_selectedGame = new QLabel;
   layout->addWidget(m_selectedGame);
   auto* selectRow = new QHBoxLayout;
-  auto* selectNote = new QLabel(tr("Select Metroid Prime USA 1.00, or PAL (experimental)."));
+  auto* selectNote = new QLabel(tr("Select Metroid Prime USA 1.00/1.01/1.02, or PAL (experimental)."));
   selectNote->setObjectName(QStringLiteral("PrimedGunMuted"));
   m_discWarning = new QLabel;
   m_discWarning->setObjectName(QStringLiteral("PrimedGunBad"));
@@ -477,7 +477,7 @@ void LauncherWindow::ShowSetupNotes() {
   contentLayout->setContentsMargins(14, 12, 14, 12);
   auto* notes = new QLabel(
       tr(R"(<ul style="margin: 0; padding-left: 22px;">
-<li>Select your Metroid Prime USA 1.00 or PAL (experimental) disc image (ISO, NKit ISO, RVZ or CISO), then press Play.</li>
+<li>Select your Metroid Prime USA 1.00/1.01/1.02 or PAL (experimental) disc image (ISO, NKit ISO, RVZ or CISO), then press Play.</li>
 <li>Check the Layout tab for controller bindings.</li>
 <li>To bring over your PrimedGun saves and settings, use Transfer PrimedGun Memory Card / Settings on this tab. Select your game first: a PAL disc uses the EUR card.</li>
 <li>Save states do not carry over from PrimedGun on Dolphin. Make sure to save normally before you transfer.</li>

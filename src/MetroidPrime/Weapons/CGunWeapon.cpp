@@ -286,6 +286,17 @@ void CGunWeapon::UpdateMuzzleFx(const float dt, const CVector3f& scale, const CV
   x1a4_muzzleGenerators[x208_muzzleEffectIdx]->Update(dt);
 }
 
+#ifdef TARGET_PC
+void CGunWeapon::UpdateMuzzleFx(const float dt, const CVector3f& scale,
+                                const CTransform4f& locator, const bool emitting) {
+  CElementGen& generator = *x1a4_muzzleGenerators[x208_muzzleEffectIdx];
+  NPortChargeFxDetail::SetLocalLocator(generator, locator);
+  generator.SetGlobalScale(scale);
+  generator.SetParticleEmission(emitting);
+  generator.Update(dt);
+}
+#endif
+
 CElementGen* CGunWeapon::GetChargeMuzzleFx() const {
   CElementGen* result = x1a4_muzzleGenerators[1].get();
   if (result) {

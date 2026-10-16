@@ -6,13 +6,14 @@
 #include <algorithm>
 #include <cmath>
 #include <cstring>
+#include <memory>
 #include <string>
 
 namespace PortRoomEnv {
 namespace {
 
 constexpr uint32_t kMagic = 0x5645504D; // 'MPEV'
-constexpr uint32_t kVersion = 19;
+constexpr uint32_t kVersion = 21;
 constexpr uint32_t kMaxGrades = 64;
 // A fog record up to its link count (inclusive).
 constexpr size_t kFogBytes = 368;
@@ -72,7 +73,90 @@ uint32_t GradeLutId(const uint8_t* lut) {
 
 using port::HexDigit;
 
+constexpr uint32_t kMaxTiles = 1u << 16;
+constexpr size_t kTileHeaderSize = 12 * 4 + 6 * 4 + 8;
+constexpr size_t kTileRecordSize = 44;
+
+// Reads a version 21 tile set at `at`, checking every record against the data it points into.
+bool ParseTiles(const std::vector<uint8_t>& data, size_t& at, PortRoomEnvTiles::TileSet& set, std::string& error) {
+  using namespace PortRoomEnvTiles;
+  if (data.size() - at < kTileHeaderSize) {
+    error = "cut short";
+    return false;
+  }
+  const uint8_t* p = data.data() + at;
+  for (int i = 0; i < 12; ++i) {
+    set.worldToPoint[i] = ReadLEFloat(p + i * 4);
+    if (!std::isfinite(set.worldToPoint[i])) {
+      error = "a tile set is not finite";
+      return false;
+    }
+  }
+  for (int i = 0; i < 6; ++i) {
+    set.box[i] = int32_t(ReadLE32(p + 48 + i * 4));
+  }
+  // A box of lit points: ordered, and no wider than 4096 points (a room spans a few hundred).
+  for (int a = 0; a < 3; ++a) {
+    const int64_t lo = set.box[a], hi = set.box[a + 3];
+    if (hi < lo || hi - lo > 4096 || lo < -(int64_t(1) << 24) || hi > (int64_t(1) << 24)) {
+      error = "bad tile box";
+      return false;
+    }
+  }
+  const uint32_t count = ReadLE32(p + 72);
+  const uint32_t bytes = ReadLE32(p + 76);
+  at += kTileHeaderSize;
+  if (count > kMaxTiles || (data.size() - at) / kTileRecordSize < count) {
+    error = "cut short";
+    return false;
+  }
+  const uint8_t* records = data.data() + at;
+  at += size_t(count) * kTileRecordSize;
+  if (data.size() - at < bytes) {
+    error = "cut short";
+    return false;
+  }
+  set.tiles.resize(count);
+  for (uint32_t i = 0; i < count; ++i) {
+    const uint8_t* r = records + size_t(i) * kTileRecordSize;
+    Tile& tile = set.tiles[i];
+    tile.key = {int32_t(ReadLE32(r)), int32_t(ReadLE32(r + 4)), int32_t(ReadLE32(r + 8)), int32_t(ReadLE32(r + 12))};
+    for (int a = 0; a < 3; ++a) {
+      tile.lo[a] = int32_t(ReadLE32(r + 16 + a * 4));
+      tile.size[a] = int32_t(ReadLE32(r + 28 + a * 4));
+    }
+    tile.offset = ReadLE32(r + 40);
+    if (tile.key.layer < 0 || tile.key.layer >= kLayers || (i != 0 && !(set.tiles[i - 1].key < tile.key))) {
+      error = "bad tile key";
+      return false;
+    }
+    const int32_t extent[3] = {TileWidth(tile.key.layer), 64, 16};
+    const bool empty = tile.size[0] == 0 && tile.size[1] == 0 && tile.size[2] == 0;
+    if (!empty) {
+      for (int a = 0; a < 3; ++a) {
+        if (tile.size[a] <= 0 || tile.lo[a] < 0 || tile.lo[a] > extent[a] - tile.size[a]) {
+          error = "bad tile crop";
+          return false;
+        }
+      }
+      const size_t tileBytes = size_t(tile.size[0]) * size_t(tile.size[1]) * size_t(tile.size[2]) *
+                               size_t(TileBytes(tile.key.layer));
+      if (tile.offset > bytes || bytes - tile.offset < tileBytes) {
+        error = "bad tile data";
+        return false;
+      }
+    }
+  }
+  set.data.assign(data.begin() + ptrdiff_t(at), data.begin() + ptrdiff_t(at + bytes));
+  at += bytes;
+  return true;
+}
+
 } // namespace
+
+bool ParseTileSet(const std::vector<uint8_t>& data, size_t& at, PortRoomEnvTiles::TileSet& set, std::string& error) {
+  return ParseTiles(data, at, set, error);
+}
 
 bool ParseFileName(const std::string& fileName, uint32_t& id) {
   return port::ParseHexFileName(fileName, ".roomenv", id);
@@ -183,7 +267,25 @@ bool Parse(std::vector<uint8_t>&& data, File& out, std::string& error) {
     }
     at = cube.offset + cube.length;
   }
-  if (version >= 2) {
+  if (version >= 21) {
+    if (data.size() - at < 4) {
+      error = "cut short";
+      return false;
+    }
+    const uint32_t hasTiles = ReadLE32(data.data() + at);
+    at += 4;
+    if (hasTiles > 1) {
+      error = "bad tile flag";
+      return false;
+    }
+    if (hasTiles != 0) {
+      auto set = std::make_shared<PortRoomEnvTiles::TileSet>();
+      if (!ParseTiles(data, at, *set, error)) {
+        return false;
+      }
+      out.tiles = std::move(set);
+    }
+  } else if (version >= 2) {
     if (data.size() - at < 4) {
       error = "cut short";
       return false;
@@ -856,8 +958,116 @@ bool Parse(std::vector<uint8_t>&& data, File& out, std::string& error) {
       }
     }
   }
+  if (version >= 20) {
+    if (data.size() - at < 4) {
+      error = "cut short";
+      return false;
+    }
+    const uint32_t hints = ReadLE32(data.data() + at);
+    at += 4;
+    constexpr size_t kHintBytes = 24;
+    if ((data.size() - at) / kHintBytes < hints) {
+      error = "cut short";
+      return false;
+    }
+    for (uint32_t i = 0; i < hints; ++i, at += kHintBytes) {
+      const uint8_t* q = data.data() + at;
+      FluidHint h;
+      h.mode = q[0];
+      h.exposure[0] = ReadLEFloat(q + 4);
+      h.exposure[1] = ReadLEFloat(q + 8);
+      h.bias = ReadLEFloat(q + 12);
+      h.sigma = ReadLEFloat(q + 16);
+      h.staticLerp = ReadLEFloat(q + 20);
+      if ((h.mode != 1 && h.mode != 2) || !std::isfinite(h.exposure[0]) || !std::isfinite(h.exposure[1]) ||
+          h.exposure[1] < h.exposure[0]) {
+        continue;
+      }
+      if (!std::isfinite(h.bias)) {
+        h.bias = 0.f;
+      }
+      if (!(h.sigma >= 0.f && h.sigma < 10000.f)) {
+        h.sigma = 32.f;
+      }
+      if (!(h.staticLerp >= 0.f && h.staticLerp <= 1.f)) {
+        h.staticLerp = 0.5f;
+      }
+      out.fluidHints.push_back(h);
+    }
+  }
   out.data = std::move(data);
   return true;
+}
+
+bool ExposureHints::Load(const std::vector<FluidHint>& hints, bool cameraInside) {
+  inside = false;
+  active.assign(hints.size(), 0);
+  order.assign(hints.size(), 0);
+  return Set(hints, cameraInside);
+}
+
+bool ExposureHints::Set(const std::vector<FluidHint>& hints, bool cameraInside) {
+  if (active.size() != hints.size()) {
+    active.assign(hints.size(), 0);
+    order.assign(hints.size(), 0);
+  }
+  if (cameraInside == inside) {
+    return false;
+  }
+  inside = cameraInside;
+  bool registered = false;
+  for (size_t i = 0; i < hints.size(); ++i) {
+    const uint8_t now = hints[i].mode == 1 ? (cameraInside ? 1 : 0) : (cameraInside ? 0 : 1);
+    if (now == active[i]) {
+      continue;
+    }
+    active[i] = now;
+    if (now != 0) {
+      order[i] = next++;
+      registered = true;
+    } else {
+      order[i] = 0;
+    }
+  }
+  return registered;
+}
+
+int ExposureHints::Pick(size_t count) const {
+  int best = -1;
+  for (size_t i = 0; i < count && i < order.size(); ++i) {
+    if (order[i] != 0 && (best < 0 || order[i] > order[best])) {
+      best = int(i);
+    }
+  }
+  return best;
+}
+
+void ParamTransition::Snap(const float target[6]) {
+  std::memcpy(from, target, sizeof(from));
+  std::memcpy(to, target, sizeof(to));
+  std::memcpy(shown, target, sizeof(shown));
+  progress = 0.f;
+  moving = false;
+}
+
+void ParamTransition::Step(const float target[6], float dt, float time) {
+  std::memcpy(to, target, sizeof(to));
+  if (!moving && std::memcmp(target, from, sizeof(from)) != 0) {
+    moving = true;
+    progress = 0.f;
+  }
+  if (moving) {
+    progress = std::min(progress + dt / time, 1.f);
+    for (int i = 0; i < 6; ++i) {
+      shown[i] = from[i] + (to[i] - from[i]) * progress;
+    }
+    if (progress >= 1.f) {
+      std::memcpy(from, to, sizeof(from));
+      moving = false;
+    }
+  } else {
+    std::memcpy(shown, from, sizeof(shown));
+  }
 }
 
 void Convergence::SetSigma(float sigma) {
@@ -1068,7 +1278,8 @@ bool SampleGrid(const File& file, const Grid& grid, const float pos[3], Ambient&
     if (outside || weight <= 0.f) {
       continue; // border texel: zero
     }
-    const uint8_t* p = file.data.data() + grid.offset + index * kPointSize;
+    const uint8_t* base = grid.points ? grid.points->data() : file.data.data() + grid.offset;
+    const uint8_t* p = base + index * kPointSize;
     const float mean[3] = {GetHalf(p), GetHalf(p + 2), GetHalf(p + 4)};
     for (int i = 0; i < 3; ++i) {
       sum[i] += weight * mean[i];

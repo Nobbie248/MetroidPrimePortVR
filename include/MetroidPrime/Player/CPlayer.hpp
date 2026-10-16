@@ -351,6 +351,7 @@ public:
   void UpdateCameraTimers(float dt, const CFinalInput& input);
   void UpdateSubmerged(const CStateManager& mgr);
   bool CheckSubmerged() const;
+  float GetFallingTime() const { return x300_fallingTime; }
   void SetMoveState(NPlayer::EPlayerMovementState state, CStateManager& mgr);
   void StartLandingControlFreeze(); // name?
   void EndLandingControlFreeze();   // name?

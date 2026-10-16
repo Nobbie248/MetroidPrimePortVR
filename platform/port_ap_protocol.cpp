@@ -662,6 +662,9 @@ State LoadStateFile(const std::string& path) {
     const PortJson::Value* seed = Member(root, "seed");
     if (seed != nullptr && seed->IsString())
       state.seed = seed->AsString();
+    const PortJson::Value* room = Member(root, "room");
+    if (room != nullptr && room->IsString())
+      state.room = room->AsString();
     int64_t number = 0;
     if (IntegerMember(root, "next_item_index", number) && number >= 0)
       state.nextItemIndex = number;
@@ -701,8 +704,10 @@ State LoadStateFile(const std::string& path) {
 bool SaveStateFile(const std::string& path, const State& state) {
   try {
     std::ostringstream text;
-    text << "{\"slot\":" << Quote(state.slot) << ",\"seed\":" << Quote(state.seed)
-         << ",\"next_item_index\":";
+    text << "{\"slot\":" << Quote(state.slot) << ",\"seed\":" << Quote(state.seed);
+    if (!state.room.empty())
+      text << ",\"room\":" << Quote(state.room);
+    text << ",\"next_item_index\":";
     text << state.nextItemIndex << ",\"checked_locations\":[";
     for (size_t i = 0; i < state.checkedLocations.size(); ++i) {
       if (i != 0)
@@ -749,6 +754,7 @@ Connection LoadConnectionFile(const std::string& path) {
     const PortJson::Value* enabled = Member(root, "enabled");
     connection.enabled = enabled == nullptr || !enabled->IsBool() || enabled->AsBool();
     connection.seed = root.StringOr("seed");
+    connection.room = root.StringOr("room");
     const PortJson::Value* lastPlayed = Member(root, "last_played");
     if (lastPlayed != nullptr)
       connection.lastPlayed = lastPlayed->AsInt(0);
@@ -799,6 +805,7 @@ bool SaveConnectionFile(const std::string& path, const Connection& connection,
         !connection.password.empty());
     set("enabled", PortJson::Value::MakeBool(false), !connection.enabled);
     set("seed", PortJson::Value::MakeString(connection.seed), !connection.seed.empty());
+    set("room", PortJson::Value::MakeString(connection.room), !connection.room.empty());
     set("last_played", PortJson::Value::MakeNumber(static_cast<double>(connection.lastPlayed)),
         connection.lastPlayed != 0);
     std::string text;
@@ -940,6 +947,7 @@ void Session::HandlePacket(const PortJson::Value& packet, std::vector<std::strin
         mState.nextItemIndex = 0;
         mState.checkedLocations.clear();
         mState.progressive.clear();
+        mState.room.clear();
         mGrantFrom = 0;
         mResetReason = "recorded for seed \"" + mState.seed + "\", server has \"" + mSeedName + "\"";
       }

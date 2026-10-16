@@ -635,6 +635,34 @@ bool ApplyPickup(uint32_t worldAssetId, uint32_t areaAssetId, uint32_t entityId,
   }
 }
 
+bool Placed(uint32_t worldAssetId, uint32_t areaAssetId, uint32_t entityId, int& itemType,
+            int& capacity) {
+  EnsureLoaded();
+  try {
+    const State& state = GetState();
+    if (!state.enabled)
+      return false;
+    // Keys hold the editor id with its layer bits; match the area's keys on
+    // the id alone.
+    char prefix[32];
+    std::snprintf(prefix, sizeof(prefix), "%08X:%08X:", static_cast<unsigned int>(worldAssetId),
+                  static_cast<unsigned int>(areaAssetId));
+    for (auto it = state.placements.lower_bound(prefix);
+         it != state.placements.end() && it->first.compare(0, 18, prefix) == 0; ++it) {
+      const unsigned long id = std::strtoul(it->first.c_str() + 18, nullptr, 16);
+      if ((id & 0x3FFFFFFul) != (entityId & 0x3FFFFFFu))
+        continue;
+      itemType = it->second.itemType;
+      if (it->second.hasCapacity)
+        capacity = it->second.capacity;
+      return true;
+    }
+    return false;
+  } catch (...) {
+    return false;
+  }
+}
+
 bool ModelForItem(int itemType, PickupModel& out) {
   EnsureLoaded();
   try {

@@ -367,9 +367,15 @@ void TestDiscProbe(const fs::path& root) {
   std::memcpy(iso.data(), "GM8E01", 6);
   Check(ProbeDiscBytes(".iso", iso.data(), iso.size()).check == DiscCheck::Ok,
         "an NTSC-U 1.00 header is the right disc");
+  iso[7] = 1;
+  Check(ProbeDiscBytes(".iso", iso.data(), iso.size()).check == DiscCheck::Ok,
+        "USA revision 1 is supported upstream");
   iso[7] = 2;
+  Check(ProbeDiscBytes(".iso", iso.data(), iso.size()).check == DiscCheck::Ok,
+        "USA revision 2 is supported upstream");
+  iso[7] = 3;
   Check(ProbeDiscBytes(".iso", iso.data(), iso.size()).check == DiscCheck::WrongRevision,
-        "revision 2 is the wrong revision");
+        "USA revision 3 is not supported");
   iso[7] = 0;
   Check(!ProbeDiscBytes(".iso", iso.data(), iso.size()).Pal(), "a USA disc is not PAL");
   std::memcpy(iso.data(), "GM8P01", 6);
@@ -399,7 +405,7 @@ void TestDiscProbe(const fs::path& root) {
   std::memcpy(ciso.data(), "CISO", 4);
   ciso[8] = 1;
   std::memcpy(ciso.data() + 0x8000, "GM8E01", 6);
-  ciso[0x8007] = 1;
+  ciso[0x8007] = 3;
   Check(ProbeDiscBytes(".ciso", ciso.data(), ciso.size()).check == DiscCheck::WrongRevision,
         "a CISO image keeps the disc header at 0x8000");
 

@@ -32,6 +32,11 @@ const char* StatusText();
 bool ApplyPickup(uint32_t worldAssetId, uint32_t areaAssetId, uint32_t entityId,
                  int& itemType, int& capacity, int& amount,
                  const PickupModel& model = PickupModel());
+// The item and capacity the seed puts at a location, for the map's pickup
+// kinds. Leaves them alone and returns false when the randomizer is off or the
+// location keeps its item; a placement without a capacity keeps `capacity`.
+bool Placed(uint32_t worldAssetId, uint32_t areaAssetId, uint32_t entityId, int& itemType,
+            int& capacity);
 // Looks up the model the seed associates with an item type. False when the seed
 // carries no model for it, in which case the original model is kept.
 bool ModelForItem(int itemType, PickupModel& out);

@@ -45,10 +45,10 @@
     <!-- Setup tab -->
     <string name="primedgun_section_setup">Setup</string>
     <string name="primedgun_setup_notes">Setup Notes</string>
-    <string name="primedgun_setup_notes_text">• Use Select Game to pick your Metroid Prime USA 1.00 or PAL (experimental) disc image (ISO, NKit ISO, RVZ or CISO). PrimedGun copies it into its own folder, so the file you picked can be deleted afterwards. Then press Play: the game opens in the immersive VR view and this window returns when you exit.\n\n• Check the Layout tab for controller bindings.\n\n• To bring over your PrimedGun saves and settings, use Transfer PrimedGun Memory Card / Settings and pick your old memory card (.raw or .gcp), your old PrimedGun.ini, or the zip that PrimedGun\'s Export User Data writes. Select your game first: a PAL disc uses the EUR card.\n\n• Save states do not carry over from PrimedGun on Dolphin. Make sure to save normally before you transfer.\n\n• Once in game, click the right stick to set your height.\n\n• Try to stay in the centre of your play space and face forward, this mod is not roomscaled.\n\n• Settings are locked while the game runs. Change them here before pressing Play.\n\n• Use Save Settings after changing PrimedGun options; Play saves them too.</string>
+    <string name="primedgun_setup_notes_text">• Use Select Game to pick your Metroid Prime USA 1.00/1.01/1.02 or PAL (experimental) disc image (ISO, NKit ISO, RVZ or CISO). PrimedGun copies it into its own folder, so the file you picked can be deleted afterwards. Then press Play: the game opens in the immersive VR view and this window returns when you exit.\n\n• Check the Layout tab for controller bindings.\n\n• To bring over your PrimedGun saves and settings, use Transfer PrimedGun Memory Card / Settings and pick your old memory card (.raw or .gcp), your old PrimedGun.ini, or the zip that PrimedGun\'s Export User Data writes. Select your game first: a PAL disc uses the EUR card.\n\n• Save states do not carry over from PrimedGun on Dolphin. Make sure to save normally before you transfer.\n\n• Once in game, click the right stick to set your height.\n\n• Try to stay in the centre of your play space and face forward, this mod is not roomscaled.\n\n• Settings are locked while the game runs. Change them here before pressing Play.\n\n• Use Save Settings after changing PrimedGun options; Play saves them too.</string>
     <string name="primedgun_selected_game">Selected: %1$s</string>
     <string name="primedgun_selected_game_pal">Selected: %1$s (PAL, experimental)</string>
-    <string name="primedgun_select_game_note">Select Metroid Prime USA 1.00, or PAL (experimental).</string>
+    <string name="primedgun_select_game_note">Select Metroid Prime USA 1.00/1.01/1.02, or PAL (experimental).</string>
     <string name="primedgun_wrong_game">Wrong game</string>
     <string name="primedgun_wrong_revision">Wrong revision</string>
     <string name="primedgun_game_unreadable_short">Cannot read file</string>
@@ -84,7 +84,7 @@
     <string name="primedgun_disc_unsupported_format">%1$s is not in a format the game reads. Use an ISO, NKit ISO, RVZ or CISO image (not GCZ).</string>
     <string name="primedgun_disc_unreadable">%1$s cannot be read.</string>
     <string name="primedgun_disc_wrong_game">The selected file is not Metroid Prime USA or PAL (game id %1$s).</string>
-    <string name="primedgun_disc_wrong_revision">The selected disc is revision %1$s; PrimedGun v2 needs revision 0: USA 1.00 or PAL.</string>
+    <string name="primedgun_disc_wrong_revision">The selected disc is revision %1$s; PrimedGun v2 supports USA revisions 0-2 or PAL revision 0.</string>
     <string name="primedgun_disc_copy_failed">The game disc could not be copied: %1$s</string>
 
     <!-- Transfer old memory card / settings -->
@@ -336,7 +336,7 @@
     <string name="primedgun_about_summary">Metroid Prime as a native VR game, built on the Metroid Prime decompilation\'s native port.</string>
     <string name="primedgun_about_version">Version: %1$s</string>
     <string name="primedgun_about_build">Build: %1$s, revision %2$s</string>
-    <string name="primedgun_about_game">Supported game: Metroid Prime USA 1.00 (GM8E01) or PAL (GM8P01, experimental), revision 0</string>
+    <string name="primedgun_about_game">Supported game: Metroid Prime USA 1.00/1.01/1.02 (GM8E01) or PAL (GM8P01, experimental), revision 0</string>
     <string name="primedgun_about_user_folder">User folder: %1$s</string>
     <string name="primedgun_about_license">The PrimedGun launcher is free software, licensed under the GNU GPL version 3 or later.</string>
     <string name="primedgun_section_useful_info">Useful Information</string>

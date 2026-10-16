@@ -3,6 +3,7 @@
 #include "../logging.hpp"
 #include "../webgpu/gpu.hpp"
 #include "../webgpu/gpu_prof.hpp"
+#include "frame.hpp"
 #include "probe.hpp"
 #include "recording.hpp"
 
@@ -238,19 +239,52 @@ fn fs_apply(in: VertexOutput) -> @location(0) vec4f {
 }
 )";
 
+// The HDR scene's apply (Domain::Hdr): the frame is exposed linear light already (RGBA16F), so it is
+// fogged raw and written back as light, with no decode, inverse curve, clip, curve or encode; the
+// post-tone after the scene does those. The in-scatter's exposure (colorA.w) is applied once, as in LDR.
+constexpr std::string_view LdrApplyTail = R"(  let x = exposed(f.rgb) * fog.a + light;
+  let drawn = vec3f(tone(x.r), tone(x.g), tone(x.b));
+  return vec4f(srgb_enc(drawn), f.a);
+)";
+constexpr std::string_view HdrApplyTail = R"(  let x = f.rgb * fog.a + light;
+  return vec4f(x, f.a);
+)";
+
+// What a recorded fog fogs. LDR keeps reading the display EFB's globals at encode, as it always did;
+// the HDR scene's targets are captured when the fog is recorded (scene_hdr_pass_active at the FIFO),
+// so a later mode switch, frame reset or resize can't change the domain or the textures it fogs.
+// Recorded fog slots. The most fogs one frame records is 2 (the scan visor zoom draws the world twice),
+// and a slot is live from record to the encode of its frame, at most FrameSlotCount frames.
+constexpr size_t RecordedSlots = 8;
+constexpr size_t MaxFogsPerFrame = 2;
+static_assert(MaxFogsPerFrame * detail::FrameSlotCount <= RecordedSlots, "volfog slots would be overwritten while pending");
+
+struct Capture {
+  Domain domain = Domain::Ldr;
+  webgpu::TextureWithSampler color;    // the pass's scene attachment (MSAA when samples > 1)
+  webgpu::TextureWithSampler resolved; // its resolve target
+  webgpu::TextureWithSampler depth;
+};
+
 struct State {
   EncoderTaskId task = InvalidEncoderTask;
   wgpu::ComputePipeline compute;
   wgpu::BindGroupLayout computeLayout;
-  wgpu::Buffer uniforms;
+  // One uniform buffer per recorded slot: every fog of a frame shares one encoder and one submit, and a
+  // queue write lands before the submit, so a shared buffer would give each fog the last one's params.
+  std::array<wgpu::Buffer, RecordedSlots> uniforms;
   wgpu::Sampler repeatSampler;
   wgpu::Sampler clampSampler;
   wgpu::TextureView noise;
-  // The apply pass for the frame's format and sample count.
-  wgpu::RenderPipeline apply;
-  wgpu::BindGroupLayout applyLayout;
-  wgpu::TextureFormat applyFormat = wgpu::TextureFormat::Undefined;
-  uint32_t applySamples = 0;
+  // The apply pass for the frame's format and sample count, one per domain (an HDR pipeline can't be
+  // taken for an LDR frame or the reverse, whatever the formats).
+  struct Apply {
+    wgpu::RenderPipeline pipeline;
+    wgpu::BindGroupLayout layout;
+    wgpu::TextureFormat format = wgpu::TextureFormat::Undefined;
+    uint32_t samples = 0;
+  };
+  std::array<Apply, DomainCount> apply;
   // The froxels, made when the fog is recorded so that the draws after it can bind them (see
   // froxel_view); remade when the frame's size changes. The placeholder is bound until then.
   wgpu::Texture froxels;
@@ -258,20 +292,26 @@ struct State {
   wgpu::TextureView placeholder;
   uint32_t gridWidth = 0;
   uint32_t gridHeight = 0;
-  // The frame as it was; remade when the frame's size or format changes.
-  wgpu::Texture frame;
-  wgpu::TextureView frameView;
-  wgpu::TextureFormat frameFormat = wgpu::TextureFormat::Undefined;
-  uint32_t width = 0;
-  uint32_t height = 0;
+  // The frame as it was, one per domain (the HDR one RGBA16F, never narrowed to 8 bits); remade
+  // when the frame's size or format changes.
+  struct Frame {
+    wgpu::Texture texture;
+    wgpu::TextureView view;
+    wgpu::TextureFormat format = wgpu::TextureFormat::Undefined;
+    uint32_t width = 0;
+    uint32_t height = 0;
+  };
+  std::array<Frame, DomainCount> frame;
 };
 State g_state;
 
 // Params are larger than an encoder task's inline payload (InlineDrawPayloadSize), so the task
 // carries a slot in this ring; frames are encoded well within its length of being recorded.
-std::array<Params, 8> g_recorded;
+std::array<Params, RecordedSlots> g_recorded;
 // The froxels each slot fills, as they were when it was recorded.
-std::array<wgpu::TextureView, 8> g_recordedFroxels;
+std::array<wgpu::TextureView, RecordedSlots> g_recordedFroxels;
+// The domain and (HDR) targets each slot fogs, as they were when it was recorded.
+std::array<Capture, RecordedSlots> g_recordedCapture;
 uint32_t g_nextSlot = 0;
 
 // Perlin's gradient noise, repeating every `period` units (CMath::Noise3d(x, y, z, 4)).
@@ -438,7 +478,9 @@ void ensure_compute(const wgpu::Queue& queue) {
       .usage = wgpu::BufferUsage::Uniform | wgpu::BufferUsage::CopyDst,
       .size = sizeof(Params),
   };
-  g_state.uniforms = g_device.CreateBuffer(&bufferDescriptor);
+  for (auto& uniforms : g_state.uniforms) {
+    uniforms = g_device.CreateBuffer(&bufferDescriptor);
+  }
   ensure_clamp_sampler();
   const wgpu::SamplerDescriptor repeatDescriptor{
       .label = "Volumetric Fog Noise Sampler",
@@ -452,14 +494,12 @@ void ensure_compute(const wgpu::Queue& queue) {
   g_state.noise = make_noise(queue);
 }
 
-void ensure_apply(wgpu::TextureFormat format, uint32_t samples) {
-  if (g_state.apply && g_state.applyFormat == format && g_state.applySamples == samples) {
+void ensure_apply(Domain domain, wgpu::TextureFormat format, uint32_t samples) {
+  auto& apply = g_state.apply[static_cast<size_t>(domain)];
+  if (apply.pipeline && apply.format == format && apply.samples == samples) {
     return;
   }
-  std::string code = std::string(CommonSource) + ApplySource;
-  const std::string token = "DEPTH_TYPE";
-  code.replace(code.find(token), token.size(),
-               samples > 1 ? "texture_depth_multisampled_2d" : "texture_depth_2d");
+  const std::string code = apply_source(domain, samples);
   const auto module = make_module("Volumetric Fog Apply", code);
   const std::array entries{
       wgpu::BindGroupLayoutEntry{
@@ -495,11 +535,11 @@ void ensure_apply(wgpu::TextureFormat format, uint32_t samples) {
       .entryCount = entries.size(),
       .entries = entries.data(),
   };
-  g_state.applyLayout = g_device.CreateBindGroupLayout(&layoutDescriptor);
+  apply.layout = g_device.CreateBindGroupLayout(&layoutDescriptor);
   const wgpu::PipelineLayoutDescriptor pipelineLayoutDescriptor{
       .label = "Volumetric Fog Apply Pipeline Layout",
       .bindGroupLayoutCount = 1,
-      .bindGroupLayouts = &g_state.applyLayout,
+      .bindGroupLayouts = &apply.layout,
   };
   const auto pipelineLayout = g_device.CreatePipelineLayout(&pipelineLayoutDescriptor);
   const wgpu::ColorTargetState target{.format = format, .writeMask = wgpu::ColorWriteMask::All};
@@ -517,26 +557,48 @@ void ensure_apply(wgpu::TextureFormat format, uint32_t samples) {
       .multisample = {.count = samples, .mask = UINT32_MAX},
       .fragment = &fragment,
   };
-  g_state.apply = g_device.CreateRenderPipeline(&descriptor);
-  g_state.applyFormat = format;
-  g_state.applySamples = samples;
+  apply.pipeline = g_device.CreateRenderPipeline(&descriptor);
+  apply.format = format;
+  apply.samples = samples;
 }
 
-void ensure_targets(uint32_t width, uint32_t height, wgpu::TextureFormat format) {
-  if (g_state.frame && g_state.width == width && g_state.height == height && g_state.frameFormat == format) {
+void ensure_targets(Domain domain, uint32_t width, uint32_t height, wgpu::TextureFormat format) {
+  auto& frame = g_state.frame[static_cast<size_t>(domain)];
+  if (frame.texture && frame.width == width && frame.height == height && frame.format == format) {
     return;
   }
-  g_state.width = width;
-  g_state.height = height;
-  g_state.frameFormat = format;
+  frame.width = width;
+  frame.height = height;
+  frame.format = format;
   const wgpu::TextureDescriptor frameDescriptor{
       .label = "Volumetric Fog Frame Copy",
       .usage = wgpu::TextureUsage::TextureBinding | wgpu::TextureUsage::CopyDst,
       .size = {width, height, 1},
       .format = format,
   };
-  g_state.frame = g_device.CreateTexture(&frameDescriptor);
-  g_state.frameView = g_state.frame.CreateView();
+  frame.texture = g_device.CreateTexture(&frameDescriptor);
+  frame.view = frame.texture.CreateView();
+}
+
+// The HDR targets a slot fogs, checked as one whole: the scene format throughout, the depth buffer's
+// size and sample count those of the colour, a resolve target when multisampled. Anything else
+// fails closed (no fog) instead of fogging 16F texels as 8-bit ones or the reverse.
+bool hdr_capture_valid(const Capture& c, uint32_t& samples) {
+  if (!c.color.texture || !c.color.view || !c.depth.texture || !c.depth.view ||
+      c.color.format != webgpu::SceneHdrFormat || c.color.texture.GetFormat() != webgpu::SceneHdrFormat) {
+    return false;
+  }
+  samples = c.color.texture.GetSampleCount();
+  if (c.depth.texture.GetSampleCount() != samples || c.depth.size.width != c.color.size.width ||
+      c.depth.size.height != c.color.size.height) {
+    return false;
+  }
+  if (samples > 1) {
+    return c.resolved.texture && c.resolved.view && c.resolved.format == webgpu::SceneHdrFormat &&
+           c.resolved.texture.GetFormat() == webgpu::SceneHdrFormat && c.resolved.texture.GetSampleCount() == 1 &&
+           c.resolved.size.width == c.color.size.width && c.resolved.size.height == c.color.size.height;
+  }
+  return true;
 }
 
 void ensure_froxels(uint32_t width, uint32_t height) {
@@ -568,26 +630,38 @@ void encode(const EncoderTaskContext& ctx, const wgpu::CommandEncoder& cmd, cons
   std::memcpy(&slot, payload, sizeof(slot));
   Params params = g_recorded[slot % g_recorded.size()];
   const wgpu::TextureView froxelView = g_recordedFroxels[slot % g_recordedFroxels.size()];
-  const auto& source = webgpu::present_source();
-  const auto& target = webgpu::g_frameBuffer;
-  const auto& depth = webgpu::g_depthBuffer;
-  const uint32_t samples = webgpu::g_graphicsConfig.msaaSamples > 1 ? webgpu::g_graphicsConfig.msaaSamples : 1;
-  const auto format = webgpu::g_graphicsConfig.surfaceConfiguration.format;
+  const Capture& capture = g_recordedCapture[slot % g_recordedCapture.size()];
+  const Domain domain = capture.domain;
+  const bool hdr = domain == Domain::Hdr;
+  uint32_t hdrSamples = 1;
+  if (hdr && !hdr_capture_valid(capture, hdrSamples)) {
+    return;
+  }
+  const auto& source = hdr ? (hdrSamples > 1 ? capture.resolved : capture.color) : webgpu::present_source();
+  const auto& target = hdr ? capture.color : webgpu::g_frameBuffer;
+  const auto& resolveTarget = hdr ? capture.resolved : webgpu::g_frameBufferResolved;
+  const auto& depth = hdr ? capture.depth : webgpu::g_depthBuffer;
+  const uint32_t samples =
+      hdr ? hdrSamples : (webgpu::g_graphicsConfig.msaaSamples > 1 ? webgpu::g_graphicsConfig.msaaSamples : 1);
+  const auto format = hdr ? webgpu::SceneHdrFormat : webgpu::g_graphicsConfig.surfaceConfiguration.format;
   const uint32_t width = source.size.width;
   const uint32_t height = source.size.height;
   if (width == 0 || height == 0 || !source.texture || !target.view || !depth.view || !froxelView) {
     return;
   }
   ensure_compute(ctx.queue);
-  ensure_apply(format, samples);
-  ensure_targets(width, height, format);
+  const wgpu::Buffer uniforms = g_state.uniforms[slot % g_state.uniforms.size()];
+  ensure_apply(domain, format, samples);
+  ensure_targets(domain, width, height, format);
+  const auto& apply = g_state.apply[static_cast<size_t>(domain)];
+  const auto& frame = g_state.frame[static_cast<size_t>(domain)];
   const bool volume = params.volume != 0 && probe::has_volume(params.volume);
   // misc.x: the volume's light is read, else a white texel's; the bindings always hold a texture.
   params.volume = volume ? 1 : 0;
-  ctx.queue.WriteBuffer(g_state.uniforms, 0, &params, sizeof(params));
+  ctx.queue.WriteBuffer(uniforms, 0, &params, sizeof(params));
 
   const std::array computeEntries{
-      wgpu::BindGroupEntry{.binding = 0, .buffer = g_state.uniforms, .size = sizeof(Params)},
+      wgpu::BindGroupEntry{.binding = 0, .buffer = uniforms, .size = sizeof(Params)},
       wgpu::BindGroupEntry{.binding = 1, .sampler = g_state.repeatSampler},
       wgpu::BindGroupEntry{.binding = 2, .textureView = g_state.noise},
       wgpu::BindGroupEntry{.binding = 3, .sampler = g_state.clampSampler},
@@ -611,20 +685,20 @@ void encode(const EncoderTaskContext& ctx, const wgpu::CommandEncoder& cmd, cons
   }
 
   const wgpu::TexelCopyTextureInfo copySource{.texture = source.texture};
-  const wgpu::TexelCopyTextureInfo copyTarget{.texture = g_state.frame};
+  const wgpu::TexelCopyTextureInfo copyTarget{.texture = frame.texture};
   const wgpu::Extent3D copySize{width, height, 1};
   cmd.CopyTextureToTexture(&copySource, &copyTarget, &copySize);
 
   const std::array applyEntries{
-      wgpu::BindGroupEntry{.binding = 0, .buffer = g_state.uniforms, .size = sizeof(Params)},
-      wgpu::BindGroupEntry{.binding = 1, .textureView = g_state.frameView},
+      wgpu::BindGroupEntry{.binding = 0, .buffer = uniforms, .size = sizeof(Params)},
+      wgpu::BindGroupEntry{.binding = 1, .textureView = frame.view},
       wgpu::BindGroupEntry{.binding = 2, .textureView = depth.view},
       wgpu::BindGroupEntry{.binding = 3, .textureView = froxelView},
       wgpu::BindGroupEntry{.binding = 4, .sampler = g_state.clampSampler},
   };
   const wgpu::BindGroupDescriptor applyGroupDescriptor{
       .label = "Volumetric Fog Apply",
-      .layout = g_state.applyLayout,
+      .layout = apply.layout,
       .entryCount = applyEntries.size(),
       .entries = applyEntries.data(),
   };
@@ -632,7 +706,7 @@ void encode(const EncoderTaskContext& ctx, const wgpu::CommandEncoder& cmd, cons
   // Every pixel is written without blending, so the frame need not be loaded first.
   const wgpu::RenderPassColorAttachment attachment{
       .view = target.view,
-      .resolveTarget = samples > 1 ? webgpu::g_frameBufferResolved.view : wgpu::TextureView{},
+      .resolveTarget = samples > 1 ? resolveTarget.view : wgpu::TextureView{},
       .loadOp = wgpu::LoadOp::Clear,
       .storeOp = wgpu::StoreOp::Store,
       .clearValue = {0.0, 0.0, 0.0, 0.0},
@@ -644,7 +718,7 @@ void encode(const EncoderTaskContext& ctx, const wgpu::CommandEncoder& cmd, cons
       .timestampWrites = webgpu::gpu_prof::pass_writes("Volumetric fog apply"),
   };
   const auto pass = cmd.BeginRenderPass(&passDescriptor);
-  pass.SetPipeline(g_state.apply);
+  pass.SetPipeline(apply.pipeline);
   pass.SetBindGroup(0, applyGroup);
   pass.Draw(3);
   pass.End();
@@ -666,7 +740,14 @@ bool record(const Params& params) {
   if (g_state.task == InvalidEncoderTask) {
     return false;
   }
-  const auto& size = webgpu::present_source().size;
+  // The domain is the pass's, here at the FIFO; the encode never asks the recorder, whose HDR mode is
+  // reset every frame. The HDR scene on but this pass not its own (offscreen, a colour pass) has no
+  // target this fog knows: fail closed.
+  const bool hdr = scene_hdr_pass_active();
+  if (!hdr && scene_hdr_active()) {
+    return false;
+  }
+  const auto& size = hdr ? webgpu::g_sceneHdr.size : webgpu::present_source().size;
   if (size.width == 0 || size.height == 0) {
     return false;
   }
@@ -676,8 +757,28 @@ bool record(const Params& params) {
   g_recorded[slot].grid[0] = g_state.gridWidth;
   g_recorded[slot].grid[1] = g_state.gridHeight;
   g_recordedFroxels[slot] = g_state.froxelView;
+  g_recordedCapture[slot] = hdr ? Capture{.domain = Domain::Hdr,
+                                          .color = webgpu::g_sceneHdr,
+                                          .resolved = webgpu::g_sceneHdrResolved,
+                                          .depth = webgpu::g_depthBuffer}
+                                : Capture{};
   record_encoder_task(g_state.task, &slot, sizeof(slot));
   return true;
+}
+
+std::string apply_source(Domain domain, uint32_t samples) {
+  std::string code = std::string(CommonSource) + ApplySource;
+  const std::string token = "DEPTH_TYPE";
+  code.replace(code.find(token), token.size(),
+               samples > 1 ? "texture_depth_multisampled_2d" : "texture_depth_2d");
+  if (domain == Domain::Hdr) {
+    const size_t at = code.find(LdrApplyTail);
+    if (at == std::string::npos) {
+      Log.fatal("volfog: no LDR apply to replace for the HDR scene");
+    }
+    code.replace(at, LdrApplyTail.size(), HdrApplyTail);
+  }
+  return code;
 }
 
 const wgpu::TextureView& froxel_view() {
@@ -706,6 +807,7 @@ void shutdown() {
   const auto task = g_state.task;
   g_state = {};
   g_recordedFroxels = {};
+  g_recordedCapture = {};
   if (task != InvalidEncoderTask) {
     unregister_encoder_task_type(task);
   }

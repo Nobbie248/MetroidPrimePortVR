@@ -55,8 +55,8 @@ void BuildAboutTab(TabContext& ctx, QTabWidget* tabs) {
   layout->addWidget(Paragraph(
       QObject::tr("Build: revision %1").arg(QString::fromLatin1(MP_BUILD_REVISION)), true));
   layout->addWidget(Paragraph(
-      QObject::tr("Supported game: Metroid Prime USA 1.00 (GM8E01) or PAL (GM8P01, experimental), "
-                  "revision 0"),
+      QObject::tr("Supported game: Metroid Prime USA 1.00/1.01/1.02 (GM8E01) or PAL (GM8P01, experimental), "
+                  "PAL revision 0"),
       true));
   layout->addWidget(Paragraph(
       QObject::tr("User folder: %1").arg(QDir::toNativeSeparators(ctx.paths.userFolder).toHtmlEscaped()),

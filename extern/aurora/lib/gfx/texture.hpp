@@ -73,8 +73,10 @@ TextureHandle new_static_texture_2d(uint32_t width, uint32_t height, uint32_t mi
 TextureHandle new_dynamic_texture_2d(uint32_t width, uint32_t height, uint32_t mips, u32 gxFormat,
                                      const char* label) noexcept;
 // mips > 1: the sample view spans every level; the attachment view is level 0 only.
+// format: Undefined is the surface format (an EFB copy's).
 TextureHandle new_render_texture(uint32_t width, uint32_t height, u32 gxFormat, const char* label,
-                                 uint32_t mips = 1) noexcept;
+                                 uint32_t mips = 1,
+                                 wgpu::TextureFormat format = wgpu::TextureFormat::Undefined) noexcept;
 TextureHandle new_conv_texture(uint32_t width, uint32_t height, u32 gxFormat, const char* label) noexcept;
 void write_texture(TextureRef& ref, ArrayRef<uint8_t> data) noexcept;
 // `ref`'s sample view as a 2D array view (all its mips, its first layer, the same

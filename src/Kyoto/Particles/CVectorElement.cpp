@@ -1,8 +1,13 @@
 #include "Kyoto/Particles/CVectorElement.hpp"
 
+#include <algorithm>
+#include <cmath>
+
 #include "Kyoto/CRandom16.hpp"
 #include "Kyoto/Graphics/CColor.hpp"
 #include "Kyoto/Math/CMath.hpp"
+#include "Kyoto/Math/CMatrix3f.hpp"
+#include "Kyoto/Math/CQuaternion.hpp"
 #include "Kyoto/Math/CVector3f.hpp"
 #include "Kyoto/Particles/CParticleGlobals.hpp"
 #include "Kyoto/Particles/IElement.hpp"
@@ -424,3 +429,68 @@ bool CVEColorToVector::GetValue(int frame, CVector3f& valOut) const {
 
   return false;
 }
+
+#ifdef TARGET_PC
+namespace {
+CQuaternion EulerQuaternion(const CVector3f& degrees) {
+  constexpr float kDegreesToRadians = 0.01745329251994329577f;
+  const float x = std::remainder(degrees.GetX(), 360.f) * kDegreesToRadians * 0.5f;
+  const float y = std::remainder(degrees.GetY(), 360.f) * kDegreesToRadians * 0.5f;
+  const float z = std::remainder(degrees.GetZ(), 360.f) * kDegreesToRadians * 0.5f;
+  const CQuaternion qx(std::cos(x), std::sin(x), 0.f, 0.f);
+  const CQuaternion qy(std::cos(y), 0.f, std::sin(y), 0.f);
+  const CQuaternion qz(std::cos(z), 0.f, 0.f, std::sin(z));
+  return qz * qy * qx;
+}
+
+CVector3f EulerDegreesFromQuaternion(const CQuaternion& rotation) {
+  constexpr float kRadiansToDegrees = 57.295779513082320876f;
+  constexpr float kGimbalCosineThreshold = 1.e-5f;
+  const CMatrix3f matrix = rotation.BuildTransform();
+  const float sineY = std::clamp(-matrix.Get20(), -1.f, 1.f);
+  const float cosineY = std::hypot(matrix.Get00(), matrix.Get10());
+  const float y = std::atan2(sineY, cosineY);
+
+  float x;
+  float z;
+  if (cosineY > kGimbalCosineThreshold) {
+    x = std::atan2(matrix.Get21(), matrix.Get22());
+    z = std::atan2(matrix.Get10(), matrix.Get00());
+  } else {
+    // At either Y gimbal, only a combined X/Z angle is observable. Choosing X=0
+    // keeps the returned matrix equivalent without claiming angle continuity.
+    x = 0.f;
+    z = std::atan2(-matrix.Get01(), matrix.Get11());
+  }
+  return CVector3f(x * kRadiansToDegrees, y * kRadiansToDegrees, z * kRadiansToDegrees);
+}
+} // namespace
+
+CVEOrderedEulerProduct::CVEOrderedEulerProduct(CVectorElement* first, CVectorElement* second)
+: mFirst(first), mSecond(second) {}
+
+CVEOrderedEulerProduct::~CVEOrderedEulerProduct() {
+  delete mFirst;
+  delete mSecond;
+}
+
+bool CVEOrderedEulerProduct::GetValue(int frame, CVector3f& valOut) const {
+  CVector3f first = CVector3f::Zero();
+  CVector3f second = CVector3f::Zero();
+  mFirst->GetValue(frame, first);
+  mSecond->GetValue(frame, second);
+
+  if (!std::isfinite(first.GetX()) || !std::isfinite(first.GetY()) || !std::isfinite(first.GetZ()) ||
+      !std::isfinite(second.GetX()) || !std::isfinite(second.GetY()) || !std::isfinite(second.GetZ())) {
+    valOut = CVector3f::Zero();
+    return false;
+  }
+
+  valOut = EulerDegreesFromQuaternion(EulerQuaternion(first) * EulerQuaternion(second));
+  return false;
+}
+
+bool CVEOrderedEulerProduct::IsFastConstant() const {
+  return mFirst->IsFastConstant() && mSecond->IsFastConstant();
+}
+#endif

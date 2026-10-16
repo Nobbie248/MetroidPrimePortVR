@@ -309,6 +309,17 @@ public:
   void DrawWorld() const;
 #ifdef TARGET_PC
   void PortCaptureProbeFace() const;
+  // CMFGame snapshots this per-world-pass policy; DrawWorld consumes and clears it before
+  // recording the LDR probe capture or beginning the real scene.
+  static bool sPortSceneHdrRequest;
+  static constexpr bool PortIsSceneHdrVisorSupported(bool combat, bool scan, bool thermal,
+                                                     bool xray) noexcept {
+    return (combat || scan) && !thermal && !xray;
+  }
+  static constexpr bool PortShouldUseSceneHdr(bool enabled, bool roomEnvEnabled, bool hasRoomTone,
+                                             bool supportedVisor, bool visorTransitioning) noexcept {
+    return enabled && roomEnvEnabled && hasRoomTone && supportedVisor && !visorTransitioning;
+  }
   // Port (sharp scan window): above 1, DrawWorld draws a magnified view through a camera
   // zoomed by this much, without the gun and the frame's one-off captures.
   static float sPortViewZoom;

@@ -104,6 +104,10 @@ struct Connection {
   // The seed the server had when this slot last connected ("seed"), so the
   // game's own save card is known before the server answers. Empty if unknown.
   std::string seed;
+  // The room this slot last played that seed in ("room"; see State::room), so
+  // two rooms generated from one seed keep their own save cards. Empty if
+  // unknown.
+  std::string room;
   // Unix time this game was last connected ("last_played"), in the per-game
   // copies of the file; 0 when absent.
   int64_t lastPlayed = 0;
@@ -129,6 +133,11 @@ struct State {
   // different seed means a different session, so the progress is discarded
   // rather than replayed into it. Empty in files written before this existed.
   std::string seed;
+  // The room this progress belongs to. Rooms generated from one seed share its
+  // seed name, so the client names each room in the server's data storage the
+  // first time it connects to it (port_apclient.cpp, EnterRoom). Empty until
+  // then, and in files written before this existed.
+  std::string room;
   int64_t nextItemIndex = 0;
   std::vector< int64_t > checkedLocations;
   // Item id -> copies processed so far: progressive ids, or every id with the
@@ -301,6 +310,8 @@ public:
     mGrantFrom = 0;
     mWorldRevision = NextWorldRevision();
   }
+  // Claims the current progress for the server room named `room`.
+  void SetRoom(const std::string& room) { mState.room = room; }
   // Changes whenever State::world may have (slot_data parsed, a state swapped
   // in), so the client can tell the layout is unchanged without comparing or
   // copying it. Unique across sessions; never 0.

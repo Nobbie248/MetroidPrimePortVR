@@ -25,6 +25,11 @@ struct FrameBufferSizes {
   uint64_t storage = StorageBufferSize;
   // The AuroraConfig::frameBufferScale these sizes are for.
   uint32_t scale = 1;
+  // What the device storage buffer sets aside for a frame's arrays before the resident
+  // region: the most `storage` can grow to, so resident offsets never move.
+  uint64_t storageReserve = StorageBufferSize;
+  // The most `storage` grows to after an overflow (0: it is fixed).
+  uint64_t storageCap = 0;
 
   // Kept across frames (AuroraConfig::residentGeometryMiB): the device buffers hold these
   // after what a frame holds, and no staging buffer does.
@@ -37,6 +42,9 @@ struct FrameBufferSizes {
   }
 };
 const FrameBufferSizes& frame_buffer_sizes() noexcept;
+// Asks for the arrays' staging storage to double (up to storageCap) at the next frame
+// start; the frame that overflowed still drops its draws. No-op when it is fixed.
+void request_storage_growth() noexcept;
 
 enum class ResidentBuffer : uint8_t { Vertex, Index, Storage };
 // The part of a shared buffer kept across frames, as offsets into that buffer; size 0

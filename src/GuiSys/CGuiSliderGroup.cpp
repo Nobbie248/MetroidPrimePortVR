@@ -4,6 +4,10 @@
 #include "Kyoto/Math/CMath.hpp"
 #include "rstl/math.hpp"
 
+#ifdef TARGET_PC
+#include <math.h>
+#endif
+
 CGuiWidget* CGuiSliderGroup::Create(CGuiFrame* frame, CInputStream& in, CSimplePool* sp) {
   CGuiWidgetParms parms = ReadWidgetHeader(frame, in);
   // Retail consumes these values but uses a fixed slider range.
@@ -107,6 +111,23 @@ void CGuiSliderGroup::SetCurVal(float cur) {
   xc0_roundedCurVal = CMath::Clamp(xb8_minVal, cur, xbc_maxVal);
   xc4_curVal = xc0_roundedCurVal;
 }
+
+#ifdef TARGET_PC
+void CGuiSliderGroup::PortSetFraction(float fraction) {
+  float value = xb8_minVal + CMath::Clamp(0.f, fraction, 1.f) * (xbc_maxVal - xb8_minVal);
+  if (xc8_increment > 0.f) {
+    value = xb8_minVal + floorf((value - xb8_minVal) / xc8_increment + 0.5f) * xc8_increment;
+  }
+  value = CMath::Clamp(xb8_minVal, value, xbc_maxVal);
+  const float oldRounded = xc0_roundedCurVal;
+  xc0_roundedCurVal = value;
+  xc4_curVal = value;
+  xf0_state = kS_None;
+  if (oldRounded != value && xd8_changeCallback) {
+    xd8_changeCallback(this, oldRounded);
+  }
+}
+#endif
 
 void CGuiSliderGroup::SetMaxVal(float max) {
   xbc_maxVal = max;

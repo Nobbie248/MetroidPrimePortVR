@@ -48,6 +48,12 @@ public:
 
   bool HasMenuAdvanceCallback() const { return xd4_doMenuAdvance; }
 
+#ifdef TARGET_PC
+  bool PortSelect(int worker);
+  bool PortAdvance() { return DoAdvance(); }
+  bool PortCancel() { return DoCancel(); }
+#endif
+
 private:
   bool DoAdvance();
   bool DoCancel();

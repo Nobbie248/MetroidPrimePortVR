@@ -5,6 +5,7 @@
 #include "pipeline_cache.hpp"
 #include "bloom.hpp"
 #include "shadow.hpp"
+#include "actor_shadow.hpp"
 #include "volfog.hpp"
 #include "thermal.hpp"
 #include "xray.hpp"
@@ -57,6 +58,8 @@ enum class BufferMapState {
 };
 
 FrameBufferSizes g_bufferSizes;
+std::atomic<bool> g_storageGrowthRequested{false};
+constexpr uint32_t StorageGrowthCapScale = 6;
 std::array<wgpu::Buffer, StagingBufferCount> g_stagingBuffers;
 std::array<std::atomic<BufferMapState>, StagingBufferCount> g_mappingStates;
 uint32_t g_frameIndex = UINT32_MAX;
@@ -260,7 +263,7 @@ Range resident_region(ResidentBuffer kind) noexcept {
   case ResidentBuffer::Index:
     return {uint32_t(g_bufferSizes.index), uint32_t(g_bufferSizes.residentIndex)};
   case ResidentBuffer::Storage:
-    return {uint32_t(g_bufferSizes.storage), uint32_t(g_bufferSizes.residentStorage)};
+    return {uint32_t(g_bufferSizes.storageReserve), uint32_t(g_bufferSizes.residentStorage)};
   }
   return {};
 }
@@ -305,14 +308,14 @@ wgpu::TextureFormat depth_format() noexcept { return webgpu::g_graphicsConfig.de
 
 uint32_t sample_count() noexcept { return webgpu::g_graphicsConfig.msaaSamples; }
 
-RenderTargetLayout scene_render_target_layout() noexcept {
+static RenderTargetLayout efb_render_target_layout(const webgpu::TextureWithSampler& color) noexcept {
   RenderTargetLayout layout{
       .colorAttachmentCount = 1,
       .colorAttachments = {{{
           .semantic = ColorAttachmentSemantic::SceneColor,
-          .format = webgpu::g_frameBuffer.format,
-          .width = webgpu::g_frameBuffer.size.width,
-          .height = webgpu::g_frameBuffer.size.height,
+          .format = color.format,
+          .width = color.size.width,
+          .height = color.size.height,
       }}},
       .depthStencilFormat = webgpu::g_graphicsConfig.depthFormat,
       .sampleCount = webgpu::g_graphicsConfig.msaaSamples,
@@ -320,6 +323,14 @@ RenderTargetLayout scene_render_target_layout() noexcept {
   finalize_render_target_layout(layout);
   return layout;
 }
+
+// The target EFB passes draw into now: the HDR scene while it is active (set_scene_hdr), else the
+// display EFB. color_format() stays the surface format either way.
+RenderTargetLayout scene_render_target_layout() noexcept {
+  return efb_render_target_layout(scene_hdr_active() ? webgpu::g_sceneHdr : webgpu::g_frameBuffer);
+}
+
+RenderTargetLayout display_render_target_layout() noexcept { return efb_render_target_layout(webgpu::g_frameBuffer); }
 
 bool uses_reversed_z() noexcept { return gx::UseReversedZ; }
 
@@ -446,6 +457,46 @@ void initialize() {
     if (scale != std::max<uint32_t>(g_config.frameBufferScale, 1)) {
       Log.warn("Frame buffer scale {} is beyond this device, using {}", g_config.frameBufferScale, scale);
     }
+    // The arrays can be scaled apart from the rest: frameStorageScale 0 follows the scale.
+    uint32_t storageScale = g_config.frameStorageScale != 0 ? g_config.frameStorageScale : scale;
+    // Test hook: start the growable storage smaller to force an overflow.
+    if (g_config.frameStorageScale == 0) {
+      if (const char* start = std::getenv("AURORA_STORAGE_START_SCALE")) {
+        storageScale = std::max<uint32_t>(1, std::min<uint32_t>(storageScale, std::strtoul(start, nullptr, 10)));
+      }
+    }
+    const uint32_t wantedStorageScale = storageScale;
+    while (storageScale > scale) {
+      g_bufferSizes.storage = StorageBufferSize * storageScale;
+      if (g_bufferSizes.storage <= maxBinding && g_bufferSizes.staging() <= maxBuffer) {
+        break;
+      }
+      --storageScale;
+    }
+    g_bufferSizes.storage = StorageBufferSize * storageScale;
+    if (storageScale != wantedStorageScale) {
+      Log.warn("Frame storage scale {} is beyond this device, using {}", wantedStorageScale, storageScale);
+    }
+    // Unless the scale was pinned, an overflow can double the staging storage later, up to
+    // 6x. The device buffer sets that much aside now so the resident region stays put.
+    g_bufferSizes.storageReserve = g_bufferSizes.storage;
+    g_bufferSizes.storageCap = 0;
+    if (g_config.frameStorageScale == 0 && g_config.residentGeometryMiB != 0) {
+      uint32_t capScale = StorageGrowthCapScale;
+      while (capScale > storageScale) {
+        FrameBufferSizes probe = g_bufferSizes;
+        probe.storage = StorageBufferSize * capScale;
+        if (probe.storage <= maxBinding && probe.staging() <= maxBuffer) {
+          break;
+        }
+        --capScale;
+      }
+      if (capScale > storageScale) {
+        g_bufferSizes.storageCap = StorageBufferSize * capScale;
+        g_bufferSizes.storageReserve = g_bufferSizes.storageCap;
+      }
+    }
+    g_storageGrowthRequested.store(false, std::memory_order_release);
     // The resident regions follow a frame's data in the device buffers, which are bound
     // whole, so they take what the device leaves after it: two fifths each to vertices and
     // arrays, a fifth to indices.
@@ -458,7 +509,7 @@ void initialize() {
       };
       const uint64_t bound = std::min(maxBinding, maxBuffer);
       g_bufferSizes.residentVertex = fit(resident / 5 * 2, g_bufferSizes.vertex, bound);
-      g_bufferSizes.residentStorage = fit(resident / 5 * 2, g_bufferSizes.storage, bound);
+      g_bufferSizes.residentStorage = fit(resident / 5 * 2, g_bufferSizes.storageReserve, bound);
       g_bufferSizes.residentIndex = fit(resident / 5, g_bufferSizes.index, maxBuffer);
       Log.info("Resident geometry: {} MiB of vertices, {} MiB of arrays, {} MiB of indices",
                g_bufferSizes.residentVertex >> 20, g_bufferSizes.residentStorage >> 20,
@@ -486,7 +537,7 @@ void initialize() {
                g_bufferSizes.index + g_bufferSizes.residentIndex,
                "Shared Index Buffer");
   createBuffer(g_resources.storageBuffer, wgpu::BufferUsage::Storage | wgpu::BufferUsage::CopyDst,
-               g_bufferSizes.storage + g_bufferSizes.residentStorage, "Shared Storage Buffer");
+               g_bufferSizes.storageReserve + g_bufferSizes.residentStorage, "Shared Storage Buffer");
   for (size_t i = 0; i < g_stagingBuffers.size(); ++i) {
     const auto label = fmt::format("Staging Buffer {}", i);
     createBuffer(g_stagingBuffers[i], wgpu::BufferUsage::MapWrite | wgpu::BufferUsage::CopySrc, g_bufferSizes.staging(),
@@ -627,6 +678,7 @@ void shutdown() {
   xray::shutdown();
   thermal::shutdown();
   shadow::shutdown();
+  actor_shadow::shutdown();
   vfx::shutdown();
   water::shutdown();
   tex_palette_conv::shutdown();
@@ -710,8 +762,57 @@ std::optional<size_t> acquire_mapped_staging_buffer() {
   }
 }
 
+void request_storage_growth() noexcept {
+  if (g_bufferSizes.storageCap > g_bufferSizes.storage) {
+    g_storageGrowthRequested.store(true, std::memory_order_release);
+  }
+}
+
+namespace {
+// Doubles the staging storage once every frame in flight is done with the staging buffers.
+void grow_storage() {
+  ZoneScopedN("Grow storage");
+  render_worker::synchronize();
+  // Holding every staging slot means no frame or pending map uses a buffer.
+  for (size_t n = 0; n < StagingBufferCount; ++n) {
+    while (true) {
+      if (const auto slot = g_stagingSlots.try_acquire()) {
+        (void)slot;
+        break;
+      }
+      wait_for_gpu_progress(std::chrono::microseconds{100});
+    }
+  }
+  g_bufferSizes.storage = std::min(g_bufferSizes.storage * 2, g_bufferSizes.storageCap);
+  for (size_t i = 0; i < g_stagingBuffers.size(); ++i) {
+    // A buffer still mapping completes with an error; wait it out before replacing it.
+    while (g_mappingStates[i].load(std::memory_order_acquire) == BufferMapState::Mapping) {
+      wait_for_gpu_progress(std::chrono::milliseconds{1});
+    }
+    if (g_mappingStates[i].load(std::memory_order_acquire) == BufferMapState::Mapped) {
+      g_stagingBuffers[i].Unmap();
+    }
+    g_mappingStates[i].store(BufferMapState::Unmapped, std::memory_order_release);
+    const wgpu::BufferDescriptor descriptor{
+        .label = "Staging Buffer",
+        .usage = wgpu::BufferUsage::MapWrite | wgpu::BufferUsage::CopySrc,
+        .size = g_bufferSizes.staging(),
+    };
+    g_stagingBuffers[i] = g_device.CreateBuffer(&descriptor);
+  }
+  for (size_t i = 0; i < g_stagingBuffers.size(); ++i) {
+    g_stagingSlots.release(i);
+  }
+  Log.info("storage buffer grown to {} MiB after an overflow", g_bufferSizes.storage >> 20);
+}
+} // namespace
+
 bool begin_frame() {
   ZoneScoped;
+  if (g_storageGrowthRequested.exchange(false, std::memory_order_acq_rel) &&
+      g_bufferSizes.storage < g_bufferSizes.storageCap) {
+    grow_storage();
+  }
   // pace_frame_start();
   const size_t frameSlot = acquire_frame_slot();
   const auto stagingSlot = acquire_mapped_staging_buffer();
@@ -840,6 +941,9 @@ const AuroraStats* aurora_get_stats() { return &aurora::gfx::detail::resources()
 
 uint32_t aurora_get_frame_buffer_scale() {
   return aurora::gfx::frame_buffer_sizes().scale;
+}
+uint32_t aurora_get_frame_storage_scale() {
+  return static_cast<uint32_t>(aurora::gfx::frame_buffer_sizes().storage / aurora::gfx::StorageBufferSize);
 }
 uint32_t aurora_get_resident_geometry_mib() {
   const auto& sizes = aurora::gfx::frame_buffer_sizes();

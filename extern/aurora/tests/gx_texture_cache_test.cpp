@@ -6,6 +6,7 @@
 
 #include <array>
 #include <cstdint>
+#include <cstring>
 #include <vector>
 
 namespace aurora::gx::testing {
@@ -323,6 +324,65 @@ TEST_F(GxTextureCacheTest, BoundObjectIsNotAgedOut) {
   EXPECT_EQ(testing::texture_allocations(), 1);
   EXPECT_EQ(texture_stats().hashedBytes, 0);
   EXPECT_EQ(texture_stats().objectHits, 1);
+}
+
+TEST_F(GxTextureCacheTest, NewObjectWithNewContentEveryFrameIsReportedAsLeak) {
+  std::array<uint8_t, 16> pixels{};
+  for (u32 frame = 0; frame < 600; ++frame) {
+    std::memcpy(pixels.data(), &frame, sizeof(frame));
+    texture::resolve_static_texture(make_texture(pixels.data(), frame + 1));
+    texture::end_frame();
+  }
+
+  EXPECT_EQ(texture::leak_warning_count(), 1);
+}
+
+TEST_F(GxTextureCacheTest, ObjectUpdatedInPlaceEveryFrameIsNotReported) {
+  std::array<uint8_t, 16> pixels{};
+  auto obj = make_texture(pixels.data(), 1);
+  for (u32 frame = 0; frame < 900; ++frame) {
+    std::memcpy(pixels.data(), &frame, sizeof(frame));
+    obj.texDataVersion = frame + 1;
+    texture::resolve_static_texture(obj);
+    texture::end_frame();
+  }
+
+  EXPECT_EQ(texture::leak_warning_count(), 0);
+}
+
+TEST_F(GxTextureCacheTest, NewObjectWithSameContentEveryFrameIsNotReported) {
+  std::array<uint8_t, 16> pixels{};
+  for (u32 frame = 0; frame < 900; ++frame) {
+    texture::resolve_static_texture(make_texture(pixels.data(), frame + 1));
+    texture::end_frame();
+  }
+
+  EXPECT_EQ(texture::leak_warning_count(), 0);
+}
+
+TEST_F(GxTextureCacheTest, ObjectDestroyedInItsFrameIsNotReported) {
+  std::array<uint8_t, 16> pixels{};
+  for (u32 frame = 0; frame < 900; ++frame) {
+    std::memcpy(pixels.data(), &frame, sizeof(frame));
+    texture::resolve_static_texture(make_texture(pixels.data(), frame + 1));
+    evict_texture_object(frame + 1);
+    texture::end_frame();
+  }
+
+  EXPECT_EQ(texture::leak_warning_count(), 0);
+}
+
+TEST_F(GxTextureCacheTest, UploadBurstIsNotReported) {
+  std::array<uint8_t, 16> pixels{};
+  for (u32 frame = 0; frame < 900; ++frame) {
+    if (frame < 200) {
+      std::memcpy(pixels.data(), &frame, sizeof(frame));
+      texture::resolve_static_texture(make_texture(pixels.data(), frame + 1));
+    }
+    texture::end_frame();
+  }
+
+  EXPECT_EQ(texture::leak_warning_count(), 0);
 }
 
 TEST_F(GxTextureCacheTest, ContentCacheEvictsLeastRecentlyUsedEntry) {

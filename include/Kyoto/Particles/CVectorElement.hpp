@@ -234,4 +234,21 @@ public:
 private:
   CColorElement* mValue;
 };
+
+#ifdef TARGET_PC
+// Composes two Euler rotations in source order and returns an equivalent
+// Z-Y-X Euler vector in degrees. Used by the Remastered PMRQ RADD carrier.
+class CVEOrderedEulerProduct : public CVectorElement {
+public:
+  CVEOrderedEulerProduct(CVectorElement* first, CVectorElement* second);
+  ~CVEOrderedEulerProduct() override;
+
+  bool GetValue(int frame, CVector3f& valOut) const override;
+  bool IsFastConstant() const override;
+
+private:
+  CVectorElement* mFirst;
+  CVectorElement* mSecond;
+};
+#endif
 #endif // _CVECTORELEMENT

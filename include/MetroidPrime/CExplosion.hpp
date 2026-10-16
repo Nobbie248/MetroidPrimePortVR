@@ -7,6 +7,10 @@
 
 #include "rstl/single_ptr.hpp"
 
+#ifdef TARGET_PC
+#include <vector>
+#endif
+
 class CParticleGen;
 class CGenDescription;
 class CElectricDescription;
@@ -35,6 +39,20 @@ public:
 
   TUniqueId GetExplosionLightId() const { return xec_explosionLight; }
   CAssetId GetSourceId() const { return xf0_sourceId; }
+#ifdef TARGET_PC
+  static uint PortNestedLightSourceId(CAssetId explosionSourceId) { return explosionSourceId; }
+#endif
+
+#ifdef TARGET_PC
+private:
+  struct PortNestedLightProxy {
+    const CParticleGen* generator; // key only; may be stale after the generator tree updates
+    TUniqueId light;
+  };
+  std::vector< PortNestedLightProxy > xPortNestedLights;
+  void PortUpdateNestedLights(CStateManager& mgr);
+  void PortDeleteNestedLights(CStateManager& mgr);
+#endif
 
 public:
   rstl::single_ptr< CParticleGen > xe8_particleGen;

@@ -94,11 +94,14 @@ constexpr uint32_t kFRME = 0x46524D45;
 constexpr uint32_t kFMV0 = 0x464D5630;
 constexpr uint32_t kGENP = 0x47454E50;  // a particle effect
 constexpr uint32_t kSWSH = 0x53575348;  // a standalone swoosh effect
+constexpr uint32_t kCRSM = 0x4352534D;  // a projectile collision response
 constexpr uint32_t kELSM = 0x454C534D;  // a standalone electric effect (retail ELSC)
 constexpr uint32_t kELC2 = 0x454C4332;  // the same, in the newer form
 constexpr uint32_t kMATI = 0x4D415449;  // a material instance
 constexpr uint32_t kWPSM = 0x5750534D;  // a projectile weapon (Remastered's WPSC)
 constexpr uint32_t kWPSC = 0x57505343;  // the disc's projectile weapon
+constexpr uint32_t kCRSC = 0x43525343;  // the disc's projectile collision response
+constexpr uint32_t kPART = 0x50415254;  // a disc particle effect
 
 constexpr const char* kStagingName = ".remastered-models.importing";
 // Written last, so a staging folder without it is an import that was cut short.
@@ -162,15 +165,11 @@ std::vector<std::pair<int, float>> CoarserLevels(const Model& model) {
 }
 
 // The rooms whose geometry is imported, from MP_REMASTERED_GEOMETRY: "all", or
-// room names (any part of one) separated by commas, or "none". Without it,
-// what SetImportGeometry() last said: none, the port's drawing of room
-// geometry being unfinished.
-std::atomic<bool> sGeometry{false};
-
+// room names (any part of one) separated by commas, or "none". Without it, all.
 bool WantsGeometry(const std::string& room) {
   const char* env = std::getenv("MP_REMASTERED_GEOMETRY");
   if (env == nullptr || env[0] == '\0') {
-    return sGeometry.load();
+    return true;
   }
   const std::string list = env;
   if (list == "none") {
@@ -268,13 +267,9 @@ bool WantsMovies(MovieFormat& format) {
 
 // --- Reusing the previous import ----------------------------------------------
 
-// Off with MP_REMASTERED_REUSE=0 or the import panel's "Reconvert everything". With
-// MP_REMASTERED_REUSE=textures only the converted textures are reused (TextureMemory).
-std::atomic<bool> sReuse{true};
-
-bool WantsReuse() {
-  return sReuse.load() && port::EnvFlag("MP_REMASTERED_REUSE", true);
-}
+// Off with MP_REMASTERED_REUSE=0. With MP_REMASTERED_REUSE=textures only the converted
+// textures are reused (TextureMemory).
+bool WantsReuse() { return port::EnvFlag("MP_REMASTERED_REUSE", true); }
 
 // What a stage of an import made, written to kManifestName in the mod: a re-import whose stage
 // has the same key (and, for a stage that gives out ids, the same ids taken before it) links
@@ -637,18 +632,22 @@ public:
           if (be32(at) == kWPSC) {
             std::string name(reinterpret_cast<const char*>(header.data() + at + 12), length);
             std::transform(name.begin(), name.end(), name.begin(), [](unsigned char c) { return char(std::tolower(c)); });
-            m_wpscNames.emplace(std::move(name), be32(at + 4));
+            if (!m_wpscNames.emplace(name, be32(at + 4)).second) {
+              m_ambiguousWpscNames.insert(std::move(name));
+            }
           }
           at += 12 + length;
         }
       }
       for (const PortMods::PakResource& res : table.resources) {
         m_ids.insert(res.id);
+        ++m_resourceCounts[Key(res.type, res.id)];
         if (res.type == kWPSC) {
           m_wpsc.emplace(Key(res.type, res.id), Where{entry, res.offset, res.size, res.compressed != 0});
         }
         if (res.type == kCMDL || res.type == kCSKR || res.type == kANCS || res.type == kTXTR || res.type == kMLVL ||
-            res.type == kMREA || res.type == kSTRG || res.type == kFRME || res.type == kMAPA || res.type == kMAPW) {
+            res.type == kMREA || res.type == kSTRG || res.type == kFRME || res.type == kMAPA || res.type == kMAPW ||
+            res.type == kCRSC) {
           m_resources.emplace(Key(res.type, res.id), Where{entry, res.offset, res.size, res.compressed != 0});
         }
       }
@@ -661,6 +660,11 @@ public:
   }
 
   bool HasId(uint32_t id) const { return m_ids.count(id) != 0; }
+
+  bool HasUniqueResource(uint32_t type, uint32_t id) const {
+    const auto found = m_resourceCounts.find(Key(type, id));
+    return found != m_resourceCounts.end() && found->second == 1;
+  }
 
   // The ids of every resource of `type` it reads, in no particular order.
   std::vector<uint32_t> Ids(uint32_t type) const {
@@ -691,6 +695,9 @@ public:
 
   // The id of the disc's projectile weapon (WPSC) of this name.
   bool WpscId(const std::string& name, uint32_t& id) const {
+    if (m_ambiguousWpscNames.count(name) != 0) {
+      return false;
+    }
     const auto found = m_wpscNames.find(name);
     if (found == m_wpscNames.end()) {
       return false;
@@ -777,6 +784,8 @@ private:
   std::unordered_set<uint32_t> m_ids;
   std::unordered_map<uint64_t, Where> m_wpsc;                 // the projectile weapons, read on demand
   std::unordered_map<std::string, uint32_t> m_wpscNames;      // WPSC id by name
+  std::unordered_set<std::string> m_ambiguousWpscNames;
+  std::unordered_map<uint64_t, size_t> m_resourceCounts;      // typed ids, including PART/CRSC
 };
 
 // --- The Remastered image ------------------------------------------------------
@@ -832,7 +841,9 @@ public:
         } else if (type == kFMV0) {
           m_movies.emplace(IdToString(assets[a].id), Where{m_paks.size(), a});
         } else if (type == kGENP) {
-          m_effects.emplace(assets[a].id, Where{m_paks.size(), a});
+          if (!m_effects.emplace(assets[a].id, Where{m_paks.size(), a}).second) {
+            m_effectDuplicates.insert(assets[a].id);
+          }
           for (const std::string& name : assets[a].names) {
             m_effectNames.emplace(FrameKey(name), assets[a].id);
             m_effectIdNames.emplace(assets[a].id, FrameKey(name));
@@ -851,7 +862,15 @@ public:
           }
         } else if (type == kWPSM) {
           for (const std::string& name : assets[a].names) {
-            m_projectiles.emplace(FrameKey(name), Where{m_paks.size(), a});
+            const std::string key = FrameKey(name);
+            const auto [found, inserted] = m_projectiles.emplace(key, Where{m_paks.size(), a});
+            if (!inserted && (found->second.pak != m_paks.size() || found->second.asset != a)) {
+              m_ambiguousProjectiles.insert(key);
+            }
+          }
+        } else if (type == kCRSM) {
+          if (!m_collisions.emplace(assets[a].id, Where{m_paks.size(), a}).second) {
+            m_collisionDuplicates.insert(assets[a].id);
           }
         } else if (type == kMATI) {
           m_materials.emplace(assets[a].id, Where{m_paks.size(), a});
@@ -1029,6 +1048,10 @@ public:
     return names;
   }
   bool ReadProjectile(const std::string& name, std::vector<uint8_t>& out, std::string& error) const {
+    if (m_ambiguousProjectiles.count(name) != 0) {
+      error = "ambiguous asset name";
+      return false;
+    }
     const auto found = m_projectiles.find(name);
     if (found == m_projectiles.end()) {
       error = "not in the image";
@@ -1036,6 +1059,19 @@ public:
     }
     const Pak& pak = *m_paks[found->second.pak];
     return pak.ReadAsset(pak.Assets()[found->second.asset], out, error);
+  }
+  bool HasUniqueCollision(const ModelUuid& id) const {
+    return m_collisions.count(id) != 0 && m_collisionDuplicates.count(id) == 0;
+  }
+  bool ReadCollision(const ModelUuid& id, std::vector<uint8_t>& out, std::string& error) const {
+    if (!HasUniqueCollision(id)) {
+      error = "missing or ambiguous collision response";
+      return false;
+    }
+    return Read(m_collisions, id, out, error);
+  }
+  bool HasUniqueEffect(const ModelUuid& id) const {
+    return m_effects.count(id) != 0 && m_effectDuplicates.count(id) == 0;
   }
   // A GENP/SWSH's (lower-case) name; the first when it has several.
   bool EffectName(const ModelUuid& id, std::string& name) const {
@@ -1153,11 +1189,15 @@ private:
   Index m_texts;
   Index m_fonts;
   Index m_effects;
+  std::unordered_set<ModelUuid, PakIdHash> m_effectDuplicates;
   Index m_swooshes;  // standalone SWSH effects
   Index m_electrics;  // standalone ELSM and ELC2 effects
   std::unordered_map<ModelUuid, uint32_t, PakIdHash> m_electricTypes;
   Index m_materials;
+  Index m_collisions;
+  std::unordered_set<ModelUuid, PakIdHash> m_collisionDuplicates;
   std::unordered_map<std::string, Where> m_projectiles;  // WPSM, by FrameKey
+  std::unordered_set<std::string> m_ambiguousProjectiles;
   std::map<ModelUuid, std::string> m_effectIdNames;  // the first name of a GENP and SWSH
   std::unordered_map<std::string, ModelUuid> m_effectNames;  // the named GENP and SWSH, by FrameKey
   std::unordered_map<std::string, Where> m_frames;  // GUIF, by FrameKey
@@ -1572,8 +1612,8 @@ std::vector<EffectPairing> ProjectilePairings(const Remastered& remastered, Reta
                                  {"slowbluetailswoosh2", 0x699EA052},
                                  {"jaggytrail", 0x5E11D659},
                                  {"spiderelectric", 0x4735D6E1},
-                                 {"wave2nd_1", 0x16871871},
-                                 {"wave2nd_2", 0x21D217FC}};
+                                 {"wave2ndelec2_1", 0x16871871},
+                                 {"wave2ndelec2_2", 0x21D217FC}};
   for (const Named& named : kNamed) {
     ModelUuid id;
     if (named.retail != 0 && retail.HasId(named.retail) && remastered.EffectByName(named.name, id)) {
@@ -1588,6 +1628,198 @@ std::vector<EffectPairing> ProjectilePairings(const Remastered& remastered, Reta
     if (!retail.HasId(synthetic) && remastered.EffectByName(name, id)) {
       pairings.push_back({id, synthetic, std::string("synthetic ") + name});
       lines.push_back(std::string("synthetic ") + name + ": " + EffectGuidString(ToStored(id)) + " -> " + HexId(synthetic));
+    }
+  }
+
+  // Missile's collision-response default is a separate role from APSM/ASW:
+  // WPSM COLR -> CRSM DEFS GENP, matching WPSC COLR -> CRSC DEFS PART. Pin
+  // only the verified USA chain; any absent, ambiguous, region-mismatched, or
+  // conflicting record leaves the disc's collision response untouched.
+  uint32_t missileWpsc = 0;
+  std::vector<uint8_t> missileWeapon;
+  std::vector<uint8_t> missileProjectile;
+  std::vector<uint8_t> missileRetailCollision;
+  std::vector<uint8_t> missileRemasteredCollision;
+  std::string missileError;
+  if (!retail.WpscId("missile", missileWpsc)) {
+    lines.push_back("WPSM missile COLR/DEFS: no unique disc WPSC named Missile");
+  } else if (!retail.Read(kWPSC, missileWpsc, missileWeapon) ||
+             !remastered.ReadProjectile("missile", missileProjectile, missileError)) {
+    lines.push_back("WPSM missile COLR/DEFS: could not read the exact weapon assets");
+  } else {
+    const bool crscPresent = retail.HasUniqueResource(kCRSC, ImportDetail::kMissileCrsc) &&
+                             retail.Read(kCRSC, ImportDetail::kMissileCrsc, missileRetailCollision);
+    const bool crsmPresent = remastered.HasUniqueCollision(ImportDetail::kMissileCrsm) &&
+                             remastered.ReadCollision(ImportDetail::kMissileCrsm, missileRemasteredCollision,
+                                                      missileError);
+    const bool genpPresent = remastered.HasUniqueEffect(ImportDetail::kMissileDefaultGenp) &&
+                             remastered.EffectAssetType(ImportDetail::kMissileDefaultGenp) == kGENP;
+    ImportDetail::MissileDefaultRoleInput input;
+    input.weaponName = "missile";
+    input.retailWpscId = missileWpsc;
+    input.retailWpscExists = retail.HasUniqueResource(kWPSC, missileWpsc);
+    input.retailCrscExists = crscPresent;
+    input.retailPartExists = retail.HasUniqueResource(kPART, ImportDetail::kMissileDefaultPart);
+    input.remasteredWpsmExists = true;  // ReadProjectile rejected missing/ambiguous names.
+    input.remasteredCrsmExists = crsmPresent;
+    input.remasteredGenpExists = genpPresent;
+    input.retailWpsc = missileWeapon.data();
+    input.retailWpscSize = missileWeapon.size();
+    input.retailCrsc = missileRetailCollision.data();
+    input.retailCrscSize = missileRetailCollision.size();
+    input.remasteredWpsm = missileProjectile.data();
+    input.remasteredWpsmSize = missileProjectile.size();
+    input.remasteredCrsm = missileRemasteredCollision.data();
+    input.remasteredCrsmSize = missileRemasteredCollision.size();
+    ImportDetail::MissileDefaultRolePair candidate;
+    std::string roleError;
+    if (!ImportDetail::ResolveMissileDefaultRole(input, candidate, &roleError)) {
+      lines.push_back("WPSM missile COLR/DEFS: not the pinned USA default role (" + roleError + "); no pair");
+    } else {
+      bool exact = false;
+      bool conflict = false;
+      for (const EffectPairing& have : pairings) {
+        if (have.id == candidate.genp && have.retail == candidate.retailPart) {
+          exact = true;
+        } else if (have.id == candidate.genp || have.retail == candidate.retailPart) {
+          conflict = true;
+          lines.push_back("WPSM missile COLR/DEFS: conflict with " + have.method + " (" +
+                          EffectGuidString(ToStored(have.id)) + " -> " + HexId(have.retail) + "); no pair");
+        }
+      }
+      if (!conflict && !exact) {
+        pairings.push_back({candidate.genp, candidate.retailPart, "wpsm missile COLR/DEFS default"});
+        lines.push_back("WPSM missile COLR/DEFS default: " + EffectGuidString(ToStored(candidate.genp)) + " -> " +
+                        HexId(candidate.retailPart));
+      }
+    }
+  }
+
+  // PowerBall's collision-response default is separately pinned to USA 1.00:
+  // WPSC COLR -> CRSC DEFS PART and named WPSM COLR -> CRSM DEFS GENP. The
+  // named lookups and unique typed-resource checks make other regions,
+  // duplicates, missing assets, and conflicting effect-id claims fail closed.
+  uint32_t powerBallWpsc = 0;
+  std::vector<uint8_t> powerBallWeapon;
+  std::vector<uint8_t> powerBallProjectile;
+  std::vector<uint8_t> powerBallRetailCollision;
+  std::vector<uint8_t> powerBallRemasteredCollision;
+  std::string powerBallError;
+  if (!retail.WpscId("powerball", powerBallWpsc)) {
+    lines.push_back("WPSM powerball COLR/DEFS: no unique disc WPSC named PowerBall");
+  } else if (!retail.Read(kWPSC, powerBallWpsc, powerBallWeapon) ||
+             !remastered.ReadProjectile("powerball", powerBallProjectile, powerBallError)) {
+    lines.push_back("WPSM powerball COLR/DEFS: could not read the exact named weapon assets");
+  } else {
+    const bool crscPresent = retail.HasUniqueResource(kCRSC, ImportDetail::kPowerBallCrsc) &&
+                             retail.Read(kCRSC, ImportDetail::kPowerBallCrsc, powerBallRetailCollision);
+    const bool crsmPresent = remastered.HasUniqueCollision(ImportDetail::kPowerBallCrsm) &&
+                             remastered.ReadCollision(ImportDetail::kPowerBallCrsm, powerBallRemasteredCollision,
+                                                      powerBallError);
+    const bool genpPresent = remastered.HasUniqueEffect(ImportDetail::kPowerBallDefaultGenp) &&
+                             remastered.EffectAssetType(ImportDetail::kPowerBallDefaultGenp) == kGENP;
+    ImportDetail::PowerBallDefaultRoleInput input;
+    input.weaponName = "powerball";
+    input.retailWpscId = powerBallWpsc;
+    input.retailWpscExists = retail.HasUniqueResource(kWPSC, powerBallWpsc);
+    input.retailCrscExists = crscPresent;
+    input.retailPartExists = retail.HasUniqueResource(kPART, ImportDetail::kPowerBallDefaultPart);
+    input.remasteredWpsmExists = true;  // ReadProjectile rejected missing/ambiguous names.
+    input.remasteredCrsmExists = crsmPresent;
+    input.remasteredGenpExists = genpPresent;
+    input.retailWpsc = powerBallWeapon.data();
+    input.retailWpscSize = powerBallWeapon.size();
+    input.retailCrsc = powerBallRetailCollision.data();
+    input.retailCrscSize = powerBallRetailCollision.size();
+    input.remasteredWpsm = powerBallProjectile.data();
+    input.remasteredWpsmSize = powerBallProjectile.size();
+    input.remasteredCrsm = powerBallRemasteredCollision.data();
+    input.remasteredCrsmSize = powerBallRemasteredCollision.size();
+    ImportDetail::PowerBallDefaultRolePair candidate;
+    std::string roleError;
+    if (!ImportDetail::ResolvePowerBallDefaultRole(input, candidate, &roleError)) {
+      lines.push_back("WPSM powerball COLR/DEFS: not the pinned USA 1.00 default role (" + roleError + "); no pair");
+    } else {
+      bool exact = false;
+      bool conflict = false;
+      for (const EffectPairing& have : pairings) {
+        if (have.id == candidate.genp && have.retail == candidate.retailPart) {
+          exact = true;
+        } else if (ImportDetail::ConflictsWithPowerBallDefaultRolePair(candidate, have.id, have.retail)) {
+          conflict = true;
+          lines.push_back("WPSM powerball COLR/DEFS: conflict with " + have.method + " (" +
+                          EffectGuidString(ToStored(have.id)) + " -> " + HexId(have.retail) + "); no pair");
+        }
+      }
+      if (!conflict && !exact) {
+        pairings.push_back({candidate.genp, candidate.retailPart, "wpsm powerball COLR/DEFS default"});
+        lines.push_back("WPSM powerball COLR/DEFS default: " + EffectGuidString(ToStored(candidate.genp)) + " -> " +
+                        HexId(candidate.retailPart));
+      }
+    }
+  }
+
+  // PlasmaBeam's collision-response default is independently pinned to USA
+  // 1.00. Its APSM projectile link is a different role and remains untouched.
+  // The exact lower-case FrameKey and unique typed-resource checks make other
+  // regions, duplicates, missing assets, and conflicting claims fail closed.
+  uint32_t plasmaBeamWpsc = 0;
+  std::vector<uint8_t> plasmaBeamWeapon;
+  std::vector<uint8_t> plasmaBeamProjectile;
+  std::vector<uint8_t> plasmaBeamRetailCollision;
+  std::vector<uint8_t> plasmaBeamRemasteredCollision;
+  std::string plasmaBeamError;
+  if (!retail.WpscId("plasmabeam", plasmaBeamWpsc)) {
+    lines.push_back("WPSM plasmabeam COLR/DEFS: no unique disc WPSC named PlasmaBeam");
+  } else if (!retail.Read(kWPSC, plasmaBeamWpsc, plasmaBeamWeapon) ||
+             !remastered.ReadProjectile("plasmabeam", plasmaBeamProjectile, plasmaBeamError)) {
+    lines.push_back("WPSM plasmabeam COLR/DEFS: could not read the exact named weapon assets");
+  } else {
+    const bool crscPresent = retail.HasUniqueResource(kCRSC, ImportDetail::kPlasmaBeamCrsc) &&
+                             retail.Read(kCRSC, ImportDetail::kPlasmaBeamCrsc, plasmaBeamRetailCollision);
+    const bool crsmPresent = remastered.HasUniqueCollision(ImportDetail::kPlasmaBeamCrsm) &&
+                             remastered.ReadCollision(ImportDetail::kPlasmaBeamCrsm, plasmaBeamRemasteredCollision,
+                                                      plasmaBeamError);
+    const bool genpPresent = remastered.HasUniqueEffect(ImportDetail::kPlasmaBeamDefaultGenp) &&
+                             remastered.EffectAssetType(ImportDetail::kPlasmaBeamDefaultGenp) == kGENP;
+    ImportDetail::PlasmaBeamDefaultRoleInput input;
+    input.weaponName = "plasmabeam";
+    input.retailWpscId = plasmaBeamWpsc;
+    input.retailWpscExists = retail.HasUniqueResource(kWPSC, plasmaBeamWpsc);
+    input.retailCrscExists = crscPresent;
+    input.retailPartExists = retail.HasUniqueResource(kPART, ImportDetail::kPlasmaBeamDefaultPart);
+    input.remasteredWpsmExists = true;  // ReadProjectile rejected missing/ambiguous names.
+    input.remasteredCrsmExists = crsmPresent;
+    input.remasteredGenpExists = genpPresent;
+    input.retailWpsc = plasmaBeamWeapon.data();
+    input.retailWpscSize = plasmaBeamWeapon.size();
+    input.retailCrsc = plasmaBeamRetailCollision.data();
+    input.retailCrscSize = plasmaBeamRetailCollision.size();
+    input.remasteredWpsm = plasmaBeamProjectile.data();
+    input.remasteredWpsmSize = plasmaBeamProjectile.size();
+    input.remasteredCrsm = plasmaBeamRemasteredCollision.data();
+    input.remasteredCrsmSize = plasmaBeamRemasteredCollision.size();
+    ImportDetail::PlasmaBeamDefaultRolePair candidate;
+    std::string roleError;
+    if (!ImportDetail::ResolvePlasmaBeamDefaultRole(input, candidate, &roleError)) {
+      lines.push_back("WPSM plasmabeam COLR/DEFS: not the pinned USA 1.00 default role (" + roleError + "); no pair");
+    } else {
+      bool exact = false;
+      bool conflict = false;
+      for (const EffectPairing& have : pairings) {
+        if (have.id == candidate.genp && have.retail == candidate.retailPart) {
+          exact = true;
+        } else if (ImportDetail::ConflictsWithPlasmaBeamDefaultRolePair(candidate, have.id, have.retail)) {
+          conflict = true;
+          lines.push_back("WPSM plasmabeam COLR/DEFS: conflict with " + have.method + " (" +
+                          EffectGuidString(ToStored(have.id)) + " -> " + HexId(have.retail) + "); no pair");
+        }
+      }
+      if (!conflict && !exact) {
+        pairings.push_back({candidate.genp, candidate.retailPart, "wpsm plasmabeam COLR/DEFS default"});
+        lines.push_back("WPSM plasmabeam COLR/DEFS default: " + EffectGuidString(ToStored(candidate.genp)) + " -> " +
+                        HexId(candidate.retailPart));
+      }
     }
   }
   return pairings;
@@ -2510,7 +2742,7 @@ void Run(std::string nspPath, std::string keysPath, int threads, fs::path stagin
                                       std::to_string(ImportStage::kRooms) + " geometry " +
                                           (geometryEnv != nullptr && geometryEnv[0] != '\0'
                                                ? std::string(geometryEnv)
-                                               : std::string(sGeometry ? "all" : "none")) +  // as the env says it
+                                               : std::string("all")) +  // as the env says it
                                           keyConverter,
                                       false);
   // Remastered's environment BRDF table, from the user's own executable. Nothing
@@ -3090,7 +3322,7 @@ void Run(std::string nspPath, std::string keysPath, int threads, fs::path stagin
       int reworded = 0;
       int translated = 0;
       if (!retail.Read(kSTRG, strg, original) ||
-          !MergeStringTable(original.data(), original.size(), strings, checkWording, merged, reworded, translated)) {
+          !MergeStringTable(original.data(), original.size(), strings, checkWording, merged, reworded, translated, strg)) {
         continue;  // not on this disc, or worded as it was
       }
       char name[16];
@@ -3548,9 +3780,6 @@ bool StartImport(const std::string& nspPath, const std::string& keysPath, int th
   return true;
 }
 
-void SetImportGeometry(bool on) { sGeometry = on; }
-
-void SetImportReuse(bool on) { sReuse = on; }
 
 ImportState ImportStatus() {
   std::lock_guard<std::mutex> lock(sStateMutex);

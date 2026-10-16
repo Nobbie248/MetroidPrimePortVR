@@ -2,6 +2,9 @@
 
 #include "Kyoto/Math/CMath.hpp"
 #include "Kyoto/Particles/CParticleGlobals.hpp"
+#include "Kyoto/Particles/CParticleDataFactory.hpp"
+#include "Kyoto/Particles/CIntElement.hpp"
+#include "Kyoto/Particles/PortParticleMath.hpp"
 #include "Kyoto/Streams/CInputStream.hpp"
 
 #include "rstl/math.hpp"
@@ -243,6 +246,36 @@ bool CCEParticleColor::GetValue(int frame, CColor& colorOut) const {
 }
 
 #ifdef TARGET_PC
+CCEGradient::CCEGradient(CInputStream& in) {
+  // Same cap as the converter's validator: a corrupt count must not allocate or loop for gigabytes.
+  const uint count = in.ReadLong();
+  x4_stops.resize(count <= 0x10000 ? count : 0);
+  for (PortParticleMath::GradientStop& stop : x4_stops) {
+    for (float& v : stop.color) {
+      v = in.ReadFloat();
+    }
+    stop.position = in.ReadFloat();
+  }
+  x1c_period = CParticleDataFactory::GetIntElement(in);
+  x20_repeat = in.ReadBool();
+}
+
+CCEGradient::~CCEGradient() { delete x1c_period; }
+
+bool CCEGradient::GetValueHdr(int frame, float out[4]) const {
+  int period = 1;
+  x1c_period->GetValue(frame, period);
+  PortParticleMath::EvalGradient(x4_stops.data(), int(x4_stops.size()), period, x20_repeat, frame, out);
+  return false;
+}
+
+bool CCEGradient::GetValue(int frame, CColor& colorOut) const {
+  float c[4];
+  GetValueHdr(frame, c);
+  colorOut.Set(c[0], c[1], c[2], c[3]); // clamped, as every other element's SDR value
+  return false;
+}
+
 bool CColorElement::GetValueHdr(int frame, float out[4]) const {
   CColor c;
   const bool ret = GetValue(frame, c);

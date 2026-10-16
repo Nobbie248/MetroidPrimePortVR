@@ -5,6 +5,9 @@
 
 #include <string.h>
 #ifdef TARGET_PC
+#include "port_visor_mesh.h"
+#endif
+#ifdef TARGET_PC
 #include <dolphin/gx/GXExtra.h>
 #include <stdlib.h>
 #endif
@@ -20,11 +23,17 @@ namespace {
 const uint kPortMagic = 0x50424958; // 'PBIX'
 const uint kPortDiscOffset = 0x2c + 0x18;
 const uint kPortNativeOffset = 0x60;
+// The visor mesh filter word follows the PBIX block (0x44 + 6 words = 0x5c on disc); the native
+// header keeps it past the base indices.
+const uint kPortVisorDiscOffset = 0x5c;
+const uint kPortVisorNativeOffset = 0x78;
 const uint kPortExtraSize = 0x40;
 const uint kPortWords = 1 + CCubeSurface::kPB_Count;
 } // namespace
 static_assert(sizeof(CCubeSurface::SSurfaceData) <= kPortNativeOffset, "PBIX block overlaps the surface header");
 static_assert(((0x4b + kPortExtraSize) & ~31) >= kPortNativeOffset + kPortWords * 4, "PBIX block past the header");
+static_assert(kPortNativeOffset + kPortWords * 4 <= kPortVisorNativeOffset && kPortVisorNativeOffset + 4 <= 0x80,
+              "visor word outside the header");
 #endif
 
 void CCubeSurface::ConvertSurfaceHeader(void* rawData) {
@@ -44,12 +53,19 @@ void CCubeSurface::ConvertSurfaceHeader(void* rawData) {
 #ifdef TARGET_PC
   uint portWords[kPortWords];
   bool hasPortWords = false;
+  bool hasVisorWord = false;
+  uint portVisorWord = 0;
   if (extraSize >= kPortExtraSize) {
     memcpy(portWords, data + kPortDiscOffset, sizeof(portWords));
     for (uint i = 0; i < kPortWords; ++i) {
       portWords[i] = CBasics::SwapBytes(portWords[i]);
     }
     hasPortWords = portWords[0] == kPortMagic;
+    uint visorWord;
+    memcpy(&visorWord, data + kPortVisorDiscOffset, sizeof(visorWord));
+    visorWord = CBasics::SwapBytes(visorWord);
+    hasVisorWord = true;
+    portVisorWord = visorWord;
   }
 #endif
   if (extraSize != 0) {
@@ -70,6 +86,9 @@ void CCubeSurface::ConvertSurfaceHeader(void* rawData) {
 #ifdef TARGET_PC
   if (hasPortWords) {
     memcpy(data + kPortNativeOffset, portWords, sizeof(portWords));
+  }
+  if (hasVisorWord) {
+    memcpy(data + kPortVisorNativeOffset, &portVisorWord, sizeof(portVisorWord));
   }
 #endif
 #endif
@@ -103,6 +122,15 @@ void CCubeSurface::PortCallDisplayList() const {
   } else {
     CGX::CallDisplayList(GetDisplayList(), GetDisplayListSize());
   }
+}
+
+uint CCubeSurface::PortVisorWord() const {
+  if (x0_data->mExtraSize < kPortExtraSize) {
+    return 0;
+  }
+  uint word;
+  memcpy(&word, x0_rawdata + kPortVisorNativeOffset, sizeof(word));
+  return word;
 }
 
 void CCubeSurface::CallDisplayList() const {

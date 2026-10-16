@@ -31,6 +31,7 @@ GUID = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11"
 
 # Per-connection deflate state for clients that negotiated permessage-deflate.
 COMPRESSORS = {}
+STORAGE = {}
 
 
 def recv_exact(sock, size):
@@ -162,7 +163,7 @@ def handle_session(sock, address, args, item_ids, bounce_sources):
             "version": {"major": 0, "minor": 6, "build": 8},
             "password": False,
             "games": ["Metroid Prime"],
-            "seed_name": "Metroid Prime Port fake seed",
+            "seed_name": args.seed_name,
         })
 
         while True:
@@ -227,6 +228,20 @@ def handle_session(sock, address, args, item_ids, bounce_sources):
                     send_json(sock, {"cmd": "Retrieved", "keys": {
                         key: (args.hints if key == "_read_hints_0_1" else None) for key in keys
                     }})
+                    continue
+                # Set: only the "default" operation the port uses; values last
+                # for the server's run, as a room's data storage does.
+                if packet_command(packet) == "Set":
+                    key = packet.get("key", "")
+                    original = STORAGE.get(key, packet.get("default"))
+                    value = original
+                    for operation in packet.get("operations", []):
+                        if operation.get("operation") == "replace":
+                            value = operation.get("value")
+                    STORAGE[key] = value
+                    if packet.get("want_reply"):
+                        send_json(sock, {"cmd": "SetReply", "key": key, "value": value,
+                                         "original_value": original, "slot": 1})
                     continue
                 if packet_command(packet) != "Connect":
                     continue
@@ -312,6 +327,8 @@ def main():
                              "(repeat for several)")
     parser.add_argument("--item", type=parse_item_ids, default=parse_item_ids("1234:5678"),
                         metavar="ID[:ID...]", help="item IDs sent in ReceivedItems (default: 1234:5678)")
+    parser.add_argument("--seed-name", default="Metroid Prime Port fake seed",
+                        help="seed_name sent in RoomInfo (default: %(default)s)")
     parser.add_argument("--slot-data", type=json.loads, default={}, metavar="JSON",
                         help="slot_data object sent in Connected (default: {})")
     parser.add_argument("--scouts", type=parse_scouts, default={}, metavar="LOC=ITEM[@PLAYER][:FLAGS],...",

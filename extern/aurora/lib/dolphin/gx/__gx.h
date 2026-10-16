@@ -177,4 +177,8 @@ void __GXSetGenMode();
 void __GXSetMatrixIndex(GXAttr matIdxAttr);
 void __GXSendFlushPrim();
 void __GXFlushTextureState();
+
+// Port extension: makes GXPortCopySerial change, so a game-thread cache keyed on it (the glass copy,
+// CCubeModel) copies again. Game thread only: the counter is never written from the FIFO side.
+void __GXPortInvalidateCopySerial();
 };

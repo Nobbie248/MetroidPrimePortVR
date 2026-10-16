@@ -7,6 +7,12 @@
 #include "Kyoto/TToken.hpp"
 #include "rstl/optional_object.hpp"
 
+#ifdef TARGET_PC
+#include "Kyoto/Particles/CPortParticleVars.hpp"
+#include <memory>
+struct CPortVfxData;
+#endif
+
 class CColorElement;
 class CEmitterElement;
 class CIntElement;
@@ -37,8 +43,37 @@ public:
   rstl::optional_object< TCachedToken< CGenDescription > > x50_GPSM;
   rstl::optional_object< TCachedToken< CGenDescription > > x60_EPSM;
   bool x70_ZERY;
+#ifdef TARGET_PC
+  // Port-only ELC2 (Remastered CParticleElectric2) fields, read when the stream starts with PEL2.
+  // Absent properties keep the ELC2 defaults the runtime applies (8 nodes, SIDE 2, RADS 1, ...).
+  bool xPortElc2 = false;
+  CIntElement* xPortSIDE = nullptr;
+  CIntElement* xPortLWQD = nullptr;
+  CIntElement* xPortNFOM = nullptr;
+  CIntElement* xPortTSPN = nullptr;
+  CIntElement* xPortBDEP = nullptr;
+  CIntElement* xPortBNDI = nullptr;
+  CRealElement* xPortRADS = nullptr;
+  CRealElement* xPortLRAD = nullptr;
+  CRealElement* xPortRRAD = nullptr;
+  CRealElement* xPortSLVF = nullptr;
+  CRealElement* xPortBLNC = nullptr;
+  CRealElement* xPortBCFF = nullptr;
+  CRealElement* xPortBLEN = nullptr;
+  CRealElement* xPortBANG = nullptr;
+  CRealElement* xPortBIDF = nullptr;
+  CRealElement* xPortBLDF = nullptr;
+  CRealElement* xPortAMDF = nullptr;
+  CColorElement* xPortNCLR = nullptr;
+  bool xPortLLRD = true;
+  bool xPortFPLB = false;
+  // port-only Remastered material (VMAT etc.; see CGenDescription::xPortVfx)
+  std::unique_ptr< CPortVfxData > xPortVfx;
+#endif
 };
 
+#ifndef TARGET_PC
 CHECK_SIZEOF(CElectricDescription, 0x74)
+#endif
 
 #endif // _CELECTRICDESCRIPTION

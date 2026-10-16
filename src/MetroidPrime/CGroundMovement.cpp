@@ -17,6 +17,10 @@
 #include "WorldFormat/CMetroidAreaCollider.hpp"
 #include "rstl/math.hpp"
 
+#ifdef TARGET_PC
+#include "port_debug.h"
+#endif
+
 #include <float.h>
 #include <math.h>
 
@@ -664,6 +668,23 @@ CMaterialList CGroundMovement::MoveObjectAnalytical(CStateManager& mgr, CPhysics
   uint cycle = 0;
   bool floorCollision = options.x3c_floorPlaneNormal;
   CVector3f floorPlaneNormal = floorCollision ? *options.x3c_floorPlaneNormal : CVector3f::Zero();
+#ifdef TARGET_PC
+  // Every tick's translation is shortened by this delta, so free movement loses
+  // delta per tick: 0.12 units/s at 60 Hz, twice that at 120 Hz (a standing jump
+  // peaked 0.06 lower). Scale it to the tick rate for moves that hit nothing;
+  // moves that hit something keep the full gap to the surface.
+  // Remastered's stepped mover (CPhysicsSteppedMoverColliderMP1::DoMovementStep
+  // 0xf948d4) takes the whole step when it hits nothing, so with Remastered
+  // movement a free move loses nothing: the ground run is 16.5 - 1/k = 10.843
+  // u/s as in Remastered, not 10.723.
+  const CPlayer* player = TCastToConstPtr< CPlayer >(&actor);
+  const float freeDelta =
+      player && player->MouseControlsAllowed(mgr) && PortDebug::RemasteredMovement()
+          ? 0.f
+          : options.x20_minimumTranslationDelta * (PortDebug::TickPeriod() * 60.f);
+#else
+  const float freeDelta = options.x20_minimumTranslationDelta;
+#endif
   while (remainingDt > 0.f) {
     float collideDt = remainingDt;
     CMotionState motion = actor.PredictMotion_Internal(remainingDt);
@@ -673,7 +694,7 @@ CMaterialList CGroundMovement::MoveObjectAnalytical(CStateManager& mgr, CPhysics
     actor.GetCollisionPrimitive()->CalculateAABox(actor.GetPrimitiveTransform());
     double distance = translationMag;
     CCollisionInfo info;
-    if (translationMag > options.x20_minimumTranslationDelta) {
+    if (translationMag > freeDelta) {
       TUniqueId id = kInvalidUniqueId;
       CGameCollision::DetectCollision_Cached_Moving(
           mgr, cache, *actor.GetCollisionPrimitive(), actor.GetPrimitiveTransform(),
@@ -684,8 +705,10 @@ CMaterialList CGroundMovement::MoveObjectAnalytical(CStateManager& mgr, CPhysics
       }
       collideDt = remainingDt * static_cast< float >(distance / translationMag);
     }
-    float moveDistance =
-        rstl::max_val(static_cast< float >(distance - options.x20_minimumTranslationDelta), 0.f);
+    float moveDistance = rstl::max_val(
+        static_cast< float >(distance - (info.IsValid() ? options.x20_minimumTranslationDelta
+                                                        : freeDelta)),
+        0.f);
     CVector3f collisionNormal = info.GetNormalLeft();
     bool floor = CGameCollision::CanBlock(info.GetMaterialLeft(), collisionNormal);
     const bool clipCollision =

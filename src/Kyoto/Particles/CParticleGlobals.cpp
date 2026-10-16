@@ -42,6 +42,7 @@ CParticleGlobals::SParticleSystem* CParticleGlobals::mCurrentParticleSystem = nu
 #ifdef TARGET_PC
 CElementGen::CParticle* CParticleGlobals::xPortUVParticle = nullptr;
 const CElementGen::CParticle* CParticleGlobals::xPortIrndParticle = nullptr;
+const CParticleGlobals::SPortSwooshEval* CParticleGlobals::xPortSwooshEval = nullptr;
 
 // splitmix64 of (seed, element address): the same pair always gives the same bits.
 u32 CParticleGlobals::PortIrndBits(const CElementGen::CParticle* particle, const void* element) {

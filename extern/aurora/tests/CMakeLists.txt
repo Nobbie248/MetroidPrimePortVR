@@ -35,6 +35,14 @@ target_include_directories(time_tests PRIVATE
 target_link_libraries(time_tests PRIVATE gtest gtest_main)
 gtest_discover_tests(time_tests)
 
+add_executable(shadow_cascade_tests
+  shadow_cascade_test.cpp
+  ../lib/gfx/shadow_cascade.cpp
+)
+target_include_directories(shadow_cascade_tests PRIVATE ../lib)
+target_link_libraries(shadow_cascade_tests PRIVATE gtest gtest_main)
+gtest_discover_tests(shadow_cascade_tests)
+
 add_executable(os_time_tests
   os_time_test.cpp
   os_time_test_stubs.cpp
@@ -100,6 +108,7 @@ if (AURORA_ENABLE_GX)
     ../lib/gx/dl.cpp
     gx_dl_test.cpp
     gx_resident_test.cpp
+    gx_scene_hdr_fifo_test.cpp
   )
 
   target_include_directories(gx_fifo_tests PRIVATE
@@ -188,7 +197,13 @@ if (AURORA_ENABLE_GX)
     gfx_recording_test.cpp
     native_vertex_test.cpp
     gx_uniform_limit_test.cpp
+    gx_suit_glass_test.cpp
+    gx_inventory_visor_test.cpp
+    vfx_blend_test.cpp
     render_target_layout_test.cpp
+    scene_hdr_test.cpp
+    scene_hdr_writer_test.cpp
+    scene_hdr_water_fog_test.cpp
   )
   target_include_directories(gfx_recording_tests PRIVATE
     ../include

@@ -15,6 +15,10 @@
 #include "rstl/math.hpp"
 
 #include "port_debug.h"
+#ifdef TARGET_PC
+#include "port_pointer_menu.h"
+#include "port_savestate.h"
+#endif
 
 const char* const skSplashScreenTextureNames[CSplashScreen::kSplashScreen_MAX] = {
     "TXTR_NintendoLogo",
@@ -36,6 +40,25 @@ CSplashScreen::CSplashScreen(const ESplashScreen splash)
 
 CIOWin::EMessageReturn CSplashScreen::OnMessage(const CArchitectureMessage& message,
                                                 CArchitectureQueue& queue) {
+#ifdef TARGET_PC
+  // Port: the quick resume prompt starts with the first splash. Yes ends the
+  // chain, so the front end loads at once.
+  if (PortDebug::FastBoot()) {
+    // Fast boot drives the front end itself.
+  } else if (message.GetType() == kAM_TimerTick) {
+    PortResumePromptTick();
+    if (PortResumePromptAccepted()) {
+      fprintf(stderr, "[resume] accepted during splash %d\n", static_cast< int >(mSplash));
+      return kMR_RemoveIOWinAndExit;
+    }
+  } else if (message.GetType() == kAM_UserInput) {
+    if (PortResumePromptInput(MakeMsg::GetParmUserInput(message).GetUserInput())) {
+      // The front end's sounds are not loaded yet: drop the click, don't defer it.
+      PortResumePromptTakeSound();
+      return kMR_Exit;
+    }
+  }
+#endif
   switch (message.GetType()) {
   case kAM_TimerTick: {
     if (!mTexturesLoaded) {
@@ -93,9 +116,21 @@ CIOWin::EMessageReturn CSplashScreen::OnMessage(const CArchitectureMessage& mess
     }
     break;
   }
-  case kAM_UserInput:
+  case kAM_UserInput: {
+#ifdef TARGET_PC
+    // Port: a pointer screen, so touch hides its gameplay buttons.
+    const bool pointerScreen = PortPointerMenu::Begin();
+#endif
     if (mTexturesLoaded) {
+#ifdef TARGET_PC
+      // Port: a click or tap is A.
+      CFinalInput input = MakeMsg::GetParmUserInput(message).GetUserInput();
+      if (pointerScreen && PortPointerMenu::TakeClick()) {
+        PortPointerMenu::PressA(input);
+      }
+#else
       const CFinalInput& input = MakeMsg::GetParmUserInput(message).GetUserInput();
+#endif
       if (mProgressivePhase == kPP_Selection) {
         if (input.DLALeft() || input.DDPLeft()) {
           mProgressiveMode = true;
@@ -111,8 +146,16 @@ CIOWin::EMessageReturn CSplashScreen::OnMessage(const CArchitectureMessage& mess
       } else if (mProgressivePhase == kPP_Confirmation && (input.PA() || input.PStart())) {
         mProgressiveSelectionTimeout = 0.f;
       }
+#ifdef TARGET_PC
+      // Port: A or Start ends this logo with the usual fade out.
+      else if (mProgressivePhase == kPP_Complete && (input.PA() || input.PStart()) &&
+               PortDebug::BootLogos() == PortDebug::kBootLogos_Skippable && mSplashTimeout > 0.5f) {
+        mSplashTimeout = 0.5f;
+      }
+#endif
     }
     break;
+  }
   default:
     break;
   }

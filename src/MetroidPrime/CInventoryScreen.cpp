@@ -12,6 +12,9 @@
 #include "MetroidPrime/CStateManager.hpp"
 #include "MetroidPrime/Tweaks/CTweakGuiColors.hpp"
 #include "rstl/math.hpp"
+#ifdef TARGET_PC
+#include "port_pointer_menu.h"
+#endif
 #include <limits.h>
 
 namespace {
@@ -119,9 +122,21 @@ void CInventoryScreen::ProcessInput(const CFinalInput& input) {
     CVector3f moveVec(0.25f * motionAmt * (moveRight - moveLeft),
                       0.5f * motionAmt * (zoomIn - zoomOut),
                       0.25f * motionAmt * (moveForward - moveBack));
+    float rotX = 0.5f * motionAmt * (circleDown - circleUp);
+    float rotZ = 0.5f * motionAmt * (circleRight - circleLeft);
+#ifdef TARGET_PC
+    // Port: a drag turns the doll, a right drag or two fingers move it, the
+    // wheel or a pinch zooms (radians and units per EFB pixel or notch).
+    PortPointerMenu::ViewMotion motion;
+    if (PortPointerMenu::TakeViewMotion(motion)) {
+      rotX += 0.008f * motion.rotateY;
+      rotZ -= 0.008f * motion.rotateX;
+      moveVec = moveVec + CVector3f(-0.004f * motion.panX, 0.15f * motion.zoom,
+                                    0.004f * motion.panY);
+    }
+#endif
     x19c_samusDoll->SetOffset(moveVec, input.Time());
-    x19c_samusDoll->SetRotation(0.5f * motionAmt * (circleDown - circleUp),
-                                0.5f * motionAmt * (circleRight - circleLeft), input.Time());
+    x19c_samusDoll->SetRotation(rotX, rotZ, input.Time());
   } else {
     x1ad_textViewing = false;
 
@@ -164,6 +179,27 @@ void CInventoryScreen::ProcessInput(const CFinalInput& input) {
     CPauseScreenBase::ProcessInput(input);
   }
 }
+
+#ifdef TARGET_PC
+void CInventoryScreen::PortPointerInput(CFinalInput& input) {
+  if (x1a8_state == kS_Inactive || x19c_samusDoll->IsViewInterpolating()) {
+    return;
+  }
+  // The Y hint toggles the doll view as Y does.
+  if (PortPointerMenu::TakeClickOn(x180_basewidget_yicon)) {
+    input.PortSetY(true, true);
+    return;
+  }
+  // In the doll view ProcessInput takes the drag, wheel and pinch itself.
+  if (CMath::AbsF(x19c_samusDoll->GetViewInterpolation()) > 0.f) {
+    if (PortPointerMenu::TakeBack()) {
+      PortPointerMenu::PressB(input);
+    }
+    return;
+  }
+  CPauseScreenBase::PortPointerInput(input);
+}
+#endif
 
 void CInventoryScreen::ChangedMode(EMode oldMode) {
   if (x10_mode == kM_TextScroll) {

@@ -133,6 +133,11 @@ public:
 #ifdef TARGET_PC
   ESpecialFunction PortFunction() const { return xe8_function; }
   const rstl::string& PortLocatorName() const { return xec_locatorName; }
+  float PortFloat(int i) const {
+    return i == 0 ? xfc_float1 : i == 1 ? x100_float2 : i == 2 ? x104_float3 : x108_float4;
+  }
+  float PortSpinnerPhase() const { return x138_; }
+  float PortSpinnerPush() const { return x16c_; }
 #endif
 
   void SkipCinematic(CStateManager&);

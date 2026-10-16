@@ -2,6 +2,9 @@
 
 #include <algorithm>
 
+#ifdef TARGET_PC
+#include "aurora/vfx.hpp"
+#endif
 #include "Kyoto/CFactoryFnReturn.hpp"
 #include "Kyoto/CRandom16.hpp"
 #include "Kyoto/CSimplePool.hpp"
@@ -235,7 +238,7 @@ static bool PortReadVfxMat(CPortVfxData& vfx, CInputStream& in, u32 nbytes, CSim
   // knows: it is skipped whole, before anything is built, and the PART draws as retail.
   constexpr u32 kTexWords = 11;
   constexpr u32 kTailWords = 7 + 2 + 1 + 3 * 11 + 3;
-  if (version != 2 || ntex > 4 || blend > 4 || nbytes != (kTexWords * ntex + kTailWords) * 4 + 16) {
+  if (version != 2 || ntex > 4 || blend > aurora::gfx::vfx::MaxBlend || nbytes != (kTexWords * ntex + kTailWords) * 4 + 16) {
     skipRest();
     return true;
   }
@@ -538,6 +541,19 @@ bool CParticleDataFactory::CreateGPSM(CGenDescription* desc, CInputStream& in,
     case SBIG('PIRN'):
       GetClassID(in);
       desc->xPortIrnd = in.ReadLong() != 0;
+      break;
+    // Port-only metadata for the one source-proven nested smooth point light.
+    case SBIG('PHDR'):
+      GetClassID(in);
+      desc->xPortNestedHdrLight = in.ReadLong() != 0;
+      break;
+    case SBIG('PIR0'):
+      delete desc->xPortNestedLightInnerRadius;
+      desc->xPortNestedLightInnerRadius = GetRealElement(in);
+      break;
+    case SBIG('POR0'):
+      delete desc->xPortNestedLightOuterRadius;
+      desc->xPortNestedLightOuterRadius = GetRealElement(in);
       break;
     // Port-only: the swooshes a converted effect starts beyond SSWH's one (xPortExtraSwooshes).
     case SBIG('PSWX'): {
@@ -1226,6 +1242,14 @@ CVectorElement* CParticleDataFactory::GetVectorElement(CInputStream& in) {
     ret = rs_new CVEColorToVector(value);
     break;
   }
+#ifdef TARGET_PC
+  case SBIG('PQAD'): {
+    CVectorElement* first = GetVectorElement(in);
+    CVectorElement* second = GetVectorElement(in);
+    ret = rs_new CVEOrderedEulerProduct(first, second);
+    break;
+  }
+#endif
   default:
     ret = nullptr;
     break;
@@ -1463,6 +1487,11 @@ CColorElement* CParticleDataFactory::GetColorElement(CInputStream& in) {
   case SBIG('KEYP'):
     ret = rs_new CCEKeyframeEmitter(in);
     break;
+#ifdef TARGET_PC
+  case SBIG('PGRD'):
+    ret = rs_new CCEGradient(in);
+    break;
+#endif
   case SBIG('FADE'): {
     CColorElement* a = GetColorElement(in);
     CColorElement* b = GetColorElement(in);

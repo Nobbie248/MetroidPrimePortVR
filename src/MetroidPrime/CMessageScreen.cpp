@@ -16,6 +16,10 @@
 #include "MetroidPrime/Tweaks/CTweakGuiColors.hpp"
 #include "rstl/math.hpp"
 
+#ifdef TARGET_PC
+#include "port_pointer_menu.h"
+#endif
+
 #include <stdlib.h>
 
 CMessageScreen::CMessageScreen(CAssetId msg, float time)
@@ -134,7 +138,15 @@ bool CMessageScreen::Update(float dt, float blurAmt) {
 }
 
 void CMessageScreen::ProcessControllerInput(const CFinalInput& input) {
-  if (x18_loadedMsgScreen && x74_delayTime <= 0.f && input.PA()) {
+  bool confirm = input.PA();
+#ifdef TARGET_PC
+  // Port: a click or tap anywhere turns the page, as A does.
+  if (x18_loadedMsgScreen && PortPointerMenu::Begin() && x74_delayTime <= 0.f &&
+      PortPointerMenu::TakeClick()) {
+    confirm = true;
+  }
+#endif
+  if (x18_loadedMsgScreen && x74_delayTime <= 0.f && confirm) {
     CGuiTextSupport& text = x1c_textpane_message->TextSupport();
     if (text.GetCurTime() < text.GetTotalAnimationTime()) {
       text.SetCurTime(text.GetTotalAnimationTime());

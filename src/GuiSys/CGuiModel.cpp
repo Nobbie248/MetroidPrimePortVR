@@ -6,6 +6,10 @@
 #include "Kyoto/Graphics/CGraphics.hpp"
 #include "Kyoto/Graphics/CModel.hpp"
 
+#ifdef TARGET_PC
+#include "port_pointer.h"
+#endif
+
 #include <cstdio>
 #include <cstdlib>
 
@@ -48,6 +52,11 @@ void CGuiModel::Draw(const CGuiWidgetDrawParms& parms) const {
     return;
   }
   if (GetIsVisible()) {
+#ifdef TARGET_PC
+    // Port: where the model lands on screen, for mouse and touch menus.
+    PortGuiHit::Record(this, CGraphics::GetModelMatrix(), model->GetBoundingBox().GetMinPoint(),
+                       model->GetBoundingBox().GetMaxPoint());
+#endif
     CColor col = GetModifiedColor().WithAlphaModulatedBy(parms.GetAlpha());
     GetParentFrame()->EnableLights(xcc_lightMask);
 

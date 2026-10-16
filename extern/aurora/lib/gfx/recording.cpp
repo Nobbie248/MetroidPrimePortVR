@@ -11,6 +11,7 @@
 #include "geometry_buffer.hpp"
 #include "resource_cache.hpp"
 
+#include "bloom.hpp"
 #include "clear.hpp"
 #include "draw_payload.hpp"
 #include "perf_counters.hpp"
@@ -71,6 +72,10 @@ struct FrameRecorder {
   uint32_t mergedDrawCallCount = 0;
   uint32_t renderPassCount = 0;
   bool inOffscreen = false;
+  // EFB passes draw into the linear HDR scene (webgpu::g_sceneHdr) instead of g_frameBuffer; reset
+  // every frame. hdrSceneCleared: this frame's HDR scene was cleared, so a later enable loads it.
+  bool hdrScene = false;
+  bool hdrSceneCleared = false;
   std::optional<RenderPass> suspendedEfbPass;
   Viewport suspendedEfbViewport;
   ClipRect suspendedEfbScissor;
@@ -294,27 +299,37 @@ std::string pass_label(std::string_view kind) {
   return std::string{kind};
 }
 
+// The active EFB colour target: the HDR scene while it is on, else the display EFB.
+const webgpu::TextureWithSampler& efb_color() noexcept {
+  return g_recorder.hdrScene ? webgpu::g_sceneHdr : webgpu::g_frameBuffer;
+}
+const webgpu::TextureWithSampler& efb_color_resolved() noexcept {
+  return g_recorder.hdrScene ? webgpu::g_sceneHdrResolved : webgpu::g_frameBufferResolved;
+}
+
 void set_efb_targets(RenderPass& pass) {
   const auto layout = scene_render_target_layout();
+  const auto& color = efb_color();
+  const auto& resolved = efb_color_resolved();
   pass.colorAttachmentCount = layout.colorAttachmentCount;
   auto& sceneColor = pass.colorAttachments[SceneColorAttachmentIndex];
   sceneColor.semantic = ColorAttachmentSemantic::SceneColor;
   sceneColor.format = layout.colorAttachments[SceneColorAttachmentIndex].format;
-  sceneColor.size = webgpu::g_frameBuffer.size;
-  sceneColor.view = webgpu::g_frameBuffer.view;
-  sceneColor.resolveView = layout.sampleCount > 1 ? webgpu::g_frameBufferResolved.view : nullptr;
+  sceneColor.size = color.size;
+  sceneColor.view = color.view;
+  sceneColor.resolveView = layout.sampleCount > 1 ? resolved.view : nullptr;
   for (uint32_t i = SceneColorAttachmentIndex + 1; i < layout.colorAttachmentCount; ++i) {
-    auto& color = pass.colorAttachments[i];
-    color.semantic = layout.colorAttachments[i].semantic;
-    color.format = layout.colorAttachments[i].format;
+    auto& extra = pass.colorAttachments[i];
+    extra.semantic = layout.colorAttachments[i].semantic;
+    extra.format = layout.colorAttachments[i].format;
     AURORA_ASSERT(false, "Scene render-target attachment {} has no backing texture", i);
   }
   pass.depthStencilView = webgpu::g_depthBuffer.view;
   pass.depthStencilFormat = layout.depthStencilFormat;
-  pass.copySourceTexture =
-      webgpu::g_graphicsConfig.msaaSamples > 1 ? webgpu::g_frameBufferResolved.texture : webgpu::g_frameBuffer.texture;
-  pass.copySourceView =
-      webgpu::g_graphicsConfig.msaaSamples > 1 ? webgpu::g_frameBufferResolved.view : webgpu::g_frameBuffer.view;
+  // EFB copies read the active target; an RGBA16F one is converted per copy (resolve_pass_into's
+  // ResolveHdr, tex_copy_conv::CopyDomain).
+  pass.copySourceTexture = webgpu::g_graphicsConfig.msaaSamples > 1 ? resolved.texture : color.texture;
+  pass.copySourceView = webgpu::g_graphicsConfig.msaaSamples > 1 ? resolved.view : color.view;
   pass.copySourceDepthView = webgpu::g_depthBuffer.view;
   pass.msaaSamples = layout.sampleCount;
   pass.hasDepth = true;
@@ -354,7 +369,8 @@ absl::flat_hash_map<OffscreenCacheKey, OffscreenCacheEntry> g_offscreenCache;
 // submitted its previous frame, and queue serialization orders the new frame's
 // copies after the old frame's reads.
 struct PassSnapshotEntry {
-  webgpu::TextureWithSampler color;
+  webgpu::TextureWithSampler color; // the pass's colour attachment format (RGBA16F in an HDR scene pass)
+  uint32_t colorSourceSamples = 0;  // the pass's MSAA count when color was made (the copy reads it resolved)
   webgpu::TextureWithSampler depth; // R32Float raw depth
 };
 struct PassSnapshotPool {
@@ -363,7 +379,10 @@ struct PassSnapshotPool {
 };
 std::array<PassSnapshotPool, FrameSlotCount> g_passSnapshotPools;
 
-PassSnapshotEntry& acquire_pass_snapshot(uint32_t width, uint32_t height, bool wantColor, bool wantDepth) {
+// format and sourceSamples: the snapshotted pass's colour attachment, which the raw copy reads
+// (resolved), so the snapshot has its format.
+PassSnapshotEntry& acquire_pass_snapshot(uint32_t width, uint32_t height, wgpu::TextureFormat format,
+                                         uint32_t sourceSamples, bool wantColor, bool wantDepth) {
   auto& pool = g_passSnapshotPools[g_recorder.frameSlot];
   if (pool.used == pool.entries.size()) {
     pool.entries.emplace_back();
@@ -371,8 +390,8 @@ PassSnapshotEntry& acquire_pass_snapshot(uint32_t width, uint32_t height, bool w
   auto& entry = pool.entries[pool.used++];
   const wgpu::Extent3D size{width, height, 1};
   if (wantColor && (!entry.color.texture || entry.color.size.width != width || entry.color.size.height != height ||
-                    entry.color.format != webgpu::g_graphicsConfig.surfaceConfiguration.format)) {
-    const auto format = webgpu::g_graphicsConfig.surfaceConfiguration.format;
+                    entry.color.format != format || entry.colorSourceSamples != sourceSamples)) {
+    entry.colorSourceSamples = sourceSamples;
     const wgpu::TextureDescriptor desc{
         .label = "Pass Snapshot Color",
         .usage = wgpu::TextureUsage::CopyDst | wgpu::TextureUsage::TextureBinding,
@@ -912,6 +931,8 @@ void begin_recording(FramePacket& packet, size_t frameSlot) {
   g_recorder.stereoRoute = AURORA_STEREO_ROUTE_WORLD;
   g_recorder.stereoScreenTexMtx = {};
   g_recorder.placement3D = {};
+  g_recorder.hdrScene = false;
+  g_recorder.hdrSceneCleared = false;
 
   current_render_passes().emplace_back();
   auto& pass = current_render_passes()[0];
@@ -945,6 +966,20 @@ RecordedFrame end_recording() {
   frame.stats.lastIndexSize = frame.indices.size();
   frame.stats.lastStorageSize = frame.storage.size();
   frame.stats.lastTextureUploadSize = frame.textureUpload.size();
+  {
+    // AURORA_FRAME_PEAKS=1 logs each new high-water mark of a frame's buffer use.
+    static const bool enabled = std::getenv("AURORA_FRAME_PEAKS") != nullptr;
+    static uint64_t peakVert, peakUniform, peakIndex, peakStorage;
+    if (enabled && (frame.verts.size() > peakVert || frame.uniforms.size() > peakUniform ||
+                    frame.indices.size() > peakIndex || frame.storage.size() > peakStorage)) {
+      peakVert = std::max<uint64_t>(peakVert, frame.verts.size());
+      peakUniform = std::max<uint64_t>(peakUniform, frame.uniforms.size());
+      peakIndex = std::max<uint64_t>(peakIndex, frame.indices.size());
+      peakStorage = std::max<uint64_t>(peakStorage, frame.storage.size());
+      Log.info("frame peaks: vertex {} uniform {} index {} storage {} (bytes)", peakVert, peakUniform, peakIndex,
+               peakStorage);
+    }
+  }
 
   for (auto& array : gx::g_gxState.arrays) {
     array.cachedRange = {};
@@ -958,6 +993,8 @@ RecordedFrame end_recording() {
   }
 #endif
   const RecordedFrame recorded{.packet = g_recorder.packet, .frameSlot = g_recorder.frameSlot};
+  g_recorder.hdrScene = false;
+  g_recorder.hdrSceneCleared = false;
   g_recorder.packet = nullptr;
   g_recorder.frameSlot = 0;
   return recorded;
@@ -974,6 +1011,8 @@ void shutdown_recording() {
   g_recorder.suspendedEfbPass.reset();
   g_recorder.heldDepth.reset();
   g_recorder.inOffscreen = false;
+  g_recorder.hdrScene = false;
+  g_recorder.hdrSceneCleared = false;
   g_recorder.packet = nullptr;
   g_recorder.frameSlot = 0;
   g_recorder.suppressRenderWorker = false;
@@ -1518,7 +1557,21 @@ PipelineRef clear_multiview_pipeline_ref(const clear::PipelineConfig& config) no
 
 void resolve_pass_into(TextureHandle texture, ClipRect rect, bool clearColor, bool clearAlpha, bool clearDepth,
                        Vec4<float> clearColorValue, float clearDepthValue, GXTexFmt resolveFormat,
-                       int probeFace, bool resolveMips) {
+                       int probeFace, bool resolveMips, const ResolveHdr* hdr) {
+  if (scene_hdr_pass_active()) {
+    // The scene holds exposed linear light: a display copy post-tones it, a linear copy keeps it,
+    // and the clear colour (display-referred) goes in as the light that post-tones back to it.
+    const hdr::Tone tone = hdr != nullptr ? hdr->tone : hdr::Tone{};
+    auto& pass = current_render_passes()[g_recorder.currentRenderPass];
+    if (hdr != nullptr && hdr->linear) {
+      pass.resolveDomain = tex_copy_conv::CopyDomain::Linear;
+    } else {
+      pass.resolveDomain = tex_copy_conv::CopyDomain::HdrDisplay;
+      pass.resolveToneRange = push_uniform(tone);
+    }
+    clearColorValue = {hdr::exposed(clearColorValue.x(), tone), hdr::exposed(clearColorValue.y(), tone),
+                       hdr::exposed(clearColorValue.z(), tone), clearColorValue.w()};
+  }
   // Resolve current render pass
   auto& prevPass = current_render_passes()[g_recorder.currentRenderPass];
   prevPass.resolveTarget = std::move(texture);
@@ -1681,6 +1734,60 @@ RenderTargetLayout get_render_target_layout() noexcept {
   return current_render_passes()[g_recorder.currentRenderPass].target_layout();
 }
 
+bool scene_hdr_active() noexcept { return g_recorder.hdrScene; }
+
+bool scene_hdr_pass_active() noexcept {
+  // hdrScene stays set through offscreen and begin_color_pass passes: only the HDR target's own pass counts.
+  if (!g_recorder.hdrScene || !g_recorder.active() || g_recorder.inOffscreen ||
+      g_recorder.currentRenderPass == UINT32_MAX || !webgpu::g_sceneHdr.view) {
+    return false;
+  }
+  const auto& pass = current_render_passes()[g_recorder.currentRenderPass];
+  return pass.colorAttachments[SceneColorAttachmentIndex].view.Get() == webgpu::g_sceneHdr.view.Get();
+}
+
+bool set_scene_hdr(bool on) {
+  if (g_recorder.hdrScene == on) {
+    return true;
+  }
+  // Only between EFB draws: not outside a frame, offscreen, or in a begin_color_pass pass.
+  if (!g_recorder.active() || g_recorder.inOffscreen || g_recorder.currentRenderPass == UINT32_MAX) {
+    return false;
+  }
+  // The current pass must be the EFB itself: a null EFB view, or a pass on another target, is refused.
+  auto& prevPass = current_render_passes()[g_recorder.currentRenderPass];
+  if (!efb_color().view || !webgpu::g_depthBuffer.view ||
+      prevPass.colorAttachments[SceneColorAttachmentIndex].view.Get() != efb_color().view.Get() ||
+      prevPass.depthStencilView.Get() != webgpu::g_depthBuffer.view.Get()) {
+    return false;
+  }
+  // An HDR scene must be convertible before its first draw. Check the same FIFO-owned post budget
+  // used by bloom::record so an unsupported third segment falls back to the display EFB here.
+  if (on && !bloom::scene_post_available()) {
+    return false;
+  }
+  if (on && !webgpu::ensure_scene_hdr_target()) {
+    return false;
+  }
+
+  // Seal the current EFB pass and continue on the other target, loading depth (shared) and, unless
+  // this frame's HDR scene is new, colour.
+  prevPass.discardable = !prevPass.has_consumer() && !prevPass.has_content();
+  enqueue_pass(current_frame_packet(), g_recorder.currentRenderPass);
+  resume_efb_pass_loading(prevPass);
+  g_recorder.hdrScene = on;
+  auto& pass = current_render_passes()[g_recorder.currentRenderPass];
+  set_efb_targets(pass);
+  if (on && !g_recorder.hdrSceneCleared) {
+    auto& color = pass.colorAttachments[SceneColorAttachmentIndex];
+    color.clear = true;
+    color.loadOp = wgpu::LoadOp::Clear;
+    color.clearValue = {0.f, 0.f, 0.f, 0.f};
+    g_recorder.hdrSceneCleared = true;
+  }
+  return true;
+}
+
 void clear_caches() noexcept {
   g_offscreenCache.clear();
   clear_bind_group_cache();
@@ -1784,7 +1891,8 @@ bool resolve_pass(const ResolveDesc& desc, ResolvedTargets& out) {
   const uint32_t height = prevPass.colorAttachments[SceneColorAttachmentIndex].size.height;
   // Requesting no snapshots is a plain pass break (or offscreen close, discarding its output).
   if (desc.color || wantDepth) {
-    auto& entry = acquire_pass_snapshot(width, height, desc.color, wantDepth);
+    auto& entry = acquire_pass_snapshot(width, height, prevPass.colorAttachments[SceneColorAttachmentIndex].format,
+                                        prevPass.msaaSamples, desc.color, wantDepth);
     if (desc.color) {
       prevPass.snapshotColorDst = entry.color.texture;
       out.color = entry.color.view;
@@ -1888,13 +1996,36 @@ bool record_encoder_task(EncoderTaskId type, const void* payload, size_t payload
 }
 
 bool record_encoder_task_overwriting(EncoderTaskId type, const void* payload, size_t payloadSize,
-                                     DrawTypeId drawType, DepthAfter depth) {
+                                     DrawTypeId drawType, DepthAfter depth, const void* drawPayload,
+                                     size_t drawPayloadSize, bool leaveSceneHdr) {
+  if (drawPayloadSize > InlineDrawPayloadSize || (drawPayloadSize > 0 && drawPayload == nullptr)) {
+    Log.warn("record_encoder_task_overwriting: bad draw payload ({} bytes)", drawPayloadSize);
+    return false;
+  }
+  if (leaveSceneHdr && (!scene_hdr_pass_active() || !webgpu::g_frameBuffer.view)) {
+    Log.warn("record_encoder_task_overwriting: no HDR scene pass to leave");
+    return false;
+  }
   if (!record_encoder_task_between(type, payload, payloadSize, depth)) {
     return false;
   }
-  current_render_passes()[g_recorder.currentRenderPass].colorAttachments[SceneColorAttachmentIndex].clear = true;
+  auto& pass = current_render_passes()[g_recorder.currentRenderPass];
+  if (leaveSceneHdr) {
+    // The continuation was made on the sealed pass's (HDR) targets: retarget it to the display EFB. Its
+    // colour is cleared below, so nothing of the display EFB is loaded; depth is shared.
+    g_recorder.hdrScene = false;
+    // A scene post ends one independent HDR scene. The next segment (e.g. scan zoom's main-world
+    // pass) starts from black rather than loading the already-composited, previous scene.
+    g_recorder.hdrSceneCleared = false;
+    set_efb_targets(pass);
+  }
+  pass.colorAttachments[SceneColorAttachmentIndex].clear = true;
   CustomDrawCommand draw{};
   draw.type = drawType;
+  draw.payloadSize = static_cast<uint32_t>(drawPayloadSize);
+  if (drawPayloadSize > 0) {
+    std::memcpy(draw.payload.data(), drawPayload, drawPayloadSize);
+  }
   push_command(CommandType::CustomDraw, Command::Data{.customDraw = draw});
   return true;
 }
@@ -1913,12 +2044,25 @@ void push_draw_command(rmlui::DrawData data) {
 }
 #endif
 
+// A GX draw's pipeline: blocking when the caller must not lose its draw (gx::blocking_pipelines).
+static PipelineRef gx_pipeline_ref(const gx::PipelineConfig& config, bool blocking) {
+  return find_pipeline(
+      ShaderType::GX, config,
+      [=] {
+        phase::Scope compiling(render_worker::is_worker_thread() ? phase::Render : phase::Main,
+                               "compiling a GX pipeline");
+        return create_pipeline(config);
+      },
+      blocking ? PipelinePriority::Blocking : PipelinePriority::Normal);
+}
+
 template <>
 PipelineRef pipeline_ref(const gx::PipelineConfig& config) {
-  return find_pipeline(ShaderType::GX, config, [=] {
-    phase::Scope compiling(render_worker::is_worker_thread() ? phase::Render : phase::Main, "compiling a GX pipeline");
-    return create_pipeline(config);
-  });
+  return gx_pipeline_ref(config, false);
+}
+
+PipelineRef pipeline_ref(const gx::PipelineConfig& config, bool blocking) {
+  return gx_pipeline_ref(config, blocking);
 }
 
 #ifdef AURORA_ENABLE_RMLUI
@@ -2039,7 +2183,12 @@ Range push_storage(const uint8_t* data, size_t length) {
   if (!check_recording("push_storage")) {
     return {};
   }
-  return push(current_frame_packet().storage, data, length, resources().limits.minStorageBufferOffsetAlignment);
+  const auto range =
+      push(current_frame_packet().storage, data, length, resources().limits.minStorageBufferOffsetAlignment);
+  if (overflowed(range)) {
+    request_storage_growth();
+  }
+  return range;
 }
 
 Range push_texture_data(const uint8_t* data, u32 bytesPerRow, u32 rowsPerImage) {

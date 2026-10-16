@@ -21,6 +21,12 @@
 #include "MetroidPrime/Tweaks/CTweakGame.hpp"
 #include "rstl/math.hpp"
 
+#ifdef TARGET_PC
+#include "MetroidPrime/CActor.hpp"
+#include "MetroidPrime/Cameras/CCameraManager.hpp"
+#include "port_debug.h"
+#endif
+
 const bool gkWaterEnable = true;
 const bool gkWaterTurbulence = true;
 const bool gkWaterBumpMapping = true;
@@ -53,7 +59,26 @@ CFluidPlaneManager::CFluidPlaneManager()
   SetupRippleMap();
 }
 
+#ifdef TARGET_PC
+namespace {
+float sPortLastDt = 0.f;
+uint sPortUpdateGeneration = 0;
+} // namespace
+
+float CFluidPlaneManager::PortPresentLag() {
+  const float t = CCameraManager::GetPresentationInterpolation();
+  if (t < 0.f || t >= 1.f || sPortUpdateGeneration != CActor::PortTickGeneration() ||
+      !PortDebug::ParticleInterpolation())
+    return 0.f;
+  return (1.f - t) * sPortLastDt;
+}
+#endif
+
 void CFluidPlaneManager::Update(float dt) {
+#ifdef TARGET_PC
+  sPortLastDt = dt;
+  sPortUpdateGeneration = CActor::PortTickGeneration();
+#endif
   x11c_uvT = dt + x11c_uvT;
   x0_rippleManager.Update(dt);
   for (CSplashRecord* it = SplashRecords().begin(); it != SplashRecords().end(); ++it) {

@@ -24,17 +24,28 @@ static_assert(sizeof(Params) <= 128);
 constexpr uint32_t CostNoFrameCopy = 4;
 constexpr uint32_t CostNoDepthReload = 8;
 constexpr uint32_t CostKeepDepth = 16;
+// Params::bloom bit from GXPortPostProcessScene: the post is the scene's conversion to display colour,
+// recorded even with nothing else to do (a no-op on the display EFB, the tone and composite on the HDR
+// scene).
+constexpr uint32_t ForceScene = 32;
 
 static_assert(sizeof(Params) % 4 == 0);
 
-// Records the bloom at this point of the frame. False when it could not be recorded.
-// Waits for the FIFO to be processed first; GXPortPostProcess queues it instead.
+// Records the bloom at this point of the frame, in a pass of its own on the display EFB. False when it
+// could not be recorded (refused under the HDR scene). Waits for the FIFO to be processed first;
+// GXPortPostProcess queues it instead.
 bool push(const Params& params);
 // Registers the bloom's encoder task (game thread); false if it could not be.
 bool ensure_task();
+// Read-only FIFO preflight for entering the HDR scene: the task and composite draw must still be
+// registered, and this frame must have room for another post. Does not reserve a post slot.
+bool scene_post_available();
 // Records the bloom from the FIFO processor (GX_AURORA_PORT_POST_PROCESS), once ensure_task
-// has returned true.
-void record(const Params& params);
+// has returned true. In the HDR scene's pass it reads that scene, and its composite (always drawn:
+// the scene's one tone, the grade, the bloom) is the first draw of the display EFB's pass, which the
+// FIFO goes on recording in (the HDR scene is left). At most two posts a frame. False when nothing
+// was recorded, true also for a ForceScene post with nothing to do on the display EFB.
+bool record(const Params& params);
 // Stores a 33^3 RGBA8 LUT (red fastest) under id (non-zero), uploaded before its next use.
 void set_grade_lut(uint32_t id, const uint8_t* rgba);
 // Maps the readbacks of the frame average that the last submit carried.

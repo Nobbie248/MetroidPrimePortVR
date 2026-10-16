@@ -46,6 +46,8 @@ struct ConnectionDetails {
   // The game's seed, when known. Connect uses it to pick that game's save card
   // before the server answers; empty keeps the saved one for the same slot.
   std::string seed;
+  // The server room of that seed (rooms generated from one seed share it).
+  std::string room;
   int64_t lastPlayed = 0; // Unix time, RecentGames only
 };
 ConnectionDetails SavedConnection();
@@ -89,6 +91,10 @@ int ItemCount();
 int CheckCount();
 // Most recent PrintJSON text, or "" when there has not been one.
 const char* LastMessage();
+// Why the running game was sent back to the title (the server is another
+// seed or room than the game in play), or "" until then. Cleared when the
+// next game starts.
+const char* SwitchNotice();
 // Drains the oldest human-readable notification (an item receipt or a
 // PrintJSON line) into `text`. False when the queue is empty. Call from the
 // game thread.
@@ -158,6 +164,10 @@ void AnnouncePickup(uint32_t world, uint32_t area, uint32_t entity);
 // retail model) when AP is off, the location isn't scouted yet, or the item
 // has no pickup on the disc.
 bool PickupModel(uint32_t world, uint32_t area, uint32_t entity, PortRandomizer::PickupModel& out);
+// Whether the item at an AP location is a minor one (a missile or power bomb
+// expansion or an energy tank of this game, or a filler item of another): 1
+// minor, 0 major, -1 not an AP game or not scouted yet.
+int PickupMinor(uint32_t world, uint32_t area, uint32_t entity);
 // The scan text for that item ("Hookshot\nfor Bob (A Link to the Past)"),
 // empty before the location is scouted. False when the location isn't one of
 // the multiworld's (AP off, or not an AP location).
@@ -176,9 +186,10 @@ void OnInventoryReset();
 // layout is known (seeds skip the frigate). `area` is 0 for the world's first.
 bool NewGameStart(uint32_t& world, uint32_t& area);
 
-// Where declining a save station with L and R held leads: the seed's starting
-// room, as every randomprime seed of the apworld allows (`area` is 0 for the
-// world's first). False without a seed layout.
+// Where a save station's "Warp to start" choice (or declining it with L and R
+// held) leads: the seed's starting room, as every randomprime seed of the
+// apworld allows, or the Landing Site for a legacy MP_RANDO seed (`area` is 0
+// for the world's first). False without a randomizer seed.
 bool WarpToStart(uint32_t& world, uint32_t& area);
 
 // The strings the seed gives the string table `strg` in place of the disc's

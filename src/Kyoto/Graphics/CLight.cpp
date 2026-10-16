@@ -104,6 +104,11 @@ void CLight::SetPosition(const CVector3f& position) { x0_pos = position; }
 void CLight::SetDirection(const CVector3f& direction) { xc_dir = direction; }
 
 float CLight::GetRadius() const {
+#ifdef TARGET_PC
+  if (HasPortHdr() && xPortHdrHasBoundsRadius) {
+    return xPortHdrBoundsRadius;
+  }
+#endif
   if (x4c_25_radiusDirty) {
     x44_cachedRadius = CalculateLightRadius();
     x4c_25_radiusDirty = false;

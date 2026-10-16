@@ -71,6 +71,13 @@ bool ApplySetting(std::string_view keyView, std::string_view valueView) {
     if (std::isfinite(f) && f >= 50.f && f <= 10000.f) {
       s.stickAimRate = f;
     }
+  } else if (key == "stick_aim_split") {
+    s.stickAimSplit = ParseBool(value);
+  } else if (key == "stick_aim_rate_y") {
+    const float f = ParseFloat(value);
+    if (std::isfinite(f) && f >= 50.f && f <= 10000.f) {
+      s.stickAimRateY = f;
+    }
   } else if (key == "gyro_mode") {
     const long v = std::strtol(value.c_str(), nullptr, 10);
     if (v >= 0 && v <= 2) {
@@ -127,6 +134,18 @@ bool ApplySetting(std::string_view keyView, std::string_view valueView) {
     s.mouseButtons = ParseBool(value);
   } else if (key == "mouse_crosshair") {
     s.mouseCrosshair = ParseBool(value);
+  } else if (key == "pointer_aim") {
+    s.pointerAim = ParseBool(value);
+  } else if (key == "pointer_aim_box") {
+    const int v = std::atoi(value.c_str());
+    if (v >= kPointerAimBoxMin && v <= kPointerAimBoxMax) {
+      s.pointerAimBox = v;
+    }
+  } else if (key == "pointer_aim_turn") {
+    const int v = std::atoi(value.c_str());
+    if (v >= kPointerAimTurnMin && v <= kPointerAimTurnMax) {
+      s.pointerAimTurn = v;
+    }
   } else if (key == "crosshair_size") {
     const int v = std::atoi(value.c_str());
     if (v >= kCrosshairSizeMin && v <= kCrosshairSizeMax) {
@@ -188,6 +207,8 @@ bool ApplySetting(std::string_view keyView, std::string_view valueView) {
     if (std::isfinite(f) && f >= 2.f && f <= 20.f) {
       s.springFlickRate = f;
     }
+  } else if (key == "spring_ball_swipe") {
+    s.springSwipe = ParseBool(value);
   } else {
     return false;
   }
@@ -237,7 +258,10 @@ void WriteAimSettings(std::ostream& out) {
   const Settings& s = Get();
   out << "spring_ball_flick=" << (s.springFlick ? 1 : 0) << '\n';
   out << "spring_ball_flick_rate=" << s.springFlickRate << '\n';
+  out << "spring_ball_swipe=" << (s.springSwipe ? 1 : 0) << '\n';
   out << "stick_aim_rate=" << s.stickAimRate << '\n';
+  out << "stick_aim_split=" << (s.stickAimSplit ? 1 : 0) << '\n';
+  out << "stick_aim_rate_y=" << s.stickAimRateY << '\n';
   out << "gyro_mode=" << s.gyroMode << '\n';
   out << "gyro_source=" << s.gyroSource << '\n';
   out << "gyro_rate=" << s.gyroRate << '\n';
@@ -262,6 +286,9 @@ void WriteAimSettings(std::ostream& out) {
   out << "mouse_crosshair=" << (s.mouseCrosshair ? 1 : 0) << '\n';
   out << "crosshair_size=" << s.crosshairSize << '\n';
   out << "mouse_sensitivity=" << s.mouseSensitivity << '\n';
+  out << "pointer_aim=" << (s.pointerAim ? 1 : 0) << '\n';
+  out << "pointer_aim_box=" << s.pointerAimBox << '\n';
+  out << "pointer_aim_turn=" << s.pointerAimTurn << '\n';
 }
 
 void WriteSettings(std::ostream& out) {
@@ -291,6 +318,9 @@ void ApplyEnvOverrides() {
   }
   if (port::EnvFlag("MP_DISABLE_MOUSE_CROSSHAIR")) {
     s.mouseCrosshair = false;
+  }
+  if (port::EnvFlag("MP_POINTER_AIM")) {
+    s.pointerAim = true;
   }
   const float sensitivity = port::EnvFloat("MP_MOUSE_SENS", 0.f);
   if (std::isfinite(sensitivity) && sensitivity > 0.f) {

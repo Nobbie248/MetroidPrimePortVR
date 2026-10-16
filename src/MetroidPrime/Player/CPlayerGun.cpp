@@ -364,6 +364,8 @@ CPlayerGun::CPlayerGun(TUniqueId playerId)
 , mPortRapidCharge(false)
 , mPortRapidShots(0)
 , mPortRapidTimer(0.f)
+, mPortPointerAimValid(false)
+, mPortPointerAimPoint(CVector3f::Zero())
 #endif
 {
 
@@ -597,6 +599,72 @@ void CPlayerGun::PortSnapshotPresentedPose(const CStateManager& mgr) const {
   sPortGunPrevRel = PortGunRelativePose(mgr, GetGunMotionTransform());
   sPortGunPrevGeneration = CActor::PortTickGeneration();
 }
+
+void CPlayerGun::PortShotFromDrawnMuzzle(const CStateManager& mgr, CTransform4f& xf) const {
+  // Tracked weapons use their world pose, without the desktop view-model FOV correction.
+  if (PortVr::VrImmersive()) {
+    return;
+  }
+  // CStateManager's RenderGun pass draws the gun at the retail FOV when the view's differs,
+  // so on screen the muzzle sits where a world point at the same depth, scaled out from the
+  // view axis by the ratio of the two projections, would. Shots start there, so they leave
+  // the cannon as drawn; with pointer aim they still head for the pointed point.
+  const CCameraManager* camMgr = mgr.GetCameraManager();
+  if (!camMgr->IsInFPCamera()) {
+    return;
+  }
+  const CGameCamera& cam = camMgr->GetCurrentCamera(mgr);
+  if (cam.GetFov() == PortDebug::kFovRetail) {
+    return;
+  }
+  const float gunTan = tanf(CGameCamera::VertPlusFov(PortDebug::kFovRetail, cam.GetAspectRatio()) *
+                            0.5f * (M_PIF / 180.f));
+  const float viewTan = tanf(cam.GetRenderFov() * 0.5f * (M_PIF / 180.f));
+  if (gunTan <= 0.f || viewTan <= 0.f) {
+    return;
+  }
+  const float scale = viewTan / gunTan;
+  const CTransform4f viewXf = cam.GetTransform();
+  const CVector3f eye = viewXf.GetTranslation();
+  const CVector3f p = viewXf.TransposeRotate(xf.GetTranslation() - eye);
+  const CVector3f pos =
+      eye + viewXf.Rotate(CVector3f(p.GetX() * scale, p.GetY(), p.GetZ() * scale));
+  if (mPortPointerAimValid) {
+    const CVector3f toAim = mPortPointerAimPoint - pos;
+    if (toAim.CanBeNormalized()) {
+      xf = CTransform4f::LookAt(CVector3f::Zero(), toAim);
+    }
+  }
+  xf.SetTranslation(pos);
+}
+
+CTransform4f CPlayerGun::PortGunView(const CStateManager& mgr,
+                                     const CTransform4f& worldView) const {
+  if (!mgr.GetCameraManager()->IsInFPCamera() ||
+      mgr.GetPlayer()->GetCameraState() != CPlayer::kCS_FirstPerson ||
+      mgr.GetPlayer()->GetMorphballTransitionState() != CPlayer::kMS_Unmorphed) {
+    return worldView;
+  }
+  // The held weapon and its muzzle effects are cached at simulation time.
+  // Render their relative pose against that same camera, not an interpolated
+  // world camera from a different tick. Projectile simulation is unchanged.
+  const CTransform4f simView = PortVr::VrRoomScaleCameraTransform(
+      mgr.GetCameraManager()->GetSimulationCameraTransform(mgr));
+  // Between ticks, blend the gun's pose relative to the camera (bob, sway,
+  // recoil) from the last tick's. The view moves instead of the gun, so the
+  // arm, beam and muzzle effects all follow.
+  const float t = CCameraManager::GetPresentationInterpolation();
+  if (t >= 0.f && t < 1.f && PortDebug::ActorInterpolation() &&
+      sPortGunPrevGeneration == CActor::PortTickGeneration()) {
+    CTransform4f blend = CTransform4f::Identity();
+    CTransform4f cur = CTransform4f::Identity();
+    if (CActor::PortBlendRigid(sPortGunPrevRel, PortGunRelativePose(mgr, GetGunMotionTransform()),
+                               t, blend, cur)) {
+      return simView * cur * blend.GetQuickInverse();
+    }
+  }
+  return simView;
+}
 #endif
 
 void CPlayerGun::Render(const CStateManager& mgr, const CVector3f& pos,
@@ -607,35 +675,18 @@ void CPlayerGun::Render(const CStateManager& mgr, const CVector3f& pos,
   const PortRoomEnv::ProbeOverrideScope probeScope(probeXyz);
 #endif
   const CTransform4f worldView = CGraphics::GetViewMatrix();
+#ifdef TARGET_PC
+  CGraphics::SetViewPointMatrix(PortGunView(mgr, worldView));
+#else
   if (mgr.GetCameraManager()->IsInFPCamera() &&
       mgr.GetPlayer()->GetCameraState() == CPlayer::kCS_FirstPerson &&
       mgr.GetPlayer()->GetMorphballTransitionState() == CPlayer::kMS_Unmorphed) {
     // The held weapon and its muzzle effects are cached at simulation time.
     // Render their relative pose against that same camera, not an interpolated
     // world camera from a different tick. Projectile simulation is unchanged.
-    CTransform4f simView = mgr.GetCameraManager()->GetSimulationCameraTransform(mgr);
-#ifdef TARGET_PC
-    // Stereo adds the physical head offset to weapon draws too. Use the same
-    // room-scale base as the world, including for camera-relative interpolation.
-    simView = PortVr::VrRoomScaleCameraTransform(simView);
-#endif
-    CGraphics::SetViewPointMatrix(simView);
-#ifdef TARGET_PC
-    // Port: between ticks, blend the gun's pose relative to the camera (bob,
-    // sway, recoil) from the last tick's. The view moves instead of the gun,
-    // so the arm, beam and muzzle effects all follow.
-    const float t = CCameraManager::GetPresentationInterpolation();
-    if (t >= 0.f && t < 1.f && PortDebug::ActorInterpolation() &&
-        sPortGunPrevGeneration == CActor::PortTickGeneration()) {
-      CTransform4f blend = CTransform4f::Identity();
-      CTransform4f cur = CTransform4f::Identity();
-      if (CActor::PortBlendRigid(sPortGunPrevRel, PortGunRelativePose(mgr, GetGunMotionTransform()),
-                                 t, blend, cur)) {
-        CGraphics::SetViewPointMatrix(simView * cur * blend.GetQuickInverse());
-      }
-    }
-#endif
+    CGraphics::SetViewPointMatrix(mgr.GetCameraManager()->GetSimulationCameraTransform(mgr));
   }
+#endif
   const CGraphics::CProjectionState projState = CGraphics::GetProjectionState();
 #ifdef MP_ENABLE_SMOKE_DRIVER
   PortSmokeMouseGunView(mgr, *this, worldView);
@@ -1008,7 +1059,13 @@ void CPlayerGun::Update(float grappleSwingT, float cameraBobT, float dt, CStateM
     const float scaleFactor =
         (emitting && x832_26_comboFiring) ? (1.f - x344_comboXferTimer) * 2.f : 2.f;
     const CVector3f scale(scaleFactor, scaleFactor, scaleFactor);
+#ifdef TARGET_PC
+    // The muzzle system inherits the gun/world pose from the render frame; pass only
+    // the sampled gun-local LBEAM locator so converted XFMD3 children inherit its rotation.
+    x72c_currentBeam->UpdateMuzzleFx(advDt, scale, x418_beamLocalXf, emitting);
+#else
     x72c_currentBeam->UpdateMuzzleFx(advDt, scale, x418_beamLocalXf.GetTranslation(), emitting);
+#endif
     x800_auxMuzzleGenerators[x320_currentAuxBeam]->SetGlobalOrientAndTrans(x418_beamLocalXf);
     x800_auxMuzzleGenerators[x320_currentAuxBeam]->SetGlobalScale(scale);
     x800_auxMuzzleGenerators[x320_currentAuxBeam]->SetParticleEmission(emitting);
@@ -1345,6 +1402,11 @@ void CPlayerGun::UpdateNormalShotCycle(float dt, CStateManager& mgr) {
     xf = x478_assistAimXf;
     xf.SetTranslation(pos);
   }
+#ifdef TARGET_PC
+  if (!x833_29_pointBlankWorldSurface) {
+    PortShotFromDrawnMuzzle(mgr, xf);
+  }
+#endif
 
   xf.AddTranslation(mgr.GetCameraManager()->GetGlobalCameraTranslation(mgr));
   x38c_muzzleEffectVisTimer = 0.0625f;
@@ -1412,6 +1474,11 @@ void CPlayerGun::FireSecondary(float dt, CStateManager& mgr) {
       xf = x478_assistAimXf;
       xf.SetTranslation(pos);
     }
+#ifdef TARGET_PC
+    if (!x833_29_pointBlankWorldSurface) {
+      PortShotFromDrawnMuzzle(mgr, xf);
+    }
+#endif
 
     xf.AddTranslation(mgr.GetCameraManager()->GetGlobalCameraTranslation(mgr));
 #ifdef MP_ENABLE_SMOKE_DRIVER
@@ -2857,7 +2924,13 @@ void CPlayerGun::ReturnArmAndGunToDefault(CStateManager& mgr, bool returnToDefau
 }
 
 void CPlayerGun::UpdateAuxWeapons(float dt, const CTransform4f& targetXf, CStateManager& mgr) {
+#ifdef TARGET_PC
+  CTransform4f fireXf = GetGunMotionTransform() * x418_beamLocalXf;
+  PortShotFromDrawnMuzzle(mgr, fireXf);
+  const CVector3f firePoint = fireXf.GetTranslation();
+#else
   const CVector3f firePoint = GetGunMotionTransform() * x418_beamLocalXf.GetTranslation();
+#endif
   const CVector3f camPos = mgr.GetCameraManager()->GetGlobalCameraTranslation(mgr);
   bool done = x744_auxWeapon->UpdateComboFx(dt, kScaleVector, firePoint + camPos, targetXf, mgr);
   if (IsWeaponStateSet(0x10)) {

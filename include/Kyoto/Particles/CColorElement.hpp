@@ -7,7 +7,8 @@
 #include "Kyoto/Particles/IElement.hpp"
 
 #ifdef TARGET_PC
-#include <array>
+#include "Kyoto/Particles/PortParticleMath.hpp"
+
 #include <vector>
 #endif
 
@@ -119,6 +120,24 @@ public:
   bool GetValueHdr(int frame, float out[4]) const override;
 #endif
 };
+
+#ifdef TARGET_PC
+class CIntElement;
+// Port-only (PGRD): Remastered's CCEGradient (0x2c8d48). HDR float stops evaluated exactly on the
+// integer frame it is given (a swoosh passes the segment's age). The period is an int element
+// (CNST frames, or ILPT for a percent of the lifetime).
+class CCEGradient : public CColorElement {
+  std::vector< PortParticleMath::GradientStop > x4_stops;
+  CIntElement* x1c_period;
+  bool x20_repeat;
+
+public:
+  CCEGradient(CInputStream& in);
+  ~CCEGradient() override;
+  bool GetValue(int frame, CColor& colorOut) const override;
+  bool GetValueHdr(int frame, float out[4]) const override;
+};
+#endif
 
 class CCEParticleColor : public CColorElement {
 public:

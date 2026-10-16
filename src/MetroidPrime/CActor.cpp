@@ -29,6 +29,8 @@
 
 #ifdef TARGET_PC
 #include "port_debug.h"
+#include "port_actor_shadow.h"
+#include "MetroidPrime/Enemies/CPatterned.hpp"
 #include "port_presentation_rules.h"
 #include "Kyoto/Math/CQuaternion.hpp"
 #endif
@@ -98,6 +100,7 @@ CActor::CActor(const TUniqueId uid, const bool active, const rstl::string& name,
 #ifdef TARGET_PC
 , xPortPrevTransform(xf)
 , xPortPrevGeneration(0)
+, xPortLastStep2(0.f)
 , xPortOwnPresentation(false)
 #endif
 {
@@ -245,6 +248,12 @@ void CActor::PreRender(CStateManager& mgr, const CFrustumPlanes& planes) {
 
       // TODO why doesn't GetDrawShadow() work?
       if (GetShadowDirty() && xe5_24_shadowEnabled && HasShadow()) {
+#ifdef TARGET_PC
+        if (PortActorShadow::Active()) {
+          PortConfigureShadow(mgr);
+          Shadow()->PortCalculate(GetModelData()->GetBounds(GetTransform()), mgr);
+        } else
+#endif
         Shadow()->Calculate(GetModelData()->GetBounds(), GetTransform(), mgr);
         SetShadowDirty(false);
       }
@@ -278,8 +287,22 @@ void CActor::PreRender(CStateManager& mgr, const CFrustumPlanes& planes) {
       if (GetShadowDirty() && xe5_24_shadowEnabled && HasShadow()) {
         if (planes.BoxInFrustumPlanes(
                 GetShadow()->GetMaxShadowBox(GetModelData()->GetBounds(GetTransform()))) == true) {
+#ifdef TARGET_PC
+          if (PortActorShadow::Active()) {
+            PortConfigureShadow(mgr);
+          Shadow()->PortCalculate(GetModelData()->GetBounds(GetTransform()), mgr);
+          } else
+#endif
           Shadow()->Calculate(GetModelData()->GetBounds(), GetTransform(), mgr);
           SetShadowDirty(false);
+#ifdef TARGET_PC
+          // Remastered re-poses a clipped actor whose dirty shadow box is in view
+          // (CActorMP1::PreRender 0xc4bb84 via PreRenderShadow 0xc4bc74), so the
+          // shadow of an off-screen animated actor follows its animation.
+          if (GetModelData()->HasAnimation()) {
+            ModelData()->AnimationData()->PreRender();
+          }
+#endif
         }
       }
     }
@@ -300,6 +323,22 @@ void CActor::AddToRenderer(const CFrustumPlanes& planes, const CStateManager& mg
       }
     }
 
+#ifdef TARGET_PC
+    // The projected shadow has its own validity and bounds: the retail ones are never set.
+    if (PortActorShadow::Active()) {
+      if (mgr.GetPlayerState()->GetActiveVisor(mgr) != CPlayerState::kPV_XRay &&
+          mgr.GetPlayerState()->GetActiveVisor(mgr) != CPlayerState::kPV_Thermal && GetDrawShadow() &&
+          GetShadow()->PortValid()) {
+        const float* rb = GetShadow()->PortReceiverBox();
+        const CAABox box(CVector3f(rb[0] - rb[3], rb[1] - rb[4], rb[2] - rb[5]),
+                         CVector3f(rb[0] + rb[3], rb[1] + rb[4], rb[2] + rb[5]));
+        if (planes.BoxInFrustumPlanes(box) == true) {
+          PortActorShadow::Register(this);
+        }
+      }
+      return;
+    }
+#endif
     if (mgr.GetPlayerState()->GetActiveVisor(mgr) != CPlayerState::kPV_XRay &&
         mgr.GetPlayerState()->GetActiveVisor(mgr) != CPlayerState::kPV_Thermal && GetDrawShadow() &&
         GetShadow()->Valid() && planes.BoxInFrustumPlanes(GetShadow()->GetBounds()) == true) {
@@ -352,7 +391,12 @@ void CActor::Render(const CStateManager& mgr) const {
       if (xe5_29_globalTimeProvider) {
         RenderInternal(mgr);
       } else {
-        const float timeSince = CGraphics::GetSecondsMod900() - xbc_time;
+        float timeSince = CGraphics::GetSecondsMod900() - xbc_time;
+#ifdef TARGET_PC
+        // The smooth-frames clock lag can put the draw just before xbc_time.
+        if (timeSince < 0.f && timeSince > -(1.f / 60.f))
+          timeSince = 0.f;
+#endif
         CTimeProvider tp(CMath::FastFmod(timeSince, 900.f));
         RenderInternal(mgr);
       }
@@ -407,6 +451,65 @@ void CActor::RenderInternal(const CStateManager& mgr) const {
   }
   GetModelData()->Render(which, x34_transform, x90_actorLights.get(), xb4_drawFlags);
 }
+
+#ifdef TARGET_PC
+namespace {
+// Caster-only drawing must not outlive the draw, whatever the draw does.
+struct PortCasterOnlyScope {
+  PortCasterOnlyScope() { GXPortSetShadowCasterOnly(true); }
+  ~PortCasterOnlyScope() { GXPortSetShadowCasterOnly(false); }
+};
+} // namespace
+
+bool CActor::PortRenderShadowCaster(const CStateManager& mgr) const {
+  if (!HasModelData() || NullModel() || !IsDrawEnabled() || !xe7_27_enableRender) {
+    return false;
+  }
+  const CAABox bounds = GetModelData()->GetBounds(GetTransform());
+  const float lo[3] = {bounds.GetMinPoint().GetX(), bounds.GetMinPoint().GetY(),
+                       bounds.GetMinPoint().GetZ()};
+  const float hi[3] = {bounds.GetMaxPoint().GetX(), bounds.GetMaxPoint().GetY(),
+                       bounds.GetMaxPoint().GetZ()};
+  if (!GXPortShadowBoxCasts(lo, hi)) {
+    return false;
+  }
+  PortCasterOnlyScope casterOnly;
+  if (xe5_29_globalTimeProvider) {
+    RenderInternal(mgr);
+  } else {
+    float timeSince = CGraphics::GetSecondsMod900() - xbc_time;
+    if (timeSince < 0.f && timeSince > -(1.f / 60.f))
+      timeSince = 0.f;
+    CTimeProvider tp(CMath::FastFmod(timeSince, 900.f));
+    RenderInternal(mgr);
+  }
+  return true;
+}
+#endif
+
+#ifdef TARGET_PC
+// AI actors (CAi's setup_for_anchor_sampled_mode(2.0,-2.0,0.5)): explicit height mode, fade 0.625,
+// alpha = CPatterned's fade alpha (+0x5c0) times its strength (+0x5d4, no retail field: 1.0), or
+// the CAi default 0.7. Everything else is sampled mode with fade 0.
+void CActor::PortConfigureShadow(const CStateManager& mgr) {
+  if (!HasShadow()) {
+    return;
+  }
+  // CPatterned is the only CAi the game builds with a shadow that TCastTo can name.
+  if (const CPatterned* patterned = TCastToConstPtr< CPatterned >(this)) {
+    Shadow()->PortSetMode(true, PortActorShadow::kAiFadeStart, patterned->GetModelAlphau8(mgr) / 255.f);
+  } else {
+    Shadow()->PortSetMode(false, 0.f, 1.f);
+  }
+}
+
+void CActor::PortRenderActorShadowCaster(const CStateManager& mgr) const {
+  if (!HasModelData() || NullModel() || !IsDrawEnabled() || !xe7_27_enableRender) {
+    return;
+  }
+  RenderInternal(mgr);
+}
+#endif
 
 float CActor::GetYaw() const {
   float sq = sqrt(x34_transform.Get11() * x34_transform.Get11() +
@@ -892,6 +995,7 @@ namespace {
 // that have not been snapshotted yet draw at their sim transform.
 uint sPortTickGeneration = 0;
 bool sPortRenderScopeActive = false;
+CTransform4f sPortScopeSavedView = CTransform4f::Identity();
 
 CTransform4f PortRigid(const CTransform4f& xf, CQuaternion& rot) {
   CVector3f right = xf.GetRight();
@@ -921,6 +1025,11 @@ uint CActor::PortTickGeneration() { return sPortTickGeneration; }
 bool CActor::PortRenderScopeActive() { return sPortRenderScopeActive; }
 
 void CActor::PortSnapshotRenderTransform() {
+  // The step the last tick made, if it was snapshotted (issue #99).
+  xPortLastStep2 =
+      xPortPrevGeneration != 0 && xPortPrevGeneration + 1 == sPortTickGeneration
+          ? (x34_transform.GetTranslation() - xPortPrevTransform.GetTranslation()).MagSquared()
+          : 0.f;
   xPortPrevTransform = x34_transform;
   xPortPrevGeneration = sPortTickGeneration;
 }
@@ -943,12 +1052,20 @@ bool CActor::PortPresentedView(const CTransform4f& view, CTransform4f& out) cons
         player->GetMorphBall() != nullptr)
       pivot = CVector3f(0.f, 0.f, player->GetMorphBall()->GetBallRadius());
   }
-  if (!PortBlendRigid(xPortPrevTransform, x34_transform, t, blend, cur, pivot))
+  if (!PortBlendRigid(xPortPrevTransform, x34_transform, t, blend, cur, pivot, xPortLastStep2))
     return false;
   // Drawn eye position = view^-1 * blend * cur^-1 * world, so the model lands
   // at the blend while everything else about the draw stays the same.
   out = cur * blend.GetQuickInverse() * view;
   return true;
+}
+
+CVector3f CActor::PortPresentedPoint(const CVector3f& world) const {
+  CTransform4f toCur = CTransform4f::Identity();
+  if (!PortPresentedView(CTransform4f::Identity(), toCur))
+    return world;
+  // toCur = cur * blend^-1; its inverse carries the sim pose onto the blend.
+  return toCur.GetQuickInverse() * world;
 }
 
 namespace {
@@ -969,9 +1086,10 @@ struct PortRigidOps {
 } // namespace
 
 bool CActor::PortBlendRigid(const CTransform4f& from, const CTransform4f& to, float t,
-                            CTransform4f& blend, CTransform4f& cur, const CVector3f& pivot) {
+                            CTransform4f& blend, CTransform4f& cur, const CVector3f& pivot,
+                            float lastStep2) {
   return PortBlendRigidGeneric< CTransform4f, CVector3f, CQuaternion >(
-      PortRigidOps(), from, to, t, blend, cur, pivot, pivot.MagSquared() > 0.f);
+      PortRigidOps(), from, to, t, blend, cur, pivot, pivot.MagSquared() > 0.f, lastStep2);
 }
 
 CPortActorRenderScope::CPortActorRenderScope(const CActor& actor)
@@ -983,6 +1101,7 @@ CPortActorRenderScope::CPortActorRenderScope(const CActor& actor)
     return;
   xActive = true;
   sPortRenderScopeActive = true;
+  sPortScopeSavedView = xSavedView;
   CGraphics::SetViewPointMatrix(view);
 }
 
@@ -991,5 +1110,24 @@ CPortActorRenderScope::~CPortActorRenderScope() {
     return;
   sPortRenderScopeActive = false;
   CGraphics::SetViewPointMatrix(xSavedView);
+}
+
+CPortRenderScopeSuspend::CPortRenderScopeSuspend(bool enable)
+: xScopedView(CTransform4f::Identity()), xActive(enable && sPortRenderScopeActive) {
+  if (!xActive)
+    return;
+  xScopedView = CGraphics::GetViewMatrix();
+  sPortRenderScopeActive = false;
+  CGraphics::SetViewPointMatrix(sPortScopeSavedView);
+}
+
+CPortRenderScopeSuspend::~CPortRenderScopeSuspend() { Resume(); }
+
+void CPortRenderScopeSuspend::Resume() {
+  if (!xActive)
+    return;
+  xActive = false;
+  sPortRenderScopeActive = true;
+  CGraphics::SetViewPointMatrix(xScopedView);
 }
 #endif

@@ -138,7 +138,10 @@ void CVisorFlare::Render(const CVector3f& inPos, const CStateManager& mgr) const
   const CGameCamera& cam = mgr.GetCameraManager()->GetCurrentCamera(mgr);
   CTransform4f cameraXf = cam.GetTransform();
 #ifdef TARGET_PC
-  cameraXf = PortVr::VrHeadViewTransform(mgr.GetCameraManager()->GetCurrentCameraTransform(mgr));
+  const CCameraManager& camMgr = *mgr.GetCameraManager();
+  cameraXf = camMgr.GetCurrentCameraTransform(mgr) *
+             camMgr.GetSimulationCameraTransform(mgr).GetQuickInverse() * cameraXf;
+  cameraXf = PortVr::VrHeadViewTransform(cameraXf);
 #endif
   CVector3f camPos = cameraXf.GetTranslation();
   CVector3f inPosCopy = inPos;

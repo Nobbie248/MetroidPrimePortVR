@@ -155,4 +155,39 @@ TEST_F(NativeVertexTest, ShortPositionsAndSingleComponentTexcoordsKeepTheirMissi
   source = build_shader_source(config);
   EXPECT_NE(source.find("vec2f(native_attr13, 0.0)"), std::string::npos);
 }
+TEST_F(NativeVertexTest, ShadowEntryPointsUseTheStereoUniformBinding) {
+  auto config = source_config();
+  config.shadow = true;
+  config.pbr = 1;
+  config.pbrKind = 24;
+  config.colorChannels[GX_COLOR0].lightingEnabled = true;
+  config.tevStages[0].texMapId = GX_TEXMAP0;
+  config.tevStages[0].texCoordId = GX_TEXCOORD0;
+  config.tevStages[0].colorPass.a = GX_CC_TEXC;
+  for (auto mode : {MultiviewClip, MultiviewFull, EyeClipImmediate}) {
+    config.multiview = mode;
+    const auto source = build_shader_source(config);
+    const auto shadow = source.find("fn vs_shadow");
+    ASSERT_NE(shadow, std::string::npos);
+    const auto end = source.find("\n}", shadow);
+    const auto body = source.substr(shadow, end - shadow);
+    EXPECT_EQ(body.find("ubuf."), std::string::npos);
+    EXPECT_NE(body.find(mode == MultiviewFull ? "ubuf_eyes[0].u." : "ubuf_mv.u."), std::string::npos);
+  }
+}
+
+TEST_F(NativeVertexTest, LightingFlagsDoNotOverwriteStereoFields) {
+  auto config = source_config();
+  config.currentPnMtx = 60;
+  config.multiview = MultiviewFull;
+  config.mapBatch = true;
+  config.mapCull = GX_CULL_BACK;
+  config.perPixelLight = true;
+  config.actorDecal = true;
+  EXPECT_EQ(config.currentPnMtx, 60);
+  EXPECT_EQ(config.multiview, MultiviewFull);
+  EXPECT_TRUE(config.mapBatch);
+  EXPECT_EQ(config.mapCull, GX_CULL_BACK);
+  EXPECT_TRUE(config.nativeVertices);
+}
 } // namespace aurora::gx

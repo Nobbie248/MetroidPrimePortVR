@@ -36,4 +36,24 @@ CElectricDescription::~CElectricDescription() {
   delete x34_LCL1;
   delete x38_LCL2;
   delete x3c_LCL3;
+#ifdef TARGET_PC
+  delete xPortSIDE;
+  delete xPortLWQD;
+  delete xPortNFOM;
+  delete xPortTSPN;
+  delete xPortBDEP;
+  delete xPortBNDI;
+  delete xPortRADS;
+  delete xPortLRAD;
+  delete xPortRRAD;
+  delete xPortSLVF;
+  delete xPortBLNC;
+  delete xPortBCFF;
+  delete xPortBLEN;
+  delete xPortBANG;
+  delete xPortBIDF;
+  delete xPortBLDF;
+  delete xPortAMDF;
+  delete xPortNCLR;
+#endif
 }
